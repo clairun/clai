@@ -30,25 +30,23 @@ const card = (over: Partial<TaskCallCard> = {}): TaskCallCard => ({
   variant: 'full',
   taskId: 'task-1',
   title: 'Round 3 review',
-  instructions: 'Review the branch end to end.',
   status: 'queued',
   assignedToWorkspaceAgentId: 'wa-review',
   assignedAgentDefinitionId: 'def-review',
   assignedAgentDisplayName: '',
-  detail: '',
-  detailIsError: false,
+  failureReason: '',
+  error: '',
   ...over,
 });
 
 const roster = [agent({})];
 
 describe('TaskCard', () => {
-  it('shows who the task went to and what it was asked to do', () => {
+  it('shows who the task went to and its title', () => {
     render(<TaskCard card={card()} roster={roster} />);
     expect(screen.getByText('Rust Reviewer')).toBeInTheDocument();
     expect(screen.getByText('Delegated to')).toBeInTheDocument();
     expect(screen.getByText('Round 3 review')).toBeInTheDocument();
-    expect(screen.getByText('Review the branch end to end.')).toBeInTheDocument();
   });
 
   it('labels no status on a hand-off, whatever the row was stamped with', () => {
@@ -93,27 +91,6 @@ describe('TaskCard', () => {
     expect(screen.getByText('Old Reviewer')).toBeInTheDocument();
   });
 
-  it('leads a poll with its answer rather than the instructions', () => {
-    render(
-      <TaskCard
-        card={card({
-          kind: 'poll',
-          status: 'completed',
-          detail: 'Found 3 issues.',
-        })}
-        roster={roster}
-      />
-    );
-    expect(screen.getByText('Found 3 issues.')).toBeInTheDocument();
-    expect(screen.queryByText('Delegated to')).not.toBeInTheDocument();
-    expect(screen.queryByText('Review the branch end to end.')).not.toBeInTheDocument();
-  });
-
-  it('falls back to the instructions when a task answered with nothing', () => {
-    render(<TaskCard card={card({ kind: 'poll', status: 'completed' })} roster={roster} />);
-    expect(screen.getByText('Review the branch end to end.')).toBeInTheDocument();
-  });
-
   it('opens the task it describes, by id', async () => {
     const onOpen = vi.fn();
     render(<TaskCard card={card()} roster={roster} onOpen={onOpen} />);
@@ -137,8 +114,8 @@ describe('TaskCard', () => {
     );
     expect(screen.getByText('Round 3 review')).toBeInTheDocument();
     expect(screen.getByText('Running')).toBeInTheDocument();
-    // The slim line drops the name and the body; the face and title carry it.
-    expect(screen.queryByText('Review the branch end to end.')).not.toBeInTheDocument();
+    // The slim line drops the name and the error; the face and title carry it.
+    expect(screen.queryByText('Rust Reviewer')).not.toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: /Round 3 review/ }));
     expect(onOpen).toHaveBeenCalledWith('task-1');
   });
@@ -149,35 +126,27 @@ describe('TaskCard', () => {
     expect(face?.getAttribute('data-activity')).toBe('none');
   });
 
-  it('shows a failed task\'s error in the error tone, not as a summary', () => {
+  it('shows a failed task\'s error under its status', () => {
     render(
       <TaskCard
-        card={card({
-          kind: 'poll',
-          status: 'failed',
-          detail: 'panicked at line 9',
-          detailIsError: true,
-        })}
+        card={card({ kind: 'poll', status: 'failed', error: 'Worker run record not found' })}
         roster={roster}
       />
     );
-    // CSS modules hash the class but keep the name readable, so the tone is
-    // checkable: the class list of a plain summary must not carry it.
-    expect(screen.getByText('panicked at line 9').className).toMatch(/detailError/);
+    expect(screen.getByText('Worker run record not found')).toBeInTheDocument();
     expect(screen.getByText('Failed')).toBeInTheDocument();
+  });
 
-    cleanup();
+  it('labels a blocked failure "Blocked"', () => {
     render(
-      <TaskCard
-        card={card({ kind: 'poll', detail: 'all good', detailIsError: false })}
-        roster={roster}
-      />
+      <TaskCard card={card({ kind: 'poll', status: 'failed', failureReason: 'blocked' })} roster={roster} />
     );
-    expect(screen.getByText('all good').className).not.toMatch(/detailError/);
+    expect(screen.getByText('Blocked')).toBeInTheDocument();
+    expect(screen.queryByText('Failed')).not.toBeInTheDocument();
   });
 
   it('keeps the whole card readable as the button name', () => {
-    // An aria-label here would hide the status and the summary from a screen
+    // An aria-label here would hide the status and the error from a screen
     // reader behind a shorter sentence. A poll card carries both.
     render(
       <TaskCard card={card({ kind: 'poll', status: 'blocked' })} roster={roster} onOpen={vi.fn()} />

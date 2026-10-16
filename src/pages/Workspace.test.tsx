@@ -1295,7 +1295,7 @@ describe('Workspace nested task logs', () => {
     const parentLog = await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` });
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
 
-    await userEvent.click(within(parentLog).getByRole('button', { name: `Open task ${CHILD.title}` }));
+    await userEvent.click(within(parentLog).getByRole('button', { name: `Result from Helper: ${CHILD.title}, Completed` }));
     const childLog = await screen.findByRole('region', { name: `Transcript for ${CHILD.title}` });
     expect(childLog).toHaveTextContent('child log');
     expect(
@@ -1303,9 +1303,10 @@ describe('Workspace nested task logs', () => {
     ).toHaveTextContent(PARENT.title);
 
     await userEvent.click(within(childLog).getByRole('button', { name: 'Back' }));
+    const returnedLog = await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` });
     expect(
-      await screen.findByRole('region', { name: `Transcript for ${PARENT.title}` })
-    ).toHaveTextContent('parse() fixed');
+      within(returnedLog).getByRole('button', { name: `Result from Helper: ${CHILD.title}, Completed` })
+    ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Back' })).toBeNull();
   });
 

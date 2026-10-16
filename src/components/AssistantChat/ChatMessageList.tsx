@@ -883,7 +883,7 @@ const MessageBlock = memo(({ message, ...props }: MessageBlockProps) => {
   if (message.role !== 'user') return null;
   const sender = props.sender ?? { kind: 'user' };
   if (sender.kind === 'user') return <UserMessageBlock message={message} {...props} />;
-  if (sender.kind === 'task') return <TaskResultBlock message={message} sender={sender} />;
+  if (sender.kind === 'task') return <TaskResultBlock sender={sender} />;
   return (
     <InboxMessageBlock
       message={message}
@@ -1064,20 +1064,13 @@ const AssistantMessageBlock = ({
   );
 };
 
-const TaskResultBlock = ({
-  message,
-  sender,
-}: {
-  message: AssistantMessage;
-  sender: Extract<MessageSender, { kind: 'task' }>;
-}) => {
+const TaskResultBlock = ({ sender }: { sender: Extract<MessageSender, { kind: 'task' }> }) => {
   const { workspaceId = '', onOpenTask } = useTaskCardSurface();
   const liveTask = useTask(workspaceId, sender.taskId);
   const sameCycle = liveTask && Number(liveTask.cycleNo) === sender.cycleNo;
   return (
     <TaskResultCard
       sender={sender}
-      body={getTextContent(message)}
       failureReason={sameCycle ? liveTask.failureReason : null}
       onOpen={onOpenTask}
     />

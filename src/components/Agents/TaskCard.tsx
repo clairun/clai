@@ -1,6 +1,6 @@
 /**
- * A workspace task as the chat shows it: the assignee's face, what it was
- * asked to do, and how that call answered — instead of an opaque
+ * A workspace task as the chat shows it: the assignee's face, its title, and
+ * how that call answered — instead of an opaque
  * workspace-task tool row. Clicking opens the task's own log. A stop or a
  * message is drawn by `TaskActionCard` instead.
  *
@@ -13,7 +13,7 @@ import { memo, useMemo, type ReactNode } from 'react';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
 import type { TaskCallCard } from '../AssistantChat/toolDisplay';
 import type { SenderAgent } from '../AssistantChat/messageSender';
-import { taskStatusLabel } from '../../utils/taskDisplay';
+import { taskDisplayStatus, taskStatusLabel } from '../../utils/taskDisplay';
 import AgentAvatar from './AgentAvatar';
 import { agentDisplayName, taskIdentity } from './agentIdentity';
 import pills from './taskStatus.module.css';
@@ -51,11 +51,18 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
    *
    * Every delegation is a full card (`inlineTaskCard` forces `variant: 'full'`
    * for `kind: 'assign'`), so the slim line below always has one to draw.
+   *
+   * Only a failure goes through `taskDisplayStatus`, for its reason: the card
+   * has no `runId`, which that helper would read as waiting for subtasks.
    */
+  const status =
+    card.status === 'failed'
+      ? taskDisplayStatus({ status: card.status, failureReason: card.failureReason })
+      : { key: card.status, label: taskStatusLabel(card.status) };
   const pill =
     card.kind !== 'poll' ? null : (
-      <span className={`${pills.pill} ${pills[`pill_${card.status}`] || ''}`}>
-        {taskStatusLabel(card.status)}
+      <span className={`${pills.pill} ${pills[`pill_${status.key}`] || ''}`}>
+        {status.label}
       </span>
     );
 
@@ -82,13 +89,7 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
           {pill}
         </span>
         <span className={styles.title}>{card.title}</span>
-        {card.detail ? (
-          <span className={`${styles.detail} ${card.detailIsError ? styles.detailError : ''}`}>
-            {card.detail}
-          </span>
-        ) : (
-          card.instructions && <span className={styles.detail}>{card.instructions}</span>
-        )}
+        {card.error && <span className={styles.error}>{card.error}</span>}
       </span>
     </>
   );
@@ -104,7 +105,7 @@ const TaskCard = ({ card, roster, onOpen }: TaskCardProps) => {
       className={className}
       onClick={() => onOpen(card.taskId)}
       // No aria-label: it would replace the card's own text — assignee, title,
-      // summary, and a poll's status — with a shorter sentence. The tooltip
+      // error, and a poll's status — with a shorter sentence. The tooltip
       // says what the click does; the content says what it is about.
       title={`Open the log of "${card.title}"`}
     >
@@ -132,21 +133,27 @@ export interface TaskActionCardProps {
  */
 const TaskActionCardImpl = ({ card, origin, roster, onOpen, children }: TaskActionCardProps) => {
   const identity = useMemo(() => taskIdentity(card, roster), [card, roster]);
-  const title = onOpen ? (
-    <button
-      type="button"
-      className={`${styles.taskLink} ${styles.taskLinkOpenable}`}
-      onClick={() => onOpen(card.taskId)}
-      title={`Open the log of "${card.title}"`}
-    >
-      {card.title}
-    </button>
-  ) : (
-    <span className={styles.taskLink}>{card.title}</span>
-  );
+  const tooltip = `Open the log of "${card.title}"`;
+  // A stop has nothing else to click, so the whole card opens the task. A
+  // message's text can hold links and its own button, which a card-wide
+  // button cannot contain, so there only the title opens it.
+  const wholeCard = card.kind === 'stop';
+  const title =
+    onOpen && !wholeCard ? (
+      <button
+        type="button"
+        className={`${styles.taskLink} ${styles.taskLinkOpenable}`}
+        onClick={() => onOpen(card.taskId)}
+        title={tooltip}
+      >
+        {card.title}
+      </button>
+    ) : (
+      <span className={styles.taskLink}>{card.title}</span>
+    );
 
-  return (
-    <div className={`${styles.card} ${styles.action}`}>
+  const body = (
+    <>
       <span className={styles.route}>
         {origin && <AgentAvatar identity={origin.identity} size={18} />}
         <span className={styles.who}>{origin ? origin.name : 'Clai'}</span>
@@ -167,7 +174,21 @@ const TaskActionCardImpl = ({ card, origin, roster, onOpen, children }: TaskActi
         )}
         {title}
       </span>
-    </div>
+    </>
+  );
+
+  if (!wholeCard || !onOpen) {
+    return <div className={`${styles.card} ${styles.action}`}>{body}</div>;
+  }
+  return (
+    <button
+      type="button"
+      className={`${styles.card} ${styles.action} ${styles.openable}`}
+      onClick={() => onOpen(card.taskId)}
+      title={tooltip}
+    >
+      {body}
+    </button>
   );
 };
 

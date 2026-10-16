@@ -397,7 +397,9 @@ describe('ChatMessageList', () => {
     expect(screen.getAllByText('Running')).toHaveLength(4);
     // The hand-off and the answer are cards of their own, outside the run.
     expect(screen.getByText('Delegated to')).toBeInTheDocument();
-    expect(screen.getByText('Found 3 issues.')).toBeInTheDocument();
+    expect(screen.getByText('Completed')).toBeInTheDocument();
+    // The summary is written for the agent; the card leaves it to the task log.
+    expect(screen.queryByText('Found 3 issues.')).toBeNull();
   });
 
   it('keeps every card in the order its call was made', () => {
@@ -424,8 +426,8 @@ describe('ChatMessageList', () => {
     };
     // hand-off → the slim poll in its run → the answer → the next hand-off.
     expect(at('Round 3 review')).toBeLessThan(at('Running'));
-    expect(at('Running')).toBeLessThan(at('Found 3 issues.'));
-    expect(at('Found 3 issues.')).toBeLessThan(at('Round 4 review'));
+    expect(at('Running')).toBeLessThan(at('Completed'));
+    expect(at('Completed')).toBeLessThan(at('Round 4 review'));
   });
 
   describe('task actions', () => {
@@ -478,7 +480,7 @@ describe('ChatMessageList', () => {
       );
 
     /** The communication card: the element that holds the sender → recipient line. */
-    const actionCard = () => screen.getByText('→').closest('div')!;
+    const actionCard = () => screen.getByText('→').closest<HTMLElement>('button, div')!;
 
     /** Sender, then the arrow, then recipient — the Main signs as "Main". */
     const expectRoute = (card: HTMLElement) => {
@@ -513,22 +515,30 @@ describe('ChatMessageList', () => {
       expect(screen.queryByText('Review the branch end to end.')).toBeNull();
       expect(screen.queryByText(/workspace_stopTask/)).toBeNull();
 
-      fireEvent.click(within(card).getByRole('button', { name: 'Round 3 review' }));
+      // The whole card is the button; nothing inside it is a second one.
+      expect(card.tagName).toBe('BUTTON');
+      expect(within(card).queryByRole('button')).toBeNull();
+      fireEvent.click(card);
       expect(onOpenTask).toHaveBeenCalledWith('task-9');
     });
 
     it('shows a message\'s text inside the card, sender → recipient, without a status', () => {
+      const onOpenTask = vi.fn();
       renderActions(
         actionCalls(
           'workspace_sendTaskMessage',
           taskPayload({ status: 'completed', resultSummary: 'Previous cycle summary.' }),
           'Also check the migration.'
-        )
+        ),
+        onOpenTask
       );
       const card = actionCard();
       expectRoute(card);
       expect(within(card).getByText('Also check the migration.')).toBeInTheDocument();
-      expect(within(card).getByText('Round 3 review')).toBeInTheDocument();
+      // The text can hold links, so the card is no button; its title opens the task.
+      expect(card.tagName).toBe('DIV');
+      fireEvent.click(within(card).getByRole('button', { name: 'Round 3 review' }));
+      expect(onOpenTask).toHaveBeenCalledWith('task-9');
       expect(within(card).queryByText('Requested to stop')).toBeNull();
       expectNoStatus(card);
       expect(screen.queryByText('Previous cycle summary.')).toBeNull();
@@ -1278,13 +1288,23 @@ describe('ChatMessageList', () => {
     });
 
     it('task origin renders result card, never user style', () => {
-      const { container } = list([fromTask('t1', 'Found 2 issues')]);
-      const card = screen.getByRole('article', { name: 'Result from Reviewer: Review PR #231' });
-      expect(within(card).getByText('Found 2 issues')).toBeInTheDocument();
+      const { container } = list([fromTask('t1', '**Verdict:** `production_quality`')]);
+      const card = screen.getByRole('article', { name: 'Result from Reviewer: Review PR #231, Completed' });
+      // The result text is written for the agent; the task's log has it.
+      expect(within(card).queryByText(/Verdict/)).toBeNull();
+      expect(within(card).queryByRole('button', { name: /full result/ })).toBeNull();
       expect(within(card).getByText('Completed')).toBeInTheDocument();
       expect(screen.queryByText('You')).toBeNull();
-      expect(within(card).queryByRole('button', { name: /Open task/ })).toBeNull();
+      expect(within(card).queryByRole('button')).toBeNull();
       expect(container.querySelector('[class*="userMessage"]')).toBeNull();
+    });
+
+    it('opens the task when its result card is clicked', () => {
+      const onOpenTask = vi.fn();
+      list([fromTask('t1', 'done')], { onOpenTask });
+      expect(screen.queryByRole('article')).toBeNull();
+      fireEvent.click(screen.getByRole('button', { name: 'Result from Reviewer: Review PR #231, Completed' }));
+      expect(onOpenTask).toHaveBeenCalledWith('task-1');
     });
 
     it('agent origin renders sender avatar and name', () => {
@@ -1336,17 +1356,6 @@ describe('ChatMessageList', () => {
       list([fromAgent('a1', 'old note', { ...reviewer, displayName: 'Old Name' })]);
       expect(screen.getByText('Reviewer')).toBeInTheDocument();
       expect(screen.queryByText('Old Name')).toBeNull();
-    });
-
-    it('result card clamps and expands with aria-expanded', () => {
-      const long = `${'a'.repeat(320)} TAIL`;
-      list([fromTask('t1', long)]);
-      expect(screen.queryByText(/TAIL/)).toBeNull();
-      const toggle = screen.getByRole('button', { name: 'Show full result' });
-      expect(toggle).toHaveAttribute('aria-expanded', 'false');
-      fireEvent.click(toggle);
-      expect(screen.getByText(/TAIL/)).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true');
     });
 
     it('inbox row has no edit/delete or delivery chip', () => {
