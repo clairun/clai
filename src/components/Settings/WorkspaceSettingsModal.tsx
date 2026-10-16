@@ -127,6 +127,8 @@ const WorkspaceSettingsModal = ({
   const indexRef = useRef<HTMLDivElement>(null);
   // The root row the current page was entered from; focus returns to it.
   const originRow = useRef<string | null>(null);
+  // What had focus when the leave prompt opened; Stay hands it back.
+  const leaveFocus = useRef<HTMLElement | null>(null);
 
   const showPage = useCallback((next: Selection | null) => {
     setPage(next);
@@ -151,14 +153,17 @@ const WorkspaceSettingsModal = ({
   }, [isOpen, initialPage, showPage]);
 
   // Focus follows navigation: the page heading on entry, the originating
-  // row on the way back.
+  // row on the way back, or the first row when there is none.
   useEffect(() => {
     if (!isOpen) return;
     if (page) {
       headingRef.current?.focus();
-    } else if (originRow.current) {
-      indexRef.current?.querySelector<HTMLElement>(`[data-row="${originRow.current}"]`)?.focus();
+      return;
     }
+    const index = indexRef.current;
+    const origin = originRow.current
+      && index?.querySelector<HTMLElement>(`[data-row="${originRow.current}"]`);
+    (origin || index?.querySelector<HTMLElement>('[data-row]'))?.focus();
   }, [isOpen, page]);
 
   // Load static dependencies once per open.
@@ -194,12 +199,14 @@ const WorkspaceSettingsModal = ({
     }
     setSaveError(null);
     setSaving(true);
+    let createdId: string | undefined;
     try {
       const result = await handle.submit();
       if (!result.ok) {
         setSaveError(result.error || 'Save failed.');
         return false;
       }
+      createdId = result.createdId;
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
       return false;
@@ -208,31 +215,56 @@ const WorkspaceSettingsModal = ({
     }
     window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
     await Promise.resolve(onChanged?.());
+    // A create continues on the new record's own page, so a later Save
+    // updates it instead of creating another.
+    if (createdId) {
+      const created: Selection = { kind: 'agent', agentId: createdId };
+      originRow.current = pageKey(created);
+      showPage(created);
+    }
     return true;
-  }, [saving, onChanged]);
+  }, [saving, onChanged, showPage]);
 
   const discardPage = useCallback(() => {
     setPageVersion((v) => v + 1);
     setDirty(false);
     setSaveError(null);
+    headingRef.current?.focus();
   }, []);
 
   const leave = useCallback((go: () => void) => {
     if (saving) return;
-    if (dirty) setPendingLeave(() => go);
-    else go();
+    if (!dirty) {
+      go();
+      return;
+    }
+    leaveFocus.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setPendingLeave(() => go);
   }, [saving, dirty]);
+
+  // Closes the prompt and puts focus back where it was before it opened.
+  const stay = useCallback(() => {
+    setPendingLeave(null);
+    const back = leaveFocus.current;
+    (back?.isConnected && back !== document.body ? back : headingRef.current)?.focus();
+  }, []);
 
   const goBack = useCallback(() => leave(() => showPage(null)), [leave, showPage]);
   const handleClose = useCallback(() => leave(onClose), [leave, onClose]);
 
   const answerLeave = useCallback(async (answer: 'stay' | 'discard' | 'save') => {
     const go = pendingLeave;
+    if (!go || answer === 'stay') {
+      stay();
+      return;
+    }
     setPendingLeave(null);
-    if (!go || answer === 'stay') return;
-    if (answer === 'save' && !(await savePage())) return;
+    if (answer === 'save' && !(await savePage())) {
+      stay();
+      return;
+    }
     go();
-  }, [pendingLeave, savePage]);
+  }, [pendingLeave, savePage, stay]);
 
   // Escape: answer "Stay" to an open prompt, let a search field clear
   // itself first, then back one level, closing only at the root. It only
@@ -240,14 +272,14 @@ const WorkspaceSettingsModal = ({
   // Settings modal opens on top of this one and takes the key first.
   const handleEscape = useCallback(() => {
     if (pendingLeave) {
-      setPendingLeave(null);
+      stay();
       return;
     }
     const focused = document.activeElement;
     if (focused instanceof HTMLInputElement && focused.type === 'search' && focused.value) return;
     if (page) goBack();
     else handleClose();
-  }, [pendingLeave, page, goBack, handleClose]);
+  }, [pendingLeave, page, goBack, handleClose, stay]);
 
   useOverlayLayer(isOpen, handleEscape);
 
@@ -324,11 +356,17 @@ const WorkspaceSettingsModal = ({
     if (sel.kind === 'agent') {
       // Only the Main is edited here. A teammate's behavior belongs to its
       // shared definition, so its row opens the local-overlay editor instead.
-      if (sel.agentId !== details?.defaultWorkspaceAgentId) {
+      // An id missing from the roster is a Main just created whose refetch
+      // has not landed (or failed): teammates are only opened from their row.
+      const isTeammate = agents.find((a) => a.id === sel.agentId)?.isDefault === false;
+      if (isTeammate) {
         return (
           <AssignmentSection
+            ref={pageRef}
             workspaceId={workspaceId}
             agentId={sel.agentId ?? undefined}
+            saving={saving}
+            onDirtyChange={setDirty}
             onChanged={onChanged}
             onUnassigned={handleAgentRemoved}
           />
@@ -368,7 +406,9 @@ const WorkspaceSettingsModal = ({
       return <AssignmentSection workspaceId={workspaceId} onChanged={onChanged} />;
     }
     if (sel.kind === 'team') {
-      return <TeamPolicySection workspaceId={workspaceId} onChanged={onChanged} />;
+      return (
+        <TeamPolicySection ref={pageRef} workspaceId={workspaceId} saving={saving} onDirtyChange={setDirty} />
+      );
     }
     return null;
   };

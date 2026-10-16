@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import { createRef } from 'react';
 
 const mockInvoke = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 
 import { AssignmentSection, TeamPolicySection } from './WorkspaceTeamSettings';
+import type { SectionHandle } from './sectionHandle';
 import {
   OPEN_GLOBAL_SETTINGS_EVENT,
   type OpenGlobalSettingsDetail,
@@ -28,6 +30,13 @@ const recordGlobalSettingsOpens = (): OpenGlobalSettingsDetail[] => {
 };
 
 const WORKSPACE = 'ws-1';
+
+/** Saves the page the way the modal shell does, through its handle. */
+const submitPage = async (ref: React.RefObject<SectionHandle | null>) => {
+  let result: { ok: boolean } | undefined;
+  await act(async () => { result = await ref.current!.submit(); });
+  return result;
+};
 
 const DEFINITIONS = [
   {
@@ -192,17 +201,25 @@ describe('AssignmentSection picker', () => {
 describe('AssignmentSection editor', () => {
   it('saves only the local overlays, keeping the shared identity', async () => {
     const user = userEvent.setup();
-    render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
+    const ref = createRef<SectionHandle>();
+    const onDirtyChange = vi.fn();
+    render(
+      <AssignmentSection ref={ref} workspaceId={WORKSPACE} agentId="assign-1" onDirtyChange={onDirtyChange} />
+    );
     await screen.findByText('Reviewer');
 
     await user.clear(screen.getByLabelText('Context for this workspace'));
     await user.type(screen.getByLabelText('Context for this workspace'), 'Docs only');
-    await user.click(screen.getByRole('button', { name: 'Save' }));
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+    // The modal's save bar is the only Save on the page.
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull();
 
-    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('workspace_configure_assignment', {
+    expect(await submitPage(ref)).toEqual({ ok: true });
+    expect(mockInvoke).toHaveBeenCalledWith('workspace_configure_assignment', {
       workspaceId: WORKSPACE,
       assignment: { ...ASSIGNMENT, context: 'Docs only' },
-    }));
+    });
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
 
   it('hands the modal back control after unassigning instead of sitting on a dead row', async () => {
@@ -245,20 +262,19 @@ describe('AssignmentSection editor', () => {
   it('parks the agent through the assignment row instead of deleting it', async () => {
     const user = userEvent.setup();
     const onUnassigned = vi.fn();
+    const ref = createRef<SectionHandle>();
     render(
-      <AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
+      <AssignmentSection ref={ref} workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
     );
     await screen.findByText('Reviewer');
 
     await user.click(screen.getByRole('checkbox', { name: 'Enabled in this workspace' }));
-    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await submitPage(ref);
 
-    await waitFor(() =>
-      expect(mockInvoke).toHaveBeenCalledWith('workspace_configure_assignment', {
-        workspaceId: WORKSPACE,
-        assignment: { ...ASSIGNMENT, enabled: false },
-      })
-    );
+    expect(mockInvoke).toHaveBeenCalledWith('workspace_configure_assignment', {
+      workspaceId: WORKSPACE,
+      assignment: { ...ASSIGNMENT, enabled: false },
+    });
     expect(mockInvoke).not.toHaveBeenCalledWith('workspace_delete_agent', expect.anything());
     expect(onUnassigned).not.toHaveBeenCalled();
   });
@@ -339,19 +355,22 @@ describe('AssignmentSection editor', () => {
 describe('TeamPolicySection', () => {
   it('saves the project context and the workspace-wide grants together', async () => {
     const user = userEvent.setup();
-    render(<TeamPolicySection workspaceId={WORKSPACE} />);
+    const ref = createRef<SectionHandle>();
+    const onDirtyChange = vi.fn();
+    render(<TeamPolicySection ref={ref} workspaceId={WORKSPACE} onDirtyChange={onDirtyChange} />);
     const context = await screen.findByLabelText('Instructions shared by every agent here');
+    expect(onDirtyChange).not.toHaveBeenCalledWith(true);
 
     await user.clear(context);
     await user.type(context, 'Ship on Fridays');
-    await user.click(screen.getByRole('button', { name: 'Save team settings' }));
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
 
-    await waitFor(() =>
-      expect(mockInvoke).toHaveBeenCalledWith('workspace_save_team_policy', {
-        workspaceId: WORKSPACE,
-        context: 'Ship on Fridays',
-        filesystemGrants: [{ path: '/opt/tools', access: 'read_only' }],
-      })
-    );
+    expect(await submitPage(ref)).toEqual({ ok: true });
+    expect(mockInvoke).toHaveBeenCalledWith('workspace_save_team_policy', {
+      workspaceId: WORKSPACE,
+      context: 'Ship on Fridays',
+      filesystemGrants: [{ path: '/opt/tools', access: 'read_only' }],
+    });
+    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
 });

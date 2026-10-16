@@ -145,8 +145,11 @@ describe('AgentBehaviorForm', () => {
     await userEvent.click(screen.getAllByRole('button', { name: 'Add' })[0]!);
     expect(screen.getByText('OpenAI')).toBeInTheDocument();
 
-    await act(async () => { await ref.current!.submit(); });
+    let result: { ok: boolean; createdId?: string } | undefined;
+    await act(async () => { result = await ref.current!.submit(); });
     expect(api.workspaceCreateAgent).toHaveBeenCalledTimes(1);
+    // The host moves to the created agent's page; this form never updates it.
+    expect(result).toEqual({ ok: true, createdId: 'agent-new' });
     const request = api.workspaceCreateAgent.mock.calls[0]![0] as {
       name: string;
       providerConnectionIds: string[];
@@ -161,26 +164,6 @@ describe('AgentBehaviorForm', () => {
       'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
     ]);
     expect(api.workspaceUpdateAgent).not.toHaveBeenCalled();
-    // A created agent is clean: a second Save after a sibling section failed
-    // must not create it again.
-    expect(onDirtyChange).toHaveBeenLastCalledWith(false);
-
-    // The form still renders as the create flow — `agent` is the blank draft,
-    // so nothing derived from it (Delete, the Enabled toggle, teammate copy)
-    // may appear for the Main that now exists.
-    expect(screen.getByText('Set up the main agent')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Delete agent' })).not.toBeInTheDocument();
-    expect(screen.queryByText('Enabled')).not.toBeInTheDocument();
-
-    // …and further edits update the agent the backend returned, they do not
-    // create another one.
-    await userEvent.type(screen.getByLabelText('Description'), 'Finds things');
-    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
-    await act(async () => { await ref.current!.submit(); });
-    expect(api.workspaceCreateAgent).toHaveBeenCalledTimes(1);
-    expect(api.workspaceUpdateAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ agentId: 'agent-new', name: 'Scout', description: 'Finds things' })
-    );
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
 

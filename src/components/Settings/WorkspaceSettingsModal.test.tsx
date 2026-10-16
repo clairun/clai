@@ -8,20 +8,58 @@ vi.mock('../../api/client', () => ({
   getMcpServers: vi.fn().mockResolvedValue([]),
   getSkills: vi.fn().mockResolvedValue([]),
   workspaceAgentDefaultExecution: vi.fn().mockResolvedValue(null),
+  workspaceCreateAgent: vi.fn().mockResolvedValue({ id: 'agent-new' }),
+  workspaceUpdateAgent: vi.fn().mockResolvedValue(undefined),
 }));
 vi.mock('../../assistant', () => ({
   assistantClient: { listProviderConnections: vi.fn().mockResolvedValue([]) },
 }));
 vi.mock('../../workspace/client', () => ({ setWorkspaceTitle: vi.fn() }));
-// The sections have their own tests; here they are stubs so what is under
-// test is the shell's own behaviour.
-vi.mock('./WorkspaceTeamSettings', () => ({
-  AssignmentSection: () => <div data-testid="assignment-section" />,
-  TeamPolicySection: () => <div data-testid="team-section" />,
-}));
-vi.mock('./AgentBehaviorForm', () => ({
-  AgentBehaviorForm: () => <input type="search" aria-label="Search skills" defaultValue="rust" />,
-}));
+// The sections have their own tests; here they are stubs that keep the page
+// contract (a handle, dirty on input) so what is under test is the shell.
+vi.mock('./WorkspaceTeamSettings', async () => {
+  const { useImperativeHandle } = await import('react');
+  const DraftPage = ({ ref, onDirtyChange, label }: PageStubProps & { label: string }) => {
+    useImperativeHandle(ref, () => ({ validate: () => ({ ok: true }), submit: async () => ({ ok: true }) }));
+    return <input aria-label={label} onChange={() => onDirtyChange?.(true)} />;
+  };
+  return {
+    TeamPolicySection: (props: PageStubProps) => <DraftPage {...props} label="Team context" />,
+    AssignmentSection: ({ agentId, onUnassigned, ...props }: PageStubProps & {
+      agentId?: string;
+      onUnassigned?: (id: string) => void;
+    }) => (
+      <>
+        <DraftPage {...props} label="Assignment context" />
+        <button type="button" onClick={() => onUnassigned?.(agentId!)}>Remove from crew</button>
+      </>
+    ),
+  };
+});
+// Same contract as the real form: no agentId means Save creates one.
+vi.mock('./AgentBehaviorForm', async () => {
+  const { useImperativeHandle } = await import('react');
+  const api = await import('../../api/client');
+  return {
+    AgentBehaviorForm: ({ ref, agentId, onDirtyChange }: PageStubProps & { agentId: string | null }) => {
+      useImperativeHandle(ref, () => ({
+        validate: () => ({ ok: true }),
+        submit: async () => {
+          if (!agentId) return { ok: true, createdId: (await api.workspaceCreateAgent({} as never)).id };
+          await api.workspaceUpdateAgent({ agentId } as never);
+          onDirtyChange?.(false);
+          return { ok: true };
+        },
+      }));
+      return (
+        <>
+          <input type="search" aria-label="Search skills" defaultValue="rust" />
+          <input aria-label="Agent name" onChange={() => onDirtyChange?.(true)} />
+        </>
+      );
+    },
+  };
+});
 // The global modal's tabs are heavy modules this test does not exercise; the
 // modal shell itself is real, because its overlay is what stacks.
 vi.mock('./AssistantProviderSettings', () => ({ default: () => <div /> }));
@@ -36,8 +74,15 @@ import WorkspaceSettingsModal from './WorkspaceSettingsModal';
 import SettingsModal, { TABS } from './SettingsModal';
 import { OPEN_GLOBAL_SETTINGS_EVENT, openGlobalSettings } from '../../utils/globalSettings';
 import type { WorkspaceDetails } from '../../generated/bindings';
+import type { SectionHandle } from './sectionHandle';
 import { invoke } from '@tauri-apps/api/core';
 import { setWorkspaceTitle } from '../../workspace/client';
+import { workspaceCreateAgent, workspaceUpdateAgent } from '../../api/client';
+
+interface PageStubProps {
+  ref?: React.Ref<SectionHandle>;
+  onDirtyChange?: (isDirty: boolean) => void;
+}
 
 const DETAILS = {
   workspaceId: 'ws-1',
@@ -163,14 +208,21 @@ const MAIN = {
   providerConnectionIds: [],
 };
 
-const renderModal = (initialSelection?: { kind: 'general' | 'schedule' | 'agent'; agentId?: string }) => {
+const CREW = {
+  ...MAIN,
+  id: 'agent-crew',
+  isDefault: false,
+  displayName: 'Reviewer',
+};
+
+const renderModal = (initialSelection?: { kind: 'general' | 'schedule' | 'team' | 'agent'; agentId?: string }) => {
   const onClose = vi.fn();
   render(
     <WorkspaceSettingsModal
       isOpen
       onClose={onClose}
       workspaceId="ws-1"
-      details={{ ...DETAILS, assignedAgents: [MAIN] } as unknown as WorkspaceDetails}
+      details={{ ...DETAILS, assignedAgents: [MAIN, CREW] } as unknown as WorkspaceDetails}
       initialSelection={initialSelection}
     />,
   );
@@ -178,6 +230,7 @@ const renderModal = (initialSelection?: { kind: 'general' | 'schedule' | 'agent'
 };
 
 const pageHeading = (name: string) => screen.getByRole('heading', { level: 2, name });
+const overlayOf = (heading: HTMLElement) => heading.closest('header')!.parentElement!.parentElement!;
 const saveBar = () => screen.queryByRole('region', { name: 'Unsaved changes' });
 
 describe('WorkspaceSettingsModal navigation and per-page save', () => {
@@ -245,10 +298,13 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
     const { onClose } = renderModal({ kind: 'general' });
     await user.type(screen.getByLabelText(/Title/), ' API');
 
-    await user.click(screen.getByRole('button', { name: /Backend — Settings/ }));
+    const back = screen.getByRole('button', { name: /Backend — Settings/ });
+    await user.click(back);
     expect(screen.getByText(LEAVE_PROMPT)).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: 'Stay' }));
     expect(screen.getByLabelText(/Title/)).toHaveValue('Backend API');
+    // Focus goes back to what asked to leave, not to <body>.
+    expect(back).toHaveFocus();
 
     // Escape also asks, and a second Escape answers Stay.
     await user.keyboard('{Escape}');
@@ -297,5 +353,100 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
 
     expect(within(saveBar()!).getByRole('alert')).toHaveTextContent('Workspace title cannot be empty.');
     expect(setWorkspaceTitle).not.toHaveBeenCalled();
+  });
+
+  it('asks before an overlay click closes a dirty page', async () => {
+    const user = userEvent.setup();
+    const { onClose } = renderModal({ kind: 'general' });
+    await user.type(screen.getByLabelText(/Title/), ' API');
+
+    await user.click(overlayOf(pageHeading('General')));
+
+    expect(screen.getByText(LEAVE_PROMPT)).toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it('stays on the page when Save from the leave prompt fails, and Discard still leaves', async () => {
+    const user = userEvent.setup();
+    vi.mocked(setWorkspaceTitle).mockRejectedValue(new Error('disk full'));
+    const { onClose } = renderModal({ kind: 'general' });
+    await user.type(screen.getByLabelText(/Title/), ' API');
+
+    await user.click(screen.getByRole('button', { name: 'Close settings' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    expect(onClose).not.toHaveBeenCalled();
+    expect(pageHeading('General')).toBeInTheDocument();
+    expect(within(saveBar()!).getByRole('alert')).toHaveTextContent('disk full');
+
+    await user.click(screen.getByRole('button', { name: 'Close settings' }));
+    await user.click(screen.getByRole('button', { name: 'Discard' }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    ['Team', { kind: 'team' as const }, 'Team context'],
+    ['a crew member', { kind: 'agent' as const, agentId: 'agent-crew' }, 'Assignment context'],
+  ])('asks before leaving a dirty %s page', async (_name, selection, field) => {
+    const user = userEvent.setup();
+    renderModal(selection);
+    await user.type(screen.getByLabelText(field), 'x');
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.getByText(LEAVE_PROMPT)).toBeInTheDocument();
+    expect(screen.getByLabelText(field)).toBeInTheDocument();
+  });
+
+  it('continues on the created Main, so Discard then Save does not create a second one', async () => {
+    const user = userEvent.setup();
+    vi.mocked(workspaceCreateAgent).mockClear();
+    vi.mocked(workspaceUpdateAgent).mockClear();
+    const Host = () => {
+      const [details, setDetails] = useState({ ...DETAILS, defaultWorkspaceAgentId: null } as unknown as WorkspaceDetails);
+      return (
+        <WorkspaceSettingsModal
+          isOpen
+          onClose={() => {}}
+          workspaceId="ws-1"
+          details={details}
+          onChanged={() => setDetails({
+            ...details,
+            defaultWorkspaceAgentId: 'agent-new',
+            assignedAgents: [{ ...MAIN, id: 'agent-new' }],
+          } as unknown as WorkspaceDetails)}
+        />
+      );
+    };
+    render(<Host />);
+
+    await user.click(screen.getByRole('button', { name: /Main — set up/ }));
+    await user.type(screen.getByLabelText('Agent name'), 'Main');
+    await user.click(within(saveBar()!).getByRole('button', { name: 'Save' }));
+    expect(workspaceCreateAgent).toHaveBeenCalledTimes(1);
+    expect(pageHeading('Main')).toHaveFocus();
+
+    await user.type(screen.getByLabelText('Agent name'), ' edit');
+    await user.click(within(saveBar()!).getByRole('button', { name: 'Discard' }));
+    await user.type(screen.getByLabelText('Agent name'), ' again');
+    await user.click(within(saveBar()!).getByRole('button', { name: 'Save' }));
+
+    expect(workspaceCreateAgent).toHaveBeenCalledTimes(1);
+    expect(workspaceUpdateAgent).toHaveBeenCalledWith({ agentId: 'agent-new' });
+
+    // Back lands on the new Main's row; the "set up" row is gone.
+    await user.click(screen.getByRole('button', { name: /Backend — Settings/ }));
+    expect(screen.getByRole('button', { name: /^Main/ })).toHaveFocus();
+  });
+
+  it('keeps focus inside the modal when it opens on the index or the origin row is gone', async () => {
+    const user = userEvent.setup();
+    renderModal();
+    expect(screen.getByRole('button', { name: /General/ })).toHaveFocus();
+
+    await user.click(screen.getByRole('button', { name: /Reviewer/ }));
+    await user.click(screen.getByRole('button', { name: 'Remove from crew' }));
+
+    expect(screen.getByRole('button', { name: /General/ })).toHaveFocus();
   });
 });

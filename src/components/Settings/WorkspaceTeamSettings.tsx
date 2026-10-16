@@ -8,7 +8,7 @@
  * under, and the paths it may touch in this workspace.
  */
 
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react';
 import {
   configureWorkspaceAssignment,
   getWorkspaceTeamPolicy,
@@ -21,6 +21,7 @@ import {
 } from '../../api/client';
 import AgentCardPicker from '../Agents/AgentCardPicker';
 import { openGlobalSettings } from '../../utils/globalSettings';
+import type { SectionHandle } from './sectionHandle';
 import styles from './WorkspaceSettingsModal.module.css';
 
 /** Editable list of path grants, shared by the assignment and policy forms. */
@@ -103,23 +104,37 @@ export const PathGrantList = ({
   );
 };
 
+interface PageProps {
+  /** The modal shell saves the page through this handle. */
+  ref?: React.Ref<SectionHandle>;
+  /** True while the shell is saving this page. */
+  saving?: boolean;
+  onDirtyChange?: (isDirty: boolean) => void;
+}
+
+// Reports dirtiness to the shell without depending on the callback's identity.
+const useReportDirty = (isDirty: boolean, onDirtyChange?: (isDirty: boolean) => void) => {
+  const report = useRef(onDirtyChange);
+  useEffect(() => { report.current = onDirtyChange; });
+  useEffect(() => { report.current?.(isDirty); }, [isDirty]);
+};
+
 /**
  * Project context and the access every agent in this workspace receives.
  * Both apply on the next turn, like every other configuration edit.
  */
 export const TeamPolicySection = ({
+  ref,
   workspaceId,
-  onChanged,
-}: {
-  workspaceId: string;
-  onChanged?: () => void;
-}) => {
+  saving = false,
+  onDirtyChange,
+}: PageProps & { workspaceId: string }) => {
   const [context, setContext] = useState('');
   const [grants, setGrants] = useState<PathGrantPayload[]>([]);
+  // What was last loaded or saved; the draft is dirty when it differs.
+  const [baseline, setBaseline] = useState({ context: '', grants: [] as PathGrantPayload[] });
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [saved, setSaved] = useState(false);
 
   // `loading` starts true and is only ever cleared here, so the effect never
   // sets state synchronously on the way in.
@@ -128,8 +143,10 @@ export const TeamPolicySection = ({
     getWorkspaceTeamPolicy(workspaceId)
       .then((policy) => {
         if (cancelled) return;
-        setContext(policy.context || '');
-        setGrants(policy.filesystemGrants || []);
+        const loaded = { context: policy.context || '', grants: policy.filesystemGrants || [] };
+        setContext(loaded.context);
+        setGrants(loaded.grants);
+        setBaseline(loaded);
       })
       .catch((e: unknown) => {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
@@ -142,19 +159,25 @@ export const TeamPolicySection = ({
     };
   }, [workspaceId]);
 
-  const save = useCallback(async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      await saveWorkspaceTeamPolicy(workspaceId, context, grants);
-      setSaved(true);
-      onChanged?.();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
-  }, [workspaceId, context, grants, onChanged]);
+  const isDirty = !loading
+    && (context !== baseline.context || JSON.stringify(grants) !== JSON.stringify(baseline.grants));
+  useReportDirty(isDirty, onDirtyChange);
+
+  useImperativeHandle(ref, () => ({
+    validate: () => ({ ok: true }),
+    submit: async () => {
+      try {
+        await saveWorkspaceTeamPolicy(workspaceId, context, grants);
+        setBaseline({ context, grants });
+        setError(null);
+        return { ok: true };
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        setError(message);
+        return { ok: false, error: message };
+      }
+    },
+  }));
 
   if (loading) return <div className={styles.sectionRoot}>Loading…</div>;
 
@@ -173,10 +196,7 @@ export const TeamPolicySection = ({
           id="workspace-context"
           className={styles.textarea}
           value={context}
-          onChange={(e) => {
-            setContext(e.target.value);
-            setSaved(false);
-          }}
+          onChange={(e) => setContext(e.target.value)}
           rows={6}
           placeholder="What this workspace is for, where the code lives, house rules…"
           disabled={saving}
@@ -193,10 +213,7 @@ export const TeamPolicySection = ({
       <div className={styles.field}>
         <PathGrantList
           grants={grants}
-          onChange={(next) => {
-            setGrants(next);
-            setSaved(false);
-          }}
+          onChange={setGrants}
           disabled={saving}
         />
       </div>
@@ -206,11 +223,6 @@ export const TeamPolicySection = ({
           {error}
         </div>
       )}
-      <div className={styles.actions}>
-        <button type="button" className={styles.primaryButton} onClick={save} disabled={saving}>
-          {saving ? 'Saving…' : saved ? 'Saved' : 'Save team settings'}
-        </button>
-      </div>
     </div>
   );
 };
@@ -220,11 +232,14 @@ export const TeamPolicySection = ({
  * adds one from the shared library.
  */
 export const AssignmentSection = ({
+  ref,
   workspaceId,
   agentId,
+  saving = false,
+  onDirtyChange,
   onChanged,
   onUnassigned,
-}: {
+}: PageProps & {
   workspaceId: string;
   agentId?: string;
   onChanged?: () => void;
@@ -281,6 +296,14 @@ export const AssignmentSection = ({
 
   const assignment = assignments.find((item) => item.id === agentId);
   const definition = definitions.find((item) => item.id === assignment?.agentDefinitionId);
+  const inert = busy || saving;
+
+  const isDirty = !!assignment && (
+    enabled !== assignment.enabled
+    || context !== (assignment.context || '')
+    || JSON.stringify(grants) !== JSON.stringify(assignment.filesystemGrants || [])
+  );
+  useReportDirty(isDirty, onDirtyChange);
 
   // The picker assigns on its own and stays busy until this resolves, so the
   // roster it filters on is the new one before another card can be clicked.
@@ -289,25 +312,25 @@ export const AssignmentSection = ({
     onChanged?.();
   }, [refresh, onChanged]);
 
-  const handleSave = useCallback(async () => {
-    if (!assignment) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await configureWorkspaceAssignment(workspaceId, {
-        ...assignment,
-        enabled,
-        context,
-        filesystemGrants: grants,
-      });
-      await refresh();
-      onChanged?.();
-    } catch (e: unknown) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  }, [workspaceId, assignment, enabled, context, grants, refresh, onChanged]);
+  // The picker has no draft: its assign is immediate and offers its own Undo.
+  useImperativeHandle(ref, () => ({
+    validate: () => ({ ok: true }),
+    submit: async () => {
+      if (!assignment) return { ok: true };
+      const next = { ...assignment, enabled, context, filesystemGrants: grants };
+      try {
+        await configureWorkspaceAssignment(workspaceId, next);
+        // The saved row is the new baseline, so the page reads clean.
+        setAssignments((rows) => rows.map((row) => (row.id === next.id ? next : row)));
+        setError(null);
+        return { ok: true };
+      } catch (e: unknown) {
+        const message = e instanceof Error ? e.message : String(e);
+        setError(message);
+        return { ok: false, error: message };
+      }
+    },
+  }));
 
   const handleUnassign = useCallback(async () => {
     if (!agentId) return;
@@ -429,7 +452,7 @@ export const AssignmentSection = ({
             type="checkbox"
             checked={enabled}
             onChange={(e) => setEnabled(e.target.checked)}
-            disabled={busy}
+            disabled={inert}
           />
           <span>Enabled in this workspace</span>
         </label>
@@ -458,7 +481,7 @@ export const AssignmentSection = ({
           onChange={(e) => setContext(e.target.value)}
           rows={5}
           placeholder="What this agent should know about its job here."
-          disabled={busy}
+          disabled={inert}
         />
         <span className={styles.hint}>
           Added to the shared instructions, in this workspace only.
@@ -467,7 +490,7 @@ export const AssignmentSection = ({
 
       <div className={styles.field}>
         <label className={styles.label}>Path grants in this workspace</label>
-        <PathGrantList grants={grants} onChange={setGrants} disabled={busy} />
+        <PathGrantList grants={grants} onChange={setGrants} disabled={inert} />
         <span className={styles.hint}>
           Local to this workspace. Paths approved during a run are saved here too, so approving
           access in one project never widens it in another.
@@ -485,7 +508,7 @@ export const AssignmentSection = ({
             type="button"
             className={styles.dangerButton}
             onClick={handleUnassign}
-            disabled={busy}
+            disabled={inert}
           >
             Remove from crew
           </button>
@@ -494,9 +517,6 @@ export const AssignmentSection = ({
             instead to park it.
           </span>
         </div>
-        <button type="button" className={styles.primaryButton} onClick={handleSave} disabled={busy}>
-          {busy ? 'Saving…' : 'Save'}
-        </button>
       </div>
     </div>
   );

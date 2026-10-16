@@ -225,12 +225,6 @@ export const AgentBehaviorForm = ({
   showHeading?: boolean;
 }) => {
   const isCreate = !agentId;
-  // Set once the create flow has succeeded. Only the submit path looks at
-  // it: the page stays open after a save, so a further edit + Save must
-  // update the agent just made, not create a second one.
-  // Everything rendered still follows `isCreate`, because `agent` is still
-  // the blank draft — not the created agent.
-  const [createdAgentId, setCreatedAgentId] = useState<string | null>(null);
   // Both flows start in a loading state: edit waits on `workspaceGetAgent`,
   // create waits on `deps.defaultExecution` so the form opens with the
   // backend's `$HOME` RO grant pre-populated instead of an empty list.
@@ -487,7 +481,7 @@ export const AgentBehaviorForm = ({
         if (saveBehavior) {
           await saveBehavior({ workspaceId, name: trimmedName, description: description.trim(), selectedSkillIds, selectedMcpServerIds, providerConnectionIds, execution, enabled });
           setBaselinePayload(currentPayload);
-        } else if (isCreate && createdAgentId === null) {
+        } else if (isCreate) {
           const created = await workspaceCreateAgent({
             workspaceId,
             name: trimmedName,
@@ -498,14 +492,13 @@ export const AgentBehaviorForm = ({
             execution,
             enabled,
           });
-          // Clean, and now editing: the page stays open, and the next Save
-          // must neither re-create the agent nor create a second one.
-          setCreatedAgentId(created.id);
+          // The host moves to the new agent's own page.
           setBaselinePayload(currentPayload);
+          return { ok: true, createdId: created.id };
         } else {
           await workspaceUpdateAgent({
             workspaceId,
-            agentId: agent?.id || createdAgentId || '',
+            agentId: agent?.id || '',
             name: isManager ? (agent?.name || 'Manager') : trimmedName,
             description: description.trim(),
             selectedSkillIds,

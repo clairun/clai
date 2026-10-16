@@ -6,6 +6,8 @@
 export interface SectionResult {
   ok: boolean;
   error?: string;
+  /** Set when the submit created a record; the shell moves to it. */
+  createdId?: string;
 }
 
 export interface SectionHandle {
