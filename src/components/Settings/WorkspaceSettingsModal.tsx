@@ -213,15 +213,18 @@ const WorkspaceSettingsModal = ({
     } finally {
       setSaving(false);
     }
-    window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
-    await Promise.resolve(onChanged?.());
-    // A create continues on the new record's own page, so a later Save
-    // updates it instead of creating another.
+    // A create continues on the new record's own page before the refetch,
+    // so a Save during it updates instead of creating another. Otherwise
+    // the save bar unmounts with focus, so hand it to the heading.
     if (createdId) {
       const created: Selection = { kind: 'agent', agentId: createdId };
       originRow.current = pageKey(created);
       showPage(created);
+    } else {
+      headingRef.current?.focus();
     }
+    window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
+    await Promise.resolve(onChanged?.());
     return true;
   }, [saving, onChanged, showPage]);
 

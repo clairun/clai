@@ -340,8 +340,8 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
 
     expect(setWorkspaceTitle).toHaveBeenCalledTimes(1);
     expect(invoke).not.toHaveBeenCalledWith('workspace_set_schedule', expect.anything());
-    // Still on the page after a save.
-    expect(pageHeading('General')).toBeInTheDocument();
+    // Still on the page after a save, with focus on it rather than <body>.
+    expect(pageHeading('General')).toHaveFocus();
   });
 
   it('keeps the page open and shows why when validation fails', async () => {
@@ -437,6 +437,32 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
     // Back lands on the new Main's row; the "set up" row is gone.
     await user.click(screen.getByRole('button', { name: /Backend — Settings/ }));
     expect(screen.getByRole('button', { name: /^Main/ })).toHaveFocus();
+  });
+
+  it('is already on the created Main while the refetch runs, so a second Save updates it', async () => {
+    const user = userEvent.setup();
+    vi.mocked(workspaceCreateAgent).mockClear();
+    vi.mocked(workspaceUpdateAgent).mockClear();
+    let finishRefetch = () => {};
+    render(
+      <WorkspaceSettingsModal
+        isOpen
+        onClose={() => {}}
+        workspaceId="ws-1"
+        details={{ ...DETAILS, defaultWorkspaceAgentId: null } as unknown as WorkspaceDetails}
+        onChanged={() => new Promise<void>((resolve) => { finishRefetch = resolve; })}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /Main — set up/ }));
+    await user.type(screen.getByLabelText('Agent name'), 'Main');
+    await user.click(within(saveBar()!).getByRole('button', { name: 'Save' }));
+    await user.type(screen.getByLabelText('Agent name'), ' edit');
+    await user.click(within(saveBar()!).getByRole('button', { name: 'Save' }));
+
+    expect(workspaceCreateAgent).toHaveBeenCalledTimes(1);
+    expect(workspaceUpdateAgent).toHaveBeenCalledWith({ agentId: 'agent-new' });
+    await act(async () => finishRefetch());
   });
 
   it('keeps focus inside the modal when it opens on the index or the origin row is gone', async () => {

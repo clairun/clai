@@ -38,6 +38,13 @@ const submitPage = async (ref: React.RefObject<SectionHandle | null>) => {
   return result;
 };
 
+/** Makes one backend command fail; everything else answers as usual. */
+const failCommand = (failing: string) => {
+  const answer = mockInvoke.getMockImplementation()!;
+  mockInvoke.mockImplementation((cmd: string, args?: unknown) =>
+    cmd === failing ? Promise.reject(new Error('disk full')) : answer(cmd, args));
+};
+
 const DEFINITIONS = [
   {
     id: 'def-review',
@@ -222,6 +229,21 @@ describe('AssignmentSection editor', () => {
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
 
+  it('reports a failed save and keeps the draft dirty', async () => {
+    const user = userEvent.setup();
+    failCommand('workspace_configure_assignment');
+    const ref = createRef<SectionHandle>();
+    const onDirtyChange = vi.fn();
+    render(
+      <AssignmentSection ref={ref} workspaceId={WORKSPACE} agentId="assign-1" onDirtyChange={onDirtyChange} />
+    );
+    await user.type(await screen.findByLabelText('Context for this workspace'), ' too');
+
+    expect(await submitPage(ref)).toEqual({ ok: false, error: expect.stringContaining('disk full') });
+    expect(screen.getByRole('alert')).toHaveTextContent('disk full');
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+  });
+
   it('hands the modal back control after unassigning instead of sitting on a dead row', async () => {
     const user = userEvent.setup();
     const onUnassigned = vi.fn();
@@ -372,5 +394,18 @@ describe('TeamPolicySection', () => {
       filesystemGrants: [{ path: '/opt/tools', access: 'read_only' }],
     });
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports a failed save and keeps the draft dirty', async () => {
+    const user = userEvent.setup();
+    failCommand('workspace_save_team_policy');
+    const ref = createRef<SectionHandle>();
+    const onDirtyChange = vi.fn();
+    render(<TeamPolicySection ref={ref} workspaceId={WORKSPACE} onDirtyChange={onDirtyChange} />);
+    await user.type(await screen.findByLabelText('Instructions shared by every agent here'), ' too');
+
+    expect(await submitPage(ref)).toEqual({ ok: false, error: expect.stringContaining('disk full') });
+    expect(screen.getByRole('alert')).toHaveTextContent('disk full');
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
   });
 });
