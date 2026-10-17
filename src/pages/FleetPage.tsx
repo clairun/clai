@@ -134,7 +134,7 @@ const FleetPage = () => {
           <strong>{counts.working}</strong> working
         </span>
         <span data-attention={counts.waiting > 0 || undefined}>
-          <strong>{counts.waiting}</strong> need you
+          <strong>{counts.waiting}</strong> {counts.waiting === 1 ? 'needs' : 'need'} you
         </span>
       </AppTopBar>
       <main className={styles.gridArea} ref={gridRef} aria-label="Fleet">

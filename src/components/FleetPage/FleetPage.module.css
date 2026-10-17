@@ -408,10 +408,9 @@
   text-overflow: ellipsis;
 }
 
-/* A small card's open request takes the body; a long one scrolls inside the card. */
+/* A small card's open request, as tall as it is; a long one scrolls inside the card. */
 .request {
   display: flex;
-  flex: 1;
   flex-direction: column;
   gap: 6px;
   min-height: 0;

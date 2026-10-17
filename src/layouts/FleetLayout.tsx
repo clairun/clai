@@ -22,6 +22,8 @@ import { useFleetActivity } from '../hooks/useFleetActivity';
 import { optimisticRunNowId, useFleetActivityStore } from '../stores/fleetActivityStore';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
 import { errText, num } from '../fleet/workspaceStatus';
+import { cardAttention } from '../fleet/fleetModel';
+import { useFleetStore } from '../fleet/fleetStore';
 import { onWorkspaceUiCommand, setPendingForkPrompt } from '../utils/workspaceUiEvents';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 import styles from './FleetLayout.module.css';
@@ -108,6 +110,16 @@ const FleetLayout = () => {
 
   const activeRunsByWorkspace = useFleetActivity() as Record<string, number>;
   const pendingPermissionCounts = usePermissionAttention() as Record<string, number>;
+  // Needs attention is the Fleet's "needs you": approvals and grants, plus open questions.
+  const fleetCards = useFleetStore((s) => s.fleet.cards);
+  const attentionCounts = useMemo(() => {
+    const counts = { ...pendingPermissionCounts };
+    for (const card of Object.values(fleetCards)) {
+      const { asks } = cardAttention(card);
+      if (asks > 0) counts[card.workspaceId] = (counts[card.workspaceId] || 0) + asks;
+    }
+    return counts;
+  }, [pendingPermissionCounts, fleetCards]);
 
   const loadWorkspaces = useCallback(async () => {
     try {
@@ -185,9 +197,9 @@ const FleetLayout = () => {
       running: workspaces.filter(
         (w) => num(w.runningTaskCount) > 0 || (activeRunsByWorkspace[w.id] || 0) > 0,
       ).length,
-      attention: workspaces.filter((w) => (pendingPermissionCounts[w.id] || 0) > 0).length,
+      attention: workspaces.filter((w) => (attentionCounts[w.id] || 0) > 0).length,
     }),
-    [workspaces, activeRunsByWorkspace, pendingPermissionCounts],
+    [workspaces, activeRunsByWorkspace, attentionCounts],
   );
 
   const handleSelect = useCallback(
@@ -468,7 +480,7 @@ const FleetLayout = () => {
         <WorkspaceRail
           workspaces={workspaces}
           selectedId={selectedId}
-          attentionCounts={pendingPermissionCounts}
+          attentionCounts={attentionCounts}
           activeRuns={activeRunsByWorkspace}
           collapsed={collapsed}
           onToggleCollapsed={toggleCollapsed}

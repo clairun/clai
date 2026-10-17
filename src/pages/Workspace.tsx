@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
-import { useOutletContext, useParams } from 'react-router';
+import { useLocation, useNavigate, useOutletContext, useParams } from 'react-router';
 import type { FleetOutletContext } from '../layouts/FleetLayout';
 import { workspaceDeleteAgent } from '../api/client';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
@@ -2198,6 +2198,16 @@ const Workspace = () => {
     },
     [openTaskById, patchWorkspaceUi]
   );
+  // A task opened from elsewhere (a Fleet stage card) rides in on the route state, once.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const routedTaskId = (location.state as { openTaskId?: string } | null)?.openTaskId;
+  useEffect(() => {
+    if (!routedTaskId) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes the route state, an external one-shot input, and clears it.
+    openTask(routedTaskId);
+    navigate(location.pathname, { replace: true });
+  }, [routedTaskId, openTask, navigate, location.pathname]);
   // From inside a task's log: Back returns to it.
   const openNestedTask = useCallback(
     (taskId: string) => {

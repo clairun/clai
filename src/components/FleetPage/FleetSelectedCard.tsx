@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router';
 import { useAssistantStore } from '../../assistant';
 import { useSessionChatActions } from '../../assistant/sessionChat';
@@ -8,6 +8,7 @@ import AskUserPanel from '../AskUserPanel/AskUserPanel';
 import InlineApprovalCard from '../InlineApprovalCard';
 import InlinePathGrantCard from '../InlinePathGrantCard';
 import { mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
+import { markWorkspaceOpened } from '../../workspace/client';
 import { cardAttention, cardPhase, openRequests, type FleetCard, type FleetLive } from '../../fleet/fleetModel';
 import type { AssistantMessage, AssistantRun, ToolInvocation } from '../../generated/bindings';
 import { LiveFaces, phaseLabel } from './FleetCard';
@@ -50,6 +51,21 @@ const FleetSelectedCard = ({ card, live, selected, faces, onSelect }: FleetSelec
     lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
 
   const actions = useSessionChatActions(workspaceId, sessionId);
+  const isStreaming = !!session?.isStreaming;
+
+  // Selected is seen: the rail's unread dot clears, as on the Workspace page
+  // (see the same stamp there), and again on leaving while a run is in flight.
+  useEffect(() => {
+    if (!selected) return undefined;
+    markWorkspaceOpened(workspaceId).catch(() => {});
+    return () => {
+      markWorkspaceOpened(workspaceId).catch(() => {});
+    };
+  }, [selected, workspaceId, isStreaming]);
+  const openTask = useCallback(
+    (taskId: string) => navigate(`/workspace/${encodeURIComponent(workspaceId)}`, { state: { openTaskId: taskId } }),
+    [navigate, workspaceId]
+  );
 
   const title = card.title || 'Workspace';
 
@@ -98,7 +114,7 @@ const FleetSelectedCard = ({ card, live, selected, faces, onSelect }: FleetSelec
             messages={messages}
             toolCalls={session?.toolCalls ?? EMPTY_TOOL_CALLS}
             streamingText={streamingText}
-            isStreaming={!!session?.isStreaming}
+            isStreaming={isStreaming}
             runError={runError}
             runStartedAt={session?.runStartedAt ?? null}
             runningIdentity={MAIN_IDENTITY}
@@ -110,6 +126,7 @@ const FleetSelectedCard = ({ card, live, selected, faces, onSelect }: FleetSelec
             onLoadOlderMessages={actions.onLoadOlderMessages}
             taskRoster={roster}
             owner={owner}
+            onOpenTask={openTask}
           />
         ) : (
           <p className={styles.chatEmpty}>

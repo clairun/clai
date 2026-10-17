@@ -140,7 +140,7 @@ const rowMenuStyle = (trigger: HTMLElement): React.CSSProperties => {
  * every workspace grouped into explicit, labeled sections (Claude-style)
  * so ordering is never a mystery:
  *
- *   1. "Needs attention" — pending approvals and path grants.
+ *   1. "Needs attention" — open questions, pending approvals and path grants.
  *   2. "Starred" — user-pinned workspaces (star via hover icon or ⋯ menu).
  *   3. "Recent" — everything else, most-recently-updated first.
  *

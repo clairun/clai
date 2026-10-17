@@ -275,6 +275,15 @@ describe('FleetPage', () => {
     expect(grid.style.gridTemplateColumns).toBe('repeat(3, minmax(0, 1fr))');
   });
 
+  it('counts one waiting workspace as "1 needs you", and small cards never mark a workspace seen', async () => {
+    const ask = { pendingId: 'q', workspaceId: 'b', sessionId: 'main', runId: 'r', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
+    fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha'), { ...workspace('b', 'Beta'), pendingAsks: [ask] }]);
+    renderFleet();
+    await screen.findByRole('button', { name: 'Select Beta' });
+    await waitFor(() => expect(document.body).toHaveTextContent('1 needs you'));
+    expect(mockInvoke).not.toHaveBeenCalledWith('workspace_mark_opened', expect.anything());
+  });
+
   it('marks only the selected card', async () => {
     fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000), workspace('b', 'Beta', 2000)]);
     renderFleet();
