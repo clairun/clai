@@ -60,6 +60,25 @@
   color: var(--color-primary);
 }
 
+.fleetButton {
+  flex-shrink: 0;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
+}
+
+.fleetButton:hover {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+}
+
 .counterChip strong {
   color: var(--color-text-primary);
   font-weight: 700;

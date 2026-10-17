@@ -1,5 +1,6 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { useLocation } from 'react-router';
+import { useFleetStore } from '../../fleet/fleetStore';
+import { useTerminalTarget } from './useTerminalTarget';
 import WorkspaceContextBar from '../../workspace/components/WorkspaceContextBar';
 import CommandHelpModal from './CommandHelpModal';
 import WorkspaceTerminal from './WorkspaceTerminal';
@@ -58,7 +59,6 @@ const TerminalEmulator = ({
   recoverablePrompt = '',
   onRecoverablePromptConsumed,
 }: TerminalEmulatorProps) => {
-  const location = useLocation();
   const [inputValue, setInputValue] = useState('');
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [isAttaching, setIsAttaching] = useState(false);
@@ -95,12 +95,17 @@ const TerminalEmulator = ({
     return cmd;
   }, []);
 
-  const isWorkspaceRoute =
-    location.pathname === '/workspace' || location.pathname.startsWith('/workspace/');
-  const workspaceRouteMatch = location.pathname.match(/^\/workspace\/([^/]+)\/?$/);
-  const currentWorkspaceId = workspaceRouteMatch
-    ? decodeURIComponent(workspaceRouteMatch[1]!)
-    : null;
+  const target = useTerminalTarget();
+  const isWorkspaceRoute = target.surface === 'workspace';
+  const isFleetRoute = target.surface === 'fleet';
+  // The integrated terminal (PTY) belongs to the workspace page only.
+  const currentWorkspaceId = isWorkspaceRoute ? target.workspaceId : null;
+  // Chat-side features (context bar, attachments, drafts) follow the target,
+  // which on the Fleet is the selected card.
+  const chatWorkspaceId = target.workspaceId;
+  const fleetTargetTitle = useFleetStore((s) =>
+    isFleetRoute && chatWorkspaceId ? s.fleet.cards[chatWorkspaceId]?.title || 'workspace' : null
+  );
   const terminalAvailable = isWorkspaceRoute && Boolean(currentWorkspaceId);
   // Show the terminal only when the active workspace actually has a live
   // (kept-alive) terminal. This also recovers gracefully if a workspace's shell
@@ -259,7 +264,7 @@ const TerminalEmulator = ({
   // terminal mode when the workspace context goes away" logic: navigating off a
   // workspace switches to the empty key, which defaults terminal mode off (and
   // `showTerminal` also guards on `terminalAvailable`).
-  const composerKey = currentWorkspaceId ?? '';
+  const composerKey = chatWorkspaceId ?? '';
   const [savedComposerState, setSavedComposerState] = useState<{
     activeKey: string;
     drafts: Map<string, string>;
@@ -629,9 +634,9 @@ const TerminalEmulator = ({
           so composer state is preserved too. */}
       <div style={{ display: showTerminal ? 'none' : 'contents' }}>
           {/* Workspace context bar — MCP badges inside the terminal on workspace routes */}
-          {isWorkspaceRoute && currentWorkspaceId && (
+          {chatWorkspaceId && (
             <div className={styles.workspaceContextWrapper}>
-              <WorkspaceContextBar key={currentWorkspaceId} workspaceId={currentWorkspaceId} />
+              <WorkspaceContextBar key={chatWorkspaceId} workspaceId={chatWorkspaceId} />
             </div>
           )}
 
@@ -696,7 +701,11 @@ const TerminalEmulator = ({
                     ? 'Agent is working — Enter queues a follow-up message...'
                     : isWorkspaceRoute
                       ? 'Message this workspace…  (!cmd runs a terminal command)'
-                      : 'Open a workspace to chat, or run a /command (/help)...'
+                      : fleetTargetTitle
+                        ? `Message ${fleetTargetTitle}…`
+                        : isFleetRoute
+                          ? 'Type to start a new workspace…'
+                          : 'Open a workspace to chat, or run a /command (/help)...'
                 }
                 spellCheck={false}
                 autoComplete="off"
@@ -706,9 +715,9 @@ const TerminalEmulator = ({
             </div>
 
             {/* Action toolbar: attach + terminal-mode, below the input */}
-            {((onPickImage && isWorkspaceRoute) || terminalAvailable) && (
+            {((onPickImage && chatWorkspaceId) || terminalAvailable) && (
               <div className={styles.composerToolbar}>
-                {onPickImage && isWorkspaceRoute && (
+                {onPickImage && chatWorkspaceId && (
                   <button
                     type="button"
                     className={styles.attachButton}

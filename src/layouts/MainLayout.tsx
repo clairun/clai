@@ -4,10 +4,12 @@ import TerminalEmulatorWrapper from '../components/TerminalEmulator/TerminalEmul
 import PermissionAttentionNotifications from '../components/PermissionAttentionNotifications';
 import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
 import { useAssistantEvents } from '../assistant';
+import { useFleetAttentionFeed } from '../fleet/useFleetAttentionFeed';
 import styles from './MainLayout.module.css';
 
 const AssistantEventListener = ({ children }: { children: React.ReactNode }) => {
   useAssistantEvents();
+  useFleetAttentionFeed();
   return <>{children}</>;
 };
 

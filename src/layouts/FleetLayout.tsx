@@ -331,12 +331,12 @@ const FleetLayout = () => {
     // modal sitting over a workspace that was already gone, which is what
     // read as a hung dialog.
     setPendingDelete(null);
-    // If we just deleted the open workspace, fall back to /fleet so the index
+    // If we just deleted the open workspace, fall back to /workspace so the index
     // can re-pick a most-recent target (or show the empty state). Before the
     // refresh, so the route stops pointing at a dead id immediately rather
     // than one `listWorkspaces` round trip later.
     if (selectedId === id) {
-      navigate('/fleet', { replace: true });
+      navigate('/workspace', { replace: true });
     }
     await loadWorkspaces();
   }, [pendingDelete, loadWorkspaces, selectedId, navigate]);
@@ -473,6 +473,14 @@ const FleetLayout = () => {
     <div className={styles.layout}>
       <div className={styles.topBar}>
         <img src="/icon.svg" alt="Clai" className={styles.brandIcon} />
+        <button
+          type="button"
+          className={styles.fleetButton}
+          onClick={() => navigate('/fleet')}
+          title="Back to the Fleet"
+        >
+          Fleet
+        </button>
         <div className={styles.counters} role="status" aria-label="Fleet summary">
           <span className={styles.counterChip}>
             <strong>{counters.total}</strong> workspace{counters.total === 1 ? '' : 's'}

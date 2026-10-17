@@ -15,6 +15,7 @@ import { useTask, useTaskStore, useWorkspaceTasks } from '../workspace/taskStore
 import * as assistantClient from '../assistant/client';
 import useAssistantStore, { isRunActive } from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
+import { restorePendingAsk } from '../assistant/pendingAsks';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
 import { mainIdentity } from '../components/Agents/agentIdentity';
@@ -1883,6 +1884,9 @@ const Workspace = () => {
               messagePage.totalCount
             );
             lastLoadedSessionUpdatedAtRef.current = nextDetails.session.updatedAt || null;
+            if (needsInitialHydration) {
+              void restorePendingAsk(workspaceId, nextDetails.session.id);
+            }
           }
         }
       } catch (err) {

@@ -1,23 +1,26 @@
 /**
  * TerminalEmulatorWrapper
  *
- * Routes free-text terminal prompts into the assistant engine. Prompts only
- * have a target on workspace routes (the workspace's manager session, keyed
- * `workspace:<id>` in the assistant store); on other routes the terminal
- * accepts slash commands but tells the user to open a workspace to chat.
+ * Routes free-text terminal prompts into the assistant engine. The target
+ * (see `useTerminalTarget`) is the open workspace's manager session, or on
+ * the Fleet the selected card's — keyed `workspace:<id>` in the assistant
+ * store. On the Fleet with no card selected, a prompt creates a workspace
+ * (default model) and sends to it.
  */
 
 import { useCallback } from 'react';
-import { useLocation } from 'react-router';
 import { useAssistantStore, assistantClient } from '../../assistant';
 import { readImage } from '@tauri-apps/plugin-clipboard-manager';
+import { useFleetStore } from '../../fleet/fleetStore';
 import {
+  createWorkspace,
   getOrCreateWorkspaceSession,
   storeWorkspaceImage,
   pickAndStoreWorkspaceImage,
 } from '../../workspace/client';
 import type { ContentPart } from '../../generated/bindings';
 import TerminalEmulator from './TerminalEmulator';
+import { useTerminalTarget } from './useTerminalTarget';
 
 const errorMessage = (err: unknown, fallback: string): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
@@ -81,20 +84,54 @@ async function readClipboardImageAsFile(): Promise<File | null> {
   }
 }
 
-const TerminalEmulatorWrapper = () => {
-  const location = useLocation();
-  const workspaceRouteMatch = location.pathname.match(/^\/workspace(?:\/([^/]+))?\/?$/);
-  const isWorkspaceRoute = Boolean(workspaceRouteMatch);
-  const currentWorkspaceId = workspaceRouteMatch?.[1]
-    ? decodeURIComponent(workspaceRouteMatch[1])
-    : 'default';
+const NO_CONNECTION_ERROR =
+  'Add an enabled assistant provider connection before sending prompts from this workspace.';
 
-  // Track whether the workspace's canonical manager session has a
-  // non-terminal run so the input can show queued-message wording while
-  // still accepting text. Workspace.tsx populates the `workspace:<id>`
-  // tab-key on load.
+/** Send `query` to `workspaceId`'s main session, binding it in the assistant store. */
+async function sendToWorkspace(
+  workspaceId: string,
+  query: string,
+  images: ContentPart[]
+): Promise<{ error?: string }> {
+  const binding = await getOrCreateWorkspaceSession(workspaceId);
+  const connectionId = binding.providerConnectionId;
+  if (!connectionId) return { error: NO_CONNECTION_ERROR };
+
+  const store = useAssistantStore.getState();
+  store.initSession(binding.session);
+  // Bridge workspace session to the chat panel via a synthetic tab key
+  store.setActiveSessionForTab(`workspace:${workspaceId}`, binding.session.id);
+
+  const result = await assistantClient.sendMessage(
+    workspaceId,
+    binding.session.id,
+    query,
+    connectionId,
+    images,
+  );
+  store.addMessage(binding.session.id, result.message);
+  if (result.queued) {
+    // Sent while a run was active — show the "Queued" chip until a
+    // run picks it up (queued_messages_delivered clears it).
+    store.markMessageQueued(binding.session.id, result.message.id);
+  }
+  useFleetStore.getState().noteUserSent(workspaceId, binding.session.id, result.message);
+  return {};
+}
+
+const TerminalEmulatorWrapper = () => {
+  const target = useTerminalTarget();
+  const targetWorkspaceId = target.workspaceId;
+  // On the Fleet with nothing selected, a prompt starts a new workspace.
+  const createsWorkspace = target.surface === 'fleet' && !targetWorkspaceId;
+
+  // Track whether the target's main session has a non-terminal run so the
+  // input can show queued-message wording while still accepting text. The
+  // workspace page and the Fleet's selected card populate the
+  // `workspace:<id>` tab-key on load.
   const workspaceSessionId = useAssistantStore(
-    (state) => state.activeSessionByTab[`workspace:${currentWorkspaceId}`] || null
+    (state) =>
+      (targetWorkspaceId && state.activeSessionByTab[`workspace:${targetWorkspaceId}`]) || null
   );
   const workspaceIsStreaming = useAssistantStore(
     (state) => (workspaceSessionId ? !!state.sessions[workspaceSessionId]?.isStreaming : false)
@@ -112,47 +149,23 @@ const TerminalEmulatorWrapper = () => {
     }
   }, [workspaceSessionId]);
 
-  const inputDisabled = isWorkspaceRoute && workspaceIsStreaming;
+  const inputDisabled = !!targetWorkspaceId && workspaceIsStreaming;
 
   /**
    * Handle sending a query through the assistant engine.
    */
   const handleSendToAgent = useCallback(
     async (query: string, images: ContentPart[] = []): Promise<{ error?: string }> => {
-      if (!isWorkspaceRoute) {
-        return { error: OPEN_WORKSPACE_ERROR };
-      }
-
       try {
-        const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
-        const connectionId = binding.providerConnectionId;
-        if (!connectionId) {
-          return {
-            error: 'Add an enabled assistant provider connection before sending prompts from this workspace.',
-          };
+        if (createsWorkspace) {
+          const workspaceId = await createWorkspace();
+          useFleetStore.getState().select(workspaceId);
+          return await sendToWorkspace(workspaceId, query, images);
         }
-
-        const store = useAssistantStore.getState();
-        store.initSession(binding.session);
-
-        // Bridge workspace session to the chat panel via a synthetic tab key
-        const workspaceTabKey = `workspace:${currentWorkspaceId}`;
-        store.setActiveSessionForTab(workspaceTabKey, binding.session.id);
-
-        const result = await assistantClient.sendMessage(
-          currentWorkspaceId,
-          binding.session.id,
-          query,
-          connectionId,
-          images,
-        );
-        store.addMessage(binding.session.id, result.message);
-        if (result.queued) {
-          // Sent while a run was active — show the "Queued" chip until a
-          // run picks it up (queued_messages_delivered clears it).
-          store.markMessageQueued(binding.session.id, result.message.id);
+        if (!targetWorkspaceId) {
+          return { error: OPEN_WORKSPACE_ERROR };
         }
-        return {};
+        return await sendToWorkspace(targetWorkspaceId, query, images);
       } catch (err) {
         console.error('[TerminalEmulatorWrapper] Workspace assistant error:', err);
         return {
@@ -160,7 +173,7 @@ const TerminalEmulatorWrapper = () => {
         };
       }
     },
-    [currentWorkspaceId, isWorkspaceRoute]
+    [createsWorkspace, targetWorkspaceId]
   );
 
   /**
@@ -171,7 +184,8 @@ const TerminalEmulatorWrapper = () => {
    */
   const handleAttachImage = useCallback(
     async (file: File): Promise<{ part?: ContentPart; error?: string }> => {
-      if (!isWorkspaceRoute) {
+      const currentWorkspaceId = targetWorkspaceId;
+      if (!currentWorkspaceId) {
         return { error: OPEN_WORKSPACE_ERROR };
       }
       try {
@@ -199,7 +213,7 @@ const TerminalEmulatorWrapper = () => {
         return { error: errorMessage(err, 'Could not attach image.') };
       }
     },
-    [currentWorkspaceId, isWorkspaceRoute]
+    [targetWorkspaceId]
   );
 
   /**
@@ -211,7 +225,8 @@ const TerminalEmulatorWrapper = () => {
     part?: ContentPart;
     error?: string;
   }> => {
-    if (!isWorkspaceRoute) {
+    const currentWorkspaceId = targetWorkspaceId;
+    if (!currentWorkspaceId) {
       return { error: OPEN_WORKSPACE_ERROR };
     }
     try {
@@ -237,13 +252,14 @@ const TerminalEmulatorWrapper = () => {
       console.error('[TerminalEmulatorWrapper] Workspace image pick error:', err);
       return { error: errorMessage(err, 'Could not attach image.') };
     }
-  }, [currentWorkspaceId, isWorkspaceRoute]);
+  }, [targetWorkspaceId]);
 
   const handleAgentCommand = useCallback(
     async (command: string): Promise<{ error?: string; message?: string }> => {
       const [name] = command.trim().split(/\s+/, 1);
 
-      if (!isWorkspaceRoute) {
+      const currentWorkspaceId = targetWorkspaceId;
+      if (!currentWorkspaceId) {
         return { error: OPEN_WORKSPACE_ERROR };
       }
 
@@ -300,7 +316,7 @@ const TerminalEmulatorWrapper = () => {
         };
       }
     },
-    [currentWorkspaceId, isWorkspaceRoute]
+    [targetWorkspaceId]
   );
 
   return (
