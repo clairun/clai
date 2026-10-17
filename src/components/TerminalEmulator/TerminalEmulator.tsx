@@ -2,6 +2,7 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useFleetStore } from '../../fleet/fleetStore';
 import { useTerminalTarget } from './useTerminalTarget';
 import { openGlobalSettings } from '../../utils/globalSettings';
+import WorkspacePicker, { PICKER_SHORTCUT } from './WorkspacePicker';
 import WorkspaceContextBar from '../../workspace/components/WorkspaceContextBar';
 import CommandHelpModal from './CommandHelpModal';
 import WorkspaceTerminal from './WorkspaceTerminal';
@@ -583,6 +584,25 @@ const TerminalEmulator = ({
     }
   }, []);
 
+  // The Fleet's workspace picker: Ctrl/Cmd+K opens it; closing it returns
+  // to the input, ready for the message.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const closePicker = useCallback(() => {
+    setPickerOpen(false);
+    inputRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    if (!isFleetRoute) return undefined;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPickerOpen(true);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [isFleetRoute]);
+
   // Global keyboard shortcut to focus terminal (Ctrl+L or Cmd+L)
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
@@ -716,10 +736,22 @@ const TerminalEmulator = ({
             {/* Composer input box */}
             <div className={styles.terminalInputWrapper} ref={inputWrapperRef}>
               {isFleetRoute && (
-                <span className={styles.fleetTarget} data-new={!fleetTargetTitle || undefined}>
-                  → {fleetTargetTitle ?? 'New workspace'}
-                </span>
+                <button
+                  type="button"
+                  className={styles.fleetTarget}
+                  data-new={!fleetTargetTitle || undefined}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPickerOpen(true);
+                  }}
+                  aria-haspopup="dialog"
+                  aria-expanded={pickerOpen}
+                  title={`Choose the workspace (${PICKER_SHORTCUT})`}
+                >
+                  {fleetTargetTitle ? `→ ${fleetTargetTitle}` : '+ Create workspace'}
+                </button>
               )}
+              {pickerOpen && <WorkspacePicker onClose={closePicker} />}
               <textarea
                 ref={inputRef}
                 rows={1}

@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { MemoryRouter } from 'react-router';
 
 import FleetPage from './FleetPage';
+import WorkspacePicker from '../components/TerminalEmulator/WorkspacePicker';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { EMPTY_FLEET, emptyCard } from '../fleet/fleetModel';
@@ -222,6 +223,28 @@ describe('FleetPage', () => {
     expect(useFleetStore.getState().selectedId).toBeNull();
     expect(screen.getAllByRole('article').map((a) => a.textContent)).toEqual(['Alpha', expect.stringContaining('Staged')]);
   });
+  it('brings a workspace that is not on the Fleet to the stage when picked', async () => {
+    const OLD_MS = 90 * 86_400_000;
+    fleetSnapshot.mockImplementation(async (_limit: number, keep: string | null) =>
+      keep === 'old' ? [workspace('s', 'Staged'), workspace('old', 'Old report', OLD_MS)] : [workspace('s', 'Staged')]
+    );
+    mockInvoke.mockImplementation((async (cmd: string) =>
+      cmd === 'workspace_list' ? [{ id: 'old', title: 'Old report', updatedAt: 0n, messageCount: 2n }] : undefined) as never);
+    render(
+      <MemoryRouter>
+        <FleetPage />
+        <WorkspacePicker onClose={() => {}} />
+      </MemoryRouter>
+    );
+    const articles = async () => (await screen.findAllByRole('article')).map((a) => a.textContent);
+    expect(await articles()).toEqual(['Staged']);
+
+    fireEvent.click(await screen.findByRole('option', { name: /Old report/ }));
+    expect(useFleetStore.getState().selectedId).toBe('old');
+    await waitFor(async () => expect(await articles()).toEqual(['Selected Old report', expect.stringContaining('Staged')]));
+    mockInvoke.mockImplementation(async () => undefined);
+  });
+
   it('gives a short Fleet only the tracks its cards fill, so they reach the terminal', async () => {
     fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha'), workspace('b', 'Beta', 1000), workspace('c', 'Gamma', 2000)]);
     renderFleet();

@@ -66,16 +66,21 @@ pub struct FleetMessagePreview {
 
 /// The `limit` most recently active workspaces (default 8, max 32), most
 /// recent first, followed by any older workspace with a pending approval,
-/// path grant or question.
+/// path grant or question, or that is `keep` (the Fleet's selected one).
 #[tauri::command]
 pub async fn fleet_snapshot(
     limit: Option<u32>,
+    keep: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<Vec<FleetWorkspace>, String> {
-    snapshot(state.inner(), limit).await
+    snapshot(state.inner(), limit, keep.as_deref()).await
 }
 
-async fn snapshot(state: &AppState, limit: Option<u32>) -> Result<Vec<FleetWorkspace>, String> {
+async fn snapshot(
+    state: &AppState,
+    limit: Option<u32>,
+    keep: Option<&str>,
+) -> Result<Vec<FleetWorkspace>, String> {
     let limit = limit
         .unwrap_or(DEFAULT_WORKSPACE_LIMIT)
         .clamp(1, MAX_WORKSPACE_LIMIT) as usize;
@@ -105,13 +110,14 @@ async fn snapshot(state: &AppState, limit: Option<u32>) -> Result<Vec<FleetWorks
     ranked.sort_by_key(|(last_activity_at, ..)| Reverse(*last_activity_at));
     // A workspace waiting on the user stays past `limit`: waiting doesn't
     // bump its activity, and the Fleet mutes the toasts that would otherwise
-    // surface the request.
+    // surface the request. So does the selected one, however old.
     let approvals = state.pending_approvals.counts_snapshot().await;
     let path_grants = state.pending_path_grants.counts_snapshot().await;
     let mut rank = 0;
     ranked.retain(|(_, locator, _)| {
         rank += 1;
         rank <= limit
+            || keep == Some(locator.id.as_str())
             || approvals.contains_key(&locator.id)
             || path_grants.contains_key(&locator.id)
             || !ask_user::pending_for_workspace(&locator.id).is_empty()
@@ -334,7 +340,7 @@ mod tests {
             insert_task(&pool, &format!("done-{n}"), "completed", 200 + n).await;
         }
 
-        let snapshot = snapshot(&state, None).await.expect("snapshot");
+        let snapshot = snapshot(&state, None, None).await.expect("snapshot");
         assert_eq!(
             snapshot
                 .iter()
@@ -378,7 +384,9 @@ mod tests {
         assert!(idle.main_session_id.is_none() && idle.active_run_ids.is_empty());
         assert!(idle.tasks.is_empty() && idle.last_assistant_message.is_none());
 
-        let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
+        let top = super::snapshot(&state, Some(1), None)
+            .await
+            .expect("snapshot");
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].workspace_id, BUSY);
     }
@@ -395,7 +403,7 @@ mod tests {
     }
 
     async fn ids_at_limit_one(state: &AppState) -> Vec<String> {
-        let top = snapshot(state, Some(1)).await.expect("snapshot");
+        let top = snapshot(state, Some(1), None).await.expect("snapshot");
         top.into_iter().map(|w| w.workspace_id).collect()
     }
 
@@ -460,9 +468,22 @@ mod tests {
             .pending_path_grants
             .register(grant, "run".to_string())
             .await;
-        let top = snapshot(&state, Some(1)).await.expect("snapshot");
+        let top = snapshot(&state, Some(1), None).await.expect("snapshot");
         assert_eq!(top.len(), 2);
         assert_eq!(top[1].workspace_id, WAITING);
         assert_eq!(top[1].pending_path_grants.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn kept_workspace_stays_past_limit() {
+        const KEPT: &str = "88888888-8888-4888-8888-888888888888";
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = busy_and(KEPT, &temp).await;
+        assert_eq!(ids_at_limit_one(&state).await, [BUSY]);
+        let top = snapshot(&state, Some(1), Some(KEPT))
+            .await
+            .expect("snapshot");
+        let ids: Vec<_> = top.into_iter().map(|w| w.workspace_id).collect();
+        assert_eq!(ids, [BUSY, KEPT]);
     }
 }

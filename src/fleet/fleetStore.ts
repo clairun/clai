@@ -92,7 +92,7 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
     let seeded: Reducer = (s) => s;
     let loadError: string | null = null;
     try {
-      const snapshot = await fleetSnapshot(SNAPSHOT_LIMIT);
+      const snapshot = await fleetSnapshot(SNAPSHOT_LIMIT, get().selectedId);
       const now = Date.now();
       const { seedTasks } = useTaskStore.getState();
       const { setRuns, activeRunsByWorkspace: runsNow } = useFleetActivityStore.getState();

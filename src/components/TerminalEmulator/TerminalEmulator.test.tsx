@@ -448,7 +448,7 @@ describe('TerminalEmulator on the Fleet', () => {
     useFleetStore.setState({ selectedId: null });
     const user = userEvent.setup();
     const send = renderFleetComposer();
-    expect(screen.getByText('→ New workspace')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '+ Create workspace' })).toBeInTheDocument();
     // Model and MCP for the workspace to be created: same bar, same height.
     expect(screen.getByTestId('context-bar')).toBeInTheDocument();
 
