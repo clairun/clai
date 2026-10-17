@@ -158,6 +158,27 @@ fn forget(pending_id: &str) {
     }
 }
 
+/// A `PENDING` entry that is removed when this is dropped, however the
+/// waiting tool future ends.
+struct PendingRegistration(String);
+
+impl PendingRegistration {
+    fn insert(entry: PendingEntry) -> Result<Self, String> {
+        let id = entry.ask.pending_id.clone();
+        pending_map()
+            .lock()
+            .map_err(|e| format!("ask_user pending map poisoned: {}", e))?
+            .insert(id.clone(), entry);
+        Ok(Self(id))
+    }
+}
+
+impl Drop for PendingRegistration {
+    fn drop(&mut self) {
+        forget(&self.0);
+    }
+}
+
 /// Deliver an answer to a waiting `ask_user` invocation. Called from the
 /// `assistant_submit_user_input` Tauri command after the user submits
 /// the inline answer block.
@@ -206,7 +227,7 @@ pub fn take_for_session(session_id: &str) -> Vec<String> {
 /// run rather than letting the model continue without the requested
 /// human answer (a no-op when the run already ended).
 struct PendingGuard {
-    id: String,
+    registration: PendingRegistration,
     app: tauri::AppHandle,
     workspace_id: String,
     session: crate::assistant::types::AssistantSession,
@@ -221,14 +242,14 @@ impl PendingGuard {
     }
 
     async fn abandon_and_stop<T>(&mut self) -> T {
-        forget(&self.id);
+        forget(&self.registration.0);
         let _ = emit_event(
             &self.app,
             &self.workspace_id,
             &self.session,
             Some(self.run_id.as_str()),
             AssistantUiEvent::AskUserResolved {
-                pending_id: self.id.clone(),
+                pending_id: self.registration.0.clone(),
             },
         );
         self.armed = false;
@@ -242,12 +263,13 @@ impl Drop for PendingGuard {
             return;
         }
         self.cancel_token.cancel();
-        forget(&self.id);
+        // Removed before `AskUserResolved` is emitted, not after the fields drop.
+        forget(&self.registration.0);
         let app = self.app.clone();
         let workspace_id = self.workspace_id.clone();
         let session = self.session.clone();
         let run_id = self.run_id.clone();
-        let pending_id = self.id.clone();
+        let pending_id = self.registration.0.clone();
         tauri::async_runtime::spawn(async move {
             let _ = emit_event(
                 &app,
@@ -316,14 +338,8 @@ pub async fn execute(
         extra_context: ask.extra_context.clone(),
     };
     let (tx, rx) = oneshot::channel::<AskUserOutcome>();
-    {
-        let mut map = pending_map()
-            .lock()
-            .map_err(|e| format!("ask_user pending map poisoned: {}", e))?;
-        map.insert(pending_id.clone(), PendingEntry { ask, tx });
-    }
     let mut guard = PendingGuard {
-        id: pending_id.clone(),
+        registration: PendingRegistration::insert(PendingEntry { ask, tx })?,
         app: deps.app.clone(),
         workspace_id: deps.workspace_id.clone(),
         session: session.clone(),
@@ -452,6 +468,20 @@ mod tests {
         session_id: &str,
         requested_at: i64,
     ) -> oneshot::Receiver<AskUserOutcome> {
+        let (entry, rx) = pending_entry(pending_id, workspace_id, session_id, requested_at);
+        pending_map()
+            .lock()
+            .unwrap()
+            .insert(pending_id.to_string(), entry);
+        rx
+    }
+
+    fn pending_entry(
+        pending_id: &str,
+        workspace_id: &str,
+        session_id: &str,
+        requested_at: i64,
+    ) -> (PendingEntry, oneshot::Receiver<AskUserOutcome>) {
         let (tx, rx) = oneshot::channel::<AskUserOutcome>();
         let ask = PendingAsk {
             pending_id: pending_id.to_string(),
@@ -464,11 +494,7 @@ mod tests {
             extra_context: None,
             requested_at,
         };
-        pending_map()
-            .lock()
-            .unwrap()
-            .insert(pending_id.to_string(), PendingEntry { ask, tx });
-        rx
+        (PendingEntry { ask, tx }, rx)
     }
 
     fn answer(text: &str) -> AskUserAnswer {
@@ -490,7 +516,8 @@ mod tests {
     fn pending_asks_are_readable_until_answered_superseded_or_cancelled() {
         let _rx_answered = register("pfw-answered", "pfw-ws", "pfw-s1", 3);
         let _rx_superseded = register("pfw-superseded", "pfw-ws", "pfw-s2", 1);
-        let _rx_cancelled = register("pfw-cancelled", "pfw-ws", "pfw-s3", 2);
+        let (cancelled, _rx_cancelled) = pending_entry("pfw-cancelled", "pfw-ws", "pfw-s3", 2);
+        let cancelled = PendingRegistration::insert(cancelled).unwrap();
         let _rx_other = register("pfw-other", "pfw-other-ws", "pfw-s4", 0);
 
         let asks = pending_for_workspace("pfw-ws");
@@ -506,8 +533,8 @@ mod tests {
 
         submit_answer("pfw-answered", answer("yes")).unwrap();
         take_for_session("pfw-s2");
-        // What `PendingGuard` does when the run is cancelled mid-wait.
-        forget("pfw-cancelled");
+        // A cancelled run drops the waiting future and with it the registration.
+        drop(cancelled);
 
         assert!(pending_ids("pfw-ws").is_empty());
         assert_eq!(pending_ids("pfw-other-ws"), vec!["pfw-other".to_string()]);
