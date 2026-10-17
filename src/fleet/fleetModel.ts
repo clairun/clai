@@ -33,6 +33,11 @@ const NOTE_CHARS = 600;
 
 export type FleetRequestKind = 'approval' | 'grant';
 
+/** A command approval or a path grant, as it arrives. */
+export type FleetPendingRequest =
+  | { kind: 'approval'; request: PermissionRequest }
+  | { kind: 'grant'; request: PathGrantRequest };
+
 /** An `ask_user` question, with the session that asked it. */
 export type FleetAsk = PendingAskUser & { sessionId: string };
 
@@ -221,34 +226,24 @@ const requestText = (request: PermissionRequest | PathGrantRequest): string =>
     ? request.command
     : `${request.requestedAccess === 'read_write' ? 'Write' : 'Read'} ${request.requestedPath}`;
 
-const toRequest = (
-  kind: FleetRequestKind,
-  request: PermissionRequest | PathGrantRequest,
-  at: number
-): FleetRequest =>
-  ({
-    kind,
-    request,
-    text: requestText(request),
-    agentName: request.agentName,
-    at,
-    resolvedAt: null,
-  }) as FleetRequest;
+const toRequest = (pending: FleetPendingRequest, at: number): FleetRequest => ({
+  ...pending,
+  text: requestText(pending.request),
+  agentName: pending.request.agentName,
+  at,
+  resolvedAt: null,
+});
 
-export const applyRequest = (
-  state: FleetState,
-  kind: FleetRequestKind,
-  request: PermissionRequest | PathGrantRequest,
-  at: number
-): FleetState => {
-  if (!request.workspaceId) return state;
-  const key = requestKey(kind, request.requestId);
-  return updateCard(state, request.workspaceId, (card) =>
+export const applyRequest = (state: FleetState, pending: FleetPendingRequest, at: number): FleetState => {
+  const { workspaceId, requestId } = pending.request;
+  if (!workspaceId) return state;
+  const key = requestKey(pending.kind, requestId);
+  return updateCard(state, workspaceId, (card) =>
     card.requests[key]
       ? card
       : {
           ...dropUserMessage(bump(card, at)),
-          requests: { ...card.requests, [key]: toRequest(kind, request, at) },
+          requests: { ...card.requests, [key]: toRequest(pending, at) },
         }
   );
 };
@@ -313,15 +308,9 @@ export const seedFleet = (
       : null;
     // Approvals and grants carry no timestamp; the workspace's activity orders them among waiting cards.
     const open: Record<string, FleetRequest> = {};
-    for (const a of ws.pendingAsks) {
-      const { pendingId, question, options, multiSelect, extraContext, sessionId } = a;
-      open[requestKey('ask', pendingId)] = askRequest(
-        { pendingId, question, options, multiSelect, extraContext, sessionId },
-        Number(a.requestedAt)
-      );
-    }
-    for (const r of ws.pendingPermissions) open[requestKey('approval', r.requestId)] = toRequest('approval', r, activity);
-    for (const r of ws.pendingPathGrants) open[requestKey('grant', r.requestId)] = toRequest('grant', r, activity);
+    for (const a of ws.pendingAsks) open[requestKey('ask', a.pendingId)] = askRequest(a, Number(a.requestedAt));
+    for (const r of ws.pendingPermissions) open[requestKey('approval', r.requestId)] = toRequest({ kind: 'approval', request: r }, activity);
+    for (const r of ws.pendingPathGrants) open[requestKey('grant', r.requestId)] = toRequest({ kind: 'grant', request: r }, activity);
     cards[ws.workspaceId] = {
       ...card,
       title: ws.title || card.title,
@@ -348,11 +337,11 @@ export interface FleetAttention {
   since: number | null;
 }
 
-/** The card's open requests, newest first. */
+/** The card's open requests, oldest first: the order they are answered in. */
 export const openRequests = (card: FleetCard): FleetRequest[] =>
   Object.values(card.requests)
     .filter((r) => r.resolvedAt == null)
-    .sort((a, b) => b.at - a.at);
+    .sort((a, b) => a.at - b.at);
 
 export const cardAttention = (card: FleetCard): FleetAttention => {
   const open = openRequests(card);
@@ -393,7 +382,7 @@ export interface FleetItem {
 
 const TONE_RANK: Record<FleetItemTone, number> = { live: 1, failed: 2, done: 2, note: 2 };
 
-const agentOf = (task: WorkspaceTaskResponse) => ({
+export const agentOf = (task: WorkspaceTaskResponse) => ({
   name: task.assignedAgentDisplayName,
   seed: task.assignedAgentDefinitionId || task.assignedToWorkspaceAgentId,
 });

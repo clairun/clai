@@ -374,12 +374,14 @@
   text-overflow: ellipsis;
 }
 
-/* A small card's open request: never clipped, the history above gives way. */
+/* A small card's open request takes the body; a long one scrolls inside the card. */
 .request {
   display: flex;
-  flex-shrink: 0;
+  flex: 1;
   flex-direction: column;
   gap: 6px;
+  min-height: 0;
+  overflow-y: auto;
   padding: 6px 8px;
   border-radius: var(--radius-md);
   background: color-mix(in srgb, var(--agent-color) 10%, transparent);
@@ -388,6 +390,7 @@
 
 .requestHead {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 10px;
   min-width: 0;
@@ -398,101 +401,11 @@
   min-width: 0;
 }
 
-.requestText {
-  display: -webkit-box;
-  margin: 0;
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--color-text-primary);
-  overflow: hidden;
-  overflow-wrap: anywhere;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  line-clamp: 3;
-}
-
-.requestControls {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.requestButtons {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-}
-
-.requestButton,
-.requestPrimary,
-.requestMore {
-  max-width: 100%;
-  padding: 3px 10px;
-  border: 1px solid var(--color-border-medium);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-elevated);
-  color: var(--color-text-primary);
-  font-size: 12px;
-  font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
-}
-
-.requestPrimary {
-  border-color: var(--color-primary);
-  background: var(--color-primary);
-  color: var(--color-text-on-primary);
-}
-
-.requestButton[aria-pressed='true'] {
-  border-color: var(--color-primary);
-  background: var(--color-primary-alpha-15);
-}
-
-.requestButton:hover:not(:disabled) {
-  background: var(--color-bg-hover);
-}
-
-.requestButton:disabled,
-.requestPrimary:disabled {
-  opacity: 0.55;
-  cursor: default;
-}
-
-.requestButton:focus-visible,
-.requestPrimary:focus-visible,
-.requestMore:focus-visible,
-.requestInput:focus-visible {
-  outline: 2px solid var(--color-border-focus);
-  outline-offset: 1px;
-}
-
-.requestMore {
-  align-self: flex-start;
-  border: 0;
-  padding: 0;
-  background: none;
-  color: var(--color-text-secondary);
-  font-weight: 500;
-}
-
-.requestInput {
-  width: 100%;
-  min-width: 0;
-  padding: 4px 8px;
-  border: 1px solid var(--color-border-medium);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-primary);
-  color: var(--color-text-primary);
-  font-size: 12px;
-}
-
-.requestError {
-  margin: 0;
+.requestCount {
+  flex-shrink: 0;
   font-size: 11px;
-  color: var(--color-error);
+  font-weight: 600;
+  color: var(--color-text-tertiary);
 }
 
 .chat {

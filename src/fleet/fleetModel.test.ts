@@ -150,9 +150,9 @@ describe('fleet reducer', () => {
   });
 
   it('resolves each request by its own resolved event, user decisions included', () => {
-    let s = applyRequest(EMPTY_FLEET, 'approval', approval('a1'), 1);
-    s = applyRequest(s, 'approval', approval('a2'), 2);
-    s = applyRequest(s, 'grant', approval('a1'), 3);
+    let s = applyRequest(EMPTY_FLEET, { kind: 'approval', request: approval('a1') }, 1);
+    s = applyRequest(s, { kind: 'approval', request: approval('a2') }, 2);
+    s = applyRequest(s, { kind: 'grant', request: approval('a1') }, 3);
     expect(cardAttention(card(s))).toMatchObject({ approvals: 2, grants: 1, total: 3, since: 1 });
     s = applyRequestResolved(s, 'approval', 'a1', 4);
     expect(cardAttention(card(s))).toMatchObject({ approvals: 1, grants: 1, total: 2, since: 2 });
@@ -164,7 +164,7 @@ describe('fleet reducer', () => {
   it('keeps finished subtasks and resolved requests as history, oldest first, live work at the bottom; open requests are not items', () => {
     const live = withTasks(task('done', 'completed', 1), task('live', 'running', 2));
     let s = apply(EMPTY_FLEET, askEvent('q1', 3), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, 4));
-    s = applyRequest(s, 'approval', approval('a1'), 5);
+    s = applyRequest(s, { kind: 'approval', request: approval('a1') }, 5);
     expect(cardItems(card(s), live).map((i) => [i.key, i.tone, i.status])).toEqual([
       ['task:done', 'done', 'Completed'],
       ['ask:q1', 'done', 'Answered'],
@@ -174,7 +174,7 @@ describe('fleet reducer', () => {
     expect(cardItems(card(s), live).map((i) => i.key)).toEqual(['task:done', 'ask:q1', 'approval:a1', 'task:live']);
   });
 
-  it('keeps what answering needs on each open request, newest first', () => {
+  it('keeps what answering needs on each open request, oldest first', () => {
     const ask = env(
       {
         type: 'ask_user_requested',
@@ -183,14 +183,14 @@ describe('fleet reducer', () => {
       3,
       'task-session'
     );
-    let s = applyRequest(apply(EMPTY_FLEET, ask), 'approval', approval('a1'), 5);
-    s = applyRequestResolved(applyRequest(s, 'grant', approval('g1'), 6), 'grant', 'g1', 7);
+    let s = applyRequest(apply(EMPTY_FLEET, ask), { kind: 'approval', request: approval('a1') }, 5);
+    s = applyRequestResolved(applyRequest(s, { kind: 'grant', request: approval('g1') }, 6), 'grant', 'g1', 7);
     expect(openRequests(card(s))).toMatchObject([
-      { kind: 'approval', request: { requestId: 'a1', command: 'ls' } },
       {
         kind: 'ask',
         ask: { pendingId: 'q1', question: 'Ship?', options: [{ label: 'Yes' }], multiSelect: false, sessionId: 'task-session' },
       },
+      { kind: 'approval', request: { requestId: 'a1', command: 'ls' } },
     ]);
   });
 
@@ -271,7 +271,7 @@ describe('snapshot', () => {
 
   it('keeps history, resolves what is no longer pending, and adds what is', () => {
     let s = apply(EMPTY_FLEET, askEvent('stale', 2), askEvent('kept', 3));
-    s = applyRequest(s, 'approval', approval('gone'), 4);
+    s = applyRequest(s, { kind: 'approval', request: approval('gone') }, 4);
     const pendingAsk = (pendingId: string) => ({ pendingId, workspaceId: WS, sessionId: MAIN, runId: 'r', question: '?', options: null, multiSelect: false, extraContext: null, requestedAt: 7n });
     s = seedFleet(s, [snapshotOf({ pendingAsks: [pendingAsk('kept'), pendingAsk('new')], pendingPathGrants: [approval('g1')] })], 50);
     const c = card(s);

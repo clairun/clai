@@ -92,10 +92,12 @@ const FleetPage = () => {
   if (placed.join(',') !== order.join(',')) setOrder(placed);
 
   // Escape deselects, unless something else used it first (the switcher,
-  // the terminal clearing its output, or an open dialog).
+  // the terminal clearing its output, or an open dialog). Agent questions
+  // sit inline in the cards; they don't hold Escape.
   useEffect(() => {
     const onEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('[role="dialog"]')) select(null);
+      const dialog = document.querySelector('[role="dialog"]:not([aria-label="Agent question"])');
+      if (e.key === 'Escape' && !e.defaultPrevented && !dialog) select(null);
     };
     window.addEventListener('keydown', onEscape);
     return () => window.removeEventListener('keydown', onEscape);

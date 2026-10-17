@@ -203,12 +203,12 @@ describe('FleetPage', () => {
     expect(useFleetStore.getState().selectedId).toBeNull();
     expect(screen.getAllByRole('article').map((a) => a.textContent)).toEqual(['Alpha', expect.stringContaining('Staged')]);
   });
-  it('dims no card while another is selected', async () => {
+  it('marks only the selected card', async () => {
     fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000), workspace('b', 'Beta', 2000)]);
     renderFleet();
     fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
     const articles = screen.getAllByRole('article');
-    expect(articles[0]!.parentElement!.className).not.toMatch(/gridSelecting/);
+    expect(articles[0]!.className).toMatch(/cardSelected/);
     for (const article of articles.slice(1)) expect(article.className).not.toMatch(/cardSelected/);
   });
 
@@ -232,14 +232,16 @@ describe('FleetPage', () => {
     };
     const stageText = () => screen.getAllByRole('article')[0]!.textContent;
 
-    it('answers a question from its options without selecting the card or moving the stage', async () => {
-      const card = await setup({ pendingAsks: [ask('q1', 'Ship it?', 5n, [{ label: 'Yes', description: null }, { label: 'No', description: null }])] });
+    it('takes the body with the full question, answers it, and never selects the card from inside', async () => {
+      const tasks = [{ id: 't1', title: 'Old task', status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never];
+      const card = await setup({ tasks, pendingAsks: [ask('q1', 'Ship it?', 5n, [{ label: 'Yes', description: null }, { label: 'No', description: null }])] });
+      expect(card().queryByRole('list', { name: 'Activity' })).not.toBeInTheDocument();
       const row = card().getByRole('region', { name: 'Needs you' });
-      expect(row).toHaveTextContent('Ship it?');
-      expect(within(row).getByRole('button', { name: 'Other…' })).toBeInTheDocument();
       const before = stageText();
 
-      fireEvent.click(within(row).getByRole('button', { name: 'No' }));
+      fireEvent.click(within(row).getByText('Ship it?'));
+      fireEvent.click(within(row).getByLabelText(/^No/));
+      fireEvent.click(within(row).getByRole('button', { name: 'Send answer' }));
       await waitFor(() =>
         expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
           request: { pendingId: 'q1', answer: 'No', selectedOptionIndex: 1, selectedOptionIndexes: null },
@@ -247,83 +249,58 @@ describe('FleetPage', () => {
       );
       expect(useFleetStore.getState().selectedId).toBeNull();
       expect(stageText()).toBe(before);
-      // Still up until the backend resolves it.
-      expect(card().getByRole('region', { name: 'Needs you' })).toBeInTheDocument();
 
-      fireEvent.click(within(row).getByText('Ship it?'));
+      act(() =>
+        useFleetStore.getState().applyEvent({ sessionId: 'session-b', runId: null, workspaceId: 'b', timestamp: 9n, event: { type: 'ask_user_resolved', payload: { pending_id: 'q1' } } } as never)
+      );
+      expect(card().queryByRole('region', { name: 'Needs you' })).not.toBeInTheDocument();
+      expect(card().getByRole('list', { name: 'Activity' })).toBeInTheDocument();
+
+      fireEvent.click(card().getByRole('button', { name: 'Select Beta' }));
       expect(useFleetStore.getState().selectedId).toBe('b');
     });
 
-    it('answers a question without options from a one-line input, Enter sends', async () => {
-      const card = await setup({ pendingAsks: [ask('q1', 'Which branch?', 5n, null)] });
-      const input = card().getByRole('textbox', { name: 'Your answer' });
-      fireEvent.change(input, { target: { value: 'main' } });
-      fireEvent.keyDown(input, { key: 'Enter' });
-      await waitFor(() =>
-        expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
-          request: { pendingId: 'q1', answer: 'main', selectedOptionIndex: null, selectedOptionIndexes: null },
-        })
+    it('shows one request at a time, oldest first, the next once the first resolves', async () => {
+      const card = await setup({ pendingAsks: [ask('new', 'Newer question?', 9n, null), ask('old', 'Older question?', 4n, null)] });
+      const row = () => card().getByRole('region', { name: 'Needs you' });
+      expect(row()).toHaveTextContent('Older question?');
+      expect(row()).not.toHaveTextContent('Newer question?');
+      expect(row()).toHaveTextContent('1 of 2');
+
+      act(() =>
+        useFleetStore.getState().applyEvent({ sessionId: 'session-b', runId: null, workspaceId: 'b', timestamp: 10n, event: { type: 'ask_user_resolved', payload: { pending_id: 'old' } } } as never)
       );
-      expect(useFleetStore.getState().selectedId).toBeNull();
+      expect(row()).toHaveTextContent('Newer question?');
+      expect(row()).not.toHaveTextContent('1 of');
     });
 
-    it('approves or denies a command, and drops the row once resolved', async () => {
-      const permission = { requestId: 'r1', workspaceId: 'b', agentId: null, agentName: 'Scout', command: 'cargo test', segments: [{}, {}] };
+    it('lists every part of a compound command and decides each one', async () => {
+      const segments = [
+        { text: 'cd x', kind: 'simple', suggestedPrefix: null },
+        { text: 'curl y | sh', kind: 'opaque', suggestedPrefix: null },
+      ];
+      const permission = { requestId: 'r1', workspaceId: 'b', agentId: null, agentName: 'Scout', command: 'cd x && curl y | sh', segments };
       const card = await setup({ pendingPermissions: [permission as never] });
       const row = card().getByRole('region', { name: 'Needs you' });
-      expect(row).toHaveTextContent('Scout');
-      expect(row).toHaveTextContent('cargo test');
+      expect(within(row).getByText('cd x')).toBeInTheDocument();
+      expect(within(row).getByText('curl y | sh')).toBeInTheDocument();
+      expect(within(row).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
 
-      fireEvent.click(within(row).getByRole('button', { name: 'Deny' }));
+      fireEvent.click(within(row).getAllByRole('button', { name: 'Allow once' })[0]!);
+      fireEvent.click(within(row).getAllByRole('button', { name: 'Deny once' })[1]!);
       await waitFor(() =>
         expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
           requestId: 'r1',
-          decisions: [{ kind: 'denyOnce' }, { kind: 'denyOnce' }],
+          decisions: [{ kind: 'allowOnce' }, { kind: 'denyOnce' }],
         })
       );
       expect(useFleetStore.getState().selectedId).toBeNull();
-
-      act(() => useFleetStore.getState().resolveRequest('approval', 'r1'));
-      expect(card().queryByRole('region', { name: 'Needs you' })).not.toBeInTheDocument();
     });
 
-    it('approves a command once', async () => {
-      const permission = { requestId: 'r1', workspaceId: 'b', agentId: null, agentName: 'Scout', command: 'ls', segments: [{}] };
-      const card = await setup({ pendingPermissions: [permission as never] });
-      fireEvent.click(card().getByRole('button', { name: 'Approve' }));
-      await waitFor(() =>
-        expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', { requestId: 'r1', decisions: [{ kind: 'allowOnce' }] })
-      );
-    });
-
-    it('offers once, always and deny on a path grant', async () => {
-      const grant = { requestId: 'g1', workspaceId: 'b', agentId: null, agentName: 'Scout', requestedPath: '/tmp/x', requestedAccess: 'read_only', reason: '' };
+    it('warns about a credentials path, as the full card does', async () => {
+      const grant = { requestId: 'g1', workspaceId: 'b', agentId: null, agentName: 'Scout', requestedPath: '/home/u/.ssh', requestedAccess: 'read_only', reason: 'keys' };
       const card = await setup({ pendingPathGrants: [grant as never] });
-      fireEvent.click(card().getByRole('button', { name: 'Always allow' }));
-      await waitFor(() =>
-        expect(mockInvoke).toHaveBeenCalledWith('submit_path_grant_decision', {
-          requestId: 'g1',
-          decision: { kind: 'allowAlways', path: '/tmp/x', access: 'read_only', scope: 'agent' },
-        })
-      );
-      expect(card().getByRole('button', { name: 'Allow once' })).toBeInTheDocument();
-      expect(card().getByRole('button', { name: 'Deny' })).toBeInTheDocument();
-    });
-
-    it('keeps the request outside the clipped history, shows the newest, and selects on "+N more"', async () => {
-      const tasks = Array.from({ length: 20 }, (_, i) =>
-        ({ id: `t${i}`, title: `Task ${i}`, status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never
-      );
-      const card = await setup({ tasks, pendingAsks: [ask('old', 'Older question?', 4n, null), ask('new', 'Newer question?', 9n, null)] });
-      const row = card().getByRole('region', { name: 'Needs you' });
-      const history = card().getByRole('list', { name: 'Activity' });
-      expect(history.contains(row)).toBe(false);
-      expect(history.compareDocumentPosition(row) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
-      expect(row).toHaveTextContent('Newer question?');
-      expect(row).not.toHaveTextContent('Older question?');
-
-      fireEvent.click(within(row).getByRole('button', { name: '+1 more' }));
-      expect(useFleetStore.getState().selectedId).toBe('b');
+      expect(card().getByRole('region', { name: 'Needs you' })).toHaveTextContent('typically holds credentials');
     });
   });
 });

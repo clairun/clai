@@ -7,12 +7,7 @@
  * read.
  */
 import { create } from 'zustand';
-import type {
-  AssistantEventEnvelope,
-  AssistantMessage,
-  PathGrantRequest,
-  PermissionRequest,
-} from '../generated/bindings';
+import type { AssistantEventEnvelope, AssistantMessage } from '../generated/bindings';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
 import { fleetSnapshot } from './client';
@@ -24,6 +19,7 @@ import {
   applyUserSent,
   isFleetEvent,
   seedFleet,
+  type FleetPendingRequest,
   type FleetRequestKind,
   type FleetState,
 } from './fleetModel';
@@ -45,7 +41,7 @@ interface FleetStoreState {
   buffer: Reducer[] | null;
   dispatch: (reducer: Reducer) => void;
   applyEvent: (envelope: AssistantEventEnvelope) => void;
-  applyRequest: (kind: FleetRequestKind, request: PermissionRequest | PathGrantRequest) => void;
+  applyRequest: (pending: FleetPendingRequest) => void;
   resolveRequest: (kind: FleetRequestKind, requestId: string) => void;
   /** The user sent `message` on `sessionId`, or cleared the chat into it (`message` null). */
   noteUserSent: (workspaceId: string, sessionId: string, message: AssistantMessage | null) => void;
@@ -75,9 +71,9 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
     if (!isFleetEvent(envelope)) return;
     get().dispatch((s) => applyAssistantEvent(s, envelope));
   },
-  applyRequest: (kind, request) => {
+  applyRequest: (pending) => {
     const at = Date.now();
-    get().dispatch((s) => applyRequest(s, kind, request, at));
+    get().dispatch((s) => applyRequest(s, pending, at));
   },
   resolveRequest: (kind, requestId) => {
     const at = Date.now();

@@ -17,12 +17,17 @@ export function useFleetAttentionFeed(): void {
   useEffect(() => {
     const store = useFleetStore.getState;
     const unlisten: Promise<() => void>[] = [];
+    unlisten.push(
+      listen<PermissionRequest>('permissions://request', (event) => {
+        if (event.payload) store().applyRequest({ kind: 'approval', request: event.payload });
+      }),
+      listen<PathGrantRequest>('path-grants://request', (event) => {
+        if (event.payload) store().applyRequest({ kind: 'grant', request: event.payload });
+      })
+    );
     for (const kind of ['approval', 'grant'] as const) {
       const channel = CHANNELS[kind];
       unlisten.push(
-        listen<PermissionRequest | PathGrantRequest>(`${channel}://request`, (event) => {
-          if (event.payload) store().applyRequest(kind, event.payload);
-        }),
         // Fires for every way a request leaves the queue, user decisions included.
         listen<{ requestId?: string }>(`${channel}://resolved`, (event) => {
           if (event.payload?.requestId) store().resolveRequest(kind, event.payload.requestId);

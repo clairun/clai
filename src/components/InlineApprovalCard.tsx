@@ -32,6 +32,11 @@ type CardState = Record<number, SegmentCellState>;
 
 interface InlineApprovalCardProps {
   workspaceId: string | null;
+  /**
+   * Show only this request, held by the caller: no seeding, no listening,
+   * no scrolling into view. The caller drops it on its `resolved` event.
+   */
+  request?: PermissionRequest;
 }
 
 /**
@@ -47,7 +52,7 @@ interface InlineApprovalCardProps {
  * chip near the input bar surfaces the count whenever there are
  * pending requests, with click-to-scroll into view.
  */
-const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
+const InlineApprovalCard = ({ workspaceId, request }: InlineApprovalCardProps) => {
   const [requests, setRequests] = useState<PermissionRequest[]>([]);
   const [perCardState, setPerCardState] = useState<Record<string, CardState>>({});
   const [submittingId, setSubmittingId] = useState<string | null>(null);
@@ -80,6 +85,10 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
     setSubmittingId(null);
     previousCountRef.current = 0;
 
+    if (request) {
+      setRequests([request]);
+      return undefined;
+    }
     if (!workspaceId) return undefined;
 
     let cancelled = false;
@@ -134,7 +143,7 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
       unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
       unlistenResolvedPromise.then((unlisten) => unlisten()).catch(() => {});
     };
-  }, [workspaceId]);
+  }, [workspaceId, request]);
 
   // Initialize per-segment editable state for each new card.
   useEffect(() => {
@@ -171,10 +180,10 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
     const prev = previousCountRef.current;
     const next = requests.length;
     previousCountRef.current = next;
-    if (prev === 0 && next > 0 && firstCardRef.current) {
+    if (!request && prev === 0 && next > 0 && firstCardRef.current) {
       firstCardRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [requests.length]);
+  }, [requests.length, request]);
 
   const toggleCollapsed = useCallback((requestId: string) => {
     setCollapsedIds((current) => {

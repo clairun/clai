@@ -1,7 +1,7 @@
 import { memo, useMemo, type CSSProperties } from 'react';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import AgentAvatar from '../Agents/AgentAvatar';
-import { GENERATOR_VERSION, identityRingColor, mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
+import { faceOf, identityRingColor, mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
 import pillStyles from '../Agents/taskStatus.module.css';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import {
@@ -51,9 +51,6 @@ const NoteRow = ({ item }: { item: FleetItem }) => (
     <time className={styles.itemTime}>{eventTime(item.at)}</time>
   </li>
 );
-
-const faceOf = (faces: Record<string, AgentIdentity>, seed: string): AgentIdentity =>
-  faces[seed] ?? { seed, generatorVersion: GENERATOR_VERSION };
 
 const MAX_HEADER_FACES = 4;
 
@@ -178,7 +175,7 @@ const FleetCard = ({ card, live, faces, onSelect }: FleetCardProps) => {
           {phaseLabel(phase, attention)}
         </span>
       </header>
-      {items.length > 0 && (
+      {requests.length === 0 && items.length > 0 && (
         <ul className={styles.items} aria-label="Activity">
           {items.map((item) => (
             item.note ? (

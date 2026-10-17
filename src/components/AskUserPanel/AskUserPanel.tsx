@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import useAssistantStore from '../../assistant/sessionStore';
+import useAssistantStore, { type PendingAskUser } from '../../assistant/sessionStore';
 import { OTHER_INDEX, useAskAnswer } from './useAskAnswer';
 import styles from './AskUserPanel.module.css';
 
@@ -14,13 +14,16 @@ import styles from './AskUserPanel.module.css';
  * The draft and its submission live in `useAskAnswer`.
  */
 interface AskUserPanelProps {
-  sessionId: string | null;
+  sessionId?: string | null;
+  /** Answer this question, held by the caller, instead of the session's; the panel doesn't take focus. */
+  ask?: PendingAskUser;
 }
 
-const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
-  const pending = useAssistantStore((state) =>
+const AskUserPanel = ({ sessionId = null, ask }: AskUserPanelProps) => {
+  const sessionPending = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId]?.pendingAskUser || null : null
   );
+  const pending = ask ?? sessionPending;
   const {
     options,
     hasOptions,
@@ -53,10 +56,10 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
   // Focus the panel when a request appears so keyboard users land
   // directly on the prompt without having to tab through the chat.
   useEffect(() => {
-    if (pending && containerRef.current) {
+    if (pending && !ask && containerRef.current) {
       containerRef.current.focus({ preventScroll: false });
     }
-  }, [pending]);
+  }, [pending, ask]);
 
   if (!pending) return null;
 

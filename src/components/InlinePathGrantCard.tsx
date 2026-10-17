@@ -28,6 +28,11 @@ interface PathGrantCardState {
 
 interface InlinePathGrantCardProps {
   workspaceId: string | null;
+  /**
+   * Show only this request, held by the caller: no seeding, no listening,
+   * no scrolling into view. The caller drops it on its `resolved` event.
+   */
+  request?: PathGrantRequest;
 }
 
 // Paths that historically hold credentials or secrets. Surfacing this in
@@ -85,7 +90,7 @@ const accessLabel = (access: PathAccess): string =>
  *   - enforces the narrowing invariants client-side (no widening, no
  *     upgrading RO→RW) so the user never gets a confusing backend rejection.
  */
-const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
+const InlinePathGrantCard = ({ workspaceId, request }: InlinePathGrantCardProps) => {
   const [requests, setRequests] = useState<PathGrantRequest[]>([]);
   const [perCardState, setPerCardState] = useState<Record<string, PathGrantCardState>>({});
   const [submittingId, setSubmittingId] = useState<string | null>(null);
@@ -110,6 +115,10 @@ const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
     setSubmittingId(null);
     previousCountRef.current = 0;
 
+    if (request) {
+      setRequests([request]);
+      return undefined;
+    }
     if (!workspaceId) return undefined;
 
     let cancelled = false;
@@ -162,7 +171,7 @@ const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
       unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
       unlistenResolvedPromise.then((unlisten) => unlisten()).catch(() => {});
     };
-  }, [workspaceId]);
+  }, [workspaceId, request]);
 
   // Initialize per-card editable state when a new request arrives.
   useEffect(() => {
@@ -193,10 +202,10 @@ const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
     const prev = previousCountRef.current;
     const next = requests.length;
     previousCountRef.current = next;
-    if (prev === 0 && next > 0 && firstCardRef.current) {
+    if (!request && prev === 0 && next > 0 && firstCardRef.current) {
       firstCardRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [requests.length]);
+  }, [requests.length, request]);
 
   const toggleCollapsed = useCallback((requestId: string) => {
     setCollapsedIds((current) => {

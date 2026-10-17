@@ -8,7 +8,7 @@ import AskUserPanel from '../AskUserPanel/AskUserPanel';
 import InlineApprovalCard from '../InlineApprovalCard';
 import InlinePathGrantCard from '../InlinePathGrantCard';
 import { mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
-import { cardAttention, cardPhase, type FleetCard, type FleetLive } from '../../fleet/fleetModel';
+import { cardAttention, cardPhase, openRequests, type FleetCard, type FleetLive } from '../../fleet/fleetModel';
 import type { AssistantMessage, AssistantRun, ToolInvocation } from '../../generated/bindings';
 import { LiveFaces, phaseLabel } from './FleetCard';
 import { useFleetChat } from './useFleetChat';
@@ -117,6 +117,9 @@ const FleetSelectedCard = ({ card, live, selected, faces, onSelect }: FleetSelec
           </p>
         )}
         <AskUserPanel sessionId={sessionId} />
+        {openRequests(card).map(
+          (r) => r.kind === 'ask' && r.ask.sessionId !== sessionId && <AskUserPanel key={r.ask.pendingId} ask={r.ask} />
+        )}
         <InlineApprovalCard workspaceId={workspaceId} />
         <InlinePathGrantCard workspaceId={workspaceId} />
       </div>
