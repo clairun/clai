@@ -67,6 +67,8 @@ const TerminalEmulator = ({
   const [isOutputVisible, setIsOutputVisible] = useState(true);
   const [isHoveringOutput, setIsHoveringOutput] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  // On the Fleet with no card selected, Enter asks once before a prompt creates a workspace.
+  const [confirmingCreate, setConfirmingCreate] = useState(false);
   // Terminal mode: when on, the composer is replaced by a real PTY-backed
   // shell (WorkspaceTerminal). Only meaningful on workspace routes.
   const [terminalMode, setTerminalMode] = useState(false);
@@ -547,7 +549,21 @@ const TerminalEmulator = ({
     // Enter sends message (Shift+Enter for newline)
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      const trimmed = inputValue.trim();
+      const createsWorkspace =
+        isFleetRoute &&
+        !useFleetStore.getState().selectedId &&
+        (attachments.length > 0 || (trimmed !== '' && !/^[/!]/.test(trimmed)));
+      if (createsWorkspace && !confirmingCreate) {
+        setConfirmingCreate(true);
+        return;
+      }
+      setConfirmingCreate(false);
       handleCommandExecution(inputValue);
+    }
+    else if (e.key === 'Escape' && confirmingCreate) {
+      e.preventDefault();
+      setConfirmingCreate(false);
     }
     // Escape: clear output, if any; otherwise it is free for the page (the Fleet deselects).
     else if (e.key === 'Escape' && outputMessages.length > 0) {
@@ -694,12 +710,20 @@ const TerminalEmulator = ({
 
             {/* Composer input box */}
             <div className={styles.terminalInputWrapper} ref={inputWrapperRef}>
+              {isFleetRoute && (
+                <span className={styles.fleetTarget} data-new={!fleetTargetTitle || undefined}>
+                  → {fleetTargetTitle ?? 'New workspace'}
+                </span>
+              )}
               <textarea
                 ref={inputRef}
                 rows={1}
                 className={styles.terminalInput}
                 value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
+                onChange={(e) => {
+                  setInputValue(e.target.value);
+                  setConfirmingCreate(false);
+                }}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
                 onClick={(e) => e.stopPropagation()}
@@ -721,6 +745,12 @@ const TerminalEmulator = ({
                 autoCapitalize="off"
               />
             </div>
+
+            {confirmingCreate && isFleetRoute && !fleetTargetTitle && (
+              <p className={styles.confirmCreate} role="status">
+                Create a new workspace with this message? <kbd>Enter</kbd> to confirm · <kbd>Esc</kbd> to cancel
+              </p>
+            )}
 
             {/* Action toolbar: attach + terminal-mode, below the input */}
             {((onPickImage && chatWorkspaceId) || terminalAvailable) && (

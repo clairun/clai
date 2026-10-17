@@ -1,6 +1,7 @@
-import { memo, useMemo } from 'react';
+import { memo, useMemo, type CSSProperties } from 'react';
+import { useAppTheme } from '../../hooks/useAppTheme';
 import AgentAvatar from '../Agents/AgentAvatar';
-import { GENERATOR_VERSION, type AgentIdentity } from '../Agents/agentIdentity';
+import { GENERATOR_VERSION, identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
 import pillStyles from '../Agents/taskStatus.module.css';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import {
@@ -48,6 +49,33 @@ const NoteRow = ({ item }: { item: FleetItem }) => (
   </li>
 );
 
+const faceOf = (faces: Record<string, AgentIdentity>, seed: string): AgentIdentity =>
+  faces[seed] ?? { seed, generatorVersion: GENERATOR_VERSION };
+
+/** A running subtask: its agent's face and name in the agent's colour, larger than history. */
+const LiveRow = ({ item, faces }: { item: FleetItem; faces: Record<string, AgentIdentity> }) => {
+  const theme = useAppTheme();
+  const lead = item.agents[0]!;
+  const color = identityRingColor(faceOf(faces, lead.seed), theme);
+  return (
+    <li className={styles.liveItem} style={{ '--agent-color': color } as CSSProperties}>
+      <AgentAvatar identity={faceOf(faces, lead.seed)} size={28} ring={false} label={lead.name} />
+      <span className={styles.liveBody}>
+        <span className={styles.liveAgent}>
+          {lead.name}
+          {item.agents.length > 1 && <span className={styles.liveMore}> +{item.agents.length - 1}</span>}
+        </span>
+        <span className={styles.liveText} title={item.text}>
+          {item.text}
+        </span>
+      </span>
+      <span className={`${pillStyles.pill} ${item.statusKey ? pillStyles[`pill_${item.statusKey}`] ?? '' : ''}`}>
+        {item.status}
+      </span>
+    </li>
+  );
+};
+
 const ItemRow = ({ item, faces }: { item: FleetItem; faces: Record<string, AgentIdentity> }) => (
   <li className={`${styles.item} ${styles[`tone_${item.tone}`]}`}>
     {item.agents.length > 0 && (
@@ -55,7 +83,7 @@ const ItemRow = ({ item, faces }: { item: FleetItem; faces: Record<string, Agent
         {item.agents.slice(0, 3).map((agent) => (
           <AgentAvatar
             key={agent.seed}
-            identity={faces[agent.seed] ?? { seed: agent.seed, generatorVersion: GENERATOR_VERSION }}
+            identity={faceOf(faces, agent.seed)}
             size={16}
             ring={false}
             label={agent.name}
@@ -116,7 +144,13 @@ const FleetCard = ({ card, live, faces, onSelect }: FleetCardProps) => {
       {items.length > 0 && (
         <ul className={styles.items} aria-label="Activity">
           {items.map((item) => (
-            item.note ? <NoteRow key={item.key} item={item} /> : <ItemRow key={item.key} item={item} faces={faces} />
+            item.note ? (
+              <NoteRow key={item.key} item={item} />
+            ) : item.tone === 'live' && item.agents.length > 0 ? (
+              <LiveRow key={item.key} item={item} faces={faces} />
+            ) : (
+              <ItemRow key={item.key} item={item} faces={faces} />
+            )
           ))}
         </ul>
       )}

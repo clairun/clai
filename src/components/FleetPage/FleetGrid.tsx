@@ -1,6 +1,6 @@
-import { useCallback, type CSSProperties } from 'react';
+import { memo, useCallback } from 'react';
 import type { AgentIdentity } from '../Agents/agentIdentity';
-import { GRID_GAP, workspaceHue, type FleetCard as FleetCardModel, type FleetLive } from '../../fleet/fleetModel';
+import { GRID_GAP, cardPhase, type FleetCard as FleetCardModel, type FleetLive } from '../../fleet/fleetModel';
 import FleetCard from './FleetCard';
 import FleetSelectedCard from './FleetSelectedCard';
 import styles from './FleetPage.module.css';
@@ -49,15 +49,9 @@ const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, onSelect
         return (
           <article
             key={id}
-            className={`${styles.card} ${selected ? styles.cardSelected : ''}`}
+            className={`${styles.card} ${selected ? styles.cardSelected : cardPhase(card, live) === 'working' ? styles.cardWorking : ''}`}
             aria-current={selected || undefined}
-            style={
-              {
-                gridColumn: `${col + 1} / span ${w}`,
-                gridRow: `${row + 1} / span ${h}`,
-                '--ws-hue': workspaceHue(id),
-              } as CSSProperties
-            }
+            style={{ gridColumn: `${col + 1} / span ${w}`, gridRow: `${row + 1} / span ${h}` }}
           >
             {selected ? (
               <FleetSelectedCard card={card} live={live} onClose={handleClose} />
@@ -71,4 +65,4 @@ const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, onSelect
   );
 };
 
-export default FleetGrid;
+export default memo(FleetGrid);

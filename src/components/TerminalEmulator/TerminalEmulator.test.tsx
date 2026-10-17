@@ -55,6 +55,8 @@ vi.mock('../../workspace/components/WorkspaceContextBar', () => ({
 }));
 
 import TerminalEmulator from './TerminalEmulator';
+import { useFleetStore } from '../../fleet/fleetStore';
+import { emptyCard } from '../../fleet/fleetModel';
 
 // A button that navigates the shared router so the (persistent, global)
 // TerminalEmulator instance sees a workspace switch — exactly how MainLayout
@@ -429,5 +431,64 @@ describe('TerminalEmulator image attachments', () => {
     expect(onSendToChat).toHaveBeenCalled();
     // Failed send keeps the image attached (cleared only on success).
     expect(await screen.findByAltText('shot.png')).toBeInTheDocument();
+  });
+});
+
+describe('TerminalEmulator on the Fleet', () => {
+  const renderFleetComposer = (onSendToChat = vi.fn(async () => ({}))) => {
+    render(
+      <MemoryRouter initialEntries={['/fleet']}>
+        <TerminalEmulator onSendToChat={onSendToChat} />
+      </MemoryRouter>
+    );
+    return onSendToChat;
+  };
+
+  it('asks once before a message creates a workspace; a second Enter sends it', async () => {
+    useFleetStore.setState({ selectedId: null });
+    const user = userEvent.setup();
+    const send = renderFleetComposer();
+    expect(screen.getByText('→ New workspace')).toBeInTheDocument();
+
+    await user.type(screen.getByRole('textbox'), 'hello{Enter}');
+    expect(send).not.toHaveBeenCalled();
+    expect(screen.getByRole('status')).toHaveTextContent('Create a new workspace with this message?');
+    expect(screen.getByRole('textbox')).toHaveValue('hello');
+
+    await user.keyboard('{Enter}');
+    expect(send).toHaveBeenCalledWith('hello', []);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('cancels the pending creation on Esc or an edit, keeping the text', async () => {
+    useFleetStore.setState({ selectedId: null });
+    const user = userEvent.setup();
+    const send = renderFleetComposer();
+    const input = screen.getByRole('textbox');
+
+    await user.type(input, 'hello{Enter}{Escape}');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(input).toHaveValue('hello');
+    await user.keyboard('{Enter}');
+    expect(send).not.toHaveBeenCalled();
+    expect(screen.getByRole('status')).toBeInTheDocument();
+
+    await user.type(input, '!');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('sends to the selected card without asking, and shows it as the target', async () => {
+    useFleetStore.setState((s) => ({
+      selectedId: 'ws-a',
+      fleet: { ...s.fleet, cards: { 'ws-a': { ...emptyCard('ws-a'), title: 'Alpha' } } },
+    }));
+    const user = userEvent.setup();
+    const send = renderFleetComposer();
+    expect(screen.getByText('→ Alpha')).toBeInTheDocument();
+
+    await user.type(screen.getByRole('textbox'), 'hi{Enter}');
+    expect(send).toHaveBeenCalledWith('hi', []);
+    useFleetStore.setState({ selectedId: null });
   });
 });

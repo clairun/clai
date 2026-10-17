@@ -486,11 +486,3 @@ export const cycleCard = (order: readonly string[], selectedId: string | null, s
   if (at < 0) return step > 0 ? order[0]! : order[order.length - 1]!;
   return order[(at + step + order.length) % order.length]!;
 };
-
-/** One of eight hues per workspace, stable across runs. */
-export const workspaceHue = (workspaceId: string): number => {
-  let hash = 0;
-  for (let i = 0; i < workspaceId.length; i += 1) hash = (hash * 31 + workspaceId.charCodeAt(i)) | 0;
-  const HUES = [200, 160, 28, 330, 260, 90, 300, 12];
-  return HUES[Math.abs(hash) % HUES.length]!;
-};

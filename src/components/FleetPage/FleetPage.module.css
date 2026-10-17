@@ -1,9 +1,8 @@
 /*
  * The Fleet. Static by design: on WebKitGTK any animation repaints the
  * whole window every frame, and even a short transition blinks, so nothing
- * here moves. No backdrop-filter: cards are translucent over a static
- * gradient instead. Every card but the selected one has the same border;
- * state shows inside it.
+ * here moves. Flat surfaces, no gradients, no backdrop-filter. Every card
+ * has the same border width; only the selected and working cards colour it.
  */
 
 .page {
@@ -12,11 +11,7 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
-  background:
-    radial-gradient(1200px 600px at 12% -10%, color-mix(in srgb, var(--color-primary) 16%, transparent), transparent 70%),
-    radial-gradient(900px 500px at 100% 0%, color-mix(in srgb, var(--color-accent) 10%, transparent), transparent 70%),
-    radial-gradient(1000px 700px at 50% 120%, color-mix(in srgb, var(--color-primary-dark) 12%, transparent), transparent 70%),
-    var(--color-bg-primary);
+  background: var(--color-bg-primary);
 }
 
 /* The shared parts the Fleet mounts (top bar, the selected card's chat and
@@ -99,26 +94,30 @@
 /* ── Cards ─────────────────────────────────────────────────────────────── */
 
 .card {
-  --ws-tint: hsl(var(--ws-hue) 70% 55%);
   position: relative;
   min-width: 0;
   min-height: 0;
   border: 1px solid var(--color-border-light);
   border-radius: var(--radius-lg);
-  background:
-    linear-gradient(160deg, color-mix(in srgb, var(--ws-tint) 14%, transparent), transparent 55%),
-    color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
+  background: var(--color-bg-elevated);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-text-primary) 6%, transparent);
   overflow: hidden;
 }
 
 /* Grown over its neighbours, so opaque, lifted and outlined (the only
  * coloured border); the rest dim behind it. */
+/* Every card keeps the same 1px border; state changes only its colour. The
+ * selected card's second pixel is an inset shadow, so nothing shifts. */
+.cardWorking {
+  border-color: var(--color-primary-alpha-40);
+}
+
 .cardSelected {
   z-index: 1;
-  border: 2px solid var(--color-primary);
-  background: var(--color-bg-elevated);
-  box-shadow: var(--shadow-xl);
+  border-color: var(--color-primary);
+  box-shadow:
+    inset 0 0 0 1px var(--color-primary),
+    var(--shadow-xl);
 }
 
 .gridSelecting .card:not(.cardSelected) {
@@ -187,7 +186,7 @@
 }
 
 .phase[data-phase='working'] {
-  color: var(--ws-tint);
+  color: var(--color-primary);
 }
 
 .phase[data-phase='waiting'] {
@@ -215,7 +214,7 @@
 
 .userMessageLabel {
   font-weight: 700;
-  color: var(--ws-tint);
+  color: var(--color-primary);
 }
 
 /* Pinned to the bottom like a chat: overflow clips the oldest, at the top. */
@@ -240,6 +239,46 @@
   min-height: 24px;
   font-size: 12px;
   color: var(--color-text-primary);
+}
+
+/* A running subtask: bigger than history, in its agent's colour. Static. */
+.liveItem {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--agent-color) 10%, transparent);
+}
+
+.liveBody {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.liveAgent {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--agent-color);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.liveMore {
+  font-weight: 500;
+  color: var(--color-text-tertiary);
+}
+
+.liveText {
+  font-size: 13px;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* A chat message: a few clamped lines of markdown, nothing wider than the card. */
@@ -325,4 +364,58 @@
   margin: auto;
   font-size: 13px;
   color: var(--color-text-tertiary);
+}
+
+/* ── Ctrl+Tab switcher: static, no blur ──────────────────────────────── */
+
+.switcherBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--color-bg-primary) 55%, transparent);
+}
+
+.switcher {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  width: min(520px, calc(100% - 40px));
+  max-height: 70%;
+  overflow: hidden;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-xl);
+}
+
+.switcherRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+}
+
+.switcherRow[aria-selected='true'] {
+  border-color: var(--color-primary);
+  background: var(--color-primary-alpha-15);
+}
+
+.switcherTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.switcherRow .phase {
+  margin-left: 0;
 }

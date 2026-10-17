@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import AppTopBar from '../components/AppTopBar';
 import FleetGrid from '../components/FleetPage/FleetGrid';
+import FleetSwitcher from '../components/FleetPage/FleetSwitcher';
 import styles from '../components/FleetPage/FleetPage.module.css';
 import { listAgentDefinitions } from '../api/client';
 import { identityFor, type AgentIdentity } from '../components/Agents/agentIdentity';
 import {
   RECENT_WINDOW_MS,
   cardPhase,
-  cycleCard,
   gridCapacity,
   pickCards,
   type FleetLive,
@@ -90,27 +90,15 @@ const FleetPage = () => {
   );
   if (placed.join(',') !== order.join(',')) setOrder(placed);
 
-  // From anywhere on the page, the terminal included: Ctrl+Tab and
-  // Ctrl+Shift+Tab cycle the selection through the slots (capture beats the
-  // terminal's keydown); Escape deselects, unless something else used it
-  // first (the terminal clearing its output, or an open dialog).
+  // Escape deselects, unless something else used it first (the switcher,
+  // the terminal clearing its output, or an open dialog).
   useEffect(() => {
-    const onCycle = (e: KeyboardEvent) => {
-      if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey) return;
-      e.preventDefault();
-      e.stopPropagation();
-      select(cycleCard(placed, useFleetStore.getState().selectedId, e.shiftKey ? -1 : 1));
-    };
     const onEscape = (e: KeyboardEvent) => {
       if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('[role="dialog"]')) select(null);
     };
-    window.addEventListener('keydown', onCycle, true);
     window.addEventListener('keydown', onEscape);
-    return () => {
-      window.removeEventListener('keydown', onCycle, true);
-      window.removeEventListener('keydown', onEscape);
-    };
-  }, [placed, select]);
+    return () => window.removeEventListener('keydown', onEscape);
+  }, [select]);
 
   // Cards born from live events (or a workspace just created here) have no
   // title yet: the snapshot has it, once per new set of untitled cards.
@@ -165,6 +153,7 @@ const FleetPage = () => {
           )
         )}
       </main>
+      <FleetSwitcher order={placed} cards={cards} selectedId={selectedId} live={live} faces={faces} onSelect={handleSelect} />
     </div>
   );
 };

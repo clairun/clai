@@ -118,6 +118,38 @@
   transition: all 0.2s ease;
 }
 
+/* The Fleet's target, always shown: typed text never hides it. */
+.fleetTarget {
+  flex-shrink: 0;
+  align-self: center;
+  max-width: 40%;
+  padding: 1px 8px;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary-alpha-15);
+  color: var(--color-primary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fleetTarget[data-new] {
+  background: var(--color-warning-alpha-20);
+  color: var(--color-warning);
+}
+
+.confirmCreate {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-warning);
+}
+
+.confirmCreate kbd {
+  font-family: inherit;
+  font-weight: 700;
+}
+
 .terminalInputWrapper:focus-within {
   background: var(--color-bg-elevated);
   border-color: var(--color-primary);
