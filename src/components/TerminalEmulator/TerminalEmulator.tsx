@@ -584,6 +584,12 @@ const TerminalEmulator = ({
     }
   }, []);
 
+  // Closing the help (button, /help or Esc) returns to the input.
+  const closeHelp = useCallback(() => {
+    setShowHelp(false);
+    inputRef.current?.focus();
+  }, []);
+
   // The Fleet's workspace picker: Ctrl/Cmd+K opens it; closing it returns
   // to the input, ready for the message.
   const [pickerOpen, setPickerOpen] = useState(false);
@@ -781,6 +787,20 @@ const TerminalEmulator = ({
                 autoCorrect="off"
                 autoCapitalize="off"
               />
+              {/* In the input row: the one row every page has, and the
+                  icon fits its line, so it adds no height. */}
+              <button
+                type="button"
+                className={styles.helpButton}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowHelp(true);
+                }}
+                aria-label="Help"
+                title="Help (/help)"
+              >
+                ?
+              </button>
             </div>
 
             {/* Action toolbar: attach + terminal-mode, below the input */}
@@ -857,7 +877,7 @@ const TerminalEmulator = ({
           )}
       </div>
 
-      {showHelp && <CommandHelpModal onClose={() => setShowHelp(false)} />}
+      {showHelp && <CommandHelpModal onClose={closeHelp} />}
     </div>
   );
 };

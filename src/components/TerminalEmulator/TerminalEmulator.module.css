@@ -154,6 +154,34 @@
   color: var(--color-accent);
 }
 
+/* Opens the /help overlay. Exactly one text line tall: it sits in the
+   input row and must not grow it. */
+.helpButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.helpButton:hover,
+.helpButton:focus-visible {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  outline: none;
+}
+
 /* ── Workspace picker (opens above the input; adds no height) ─────── */
 .picker {
   position: absolute;

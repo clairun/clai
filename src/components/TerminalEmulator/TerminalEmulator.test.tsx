@@ -520,3 +520,38 @@ describe('TerminalEmulator on the Fleet', () => {
     useFleetStore.setState({ selectedId: null });
   });
 });
+
+describe('TerminalEmulator help button', () => {
+  const renderAt = (path: string) =>
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <TerminalEmulator onSendToChat={vi.fn(async () => ({}))} />
+      </MemoryRouter>
+    );
+
+  it('opens the same help as /help with no workspace selected; Esc closes it, back to the input', async () => {
+    useFleetStore.setState({ selectedId: null });
+    const user = userEvent.setup();
+    renderAt('/fleet');
+    const input = screen.getByRole('textbox');
+
+    await user.click(screen.getByRole('button', { name: 'Help' }));
+    const fromButton = screen.getByRole('dialog', { name: 'Available commands' }).innerHTML;
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(input).toHaveFocus();
+
+    await user.type(input, '/help{Enter}');
+    expect(screen.getByRole('dialog', { name: 'Available commands' }).innerHTML).toBe(fromButton);
+  });
+
+  it('is on pages without a target too, and opens from the keyboard', async () => {
+    const user = userEvent.setup();
+    renderAt('/settings');
+    const help = screen.getByRole('button', { name: 'Help' });
+    expect(help).toHaveAttribute('title', 'Help (/help)');
+    help.focus();
+    await user.keyboard('{Enter}');
+    expect(screen.getByRole('dialog', { name: 'Available commands' })).toBeInTheDocument();
+  });
+});
