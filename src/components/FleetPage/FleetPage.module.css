@@ -145,8 +145,33 @@
   display: flex;
   align-items: center;
   gap: 8px;
+  height: 28px;
   min-width: 0;
   flex-shrink: 0;
+}
+
+/* Sits just before the status label, which keeps `margin-left: auto`. */
+.headerFaces {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.headerFaces + .phase {
+  margin-left: 0;
+}
+
+.queuedFace {
+  display: inline-flex;
+  opacity: 0.45;
+}
+
+.headerFacesMore {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-tertiary);
 }
 
 .cardTitle,

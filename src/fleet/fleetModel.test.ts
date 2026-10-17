@@ -20,6 +20,7 @@ import {
   cardPhase,
   emptyCard,
   gridCapacity,
+  liveAgents,
   pickCards,
   seedFleet,
   visibleLastMessage,
@@ -377,5 +378,48 @@ describe('card picking', () => {
 
   it('gives newcomers the next slots, never the stage, and closes the gap a leaving card left', () => {
     expect(pick([mk('a', NOW - 1), mk('c', NOW - 3), mk('new', NOW)], 4, 3, null, ['a', 'b', 'c'])).toEqual(['a', 'c', 'new']);
+  });
+});
+
+describe('live agents', () => {
+  const card = emptyCard(WS, 'W');
+  const agent = (n: string) => ({
+    assignedAgentDisplayName: `Agent ${n}`,
+    assignedAgentDefinitionId: `def-${n}`,
+  });
+  const liveWith = (tasks: WorkspaceTaskResponse[], runs: string[] = []): FleetLive => ({
+    runs: { [WS]: runs },
+    tasks: { [WS]: Object.fromEntries(tasks.map((t) => [t.id, t])) },
+  });
+
+  it('lists each agent once, running before queued', () => {
+    const agents = liveAgents(
+      card,
+      liveWith([
+        task('q1', 'queued', 1, agent('a')),
+        task('q2', 'queued', 2, agent('a')),
+        task('r1', 'running', 3, agent('b')),
+        task('r2', 'running', 4, { ...agent('b'), title: 'Second' }),
+        task('d1', 'completed', 5, agent('c')),
+      ])
+    );
+    expect(agents.map((a) => [a.seed, a.running, a.doing])).toEqual([
+      ['def-b', true, 'running: 2 tasks'],
+      ['def-a', false, 'queued: 2 tasks'],
+    ]);
+  });
+
+  it("adds Main when a run belongs to no task, but not for a task's own run", () => {
+    const tasks = [task('r1', 'running', 1, { ...agent('b'), runId: 'run-task' })];
+    expect(liveAgents(card, liveWith(tasks, ['run-task'])).map((a) => a.seed)).toEqual(['def-b']);
+    expect(liveAgents(card, liveWith(tasks, ['run-task', 'run-main'])).map((a) => a.name)).toEqual([
+      'Main',
+      'Agent b',
+    ]);
+  });
+
+  it('is empty when nothing is live', () => {
+    expect(liveAgents(card, liveWith([task('d1', 'completed', 1)]))).toEqual([]);
+    expect(liveAgents(card, NO_LIVE)).toEqual([]);
   });
 });

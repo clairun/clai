@@ -1,13 +1,14 @@
 import { memo, useMemo, type CSSProperties } from 'react';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import AgentAvatar from '../Agents/AgentAvatar';
-import { GENERATOR_VERSION, identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
+import { GENERATOR_VERSION, identityRingColor, mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
 import pillStyles from '../Agents/taskStatus.module.css';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import {
   cardAttention,
   cardItems,
   cardPhase,
+  liveAgents,
   openRequests,
   type FleetAttention,
   type FleetCard as FleetCardModel,
@@ -53,6 +54,38 @@ const NoteRow = ({ item }: { item: FleetItem }) => (
 
 const faceOf = (faces: Record<string, AgentIdentity>, seed: string): AgentIdentity =>
   faces[seed] ?? { seed, generatorVersion: GENERATOR_VERSION };
+
+const MAX_HEADER_FACES = 4;
+
+/** The faces of the agents with live work, for the card header: running first, queued muted. */
+export const LiveFaces = ({ card, live, faces }: { card: FleetCardModel; live: FleetLive; faces: Record<string, AgentIdentity> }) => {
+  const agents = useMemo(() => liveAgents(card, live), [card, live]);
+  if (agents.length === 0) return null;
+  const extra = agents.length - MAX_HEADER_FACES;
+  return (
+    <span className={styles.headerFaces}>
+      {agents.slice(0, MAX_HEADER_FACES).map((agent) => (
+        <span
+          key={agent.seed}
+          className={agent.running ? undefined : styles.queuedFace}
+          title={`${agent.name}: ${agent.doing}`}
+        >
+          <AgentAvatar
+            identity={agent.main ? mainIdentity() : faceOf(faces, agent.seed)}
+            size={18}
+            ring={false}
+            label={`${agent.name}: ${agent.doing}`}
+          />
+        </span>
+      ))}
+      {extra > 0 && (
+        <span className={styles.headerFacesMore} title={agents.slice(MAX_HEADER_FACES).map((a) => `${a.name}: ${a.doing}`).join('\n')}>
+          +{extra}
+        </span>
+      )}
+    </span>
+  );
+};
 
 /** A running subtask: its agent's face and name in the agent's colour, larger than history. */
 const LiveRow = ({ item, faces }: { item: FleetItem; faces: Record<string, AgentIdentity> }) => {
@@ -135,6 +168,7 @@ const FleetCard = ({ card, live, faces, onSelect }: FleetCardProps) => {
         >
           {title}
         </button>
+        <LiveFaces card={card} live={live} faces={faces} />
         <span className={styles.phase} data-phase={phase}>
           {phase === 'waiting' && (
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" aria-hidden="true">

@@ -453,6 +453,47 @@ export const cardItems = (card: FleetCard, live: FleetLive): FleetItem[] => {
   return shown.sort((a, b) => TONE_RANK[b.tone] - TONE_RANK[a.tone] || a.at - b.at);
 };
 
+/** An agent with work in flight: its tasks, or `main` for the workspace's own session. */
+export interface LiveAgent {
+  seed: string;
+  name: string;
+  main?: true;
+  running: boolean;
+  /** What it is doing, for a tooltip. */
+  doing: string;
+}
+
+const quoted = (tasks: WorkspaceTaskResponse[], verb: string): string =>
+  tasks.length === 1 ? `${verb} '${tasks[0]!.title}'` : `${verb}: ${tasks.length} tasks`;
+
+/**
+ * One entry per distinct agent with a live task, running agents first. A run
+ * that belongs to no task is the workspace's own session, run by its Main.
+ */
+export const liveAgents = (card: FleetCard, live: FleetLive): LiveAgent[] => {
+  const tasks = workspaceTasks(card, live);
+  const byAgent = new Map<string, { name: string; running: WorkspaceTaskResponse[]; queued: WorkspaceTaskResponse[] }>();
+  for (const task of tasks) {
+    if (!isTaskLive(task.status)) continue;
+    const { name, seed } = agentOf(task);
+    const entry = byAgent.get(seed) ?? { name, running: [], queued: [] };
+    (task.status === 'queued' ? entry.queued : entry.running).push(task);
+    byAgent.set(seed, entry);
+  }
+  const taskRuns = new Set(tasks.map((t) => t.runId));
+  const mainRunning = (live.runs[card.workspaceId] ?? []).some((id) => !taskRuns.has(id));
+  const agents: LiveAgent[] = [...byAgent].map(([seed, { name, running, queued }]) => ({
+    seed,
+    name,
+    running: running.length > 0,
+    doing: [running.length ? quoted(running, 'running') : '', queued.length ? quoted(queued, 'queued') : '']
+      .filter(Boolean)
+      .join(', '),
+  }));
+  if (mainRunning) agents.unshift({ seed: 'main', name: 'Main', main: true, running: true, doing: 'running the workspace chat' });
+  return agents.sort((a, b) => Number(b.running) - Number(a.running));
+};
+
 /** The last assistant message, only once the workspace has stopped. */
 export const visibleLastMessage = (card: FleetCard, live: FleetLive): FleetNote | null =>
   cardPhase(card, live) === 'stopped' ? card.lastMessage : null;

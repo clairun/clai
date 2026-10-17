@@ -7,10 +7,10 @@ import { resolveSessionOwner } from '../AssistantChat/messageSender';
 import AskUserPanel from '../AskUserPanel/AskUserPanel';
 import InlineApprovalCard from '../InlineApprovalCard';
 import InlinePathGrantCard from '../InlinePathGrantCard';
-import { mainIdentity } from '../Agents/agentIdentity';
+import { mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
 import { cardAttention, cardPhase, type FleetCard, type FleetLive } from '../../fleet/fleetModel';
 import type { AssistantMessage, AssistantRun, ToolInvocation } from '../../generated/bindings';
-import { phaseLabel } from './FleetCard';
+import { LiveFaces, phaseLabel } from './FleetCard';
 import { useFleetChat } from './useFleetChat';
 import styles from './FleetPage.module.css';
 
@@ -25,11 +25,13 @@ interface FleetSelectedCardProps {
   card: FleetCard;
   live: FleetLive;
   selected: boolean;
+  /** Picked agent faces, by agent definition id. */
+  faces: Record<string, AgentIdentity>;
   onSelect: (workspaceId: string | null) => void;
 }
 
 /** The stage card: the workspace's chat, in full, with its pending requests. */
-const FleetSelectedCard = ({ card, live, selected, onSelect }: FleetSelectedCardProps) => {
+const FleetSelectedCard = ({ card, live, selected, faces, onSelect }: FleetSelectedCardProps) => {
   const navigate = useNavigate();
   const { workspaceId, mainSessionId: sessionId } = card;
   const { roster, error, loading } = useFleetChat(workspaceId, sessionId);
@@ -71,6 +73,7 @@ const FleetSelectedCard = ({ card, live, selected, onSelect }: FleetSelectedCard
             </button>
           )}
         </h2>
+        <LiveFaces card={card} live={live} faces={faces} />
         <span className={styles.phase} data-phase={cardPhase(card, live)}>
           {phaseLabel(cardPhase(card, live), cardAttention(card))}
         </span>
