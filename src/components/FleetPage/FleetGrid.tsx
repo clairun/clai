@@ -27,7 +27,7 @@ const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, onSelect
 
   return (
     <div
-      className={`${styles.grid} ${selectedId && order.includes(selectedId) ? styles.gridSelecting : ''}`}
+      className={styles.grid}
       style={{
         gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
         gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,

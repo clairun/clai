@@ -21,6 +21,7 @@ import type {
   TaskStatus,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
+import type { PendingAskUser } from '../assistant/sessionStore';
 import { taskDisplayStatus } from '../utils/taskDisplay';
 import { buildTaskTree, type TaskNode } from '../utils/taskTree';
 
@@ -32,14 +33,23 @@ const NOTE_CHARS = 600;
 
 export type FleetRequestKind = 'approval' | 'grant';
 
-/** Something the workspace waits on the user for: a question, a command approval or a path grant. */
-export interface FleetRequest {
-  kind: FleetRequestKind | 'ask';
+/** An `ask_user` question, with the session that asked it. */
+export type FleetAsk = PendingAskUser & { sessionId: string };
+
+/**
+ * Something the workspace waits on the user for: a question, a command
+ * approval or a path grant, with what answering it needs.
+ */
+export type FleetRequest = {
   text: string;
   agentName: string | null;
   at: number;
   resolvedAt: number | null;
-}
+} & (
+  | { kind: 'ask'; ask: FleetAsk }
+  | { kind: 'approval'; request: PermissionRequest }
+  | { kind: 'grant'; request: PathGrantRequest }
+);
 
 export interface FleetNote {
   id: string;
@@ -123,9 +133,10 @@ const resolve = (card: FleetCard, key: string, at: number): FleetCard => {
   return { ...card, requests: { ...card.requests, [key]: { ...request, resolvedAt: at } } };
 };
 
-const askRequest = (question: string, at: number): FleetRequest => ({
+const askRequest = (ask: FleetAsk, at: number): FleetRequest => ({
   kind: 'ask',
-  text: question,
+  ask,
+  text: ask.question,
   agentName: null,
   at,
   resolvedAt: null,
@@ -181,7 +192,17 @@ export const applyAssistantEvent = (
           ...dropUserMessage(card),
           requests: {
             ...card.requests,
-            [requestKey('ask', event.payload.pending_id)]: askRequest(event.payload.question, at),
+            [requestKey('ask', event.payload.pending_id)]: askRequest(
+              {
+                pendingId: event.payload.pending_id,
+                question: event.payload.question,
+                options: event.payload.options,
+                multiSelect: event.payload.multi_select,
+                extraContext: event.payload.extra_context ?? null,
+                sessionId,
+              },
+              at
+            ),
           },
         };
       case 'ask_user_resolved':
@@ -204,13 +225,15 @@ const toRequest = (
   kind: FleetRequestKind,
   request: PermissionRequest | PathGrantRequest,
   at: number
-): FleetRequest => ({
-  kind,
-  text: requestText(request),
-  agentName: request.agentName,
-  at,
-  resolvedAt: null,
-});
+): FleetRequest =>
+  ({
+    kind,
+    request,
+    text: requestText(request),
+    agentName: request.agentName,
+    at,
+    resolvedAt: null,
+  }) as FleetRequest;
 
 export const applyRequest = (
   state: FleetState,
@@ -290,7 +313,13 @@ export const seedFleet = (
       : null;
     // Approvals and grants carry no timestamp; the workspace's activity orders them among waiting cards.
     const open: Record<string, FleetRequest> = {};
-    for (const a of ws.pendingAsks) open[requestKey('ask', a.pendingId)] = askRequest(a.question, Number(a.requestedAt));
+    for (const a of ws.pendingAsks) {
+      const { pendingId, question, options, multiSelect, extraContext, sessionId } = a;
+      open[requestKey('ask', pendingId)] = askRequest(
+        { pendingId, question, options, multiSelect, extraContext, sessionId },
+        Number(a.requestedAt)
+      );
+    }
     for (const r of ws.pendingPermissions) open[requestKey('approval', r.requestId)] = toRequest('approval', r, activity);
     for (const r of ws.pendingPathGrants) open[requestKey('grant', r.requestId)] = toRequest('grant', r, activity);
     cards[ws.workspaceId] = {
@@ -319,8 +348,14 @@ export interface FleetAttention {
   since: number | null;
 }
 
+/** The card's open requests, newest first. */
+export const openRequests = (card: FleetCard): FleetRequest[] =>
+  Object.values(card.requests)
+    .filter((r) => r.resolvedAt == null)
+    .sort((a, b) => b.at - a.at);
+
 export const cardAttention = (card: FleetCard): FleetAttention => {
-  const open = Object.values(card.requests).filter((r) => r.resolvedAt == null);
+  const open = openRequests(card);
   const count = (kind: FleetRequest['kind']) => open.filter((r) => r.kind === kind).length;
   return {
     asks: count('ask'),
@@ -341,7 +376,7 @@ export const cardPhase = (card: FleetCard, live: FleetLive): FleetPhase => {
   return workspaceTasks(card, live).some((t) => isTaskLive(t.status)) ? 'working' : 'stopped';
 };
 
-export type FleetItemTone = 'attention' | 'live' | 'done' | 'failed' | 'note';
+export type FleetItemTone = 'live' | 'done' | 'failed' | 'note';
 
 export interface FleetItem {
   key: string;
@@ -356,7 +391,7 @@ export interface FleetItem {
   note?: 'user' | 'assistant';
 }
 
-const TONE_RANK: Record<FleetItemTone, number> = { attention: 0, live: 1, failed: 2, done: 2, note: 2 };
+const TONE_RANK: Record<FleetItemTone, number> = { live: 1, failed: 2, done: 2, note: 2 };
 
 const agentOf = (task: WorkspaceTaskResponse) => ({
   name: task.assignedAgentDisplayName,
@@ -389,29 +424,23 @@ const taskItems = (tasks: WorkspaceTaskResponse[]): FleetItem[] =>
     } satisfies FleetItem;
   });
 
-const OPEN_STATUS: Record<FleetRequest['kind'], string> = {
-  ask: 'Question',
-  approval: 'Approve command',
-  grant: 'Grant access',
-};
-
 /**
  * Every live item plus the `HISTORY_LIMIT` newest resolved ones, in reading
  * order like a chat: history and the visible messages oldest first, then work
- * in progress, then what needs the user, so the bottom of the card is always
- * the most current.
+ * in progress, so the bottom of the card is always the most current. Open
+ * requests are not items: the card shows them below, with their answers.
  */
 export const cardItems = (card: FleetCard, live: FleetLive): FleetItem[] => {
   const items: FleetItem[] = taskItems(workspaceTasks(card, live));
   for (const [key, request] of Object.entries(card.requests)) {
-    const open = request.resolvedAt == null;
+    if (request.resolvedAt == null) continue;
     items.push({
       key,
       text: request.text,
-      status: open ? OPEN_STATUS[request.kind] : request.kind === 'ask' ? 'Answered' : 'Resolved',
-      tone: open ? 'attention' : 'done',
+      status: request.kind === 'ask' ? 'Answered' : 'Resolved',
+      tone: 'done',
       agents: request.agentName ? [{ name: request.agentName, seed: request.agentName }] : [],
-      at: request.resolvedAt ?? request.at,
+      at: request.resolvedAt,
     });
   }
   items.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone] || b.at - a.at);

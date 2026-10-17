@@ -9,10 +9,15 @@
   position: relative;
   display: flex;
   flex-direction: column;
-  height: 100%;
+  flex: 1;
   min-height: 0;
   background: var(--color-bg-primary);
 }
+
+/* Every box from the viewport down to a card's content is sized by flexing,
+ * never by a percentage height: if any link resolved as indefinite, the grid's
+ * `fr` rows would be sized from the cards' content, and the stage's chat
+ * would resize every row. */
 
 /* The shared parts the Fleet mounts (top bar, the selected card's chat and
  * request cards) bring their own fades and slide-ins: off here. A 0s single
@@ -46,14 +51,17 @@
 
 .gridArea {
   position: relative;
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-height: 0;
   padding: 4px 20px calc(var(--terminal-height, 80px) + 16px);
 }
 
 .grid {
   display: grid;
-  height: 100%;
+  flex: 1;
+  min-height: 0;
 }
 
 .notice {
@@ -75,7 +83,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100%;
+  flex: 1;
   text-align: center;
   color: var(--color-text-secondary);
 }
@@ -101,11 +109,11 @@
   border-radius: var(--radius-lg);
   background: var(--color-bg-elevated);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-text-primary) 6%, transparent);
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
-/* Grown over its neighbours, so opaque, lifted and outlined (the only
- * coloured border); the rest dim behind it. */
 /* Every card keeps the same 1px border; state changes only its colour. The
  * selected card's second pixel is an inset shadow, so nothing shifts. */
 .cardWorking {
@@ -119,15 +127,11 @@
     var(--shadow-xl);
 }
 
-.gridSelecting .card:not(.cardSelected) {
-  opacity: 0.45;
-}
-
 .cardInner {
   display: flex;
+  flex: 1;
   flex-direction: column;
   gap: 8px;
-  height: 100%;
   padding: 12px 14px;
   min-height: 0;
   cursor: default;
@@ -321,11 +325,6 @@
   opacity: 0.55;
 }
 
-.tone_attention {
-  color: var(--color-warning);
-  font-weight: 600;
-}
-
 .itemTime {
   flex-shrink: 0;
   font-size: 11px;
@@ -348,6 +347,127 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* A small card's open request: never clipped, the history above gives way. */
+.request {
+  display: flex;
+  flex-shrink: 0;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--agent-color) 10%, transparent);
+  cursor: default;
+}
+
+.requestHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.requestHead .liveAgent {
+  flex: 1;
+  min-width: 0;
+}
+
+.requestText {
+  display: -webkit-box;
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  line-clamp: 3;
+}
+
+.requestControls {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.requestButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.requestButton,
+.requestPrimary,
+.requestMore {
+  max-width: 100%;
+  padding: 3px 10px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.requestPrimary {
+  border-color: var(--color-primary);
+  background: var(--color-primary);
+  color: var(--color-text-on-primary);
+}
+
+.requestButton[aria-pressed='true'] {
+  border-color: var(--color-primary);
+  background: var(--color-primary-alpha-15);
+}
+
+.requestButton:hover:not(:disabled) {
+  background: var(--color-bg-hover);
+}
+
+.requestButton:disabled,
+.requestPrimary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.requestButton:focus-visible,
+.requestPrimary:focus-visible,
+.requestMore:focus-visible,
+.requestInput:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 1px;
+}
+
+.requestMore {
+  align-self: flex-start;
+  border: 0;
+  padding: 0;
+  background: none;
+  color: var(--color-text-secondary);
+  font-weight: 500;
+}
+
+.requestInput {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  font-size: 12px;
+}
+
+.requestError {
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-error);
 }
 
 .chat {

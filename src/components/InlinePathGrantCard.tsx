@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
+  allowAlwaysDecision,
+  allowOnceDecision,
+  denyDecision,
   listPendingPathGrantRequests,
   submitPathGrantDecision,
 } from '../permissions/pathGrantsClient';
@@ -67,18 +70,6 @@ const isOverlyBroadPath = (path: string | null | undefined): boolean => {
   return homeRootMatch;
 };
 
-const denyDecision = (): PathGrantDecision => ({ kind: 'deny' });
-const allowOnceDecision = (path: string, access: PathAccess): PathGrantDecision => ({
-  kind: 'allowOnce',
-  path,
-  access,
-});
-const allowAlwaysDecision = (path: string, access: PathAccess): PathGrantDecision => ({
-  kind: 'allowAlways',
-  path,
-  access,
-  scope: 'agent',
-});
 
 const accessLabel = (access: PathAccess): string =>
   access === 'read_write' ? 'Read + write' : 'Read only';

@@ -16,6 +16,7 @@ import {
   applyUserSent,
   cardAttention,
   cardItems,
+  openRequests,
   cardPhase,
   emptyCard,
   gridCapacity,
@@ -159,7 +160,7 @@ describe('fleet reducer', () => {
     expect(applyRequestResolved(s, 'approval', 'a1', 9)).toBe(s);
   });
 
-  it('keeps finished subtasks and resolved requests as history, oldest first, live work at the bottom', () => {
+  it('keeps finished subtasks and resolved requests as history, oldest first, live work at the bottom; open requests are not items', () => {
     const live = withTasks(task('done', 'completed', 1), task('live', 'running', 2));
     let s = apply(EMPTY_FLEET, askEvent('q1', 3), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, 4));
     s = applyRequest(s, 'approval', approval('a1'), 5);
@@ -167,10 +168,29 @@ describe('fleet reducer', () => {
       ['task:done', 'done', 'Completed'],
       ['ask:q1', 'done', 'Answered'],
       ['task:live', 'live', 'Waiting for subtasks'],
-      ['approval:a1', 'attention', 'Approve command'],
     ]);
     s = applyRequestResolved(s, 'approval', 'a1', 6);
-    expect(cardItems(card(s), live).at(-1)).toMatchObject({ key: 'task:live' });
+    expect(cardItems(card(s), live).map((i) => i.key)).toEqual(['task:done', 'ask:q1', 'approval:a1', 'task:live']);
+  });
+
+  it('keeps what answering needs on each open request, newest first', () => {
+    const ask = env(
+      {
+        type: 'ask_user_requested',
+        payload: { pending_id: 'q1', question: 'Ship?', options: [{ label: 'Yes', description: null }], multi_select: false },
+      } as AssistantUiEvent,
+      3,
+      'task-session'
+    );
+    let s = applyRequest(apply(EMPTY_FLEET, ask), 'approval', approval('a1'), 5);
+    s = applyRequestResolved(applyRequest(s, 'grant', approval('g1'), 6), 'grant', 'g1', 7);
+    expect(openRequests(card(s))).toMatchObject([
+      { kind: 'approval', request: { requestId: 'a1', command: 'ls' } },
+      {
+        kind: 'ask',
+        ask: { pendingId: 'q1', question: 'Ship?', options: [{ label: 'Yes' }], multiSelect: false, sessionId: 'task-session' },
+      },
+    ]);
   });
 
   it('folds subtasks into their top-level task and stays live while any descendant runs', () => {
@@ -258,7 +278,7 @@ describe('snapshot', () => {
     expect(c.mainSessionId).toBe(MAIN);
     expect(c.requests['ask:stale']!.resolvedAt).toBe(50);
     expect(c.requests['ask:kept']).toMatchObject({ at: 3, resolvedAt: null });
-    expect(c.requests['ask:new']).toMatchObject({ kind: 'ask', text: '?', at: 7, resolvedAt: null });
+    expect(c.requests['ask:new']).toMatchObject({ kind: 'ask', ask: { pendingId: 'new', sessionId: MAIN }, text: '?', at: 7, resolvedAt: null });
     expect(c.requests['approval:gone']!.resolvedAt).toBe(50);
     // A request has no timestamp of its own: it takes the workspace's activity.
     expect(c.requests['grant:g1']).toMatchObject({ at: 10, resolvedAt: null });
@@ -294,7 +314,18 @@ describe('card picking', () => {
     ...patch,
   });
   const waitingCard = (id: string, lastActivityAt: number, since = lastActivityAt) =>
-    mk(id, lastActivityAt, { requests: { 'ask:q': { kind: 'ask', text: '?', agentName: null, at: since, resolvedAt: null } } });
+    mk(id, lastActivityAt, {
+      requests: {
+        'ask:q': {
+          kind: 'ask',
+          ask: { pendingId: 'q', question: '?', options: null, extraContext: null, sessionId: MAIN },
+          text: '?',
+          agentName: null,
+          at: since,
+          resolvedAt: null,
+        },
+      },
+    });
   const pick = (cards: FleetCard[], cols: number, rows: number, selectedId: string | null = null, prevOrder: string[] = [], live = NO_LIVE) =>
     pickCards(cards, { now: NOW, capacity: { cols, rows }, selectedId, prevOrder, live });
 

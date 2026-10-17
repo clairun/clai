@@ -8,12 +8,14 @@ import {
   cardAttention,
   cardItems,
   cardPhase,
+  openRequests,
   type FleetAttention,
   type FleetCard as FleetCardModel,
   type FleetItem,
   type FleetLive,
   type FleetPhase,
 } from '../../fleet/fleetModel';
+import FleetRequestRow from './FleetRequestRow';
 import styles from './FleetPage.module.css';
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -95,7 +97,7 @@ const ItemRow = ({ item, faces }: { item: FleetItem; faces: Record<string, Agent
       {item.text}
     </span>
     <span
-      className={`${pillStyles.pill} ${item.statusKey ? pillStyles[`pill_${item.statusKey}`] ?? '' : item.tone === 'attention' ? pillStyles.pill_blocked : ''}`}
+      className={`${pillStyles.pill} ${item.statusKey ? pillStyles[`pill_${item.statusKey}`] ?? '' : ''}`}
     >
       {item.status}
     </span>
@@ -111,11 +113,12 @@ interface FleetCardProps {
   onSelect: (workspaceId: string) => void;
 }
 
-/** An unselected card: events and minimal text only. */
+/** An unselected card: events and minimal text, and its open request answerable in place. */
 const FleetCard = ({ card, live, faces, onSelect }: FleetCardProps) => {
   const phase = cardPhase(card, live);
   const attention = cardAttention(card);
   const items = useMemo(() => cardItems(card, live), [card, live]);
+  const requests = useMemo(() => openRequests(card), [card]);
   const title = card.title || 'Workspace';
 
   return (
@@ -153,6 +156,9 @@ const FleetCard = ({ card, live, faces, onSelect }: FleetCardProps) => {
             )
           ))}
         </ul>
+      )}
+      {requests.length > 0 && (
+        <FleetRequestRow requests={requests} workspaceId={card.workspaceId} live={live} faces={faces} />
       )}
     </div>
   );

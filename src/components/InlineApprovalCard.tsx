@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
+  allowAlways,
+  allowOnce,
+  denyAlways,
+  denyOnce,
   listPendingPermissionRequests,
   submitPermissionDecision,
 } from '../permissions/client';
@@ -25,19 +29,6 @@ interface SegmentCellState {
 }
 
 type CardState = Record<number, SegmentCellState>;
-
-const allowOnce = (): SegmentDecision => ({ kind: 'allowOnce' });
-const denyOnce = (): SegmentDecision => ({ kind: 'denyOnce' });
-const allowAlways = (prefix: string): SegmentDecision => ({
-  kind: 'allowAlways',
-  scope: 'agent',
-  prefix,
-});
-const denyAlways = (prefix: string): SegmentDecision => ({
-  kind: 'denyAlways',
-  scope: 'agent',
-  prefix,
-});
 
 interface InlineApprovalCardProps {
   workspaceId: string | null;
