@@ -245,18 +245,37 @@
   color: var(--color-primary);
 }
 
-/* Pinned to the bottom like a chat: overflow clips the oldest, at the top. */
+/*
+ * Pinned to the bottom like a chat. Items come newest first and stack
+ * upward (column-reverse); a row that doesn't fit whole wraps into a second,
+ * hidden column instead of showing cut in half at the top.
+ */
 .items {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
   flex: 1;
-  flex-direction: column;
-  justify-content: flex-end;
+  flex-direction: column-reverse;
+  flex-wrap: wrap;
+  align-content: flex-start;
   gap: 4px;
   min-height: 0;
   overflow: hidden;
+}
+
+.items > li {
+  width: 100%;
+}
+
+/* Just the last message and at most one other row: the message reads larger. */
+.feedShort .noteBody {
+  max-height: none;
+}
+
+.feedShort .noteBody > * {
+  font-size: 15px;
+  line-height: 1.55;
 }
 
 .item {

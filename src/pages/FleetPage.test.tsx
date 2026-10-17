@@ -181,8 +181,27 @@ describe('FleetPage', () => {
     renderFleet();
     const bold = await screen.findByText('v2');
     expect(bold.tagName).toBe('STRONG');
-    const rows = within(screen.getByRole('list', { name: 'Activity' })).getAllByRole('listitem');
-    expect(rows.map((row) => row.textContent)).toEqual([expect.stringContaining('Research'), expect.stringContaining('Shipped v2')]);
+    // Newest first in the DOM; the list stacks them upward.
+    const list = screen.getByRole('list', { name: 'Activity' });
+    const rows = within(list).getAllByRole('listitem');
+    expect(rows.map((row) => row.textContent)).toEqual([expect.stringContaining('Shipped v2'), expect.stringContaining('Research')]);
+    expect(list.className).toMatch(/feedShort/);
+  });
+
+  it('keeps the regular size when the message shares the feed with more rows', async () => {
+    const task = (id: string) =>
+      ({ id, title: id, status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Main', assignedAgentDefinitionId: 'def-m' }) as never;
+    fleetSnapshot.mockResolvedValue([
+      workspace('staged', 'Staged'),
+      {
+        ...workspace('a', 'Alpha', 1000),
+        tasks: [task('t1'), task('t2')],
+        lastAssistantMessage: { messageId: 'm1', text: 'Done', truncated: false, createdAt: 2n },
+      },
+    ]);
+    renderFleet();
+    await screen.findByText('Done');
+    expect(screen.getByRole('list', { name: 'Activity' }).className).not.toMatch(/feedShort/);
   });
 
   it('deselects on Escape, from the terminal too, and on a click on the empty grid, leaving the card on the stage', async () => {

@@ -149,6 +149,7 @@ const FleetCard = ({ card, live, faces, onSelect }: FleetCardProps) => {
   const attention = cardAttention(card);
   const items = useMemo(() => cardItems(card, live), [card, live]);
   const requests = useMemo(() => openRequests(card), [card]);
+  const shortFeed = items.length <= 2 && items.some((item) => item.note === 'assistant');
   const title = card.title || 'Workspace';
 
   return (
@@ -176,8 +177,8 @@ const FleetCard = ({ card, live, faces, onSelect }: FleetCardProps) => {
         </span>
       </header>
       {requests.length === 0 && items.length > 0 && (
-        <ul className={styles.items} aria-label="Activity">
-          {items.map((item) => (
+        <ul className={`${styles.items} ${shortFeed ? styles.feedShort : ''}`} aria-label="Activity">
+          {[...items].reverse().map((item) => (
             item.note ? (
               <NoteRow key={item.key} item={item} />
             ) : item.tone === 'live' && item.agents.length > 0 ? (
