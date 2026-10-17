@@ -555,3 +555,36 @@ describe('TerminalEmulator help button', () => {
     expect(screen.getByRole('dialog', { name: 'Available commands' })).toBeInTheDocument();
   });
 });
+
+describe('TerminalEmulator published height', () => {
+  it('publishes its height with a one-line input apart from its height, for pages the input grows over', () => {
+    const Previous = globalThis.ResizeObserver;
+    let measure = () => {};
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: () => void) {
+          measure = cb;
+        }
+        observe() {}
+        disconnect() {}
+      }
+    );
+    const { container } = renderComposer();
+    vi.stubGlobal('ResizeObserver', Previous);
+    const terminal = container.lastElementChild!;
+    const input = screen.getByRole('textbox');
+    const resize = (terminalPx: number, inputPx: number) => {
+      Object.defineProperty(terminal, 'offsetHeight', { configurable: true, value: terminalPx });
+      Object.defineProperty(input, 'offsetHeight', { configurable: true, value: inputPx });
+      measure();
+      const root = document.documentElement.style;
+      return [root.getPropertyValue('--terminal-height'), root.getPropertyValue('--terminal-rest-height')];
+    };
+
+    expect(resize(122, 20)).toEqual(['122px', '122px']);
+    expect(resize(222, 120)).toEqual(['222px', '122px']);
+    // Terminal mode hides the composer: all of the terminal is its rest height.
+    expect(resize(400, 0)).toEqual(['400px', '400px']);
+  });
+});

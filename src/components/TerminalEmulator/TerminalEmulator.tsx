@@ -15,6 +15,9 @@ import styles from './TerminalEmulator.module.css';
 import { restoreFailedPrompt } from '../../utils/composerRestore';
 import { computeTextareaSize } from '../../utils/composerTextarea';
 
+/** The composer's one-line height; it grows by this per line. */
+const INPUT_LINE_PX = 20;
+
 type OutputType = 'info' | 'success' | 'error' | 'warning';
 
 interface OutputMessage {
@@ -173,9 +176,9 @@ const TerminalEmulator = ({
     const textarea = inputRef.current;
     if (textarea) {
       // Collapse to one line so scrollHeight reflects only the content.
-      textarea.style.height = '20px';
+      textarea.style.height = `${INPUT_LINE_PX}px`;
       // Grow to fit, then cap + scroll (kept in sync with the CSS max-height).
-      const { height, overflowY } = computeTextareaSize(textarea.scrollHeight, 20, 150);
+      const { height, overflowY } = computeTextareaSize(textarea.scrollHeight, INPUT_LINE_PX, 150);
       textarea.style.height = `${height}px`;
       textarea.style.overflowY = overflowY;
     }
@@ -639,6 +642,10 @@ const TerminalEmulator = ({
       // Use offsetHeight to include padding and borders
       const height = terminal.offsetHeight;
       document.documentElement.style.setProperty('--terminal-height', `${height}px`);
+      // Its height with a one-line input, for pages the input should grow over.
+      // A hidden composer (terminal mode) has no growth.
+      const growth = Math.max(0, (inputRef.current?.offsetHeight ?? 0) - INPUT_LINE_PX);
+      document.documentElement.style.setProperty('--terminal-rest-height', `${height - growth}px`);
     });
 
     resizeObserver.observe(terminal);
