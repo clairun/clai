@@ -449,6 +449,8 @@ pub fn run() {
             commands::assistant::assistant_delete_queued_message,
             commands::assistant::assistant_edit_queued_message,
             commands::assistant::assistant_submit_user_input,
+            commands::assistant::assistant_list_pending_asks,
+            commands::fleet::fleet_snapshot,
             commands::assistant::assistant_cancel_run,
             // App-level agent library and workspace assignments.
             commands::global_agents::agent_definitions_list,

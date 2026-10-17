@@ -244,6 +244,15 @@ pub async fn get_session(
     row.as_ref().map(map_session_row).transpose()
 }
 
+/// When any session in this workspace database was last touched (a message,
+/// a run start, or an explicit touch), or `None` when it has no sessions.
+pub async fn last_session_activity(pool: &DbPool) -> Result<Option<i64>, String> {
+    sqlx::query_scalar("SELECT MAX(updated_at) FROM assistant_sessions")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("Failed to read session activity: {}", e))
+}
+
 /// Canonical conversation session for a workspace manager: the newest session
 /// whose `automationId` is `manager_id`, excluding sessions
 /// linked from `workspace_tasks.session_id` (a self-assigned task carries the
