@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter } from 'react-router';
 
 import FleetPage from './FleetPage';
@@ -96,6 +96,21 @@ describe('FleetPage', () => {
     press(true);
     expect(useFleetStore.getState().selectedId).toBe('c');
     expect(screen.getByRole('main', { name: 'Fleet' })).toBeInTheDocument();
+  });
+
+  it('renders the last message as markdown, after the events it followed', async () => {
+    fleetSnapshot.mockResolvedValue([
+      {
+        ...workspace('a', 'Alpha'),
+        tasks: [{ id: 't1', title: 'Research', status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Main', assignedAgentDefinitionId: 'def-m' } as never],
+        lastAssistantMessage: { messageId: 'm1', text: 'Shipped **v2**', truncated: false, createdAt: 2n },
+      },
+    ]);
+    renderFleet();
+    const bold = await screen.findByText('v2');
+    expect(bold.tagName).toBe('STRONG');
+    const rows = within(screen.getByRole('list', { name: 'Activity' })).getAllByRole('listitem');
+    expect(rows.map((row) => row.textContent)).toEqual([expect.stringContaining('Research'), expect.stringContaining('Shipped v2')]);
   });
 
   it('deselects on Escape, from the terminal too, and on a click on the empty grid', async () => {

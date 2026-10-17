@@ -341,7 +341,7 @@ export const cardPhase = (card: FleetCard, live: FleetLive): FleetPhase => {
   return workspaceTasks(card, live).some((t) => isTaskLive(t.status)) ? 'working' : 'stopped';
 };
 
-export type FleetItemTone = 'attention' | 'live' | 'done' | 'failed';
+export type FleetItemTone = 'attention' | 'live' | 'done' | 'failed' | 'note';
 
 export interface FleetItem {
   key: string;
@@ -352,9 +352,11 @@ export interface FleetItem {
   tone: FleetItemTone;
   agents: { name: string; seed: string }[];
   at: number;
+  /** Set on a chat message; its `text` is markdown. */
+  note?: 'user' | 'assistant';
 }
 
-const TONE_RANK: Record<FleetItemTone, number> = { attention: 0, live: 1, failed: 2, done: 2 };
+const TONE_RANK: Record<FleetItemTone, number> = { attention: 0, live: 1, failed: 2, done: 2, note: 2 };
 
 const agentOf = (task: WorkspaceTaskResponse) => ({
   name: task.assignedAgentDisplayName,
@@ -395,8 +397,9 @@ const OPEN_STATUS: Record<FleetRequest['kind'], string> = {
 
 /**
  * Every live item plus the `HISTORY_LIMIT` newest resolved ones, in reading
- * order like a chat: history oldest first, then work in progress, then what
- * needs the user, so the bottom of the card is always the most current.
+ * order like a chat: history and the visible messages oldest first, then work
+ * in progress, then what needs the user, so the bottom of the card is always
+ * the most current.
  */
 export const cardItems = (card: FleetCard, live: FleetLive): FleetItem[] => {
   const items: FleetItem[] = taskItems(workspaceTasks(card, live));
@@ -413,9 +416,12 @@ export const cardItems = (card: FleetCard, live: FleetLive): FleetItem[] => {
   }
   items.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone] || b.at - a.at);
   const liveCount = items.filter((i) => TONE_RANK[i.tone] < 2).length;
-  return items
-    .slice(0, liveCount + HISTORY_LIMIT)
-    .sort((a, b) => TONE_RANK[b.tone] - TONE_RANK[a.tone] || a.at - b.at);
+  const shown = items.slice(0, liveCount + HISTORY_LIMIT);
+  const notes = [['user', card.userMessage], ['assistant', visibleLastMessage(card, live)]] as const;
+  for (const [note, message] of notes) {
+    if (message) shown.push({ key: `${note}:${message.id}`, text: message.text, status: '', tone: 'note', agents: [], at: message.at, note });
+  }
+  return shown.sort((a, b) => TONE_RANK[b.tone] - TONE_RANK[a.tone] || a.at - b.at);
 };
 
 /** The last assistant message, only once the workspace has stopped. */

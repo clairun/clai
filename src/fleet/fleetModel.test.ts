@@ -208,6 +208,22 @@ describe('fleet reducer', () => {
     expect(cardPhase(asking, { runs: { [WS]: ['r'] }, tasks: {} })).toBe('waiting');
   });
 
+  it('places the visible messages among the events by time, the newest last', () => {
+    const done = withTasks(task('t1', 'completed', 1), task('t2', 'completed', 4));
+    const reply = (at: number) =>
+      apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'All done.') } }, at));
+    expect(cardItems(card(reply(5)), done).map((i) => i.key)).toEqual(['task:t1', 'task:t2', 'assistant:a1']);
+    expect(cardItems(card(reply(2)), done).map((i) => i.key)).toEqual(['task:t1', 'assistant:a1', 'task:t2']);
+    expect(cardItems(card(reply(5)), done).at(-1)).toMatchObject({ note: 'assistant', text: 'All done.', at: 5 });
+    // Live work and open requests stay below; the user's message sits by time among the history.
+    const sent = applyUserSent(EMPTY_FLEET, WS, MAIN, message('u1', 'user', 'Deploy'), 3);
+    expect(cardItems(card(sent), withTasks(task('t1', 'completed', 1), task('t2', 'running', 2))).map((i) => i.key)).toEqual([
+      'task:t1',
+      'user:u1',
+      'task:t2',
+    ]);
+  });
+
   it('shows the last assistant message only once the workspace has stopped', () => {
     const s = apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'All done.') } }, 3));
     expect(visibleLastMessage(card(s), { runs: { [WS]: ['r'] }, tasks: {} })).toBeNull();

@@ -2,11 +2,11 @@ import { memo, useMemo } from 'react';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { GENERATOR_VERSION, type AgentIdentity } from '../Agents/agentIdentity';
 import pillStyles from '../Agents/taskStatus.module.css';
+import MarkdownMessage from '../Chat/MarkdownMessage';
 import {
   cardAttention,
   cardItems,
   cardPhase,
-  visibleLastMessage,
   type FleetAttention,
   type FleetCard as FleetCardModel,
   type FleetItem,
@@ -36,6 +36,17 @@ const eventTime = (at: number): string => {
     ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
     : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 };
+
+/** A chat message: a few clamped lines of markdown. */
+const NoteRow = ({ item }: { item: FleetItem }) => (
+  <li className={styles.note}>
+    {item.note === 'user' && <span className={styles.userMessageLabel}>You</span>}
+    <div className={styles.noteBody}>
+      <MarkdownMessage content={item.text} />
+    </div>
+    <time className={styles.itemTime}>{eventTime(item.at)}</time>
+  </li>
+);
 
 const ItemRow = ({ item, faces }: { item: FleetItem; faces: Record<string, AgentIdentity> }) => (
   <li className={`${styles.item} ${styles[`tone_${item.tone}`]}`}>
@@ -77,7 +88,6 @@ const FleetCard = ({ card, live, faces, onSelect }: FleetCardProps) => {
   const phase = cardPhase(card, live);
   const attention = cardAttention(card);
   const items = useMemo(() => cardItems(card, live), [card, live]);
-  const body = visibleLastMessage(card, live)?.text;
   const title = card.title || 'Workspace';
 
   return (
@@ -103,16 +113,10 @@ const FleetCard = ({ card, live, faces, onSelect }: FleetCardProps) => {
           {phaseLabel(phase, attention)}
         </span>
       </header>
-      {card.userMessage && (
-        <p className={styles.userMessage}>
-          <span className={styles.userMessageLabel}>You</span> {card.userMessage.text}
-        </p>
-      )}
-      {body && <p className={styles.lastMessage}>{body}</p>}
       {items.length > 0 && (
         <ul className={styles.items} aria-label="Activity">
           {items.map((item) => (
-            <ItemRow key={item.key} item={item} faces={faces} />
+            item.note ? <NoteRow key={item.key} item={item} /> : <ItemRow key={item.key} item={item} faces={faces} />
           ))}
         </ul>
       )}
