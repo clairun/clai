@@ -33,6 +33,12 @@ interface InlinePathGrantCardProps {
    * no scrolling into view. The caller drops it on its `resolved` event.
    */
   request?: PathGrantRequest;
+  /**
+   * For a small Fleet card: no badge or collapse, the path and access on one
+   * line, the reason as one muted line, decision chips. The warnings stay;
+   * narrowing the path is left to the full card.
+   */
+  compact?: boolean;
 }
 
 // Paths that historically hold credentials or secrets. Surfacing this in
@@ -90,7 +96,7 @@ const accessLabel = (access: PathAccess): string =>
  *   - enforces the narrowing invariants client-side (no widening, no
  *     upgrading RO→RW) so the user never gets a confusing backend rejection.
  */
-const InlinePathGrantCard = ({ workspaceId, request }: InlinePathGrantCardProps) => {
+const InlinePathGrantCard = ({ workspaceId, request, compact = false }: InlinePathGrantCardProps) => {
   const [requests, setRequests] = useState<PathGrantRequest[]>([]);
   const [perCardState, setPerCardState] = useState<Record<string, PathGrantCardState>>({});
   const [submittingId, setSubmittingId] = useState<string | null>(null);
@@ -258,14 +264,17 @@ const InlinePathGrantCard = ({ workspaceId, request }: InlinePathGrantCardProps)
   }
 
   return (
-    <div className={styles.stack} aria-live="polite">
+    <div className={compact ? `${styles.stack} ${styles.stackCompact}` : styles.stack} aria-live="polite">
       {requests.map((req, cardIndex) => {
         const card = perCardState[req.requestId] || {
           path: req.requestedPath,
           access: req.requestedAccess,
         };
         const isSubmitting = submittingId === req.requestId;
-        const isCollapsed = collapsedIds.has(req.requestId);
+        const isCollapsed = !compact && collapsedIds.has(req.requestId);
+        // Compact chips carry the short label; the tooltip the full one.
+        const chipText = (full: string, short: string, why?: string) =>
+          compact ? { title: why ? `${full}. ${why}` : full, children: short } : { title: why, children: full };
 
         // Validation: edited path must be the original or a descendant
         // (component-wise prefix). Edited access must be no stronger
@@ -288,9 +297,10 @@ const InlinePathGrantCard = ({ workspaceId, request }: InlinePathGrantCardProps)
           <article
             key={req.requestId}
             ref={cardIndex === 0 ? firstCardRef : null}
-            className={styles.card}
+            className={compact ? `${styles.card} ${styles.compact}` : styles.card}
             aria-label="Path grant requested"
           >
+            {!compact && (
             <header className={styles.cardHeader}>
               <div className={styles.cardHeaderLeft}>
                 <span className={styles.tag}>Path access requested</span>
@@ -311,11 +321,24 @@ const InlinePathGrantCard = ({ workspaceId, request }: InlinePathGrantCardProps)
                 {isCollapsed ? '▸' : '▾'}
               </button>
             </header>
+            )}
 
             {isCollapsed ? (
               <div className={styles.collapsedSummary}>{card.path}</div>
             ) : (
               <div className={styles.cardBody}>
+            {compact ? (
+              <>
+                <div className={styles.compactTarget} title={`${card.path} (${accessLabel(card.access)})`}>
+                  <code>{card.path}</code>
+                  <span>{accessLabel(card.access)}</span>
+                </div>
+                <div className={styles.compactReason} title={req.reason || undefined}>
+                  {req.reason || '(no reason given)'}
+                </div>
+              </>
+            ) : (
+              <>
             <div className={styles.reasonBlock}>
               <span className={styles.reasonLabel}>Reason from agent:</span>
               <div className={styles.reasonText}>{req.reason || '(no reason given)'}</div>
@@ -380,6 +403,8 @@ const InlinePathGrantCard = ({ workspaceId, request }: InlinePathGrantCardProps)
                 </span>
               </div>
             </section>
+              </>
+            )}
 
             {(sensitive || overlyBroad) && (
               <div className={styles.warningStack}>
@@ -407,10 +432,8 @@ const InlinePathGrantCard = ({ workspaceId, request }: InlinePathGrantCardProps)
                   sendDecision(req.requestId, allowOnceDecision(card.path.trim(), card.access))
                 }
                 disabled={!canSubmit}
-                title="Grant for the rest of this run only. Vanishes when the run ends."
-              >
-                Allow once
-              </button>
+                {...chipText('Allow once', 'Once', 'Grant for the rest of this run only. Vanishes when the run ends.')}
+              />
               <button
                 type="button"
                 className={`${styles.btn} ${styles.btnAllowAlways}`}
@@ -418,18 +441,19 @@ const InlinePathGrantCard = ({ workspaceId, request }: InlinePathGrantCardProps)
                   sendDecision(req.requestId, allowAlwaysDecision(card.path.trim(), card.access))
                 }
                 disabled={!canSubmit}
-                title="Add to this agent's permanent grant list. Survives across runs."
-              >
-                Always allow (this agent)
-              </button>
+                {...chipText(
+                  'Always allow (this agent)',
+                  'Always',
+                  "Add to this agent's permanent grant list. Survives across runs."
+                )}
+              />
               <button
                 type="button"
                 className={`${styles.btn} ${styles.btnDeny}`}
                 onClick={() => sendDecision(req.requestId, denyDecision())}
                 disabled={isSubmitting}
-              >
-                Deny
-              </button>
+                {...chipText('Deny', 'Deny')}
+              />
             </div>
 
             {error && submittingId === null && (

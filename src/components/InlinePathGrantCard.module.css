@@ -295,3 +295,70 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ── Compact (a small Fleet card): flat, one line each, warnings kept ── */
+.stackCompact {
+  padding: 0;
+  gap: 6px;
+}
+
+.compact {
+  padding: 0;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.compact .cardBody {
+  gap: 6px;
+  max-height: none;
+  overflow: visible;
+}
+
+.compactTarget {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+.compactTarget code {
+  min-width: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compactTarget span {
+  flex-shrink: 0;
+}
+
+.compactReason {
+  font-size: 12px;
+  color: var(--color-text-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compact .warning {
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.compact .buttonRow {
+  gap: 4px;
+}
+
+.compact .btn {
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  line-height: 18px;
+}

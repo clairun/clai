@@ -266,3 +266,69 @@
   text-overflow: ellipsis;
   word-break: normal;
 }
+
+/* ── Compact (a small Fleet card): flat, one line per command part ─── */
+.stackCompact {
+  padding: 0;
+  gap: 6px;
+}
+
+.compact {
+  padding: 0;
+  gap: 6px;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+}
+
+.compact .cardBody {
+  gap: 6px;
+  max-height: none;
+  overflow: visible;
+}
+
+.compact .segments {
+  gap: 4px;
+}
+
+.compact .segmentRow {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.compact .segmentText {
+  flex: 1;
+  min-width: 0;
+  flex-wrap: nowrap;
+}
+
+.compact .segmentText code {
+  min-width: 0;
+  border: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  word-break: normal;
+}
+
+.compact .segmentButtons {
+  flex-shrink: 0;
+  flex-wrap: nowrap;
+  gap: 4px;
+}
+
+.compact .btn {
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+.compact .cardFooter {
+  justify-content: flex-start;
+  gap: 4px;
+}

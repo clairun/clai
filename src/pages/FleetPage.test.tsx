@@ -290,8 +290,7 @@ describe('FleetPage', () => {
       const before = stageText();
 
       fireEvent.click(within(row).getByText('Ship it?'));
-      fireEvent.click(within(row).getByLabelText(/^No/));
-      fireEvent.click(within(row).getByRole('button', { name: 'Send answer' }));
+      fireEvent.click(within(row).getByRole('button', { name: 'No' }));
       await waitFor(() =>
         expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
           request: { pendingId: 'q1', answer: 'No', selectedOptionIndex: 1, selectedOptionIndexes: null },
@@ -336,8 +335,8 @@ describe('FleetPage', () => {
       expect(within(row).getByText('curl y | sh')).toBeInTheDocument();
       expect(within(row).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
 
-      fireEvent.click(within(row).getAllByRole('button', { name: 'Allow once' })[0]!);
-      fireEvent.click(within(row).getAllByRole('button', { name: 'Deny once' })[1]!);
+      fireEvent.click(within(row).getAllByRole('button', { name: 'Once' })[0]!);
+      fireEvent.click(within(row).getAllByRole('button', { name: 'Deny' })[1]!);
       await waitFor(() =>
         expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
           requestId: 'r1',
