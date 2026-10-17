@@ -382,6 +382,50 @@ mod tests {
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].workspace_id, BUSY);
 
+        // Each kind of wait alone keeps IDLE past the limit.
+        let kept = |top: Vec<FleetWorkspace>| {
+            top.iter()
+                .map(|w| w.workspace_id.clone())
+                .collect::<Vec<_>>()
+        };
+        let waiting = vec![BUSY.to_string(), IDLE.to_string()];
+
+        let approval = PermissionRequest {
+            persists_to_shared_agent: false,
+            also_affects_workspaces: Vec::new(),
+            request_id: "approval".to_string(),
+            workspace_id: Some(IDLE.to_string()),
+            agent_id: None,
+            agent_name: None,
+            command: "cmd".to_string(),
+            segments: Vec::new(),
+        };
+        let _waiting = state
+            .pending_approvals
+            .register(approval, "run".to_string())
+            .await;
+        let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
+        assert_eq!(kept(top), waiting, "a pending approval");
+        state
+            .pending_approvals
+            .purge_workspace_canceling_runs(IDLE, |_| {})
+            .await;
+
+        let ask = ask_user::register_for_test(PendingAsk {
+            pending_id: "fleet-ask".to_string(),
+            workspace_id: IDLE.to_string(),
+            session_id: "session".to_string(),
+            run_id: "run".to_string(),
+            question: "?".to_string(),
+            options: None,
+            multi_select: false,
+            extra_context: None,
+            requested_at: 0,
+        });
+        let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
+        assert_eq!(kept(top), waiting, "a pending question");
+        drop(ask);
+
         let grant = PathGrantRequest {
             request_id: "grant".to_string(),
             workspace_id: Some(IDLE.to_string()),
@@ -396,13 +440,7 @@ mod tests {
             .register(grant, "run".to_string())
             .await;
         let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
-        assert_eq!(
-            top.iter()
-                .map(|w| w.workspace_id.as_str())
-                .collect::<Vec<_>>(),
-            vec![BUSY, IDLE],
-            "a workspace waiting on the user stays past the limit"
-        );
         assert_eq!(top[1].pending_path_grants.len(), 1);
+        assert_eq!(kept(top), waiting, "a pending path grant");
     }
 }

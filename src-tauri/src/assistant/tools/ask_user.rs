@@ -179,6 +179,13 @@ impl Drop for PendingRegistration {
     }
 }
 
+/// Keeps `ask` pending until the returned guard is dropped.
+#[cfg(test)]
+pub(crate) fn register_for_test(ask: PendingAsk) -> impl Drop {
+    let (tx, _rx) = oneshot::channel();
+    PendingRegistration::insert(PendingEntry { ask, tx }).expect("register ask")
+}
+
 /// Deliver an answer to a waiting `ask_user` invocation. Called from the
 /// `assistant_submit_user_input` Tauri command after the user submits
 /// the inline answer block.
