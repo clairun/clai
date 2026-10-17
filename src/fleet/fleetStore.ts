@@ -21,7 +21,6 @@ import {
   applyAssistantEvent,
   applyRequest,
   applyRequestResolved,
-  applyTitles,
   applyUserSent,
   isFleetEvent,
   seedFleet,
@@ -50,7 +49,6 @@ interface FleetStoreState {
   resolveRequest: (kind: FleetRequestKind, requestId: string) => void;
   /** The user sent `message` on `sessionId`, or cleared the chat into it (`message` null). */
   noteUserSent: (workspaceId: string, sessionId: string, message: AssistantMessage | null) => void;
-  setTitles: (titles: Record<string, string>) => void;
   loadSnapshot: () => Promise<void>;
   select: (workspaceId: string | null) => void;
 }
@@ -89,22 +87,31 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
     const at = Date.now();
     get().dispatch((s) => applyUserSent(s, workspaceId, sessionId, message, at));
   },
-  setTitles: (titles) => get().dispatch((s) => applyTitles(s, titles)),
 
   loadSnapshot: async () => {
     if (get().buffer) return;
     const buffer: Reducer[] = [];
     set({ buffer });
+    const runsBefore = useFleetActivityStore.getState().activeRunsByWorkspace;
     let seeded: Reducer = (s) => s;
     let loadError: string | null = null;
     try {
       const snapshot = await fleetSnapshot(SNAPSHOT_LIMIT);
       const now = Date.now();
       const { seedTasks } = useTaskStore.getState();
-      const { setRuns } = useFleetActivityStore.getState();
+      const { setRuns, activeRunsByWorkspace: runsNow } = useFleetActivityStore.getState();
       for (const ws of snapshot) {
         seedTasks(ws.workspaceId, ws.tasks);
-        setRuns(ws.workspaceId, ws.activeRunIds);
+        // A run that started or ended while the snapshot loaded is newer than the snapshot.
+        const before = runsBefore[ws.workspaceId] ?? [];
+        const current = runsNow[ws.workspaceId] ?? [];
+        const ids = new Set([...ws.activeRunIds, ...current]);
+        setRuns(
+          ws.workspaceId,
+          [...ids].filter((id) =>
+            before.includes(id) !== current.includes(id) ? current.includes(id) : ws.activeRunIds.includes(id)
+          )
+        );
       }
       seeded = (s) => seedFleet(s, snapshot, now);
     } catch (err) {
@@ -112,7 +119,16 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
     }
     const fleet = buffer.reduce((s, reducer) => reducer(s), seeded(get().fleet));
     const now = Date.now();
-    set({ fleet, now, buffer: null, loadedAt: now, loadError });
+    // A selected card that is gone (deleted, or no longer recent) leaves nothing selected.
+    const { selectedId } = get();
+    set({
+      fleet,
+      now,
+      buffer: null,
+      loadedAt: now,
+      loadError,
+      selectedId: selectedId && fleet.cards[selectedId] ? selectedId : null,
+    });
   },
 
   select: (workspaceId) => set({ selectedId: workspaceId, now: Date.now() }),

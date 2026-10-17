@@ -15,7 +15,7 @@ import {
 } from '../workspace/client';
 import WorkspaceRail from '../components/Fleet/WorkspaceRail';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
-import AppHeaderActions from '../components/AppHeaderActions';
+import AppTopBar from '../components/AppTopBar';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ProgressDialog from '../components/ProgressDialog';
 import { useFleetActivity } from '../hooks/useFleetActivity';
@@ -443,37 +443,20 @@ const FleetLayout = () => {
 
   return (
     <div className={styles.layout}>
-      <div className={styles.topBar}>
-        <img src="/icon.svg" alt="Clai" className={styles.brandIcon} />
-        <button
-          type="button"
-          className={styles.fleetButton}
-          onClick={() => navigate('/fleet')}
-          title="Back to the Fleet"
-        >
-          Fleet
-        </button>
-        <div className={styles.counters} role="status" aria-label="Fleet summary">
-          <span className={styles.counterChip}>
-            <strong>{counters.total}</strong> workspace{counters.total === 1 ? '' : 's'}
-          </span>
-          <span className={styles.counterSep}>·</span>
-          <span className={styles.counterChip}>
-            <strong>{counters.periodic}</strong> periodic
-          </span>
-          <span className={styles.counterSep}>·</span>
-          <span className={styles.counterChip}>
-            <strong>{counters.running}</strong> running
-          </span>
-          <span className={styles.counterSep}>·</span>
-          <span
-            className={`${styles.counterChip} ${counters.attention > 0 ? styles.counterChipAttention : ''}`}
-          >
-            <strong>{counters.attention}</strong> need attention
-          </span>
-        </div>
-        <AppHeaderActions />
-      </div>
+      <AppTopBar nav={{ label: 'Fleet', to: '/fleet' }}>
+        <span>
+          <strong>{counters.total}</strong> workspace{counters.total === 1 ? '' : 's'}
+        </span>
+        <span>
+          <strong>{counters.periodic}</strong> periodic
+        </span>
+        <span>
+          <strong>{counters.running}</strong> running
+        </span>
+        <span data-attention={counters.attention > 0 || undefined}>
+          <strong>{counters.attention}</strong> need attention
+        </span>
+      </AppTopBar>
 
       <div className={styles.body} ref={bodyRef}>
         {(error || flash) && (

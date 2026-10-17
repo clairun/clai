@@ -13,7 +13,6 @@ import {
   applyAssistantEvent,
   applyRequest,
   applyRequestResolved,
-  applyTitles,
   applyUserSent,
   cardAttention,
   cardItems,
@@ -186,6 +185,19 @@ describe('fleet reducer', () => {
     expect(items[0]!.agents.map((a) => a.name)).toEqual(['Researcher', 'Writer']);
   });
 
+  it('labels tasks the way the rest of the app does', () => {
+    const live = withTasks(
+      task('done', 'completed', 3),
+      task('lost', 'failed', 2, { failureReason: 'restart' }),
+      task('stuck', 'failed', 1, { failureReason: 'blocked' }),
+    );
+    expect(cardItems(emptyCard(WS), live).map((i) => [i.status, i.statusKey])).toEqual([
+      ['Completed', 'completed'],
+      ['Failed · interrupted', 'failed'],
+      ['Blocked', 'blocked'],
+    ]);
+  });
+
   it('is working while any run of the workspace or any task is live, and waiting while anything is open', () => {
     const c = emptyCard(WS);
     expect(cardPhase(c, NO_LIVE)).toBe('stopped');
@@ -229,9 +241,9 @@ describe('snapshot', () => {
     const c = card(s);
     expect(c.title).toBe('Infra');
     expect(c.mainSessionId).toBe(MAIN);
-    expect(c.asks.stale!.resolvedAt).toBe(50);
-    expect(c.asks.kept).toMatchObject({ at: 3, resolvedAt: null });
-    expect(c.asks.new).toMatchObject({ at: 7, resolvedAt: null });
+    expect(c.requests['ask:stale']!.resolvedAt).toBe(50);
+    expect(c.requests['ask:kept']).toMatchObject({ at: 3, resolvedAt: null });
+    expect(c.requests['ask:new']).toMatchObject({ kind: 'ask', text: '?', at: 7, resolvedAt: null });
     expect(c.requests['approval:gone']!.resolvedAt).toBe(50);
     // A request has no timestamp of its own: it takes the workspace's activity.
     expect(c.requests['grant:g1']).toMatchObject({ at: 10, resolvedAt: null });
@@ -252,12 +264,10 @@ describe('snapshot', () => {
     expect(card(s).lastMessage?.text).toBe('live');
   });
 
-  it('titles come from the workspace list, which also drops deleted workspaces', () => {
-    const s = apply(EMPTY_FLEET, askEvent('q', 1), env({ type: 'run_started', payload: { run: run('r') } }, 2, 's', 'deleted'));
-    const next = applyTitles(s, { [WS]: 'Infra' });
-    expect(Object.keys(next.cards)).toEqual([WS]);
-    expect(card(next).title).toBe('Infra');
-    expect(applyTitles(next, { [WS]: 'Infra' })).toBe(next);
+  it("takes the snapshot's main session over the held one, and keeps the held one when the snapshot has none", () => {
+    const held = applyUserSent(EMPTY_FLEET, WS, 'cleared-into', null, 1);
+    expect(card(seedFleet(held, [snapshotOf()], 50)).mainSessionId).toBe(MAIN);
+    expect(card(seedFleet(held, [snapshotOf({ mainSessionId: null })], 50)).mainSessionId).toBe('cleared-into');
   });
 });
 
@@ -269,7 +279,7 @@ describe('card placement', () => {
     ...patch,
   });
   const waitingCard = (id: string, lastActivityAt: number, since = lastActivityAt) =>
-    mk(id, lastActivityAt, { asks: { q: { pendingId: 'q', sessionId: 's', question: '?', options: null, multiSelect: false, extraContext: null, at: since, resolvedAt: null } } });
+    mk(id, lastActivityAt, { requests: { 'ask:q': { kind: 'ask', text: '?', agentName: null, at: since, resolvedAt: null } } });
   const ids = (placed: { id: string }[]) => placed.map((p) => p.id);
   const place = (cards: FleetCard[], cols: number, rows: number, selectedId: string | null = null, prevOrder: string[] = [], live = NO_LIVE) =>
     placeCards(cards, { now: NOW, capacity: { cols, rows }, selectedId, prevOrder, live });

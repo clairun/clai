@@ -122,7 +122,7 @@ describe('FleetLayout attention', () => {
     try {
       renderFleet();
       await screen.findByText('Alpha');
-      expect(screen.getByRole('status', { name: 'Fleet summary' })).toHaveTextContent('1 need attention');
+      expect(screen.getByRole('status', { name: 'Summary' })).toHaveTextContent('1 need attention');
     } finally {
       permissionAttention.counts = {};
     }

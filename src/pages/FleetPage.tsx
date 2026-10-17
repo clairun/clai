@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router';
-import AppHeaderActions from '../components/AppHeaderActions';
+import AppTopBar from '../components/AppTopBar';
 import FleetGrid from '../components/FleetPage/FleetGrid';
 import styles from '../components/FleetPage/FleetPage.module.css';
 import {
@@ -15,7 +14,6 @@ import {
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
-import { listWorkspaces } from '../workspace/client';
 
 const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
 
@@ -46,14 +44,12 @@ function useBoxSize(ref: React.RefObject<HTMLElement | null>) {
  * grows into the workspace's chat and the terminal talks to it.
  */
 const FleetPage = () => {
-  const navigate = useNavigate();
   const cards = useFleetStore((s) => s.fleet.cards);
   const now = useFleetStore((s) => s.now);
   const selectedId = useFleetStore((s) => s.selectedId);
   const select = useFleetStore((s) => s.select);
   const loadedAt = useFleetStore((s) => s.loadedAt);
   const loadError = useFleetStore((s) => s.loadError);
-  const setTitles = useFleetStore((s) => s.setTitles);
   const runs = useFleetActivityStore((s) => s.activeRunsByWorkspace);
   const tasks = useTaskStore((s) => s.tasks);
   const live: FleetLive = useMemo(() => ({ runs, tasks }), [runs, tasks]);
@@ -87,14 +83,11 @@ const FleetPage = () => {
   if (placedIds.join(',') !== order.join(',')) setOrder(placedIds);
 
   // Cards born from live events (or a workspace just created here) have no
-  // title yet: fetch the list once per new set of untitled cards.
+  // title yet: the snapshot has it, once per new set of untitled cards.
   const untitled = placed.filter((p) => !cards[p.id]?.title).map((p) => p.id).join(',');
   useEffect(() => {
-    if (!untitled) return;
-    listWorkspaces()
-      .then((list) => setTitles(Object.fromEntries(list.map((ws) => [ws.id, ws.title]))))
-      .catch(() => {});
-  }, [untitled, setTitles]);
+    if (untitled) void useFleetStore.getState().loadSnapshot();
+  }, [untitled]);
 
   // Every card counts, placed or not, so waiting work that doesn't fit still shows here.
   const counts = useMemo(() => {
@@ -112,22 +105,14 @@ const FleetPage = () => {
 
   return (
     <div className={styles.page}>
-      <header className={styles.topBar}>
-        <img src="/icon.svg" alt="Clai" className={styles.brandIcon} />
-        <h1 className={styles.pageTitle}>Fleet</h1>
-        <div className={styles.counters} role="status">
-          <span>
-            <strong>{counts.working}</strong> working
-          </span>
-          <span className={counts.waiting > 0 ? styles.countersAttention : ''}>
-            <strong>{counts.waiting}</strong> need you
-          </span>
-        </div>
-        <button type="button" className={styles.headerButton} onClick={() => navigate('/workspace')}>
-          Workspaces
-        </button>
-        <AppHeaderActions />
-      </header>
+      <AppTopBar nav={{ label: 'Workspaces', to: '/workspace' }}>
+        <span>
+          <strong>{counts.working}</strong> working
+        </span>
+        <span data-attention={counts.waiting > 0 || undefined}>
+          <strong>{counts.waiting}</strong> need you
+        </span>
+      </AppTopBar>
       <main className={styles.gridArea} ref={gridRef}>
         {loadError && <p className={styles.notice}>{loadError}</p>}
         {placed.length > 0 ? (

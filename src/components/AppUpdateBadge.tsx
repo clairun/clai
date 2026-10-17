@@ -2,7 +2,7 @@
  * AppUpdateBadge Component
  *
  * The app's only update surface: a persistent pill in the top bar of every
- * page (`AppHeaderActions`, on the Fleet and the workspaces page). It stays
+ * page (`AppTopBar`, on the Fleet and the workspaces page). It stays
  * up until the update is applied — deliberately not dismissible, and
  * deliberately not a toast: an update is worth knowing about, never worth
  * interrupting for.

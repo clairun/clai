@@ -51,9 +51,12 @@ export function useFleetChat(
     assistantClient
       .getSession(workspaceId, sessionId)
       .then(async (session) => {
-        if (!session || !(await hydrateSession(workspaceId, session, { isCurrent: () => !cancelled }))) return;
-        void restorePendingAsk(workspaceId, sessionId);
-        setResult({ sessionId, error: null });
+        // A deleted session has nothing to show: settle as empty instead of loading forever.
+        if (session) {
+          if (!(await hydrateSession(workspaceId, session, { isCurrent: () => !cancelled }))) return;
+          void restorePendingAsk(workspaceId, sessionId);
+        }
+        if (!cancelled) setResult({ sessionId, error: null });
       })
       .catch((err) => {
         if (cancelled) return;

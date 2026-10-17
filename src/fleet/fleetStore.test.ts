@@ -38,7 +38,7 @@ const snapshot: FleetWorkspace = {
 
 describe('fleet store snapshot', () => {
   beforeEach(() => {
-    useFleetStore.setState({ fleet: EMPTY_FLEET, buffer: null, loadedAt: null });
+    useFleetStore.setState({ fleet: EMPTY_FLEET, buffer: null, loadedAt: null, selectedId: null });
     useFleetActivityStore.setState({ activeRunsByWorkspace: { ws: ['stale'] } });
     useTaskStore.setState({ tasks: {}, seeded: {} });
   });
@@ -53,7 +53,7 @@ describe('fleet store snapshot', () => {
     await loading;
     const card = useFleetStore.getState().fleet.cards.ws!;
     expect(card.title).toBe('Infra');
-    expect(card.asks.q1!.resolvedAt).toBe(10);
+    expect(card.requests['ask:q1']!.resolvedAt).toBe(10);
     expect(card.lastMessage?.text).toBe('Done');
     expect(useFleetStore.getState().buffer).toBeNull();
   });
@@ -69,6 +69,29 @@ describe('fleet store snapshot', () => {
     resolveSnapshot([{ ...snapshot, activeRunIds: [] }]);
     await reload;
     expect(useFleetActivityStore.getState().activeRunsByWorkspace.ws).toBeUndefined();
+  });
+
+  it('keeps runs that started or ended while the snapshot loaded', async () => {
+    useFleetActivityStore.setState({ activeRunsByWorkspace: { ws: ['stale', 'r1'] } });
+    const loading = useFleetStore.getState().loadSnapshot();
+    useFleetActivityStore.getState().markRunStarted('ws', 'new');
+    useFleetActivityStore.getState().markRunEnded('ws', 'r1');
+    // Read before either event: still reports r1, not yet `new`.
+    resolveSnapshot([snapshot]);
+    await loading;
+    expect(useFleetActivityStore.getState().activeRunsByWorkspace.ws).toEqual(['task-run', 'new']);
+  });
+
+  it('drops the selection when its card is gone after a reload', async () => {
+    let loading = useFleetStore.getState().loadSnapshot();
+    resolveSnapshot([snapshot]);
+    await loading;
+    useFleetStore.getState().select('ws');
+
+    loading = useFleetStore.getState().loadSnapshot();
+    resolveSnapshot([{ ...snapshot, workspaceId: 'other' }]);
+    await loading;
+    expect(useFleetStore.getState().selectedId).toBeNull();
   });
 
   it('ignores streaming events entirely', () => {
