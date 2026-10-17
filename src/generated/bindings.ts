@@ -159,7 +159,8 @@ export type FleetMessagePreview = { messageId: string, text: string, truncated: 
 
 export type FleetWorkspace = { workspaceId: string, title: string, starred: boolean, 
 /**
- * Newest of any session touch and the workspace config's `updated_at`.
+ * When any session (main, task or other) was last touched; 0 when the
+ * workspace has no session yet.
  */
 lastActivityAt: bigint, 
 /**
@@ -167,9 +168,10 @@ lastActivityAt: bigint,
  */
 mainSessionId: string | null, 
 /**
- * The main session's queued or running run.
+ * Queued or running runs in any session of the workspace, not only the
+ * main one; empty when nothing runs.
  */
-activeRunId: string | null, 
+activeRunIds: Array<string>, 
 /**
  * Unfinished tasks plus the most recently finished ones, newest first.
  */

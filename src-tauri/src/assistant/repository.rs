@@ -760,18 +760,21 @@ pub async fn active_run_id(pool: &DbPool, session_id: &str) -> Result<Option<Str
 /// Whether the workspace database contains any non-terminal run. Workspace
 /// deletion uses this as a coarse guard before removing the root directory.
 pub async fn workspace_has_active_run(pool: &DbPool) -> Result<bool, String> {
-    let (count,): (i64,) = sqlx::query_as(&format!(
+    Ok(!workspace_active_run_ids(pool).await?.is_empty())
+}
+
+/// Queued or running runs in any session of this workspace database.
+pub async fn workspace_active_run_ids(pool: &DbPool) -> Result<Vec<String>, String> {
+    sqlx::query_scalar(&format!(
         r#"
-        SELECT COUNT(*)
+        SELECT id
         FROM assistant_runs
         WHERE status IN {ACTIVE_RUN_STATUSES}
         "#
     ))
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
-    .map_err(|e| format!("Failed to check workspace for active runs: {}", e))?;
-
-    Ok(count > 0)
+    .map_err(|e| format!("Failed to check workspace for active runs: {}", e))
 }
 
 pub async fn get_active_run(

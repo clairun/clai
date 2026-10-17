@@ -36,12 +36,14 @@ pub struct FleetWorkspace {
     pub workspace_id: String,
     pub title: String,
     pub starred: bool,
-    /// Newest of any session touch and the workspace config's `updated_at`.
+    /// When any session (main, task or other) was last touched; 0 when the
+    /// workspace has no session yet.
     pub last_activity_at: i64,
     /// The manager's conversation; `None` until someone talks to it.
     pub main_session_id: Option<String>,
-    /// The main session's queued or running run.
-    pub active_run_id: Option<String>,
+    /// Queued or running runs in any session of the workspace, not only the
+    /// main one; empty when nothing runs.
+    pub active_run_ids: Vec<String>,
     /// Unfinished tasks plus the most recently finished ones, newest first.
     pub tasks: Vec<WorkspaceTaskResponse>,
     pub pending_permissions: Vec<PermissionRequest>,
@@ -81,21 +83,33 @@ async fn snapshot(state: &AppState, limit: Option<u32>) -> Result<Vec<FleetWorks
         .map_err(|e| format!("Workspace index lock error: {}", e))?
         .locators_sorted();
 
+    // A workspace whose database can't be opened or read is skipped, so one
+    // broken workspace doesn't blank the whole page.
     let mut ranked = Vec::with_capacity(locators.len());
     for locator in locators {
-        let pool = state.workspace_db(&locator.id).await?;
-        let last_activity_at = repository::last_session_activity(&pool)
-            .await?
-            .unwrap_or(0)
-            .max(locator.updated_at);
-        ranked.push((last_activity_at, locator, pool));
+        let activity = match state.workspace_db(&locator.id).await {
+            Ok(pool) => repository::last_session_activity(&pool)
+                .await
+                .map(|at| (at.unwrap_or(0), pool)),
+            Err(e) => Err(e),
+        };
+        match activity {
+            Ok((last_activity_at, pool)) => ranked.push((last_activity_at, locator, pool)),
+            Err(e) => {
+                tracing::warn!(workspace_id = %locator.id, error = %e, "Fleet skips workspace");
+            }
+        }
     }
     ranked.sort_by_key(|(last_activity_at, ..)| Reverse(*last_activity_at));
     ranked.truncate(limit);
 
     let mut workspaces = Vec::with_capacity(ranked.len());
     for (last_activity_at, locator, pool) in ranked {
-        workspaces.push(workspace_snapshot(state, locator, &pool, last_activity_at).await?);
+        let id = locator.id.clone();
+        match workspace_snapshot(state, locator, &pool, last_activity_at).await {
+            Ok(workspace) => workspaces.push(workspace),
+            Err(e) => tracing::warn!(workspace_id = %id, error = %e, "Fleet skips workspace"),
+        }
     }
     Ok(workspaces)
 }
@@ -107,12 +121,9 @@ async fn workspace_snapshot(
     last_activity_at: i64,
 ) -> Result<FleetWorkspace, String> {
     let main_session = repository::find_manager_session(pool, &locator.default_agent_id).await?;
-    let (active_run_id, last_assistant_message) = match &main_session {
-        Some(session) => (
-            repository::active_run_id(pool, &session.id).await?,
-            last_assistant_message(pool, &session.id).await?,
-        ),
-        None => (None, None),
+    let last_assistant_message = match &main_session {
+        Some(session) => last_assistant_message(pool, &session.id).await?,
+        None => None,
     };
 
     let rows = workspace_tasks_repo::list_open_and_recent_tasks(
@@ -146,7 +157,7 @@ async fn workspace_snapshot(
         starred: locator.starred_at > 0,
         last_activity_at,
         main_session_id: main_session.map(|session| session.id),
-        active_run_id,
+        active_run_ids: repository::workspace_active_run_ids(pool).await?,
         tasks,
         last_assistant_message,
     })
@@ -183,12 +194,15 @@ fn preview(message: &AssistantMessage) -> Option<FleetMessagePreview> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::types::{ContentPart, RunStatus, RunTrigger, SessionContext};
+    use crate::assistant::types::{
+        AssistantRun, ContentPart, RunStatus, RunTrigger, SessionContext,
+    };
     use crate::config::{workspace_config, AppConfig, WorkspaceConfig};
     use crate::workspace_index::WorkspaceIndex;
 
     const BUSY: &str = "11111111-1111-4111-8111-111111111111";
     const IDLE: &str = "22222222-2222-4222-8222-222222222222";
+    const BROKEN: &str = "44444444-4444-4444-8444-444444444444";
     const MANAGER: &str = "33333333-3333-4333-8333-333333333333";
 
     fn state_with(workspaces: &[&str], temp: &tempfile::TempDir) -> AppState {
@@ -196,8 +210,14 @@ mod tests {
         let mut index = WorkspaceIndex::default();
         for (n, id) in workspaces.iter().enumerate() {
             let root = parent.join(id);
-            let config =
-                WorkspaceConfig::new(id.to_string(), format!("ws {n}"), 1, MANAGER.to_string());
+            // Config edits aren't activity: IDLE's are the newest of all.
+            let edited_at = if *id == IDLE { i64::MAX / 2 } else { 1 };
+            let config = WorkspaceConfig::new(
+                id.to_string(),
+                format!("ws {n}"),
+                edited_at,
+                MANAGER.to_string(),
+            );
             workspace_config::save(&root, &config).expect("seed workspace");
             index.insert_config(root, &config);
         }
@@ -242,10 +262,30 @@ mod tests {
         .expect("message");
     }
 
+    async fn start_run(pool: &DbPool, session_id: &str, status: RunStatus) -> AssistantRun {
+        repository::create_run(
+            pool,
+            repository::CreateRunParams {
+                session_id: session_id.to_string(),
+                status,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "conn".to_string(),
+                protocol_id: "proto".to_string(),
+                model_id: "model".to_string(),
+                error: None,
+            },
+        )
+        .await
+        .expect("run")
+    }
+
     #[tokio::test]
     async fn snapshot_ranks_by_session_activity_and_bounds_its_payload() {
         let temp = tempfile::tempdir().expect("temp dir");
-        let state = state_with(&[BUSY, IDLE], &temp);
+        let state = state_with(&[BUSY, IDLE, BROKEN], &temp);
+        // A directory where the database file belongs: BROKEN can't open.
+        let broken_root = temp.path().join("workspaces").join(BROKEN);
+        std::fs::create_dir_all(workspace_config::data_path(&broken_root)).expect("block db");
         let pool = state.workspace_db(BUSY).await.expect("db");
 
         let session = repository::create_session(
@@ -268,20 +308,11 @@ mod tests {
         .await;
         // A newer text-less reply is skipped, not shown as an empty preview.
         assistant_message(&pool, &session.id, Vec::new()).await;
-        let run = repository::create_run(
-            &pool,
-            repository::CreateRunParams {
-                session_id: session.id.clone(),
-                status: RunStatus::Running,
-                trigger: RunTrigger::UserMessage,
-                connection_id: "conn".to_string(),
-                protocol_id: "proto".to_string(),
-                model_id: "model".to_string(),
-                error: None,
-            },
-        )
-        .await
-        .expect("run");
+        let run = start_run(&pool, &session.id, RunStatus::Running).await;
+        let other_session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .expect("other session");
+        let other_run = start_run(&pool, &other_session.id, RunStatus::Queued).await;
         for n in 0..(OPEN_TASK_LIMIT + 3) {
             insert_task(&pool, &format!("open-{n}"), "running", 100 + n).await;
         }
@@ -296,11 +327,15 @@ mod tests {
                 .map(|w| w.workspace_id.as_str())
                 .collect::<Vec<_>>(),
             vec![BUSY, IDLE],
-            "the workspace with session activity ranks first"
+            "session activity ranks, config edits don't, and BROKEN is skipped"
         );
         let busy = &snapshot[0];
         assert_eq!(busy.main_session_id.as_deref(), Some(session.id.as_str()));
-        assert_eq!(busy.active_run_id.as_deref(), Some(run.id.as_str()));
+        let mut run_ids = busy.active_run_ids.clone();
+        run_ids.sort();
+        let mut expected = vec![run.id.clone(), other_run.id.clone()];
+        expected.sort();
+        assert_eq!(run_ids, expected, "runs in every session count");
         assert!(busy.last_activity_at >= session.created_at);
 
         let open = busy
@@ -325,7 +360,8 @@ mod tests {
         assert!(preview.text.starts_with('é'));
 
         let idle = &snapshot[1];
-        assert!(idle.main_session_id.is_none() && idle.active_run_id.is_none());
+        assert_eq!(idle.last_activity_at, 0);
+        assert!(idle.main_session_id.is_none() && idle.active_run_ids.is_empty());
         assert!(idle.tasks.is_empty() && idle.last_assistant_message.is_none());
 
         let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
