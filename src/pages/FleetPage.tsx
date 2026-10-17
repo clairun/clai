@@ -9,6 +9,7 @@ import {
   RECENT_WINDOW_MS,
   cardPhase,
   gridCapacity,
+  gridShape,
   pickCards,
   type FleetLive,
 } from '../fleet/fleetModel';
@@ -124,6 +125,8 @@ const FleetPage = () => {
 
   const handleSelect = useCallback((id: string | null) => select(id), [select]);
 
+  const shape = gridShape(capacity, placed.length);
+
   return (
     <div className={styles.page}>
       <AppTopBar nav={{ label: 'Workspaces', to: '/workspace' }}>
@@ -140,8 +143,8 @@ const FleetPage = () => {
           <FleetGrid
             order={placed}
             cards={cards}
-            cols={capacity.cols}
-            rows={capacity.rows}
+            cols={shape.cols}
+            rows={shape.rows}
             selectedId={selectedId}
             live={live}
             faces={faces}

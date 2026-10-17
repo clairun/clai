@@ -222,6 +222,14 @@ describe('FleetPage', () => {
     expect(useFleetStore.getState().selectedId).toBeNull();
     expect(screen.getAllByRole('article').map((a) => a.textContent)).toEqual(['Alpha', expect.stringContaining('Staged')]);
   });
+  it('gives a short Fleet only the tracks its cards fill, so they reach the terminal', async () => {
+    fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha'), workspace('b', 'Beta', 1000), workspace('c', 'Gamma', 2000)]);
+    renderFleet();
+    const grid = (await screen.findAllByRole('article'))[0]!.parentElement!;
+    expect(grid.style.gridTemplateRows).toBe('repeat(2, minmax(0, 1fr))');
+    expect(grid.style.gridTemplateColumns).toBe('repeat(3, minmax(0, 1fr))');
+  });
+
   it('marks only the selected card', async () => {
     fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000), workspace('b', 'Beta', 2000)]);
     renderFleet();

@@ -512,6 +512,23 @@ export const stageSpan = (capacity: GridCapacity): GridCapacity => ({
 });
 
 /**
+ * The tracks `count` cards fill, within `capacity`: the stage plus the columns
+ * beside it, then full rows below. Sizing the grid by its capacity instead
+ * leaves the unused rows and columns empty, so a short Fleet stops short of
+ * the terminal.
+ */
+export const gridShape = (capacity: GridCapacity, count: number): GridCapacity => {
+  const stage = stageSpan(capacity);
+  const side = capacity.cols - stage.cols;
+  const small = Math.max(0, count - 1);
+  if (small <= side * stage.rows) {
+    return { cols: stage.cols + Math.ceil(small / stage.rows), rows: stage.rows };
+  }
+  const below = Math.ceil((small - side * stage.rows) / capacity.cols);
+  return { cols: capacity.cols, rows: Math.min(capacity.rows, stage.rows + below) };
+};
+
+/**
  * The visible cards, in slot order; slot 0 is the stage. Eligible: the
  * selected card, anything live, and workspaces active within
  * `RECENT_WINDOW_MS`. When they don't all fit, the selected card wins, then

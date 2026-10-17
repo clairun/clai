@@ -55,7 +55,9 @@
   flex: 1;
   flex-direction: column;
   min-height: 0;
-  padding: 4px 20px calc(var(--terminal-height, 80px) + 16px);
+  /* Room for the floating terminal: its height, its 12px offset from the
+     window's bottom, and the grid's 16px gap between them. */
+  padding: 4px 20px calc(var(--terminal-height, 80px) + 12px + 16px);
 }
 
 .grid {

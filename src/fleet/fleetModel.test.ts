@@ -20,6 +20,7 @@ import {
   cardPhase,
   emptyCard,
   gridCapacity,
+  gridShape,
   liveAgents,
   pickCards,
   seedFleet,
@@ -334,6 +335,18 @@ describe('card picking', () => {
     expect(gridCapacity(300, 150)).toEqual({ cols: 1, rows: 1 });
     expect(gridCapacity(1400, 700)).toEqual({ cols: 4, rows: 3 });
     expect(gridCapacity(900, 450)).toEqual({ cols: 2, rows: 2 });
+  });
+
+  it('sizes the grid by the cards it holds, so a short Fleet still reaches the terminal', () => {
+    const fourByThree = { cols: 4, rows: 3 };
+    expect(gridShape(fourByThree, 1)).toEqual({ cols: 2, rows: 2 });
+    expect(gridShape(fourByThree, 2)).toEqual({ cols: 3, rows: 2 });
+    expect(gridShape(fourByThree, 3)).toEqual({ cols: 3, rows: 2 });
+    expect(gridShape(fourByThree, 5)).toEqual({ cols: 4, rows: 2 });
+    expect(gridShape(fourByThree, 6)).toEqual({ cols: 4, rows: 3 });
+    expect(gridShape(fourByThree, 9)).toEqual({ cols: 4, rows: 3 });
+    expect(gridShape({ cols: 2, rows: 3 }, 2)).toEqual({ cols: 2, rows: 3 });
+    expect(gridShape({ cols: 1, rows: 1 }, 1)).toEqual({ cols: 1, rows: 1 });
   });
 
   it('never shows old idle workspaces, but always shows live and selected ones', () => {
