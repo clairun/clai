@@ -42,7 +42,8 @@ function useBoxSize(ref: React.RefObject<HTMLElement | null>) {
 /**
  * The Fleet: one card per recently active workspace, sized to the screen,
  * with the shared terminal at the bottom. Clicking a card selects it — it
- * grows into the workspace's chat and the terminal talks to it.
+ * swaps onto the stage, showing the workspace's chat, and the terminal
+ * talks to it.
  */
 const FleetPage = () => {
   const cards = useFleetStore((s) => s.fleet.cards);

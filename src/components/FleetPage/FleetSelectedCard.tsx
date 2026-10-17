@@ -24,11 +24,12 @@ const EMPTY_RUNS: AssistantRun[] = [];
 interface FleetSelectedCardProps {
   card: FleetCard;
   live: FleetLive;
-  onClose: () => void;
+  selected: boolean;
+  onSelect: (workspaceId: string | null) => void;
 }
 
-/** The selected card: the workspace's chat, in full, with its pending requests. */
-const FleetSelectedCard = ({ card, live, onClose }: FleetSelectedCardProps) => {
+/** The stage card: the workspace's chat, in full, with its pending requests. */
+const FleetSelectedCard = ({ card, live, selected, onSelect }: FleetSelectedCardProps) => {
   const navigate = useNavigate();
   const { workspaceId, mainSessionId: sessionId } = card;
   const { roster, error, loading } = useFleetChat(workspaceId, sessionId);
@@ -51,9 +52,25 @@ const FleetSelectedCard = ({ card, live, onClose }: FleetSelectedCardProps) => {
   const title = card.title || 'Workspace';
 
   return (
-    <div className={styles.cardInner}>
+    <div className={styles.cardInner} onClick={selected ? undefined : () => onSelect(workspaceId)}>
       <header className={styles.cardHeader}>
-        <h2 className={styles.selectedTitle}>{title}</h2>
+        <h2 className={styles.selectedTitle}>
+          {selected ? (
+            title
+          ) : (
+            <button
+              type="button"
+              className={styles.cardTitle}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect(workspaceId);
+              }}
+              aria-label={`Select ${title}`}
+            >
+              {title}
+            </button>
+          )}
+        </h2>
         <span className={styles.phase} data-phase={cardPhase(card, live)}>
           {phaseLabel(cardPhase(card, live), cardAttention(card))}
         </span>
@@ -64,9 +81,11 @@ const FleetSelectedCard = ({ card, live, onClose }: FleetSelectedCardProps) => {
         >
           Open workspace
         </button>
-        <button type="button" className={styles.closeButton} onClick={onClose} aria-label="Deselect workspace" title="Deselect">
-          ×
-        </button>
+        {selected && (
+          <button type="button" className={styles.closeButton} onClick={() => onSelect(null)} aria-label="Deselect workspace" title="Deselect">
+            ×
+          </button>
+        )}
       </header>
       <div className={styles.chat}>
         {messages.length > 0 ? (

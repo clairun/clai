@@ -12,16 +12,23 @@ vi.mock('../fleet/client', () => ({ fleetSnapshot: vi.fn() }));
 vi.mock('../api/client', () => ({ listAgentDefinitions: vi.fn(async () => []) }));
 vi.mock('../components/AppUpdateBadge', () => ({ default: () => null }));
 vi.mock('../components/FleetPage/FleetSelectedCard', () => ({
-  default: ({ card }: { card: { title: string } }) => <h2>Selected {card.title}</h2>,
+  default: ({ card, selected, onSelect }: { card: { workspaceId: string; title: string }; selected: boolean; onSelect: (id: string) => void }) =>
+    selected ? (
+      <h2>Selected {card.title}</h2>
+    ) : (
+      <button type="button" aria-label={`Select ${card.title}`} onClick={() => onSelect(card.workspaceId)}>
+        {card.title}
+      </button>
+    ),
 }));
 
 const { fleetSnapshot } = vi.mocked(await import('../fleet/client'));
 
-const workspace = (workspaceId: string, title: string): FleetWorkspace => ({
+const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspace => ({
   workspaceId,
   title,
   starred: false,
-  lastActivityAt: BigInt(Date.now()),
+  lastActivityAt: BigInt(Date.now() - ageMs),
   mainSessionId: null,
   activeRunIds: [],
   tasks: [],
@@ -109,10 +116,16 @@ describe('FleetPage', () => {
     fireEvent.keyUp(terminal, { key: 'Control' });
     expect(useFleetStore.getState().selectedId).toBe(ids[order[1]!]);
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    // The same swap as a click: it takes the stage, the stage card takes its slot.
+    expect([screen.getByRole('heading', { name: /^Selected / }), ...screen.getAllByRole('button', { name: /^Select / })].map((e) => e.textContent)).toEqual([
+      `Selected ${order[1]}`,
+      order[0],
+      order[2],
+    ]);
 
     // Escape closes it with no change.
     press();
-    expect(highlighted()).toContain(order[2]);
+    expect(highlighted()).toContain(order[0]); // the next slot after the stage, now
     fireEvent.keyDown(terminal, { key: 'Escape', ctrlKey: true });
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
     fireEvent.keyUp(terminal, { key: 'Control' });
@@ -141,7 +154,8 @@ describe('FleetPage', () => {
     const task = (id: string, title: string, status: string) =>
       ({ id, title, status, parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never;
     fleetSnapshot.mockResolvedValue([
-      { ...workspace('live', 'Alpha'), tasks: [task('t1', 'Old research', 'completed'), task('t2', 'New research', 'running')] },
+      workspace('staged', 'Staged'),
+      { ...workspace('live', 'Alpha', 1000), tasks: [task('t1', 'Old research', 'completed'), task('t2', 'New research', 'running')] },
     ]);
     renderFleet();
     const live = (await screen.findByText('New research')).closest('li')!;
@@ -153,8 +167,9 @@ describe('FleetPage', () => {
 
   it('renders the last message as markdown, after the events it followed', async () => {
     fleetSnapshot.mockResolvedValue([
+      workspace('staged', 'Staged'),
       {
-        ...workspace('a', 'Alpha'),
+        ...workspace('a', 'Alpha', 1000),
         tasks: [{ id: 't1', title: 'Research', status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Main', assignedAgentDefinitionId: 'def-m' } as never],
         lastAssistantMessage: { messageId: 'm1', text: 'Shipped **v2**', truncated: false, createdAt: 2n },
       },
@@ -166,16 +181,22 @@ describe('FleetPage', () => {
     expect(rows.map((row) => row.textContent)).toEqual([expect.stringContaining('Research'), expect.stringContaining('Shipped v2')]);
   });
 
-  it('deselects on Escape, from the terminal too, and on a click on the empty grid', async () => {
-    fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+  it('deselects on Escape, from the terminal too, and on a click on the empty grid, leaving the card on the stage', async () => {
+    fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000)]);
     renderFleet();
     fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
     expect(useFleetStore.getState().selectedId).toBe('a');
+    const stage = () => screen.getAllByRole('article')[0]!;
+    expect(stage()).toHaveTextContent('Selected Alpha');
+    expect(stage().style.gridColumn).toBe('1 / span 2');
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Terminal' }), { key: 'Escape' });
     expect(useFleetStore.getState().selectedId).toBeNull();
+    expect(stage()).toHaveTextContent('Alpha');
+    expect(stage()).not.toHaveTextContent('Staged');
 
     fireEvent.click(screen.getByRole('button', { name: 'Select Alpha' }));
-    fireEvent.click(screen.getByRole('article').parentElement!);
+    fireEvent.click(stage().parentElement!);
     expect(useFleetStore.getState().selectedId).toBeNull();
+    expect(screen.getAllByRole('article').map((a) => a.textContent)).toEqual(['Alpha', expect.stringContaining('Staged')]);
   });
 });

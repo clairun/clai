@@ -311,18 +311,40 @@ describe('card picking', () => {
     expect([...picked].sort()).toEqual(['old-but-running', 'old-selected', 'old-waiting', 'recent']);
   });
 
-  it('shows the most recent when more are active than fit, but the selected and waiting ones first', () => {
-    expect(pick([mk('a', NOW - 3), mk('b', NOW - 1), mk('c', NOW - 2)], 2, 1)).toEqual(['b', 'c']);
-    expect(pick([mk('a', NOW - 3), waitingCard('w', NOW - 9), mk('b', NOW - 1), mk('sel', NOW - 8)], 3, 1, 'sel')).toEqual(['sel', 'w', 'b']);
+  it('counts the stage as four cells and shows the most recent when more are active than fit, but the selected and waiting ones first', () => {
+    const many = Array.from({ length: 12 }, (_, i) => mk(`c${i}`, NOW - i));
+    expect(pick(many, 4, 3)).toHaveLength(9);
+    expect(pick(many, 2, 2)).toEqual(['c0']);
+    expect(pick([mk('a', NOW - 3), mk('b', NOW - 1), mk('c', NOW - 2)], 3, 1)).toEqual(['b', 'c']);
+    expect(pick([mk('a', NOW - 3), waitingCard('w', NOW - 9), mk('b', NOW - 1), mk('sel', NOW - 8)], 4, 1, 'sel')).toEqual(['sel', 'b', 'w']);
   });
 
-  it('keeps every card in its slot when one is selected or starts waiting', () => {
-    const prev = ['a', 'b', 'c'];
-    expect(pick([mk('a', NOW - 1), mk('b', NOW - 2), mk('c', NOW - 3)], 3, 1, 'c', prev)).toEqual(prev);
-    expect(pick([mk('a', NOW - 1), mk('b', NOW - 2), waitingCard('c', NOW - 3)], 3, 1, null, prev)).toEqual(prev);
+  it('puts the most recent card on the stage at first, unselected, and the rest in rank order', () => {
+    expect(pick([waitingCard('w', NOW - 9), mk('a', NOW - 2), mk('b', NOW - 1)], 4, 3)).toEqual(['b', 'w', 'a']);
   });
 
-  it('gives newcomers the next slots and closes the gap a leaving card left', () => {
-    expect(pick([mk('a', NOW - 1), mk('c', NOW - 3), mk('new', NOW)], 3, 1, null, ['a', 'b', 'c'])).toEqual(['a', 'c', 'new']);
+  const cards = [mk('s', NOW - 1), mk('a', NOW - 2), mk('b', NOW - 3), mk('c', NOW - 4), mk('d', NOW - 5)];
+  const prev = ['s', 'a', 'b', 'c', 'd'];
+
+  it('swaps the selected card with the stage card, and every other card keeps its slot', () => {
+    expect(pick(cards, 4, 3, 'c', prev)).toEqual(['c', 'a', 'b', 's', 'd']);
+    // From there, selecting another swaps only those two again.
+    expect(pick(cards, 4, 3, 'a', ['c', 'a', 'b', 's', 'd'])).toEqual(['a', 'c', 'b', 's', 'd']);
+  });
+
+  it('moves nothing when the selected card is already on the stage, or on deselect', () => {
+    expect(pick(cards, 4, 3, 's', prev)).toEqual(prev);
+    const afterSwap = ['c', 'a', 'b', 's', 'd'];
+    expect(pick(cards, 4, 3, null, afterSwap)).toEqual(afterSwap);
+  });
+
+  it('gives the stage to the most recent remaining card when the stage card leaves; only that card moves', () => {
+    const rest = cards.filter((c) => c.workspaceId !== 's');
+    expect(pick(rest, 4, 3, null, prev)).toEqual(['a', 'b', 'c', 'd']);
+    expect(pick([mk('a', NOW - 3), mk('c', NOW - 4), mk('b', NOW)], 4, 3, null, ['s', 'a', 'c', 'b'])).toEqual(['b', 'a', 'c']);
+  });
+
+  it('gives newcomers the next slots, never the stage, and closes the gap a leaving card left', () => {
+    expect(pick([mk('a', NOW - 1), mk('c', NOW - 3), mk('new', NOW)], 4, 3, null, ['a', 'b', 'c'])).toEqual(['a', 'c', 'new']);
   });
 });

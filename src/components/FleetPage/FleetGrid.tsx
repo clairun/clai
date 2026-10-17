@@ -1,12 +1,12 @@
 import { memo, useCallback } from 'react';
 import type { AgentIdentity } from '../Agents/agentIdentity';
-import { GRID_GAP, cardPhase, type FleetCard as FleetCardModel, type FleetLive } from '../../fleet/fleetModel';
+import { GRID_GAP, cardPhase, stageSpan, type FleetCard as FleetCardModel, type FleetLive } from '../../fleet/fleetModel';
 import FleetCard from './FleetCard';
 import FleetSelectedCard from './FleetSelectedCard';
 import styles from './FleetPage.module.css';
 
 interface FleetGridProps {
-  /** Card ids in slot order. */
+  /** Card ids in slot order; the first is on the stage. */
   order: string[];
   cards: Record<string, FleetCardModel>;
   cols: number;
@@ -18,13 +18,12 @@ interface FleetGridProps {
 }
 
 /**
- * The card grid. Every card keeps its slot; the selected one grows over its
- * neighbours from that slot, shifted inward at the grid's edges. Nothing
- * animates: on WebKitGTK even a short transition blinks.
+ * The card grid: the stage card, in its large form, spans the top-left
+ * 2 × 2; the rest flow into the 1 × 1 slots around it. Nothing animates: on
+ * WebKitGTK even a short transition blinks.
  */
 const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, onSelect }: FleetGridProps) => {
   const handleSelect = useCallback((id: string) => onSelect(id), [onSelect]);
-  const handleClose = useCallback(() => onSelect(null), [onSelect]);
 
   return (
     <div
@@ -42,19 +41,16 @@ const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, onSelect
         const card = cards[id];
         if (!card) return null;
         const selected = id === selectedId;
-        const w = selected ? Math.min(2, cols) : 1;
-        const h = selected ? Math.min(2, rows) : 1;
-        const col = Math.min(slot % cols, cols - w);
-        const row = Math.min(Math.floor(slot / cols), rows - h);
+        const stage = slot === 0 ? stageSpan({ cols, rows }) : null;
         return (
           <article
             key={id}
             className={`${styles.card} ${selected ? styles.cardSelected : cardPhase(card, live) === 'working' ? styles.cardWorking : ''}`}
             aria-current={selected || undefined}
-            style={{ gridColumn: `${col + 1} / span ${w}`, gridRow: `${row + 1} / span ${h}` }}
+            style={stage ? { gridColumn: `1 / span ${stage.cols}`, gridRow: `1 / span ${stage.rows}` } : undefined}
           >
-            {selected ? (
-              <FleetSelectedCard card={card} live={live} onClose={handleClose} />
+            {stage ? (
+              <FleetSelectedCard card={card} live={live} selected={selected} onSelect={onSelect} />
             ) : (
               <FleetCard card={card} live={live} faces={faces} onSelect={handleSelect} />
             )}

@@ -446,18 +446,27 @@ export const gridCapacity = (width: number, height: number): GridCapacity => ({
   rows: Math.min(MAX_ROWS, Math.max(1, Math.floor((height + GRID_GAP) / (CARD_MIN_HEIGHT + GRID_GAP)))),
 });
 
+/** The stage: the top-left 2 × 2 slot (smaller on a smaller grid). */
+export const stageSpan = (capacity: GridCapacity): GridCapacity => ({
+  cols: Math.min(2, capacity.cols),
+  rows: Math.min(2, capacity.rows),
+});
+
 /**
- * The visible cards, in slot order. Eligible: the selected card, anything
- * live, and workspaces active within `RECENT_WINDOW_MS`. When they don't all
- * fit, the selected card wins, then waiting ones (oldest first), then the
- * most recent. Cards already visible keep their slots (`prevOrder`) and
- * newcomers take the next ones, so nothing moves to highlight a card.
+ * The visible cards, in slot order; slot 0 is the stage. Eligible: the
+ * selected card, anything live, and workspaces active within
+ * `RECENT_WINDOW_MS`. When they don't all fit, the selected card wins, then
+ * waiting ones (oldest first), then the most recent. Cards already visible
+ * keep their slots (`prevOrder`) and newcomers take the next ones. The stage
+ * starts with the most recent card; selecting a card swaps it with the stage
+ * card, and nothing else moves.
  */
 export const pickCards = (
   cards: readonly FleetCard[],
   options: { now: number; capacity: GridCapacity; selectedId: string | null; prevOrder: readonly string[]; live: FleetLive }
 ): string[] => {
   const { now, capacity, selectedId, prevOrder, live } = options;
+  const stage = stageSpan(capacity);
   const meta = cards
     .map((card) => ({ id: card.workspaceId, card, phase: cardPhase(card, live), since: cardAttention(card).since ?? 0 }))
     .filter(
@@ -465,18 +474,24 @@ export const pickCards = (
     );
   const rank = (m: (typeof meta)[number]): [number, number] =>
     m.id === selectedId ? [0, 0] : m.phase === 'waiting' ? [1, m.since] : [2, -m.card.lastActivityAt];
-  const chosen = new Set(
-    meta
-      .sort((a, b) => {
-        const [ra, ka] = rank(a);
-        const [rb, kb] = rank(b);
-        return ra - rb || ka - kb;
-      })
-      .slice(0, capacity.cols * capacity.rows)
-      .map((m) => m.id)
-  );
-  const kept = prevOrder.filter((id) => chosen.has(id));
-  return [...kept, ...meta.filter((m) => chosen.has(m.id) && !kept.includes(m.id)).map((m) => m.id)];
+  const chosen = meta
+    .sort((a, b) => {
+      const [ra, ka] = rank(a);
+      const [rb, kb] = rank(b);
+      return ra - rb || ka - kb;
+    })
+    .slice(0, capacity.cols * capacity.rows - stage.cols * stage.rows + 1);
+  if (chosen.length === 0) return [];
+  const ids = new Set(chosen.map((m) => m.id));
+  let order = prevOrder.filter((id) => ids.has(id));
+  if (order[0] !== prevOrder[0] || order.length === 0) {
+    const mostRecent = chosen.reduce((a, b) => (b.card.lastActivityAt > a.card.lastActivityAt ? b : a)).id;
+    order = [mostRecent, ...order.filter((id) => id !== mostRecent)];
+  }
+  order.push(...chosen.filter((m) => !order.includes(m.id)).map((m) => m.id));
+  const at = selectedId ? order.indexOf(selectedId) : -1;
+  if (at > 0) [order[0], order[at]] = [order[at]!, order[0]!];
+  return order;
 };
 
 /** The card `step` slots after `selectedId` (±1), wrapping; from no selection, the first or the last. */
