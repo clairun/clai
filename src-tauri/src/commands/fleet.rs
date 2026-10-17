@@ -179,3 +179,157 @@ fn preview(message: &AssistantMessage) -> Option<FleetMessagePreview> {
         created_at: message.created_at,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assistant::types::{ContentPart, RunStatus, RunTrigger, SessionContext};
+    use crate::config::{workspace_config, AppConfig, WorkspaceConfig};
+    use crate::workspace_index::WorkspaceIndex;
+
+    const BUSY: &str = "11111111-1111-4111-8111-111111111111";
+    const IDLE: &str = "22222222-2222-4222-8222-222222222222";
+    const MANAGER: &str = "33333333-3333-4333-8333-333333333333";
+
+    fn state_with(workspaces: &[&str], temp: &tempfile::TempDir) -> AppState {
+        let parent = temp.path().join("workspaces");
+        let mut index = WorkspaceIndex::default();
+        for (n, id) in workspaces.iter().enumerate() {
+            let root = parent.join(id);
+            let config =
+                WorkspaceConfig::new(id.to_string(), format!("ws {n}"), 1, MANAGER.to_string());
+            workspace_config::save(&root, &config).expect("seed workspace");
+            index.insert_config(root, &config);
+        }
+        let app_config = AppConfig {
+            workspace_dirs: vec![parent],
+            ..AppConfig::default()
+        };
+        let config_manager =
+            crate::ConfigManager::new_for_tests(app_config, temp.path().join("config.json"));
+        AppState::new_for_tests(config_manager, index).expect("app state")
+    }
+
+    async fn insert_task(pool: &DbPool, id: &str, status: &str, updated_at: i64) {
+        sqlx::query(
+            "INSERT INTO workspace_tasks (id, assigned_to_workspace_agent_id, \
+             assigned_agent_definition_id, title, instructions, status, depth, created_at, \
+             updated_at) VALUES (?, ?, 'def', ?, '', ?, 0, ?, ?)",
+        )
+        .bind(id)
+        .bind(MANAGER)
+        .bind(format!("task {id}"))
+        .bind(status)
+        .bind(updated_at)
+        .bind(updated_at)
+        .execute(pool)
+        .await
+        .expect("insert task");
+    }
+
+    async fn assistant_message(pool: &DbPool, session_id: &str, content: Vec<ContentPart>) {
+        repository::create_message(
+            pool,
+            repository::CreateMessageParams {
+                session_id: session_id.to_string(),
+                role: MessageRole::Assistant,
+                content,
+                provider_metadata: None,
+                run_id: None,
+            },
+        )
+        .await
+        .expect("message");
+    }
+
+    #[tokio::test]
+    async fn snapshot_ranks_by_session_activity_and_bounds_its_payload() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = state_with(&[BUSY, IDLE], &temp);
+        let pool = state.workspace_db(BUSY).await.expect("db");
+
+        let session = repository::create_session(
+            &pool,
+            SessionContext {
+                automation_id: Some(MANAGER.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session");
+        let long_reply = "é".repeat(LAST_MESSAGE_MAX_CHARS + 5);
+        assistant_message(
+            &pool,
+            &session.id,
+            vec![ContentPart::Text {
+                text: format!("  {long_reply}\n"),
+            }],
+        )
+        .await;
+        // A newer text-less reply is skipped, not shown as an empty preview.
+        assistant_message(&pool, &session.id, Vec::new()).await;
+        let run = repository::create_run(
+            &pool,
+            repository::CreateRunParams {
+                session_id: session.id.clone(),
+                status: RunStatus::Running,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "conn".to_string(),
+                protocol_id: "proto".to_string(),
+                model_id: "model".to_string(),
+                error: None,
+            },
+        )
+        .await
+        .expect("run");
+        for n in 0..(OPEN_TASK_LIMIT + 3) {
+            insert_task(&pool, &format!("open-{n}"), "running", 100 + n).await;
+        }
+        for n in 0..(FINISHED_TASK_LIMIT + 3) {
+            insert_task(&pool, &format!("done-{n}"), "completed", 200 + n).await;
+        }
+
+        let snapshot = snapshot(&state, None).await.expect("snapshot");
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|w| w.workspace_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![BUSY, IDLE],
+            "the workspace with session activity ranks first"
+        );
+        let busy = &snapshot[0];
+        assert_eq!(busy.main_session_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(busy.active_run_id.as_deref(), Some(run.id.as_str()));
+        assert!(busy.last_activity_at >= session.created_at);
+
+        let open = busy
+            .tasks
+            .iter()
+            .filter(|t| !t.status.is_terminal())
+            .count();
+        assert_eq!(open as i64, OPEN_TASK_LIMIT);
+        assert_eq!(
+            busy.tasks.len() as i64,
+            OPEN_TASK_LIMIT + FINISHED_TASK_LIMIT
+        );
+        assert_eq!(
+            busy.tasks[0].id,
+            format!("done-{}", FINISHED_TASK_LIMIT + 2)
+        );
+        assert_eq!(busy.tasks[0].assigned_agent_display_name, "Manager");
+
+        let preview = busy.last_assistant_message.as_ref().expect("preview");
+        assert!(preview.truncated);
+        assert_eq!(preview.text.chars().count(), LAST_MESSAGE_MAX_CHARS);
+        assert!(preview.text.starts_with('é'));
+
+        let idle = &snapshot[1];
+        assert!(idle.main_session_id.is_none() && idle.active_run_id.is_none());
+        assert!(idle.tasks.is_empty() && idle.last_assistant_message.is_none());
+
+        let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
+        assert_eq!(top.len(), 1);
+        assert_eq!(top[0].workspace_id, BUSY);
+    }
+}
