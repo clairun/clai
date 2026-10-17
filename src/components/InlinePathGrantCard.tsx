@@ -300,28 +300,30 @@ const InlinePathGrantCard = ({ workspaceId, request, compact = false }: InlinePa
             className={compact ? `${styles.card} ${styles.compact}` : styles.card}
             aria-label="Path grant requested"
           >
-            {!compact && (
             <header className={styles.cardHeader}>
               <div className={styles.cardHeaderLeft}>
                 <span className={styles.tag}>Path access requested</span>
-                <span className={styles.cardSubtitle}>
-                  {req.agentName
-                    ? `Agent "${req.agentName}" wants to extend its filesystem grants:`
-                    : 'An agent wants to extend its filesystem grants:'}
-                </span>
+                {!compact && (
+                  <span className={styles.cardSubtitle}>
+                    {req.agentName
+                      ? `Agent "${req.agentName}" wants to extend its filesystem grants:`
+                      : 'An agent wants to extend its filesystem grants:'}
+                  </span>
+                )}
               </div>
-              <button
-                type="button"
-                className={styles.collapseBtn}
-                onClick={() => toggleCollapsed(req.requestId)}
-                aria-expanded={!isCollapsed}
-                aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
-                title={isCollapsed ? 'Expand' : 'Collapse'}
-              >
-                {isCollapsed ? '▸' : '▾'}
-              </button>
+              {!compact && (
+                <button
+                  type="button"
+                  className={styles.collapseBtn}
+                  onClick={() => toggleCollapsed(req.requestId)}
+                  aria-expanded={!isCollapsed}
+                  aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
+                  title={isCollapsed ? 'Expand' : 'Collapse'}
+                >
+                  {isCollapsed ? '▸' : '▾'}
+                </button>
+              )}
             </header>
-            )}
 
             {isCollapsed ? (
               <div className={styles.collapsedSummary}>{card.path}</div>

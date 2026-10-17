@@ -213,14 +213,11 @@
   text-overflow: ellipsis;
 }
 
-/* ── Compact (a small Fleet card): flat, chips, one-line context ───── */
+/* ── Compact (a small Fleet card): the same panel, denser; options as chips ── */
 .compact {
   margin: 0;
-  padding: 0;
+  padding: 6px 10px 6px 12px;
   gap: 6px;
-  border: none;
-  background: transparent;
-  box-shadow: none;
 }
 
 .compact .body {
@@ -251,7 +248,7 @@
 .optionChip {
   max-width: 100%;
   padding: 2px 10px;
-  border: 1px solid var(--color-border-medium);
+  border: 1px solid var(--color-accent-alpha-40);
   border-radius: var(--radius-full);
   background: var(--color-bg-elevated);
   color: var(--color-text-primary);

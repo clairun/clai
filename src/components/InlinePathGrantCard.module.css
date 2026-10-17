@@ -296,18 +296,15 @@
   text-overflow: ellipsis;
 }
 
-/* ── Compact (a small Fleet card): flat, one line each, warnings kept ── */
+/* ── Compact (a small Fleet card): the same card, denser; warnings kept ── */
 .stackCompact {
   padding: 0;
   gap: 6px;
 }
 
 .compact {
-  padding: 0;
+  padding: 6px 10px 6px 12px;
   gap: 6px;
-  border: none;
-  background: transparent;
-  box-shadow: none;
 }
 
 .compact .cardBody {

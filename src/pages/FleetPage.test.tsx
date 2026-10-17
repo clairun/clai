@@ -155,6 +155,28 @@ describe('FleetPage', () => {
     expect(selected.className).not.toMatch(/cardWorking/);
   });
 
+  it('colours the border of a card that needs the user, but the selected one wins', async () => {
+    const ask = (workspaceId: string) => ({
+      pendingId: `q-${workspaceId}`, workspaceId, sessionId: 'main', runId: 'r', question: 'Ship it?',
+      options: null, multiSelect: false, extraContext: null, requestedAt: 4n,
+    });
+    fleetSnapshot.mockResolvedValue([
+      { ...workspace('a', 'Alpha'), activeRunIds: ['run-1'], pendingAsks: [ask('a')] },
+      { ...workspace('b', 'Beta'), pendingAsks: [ask('b')] },
+    ]);
+    renderFleet();
+    await screen.findByRole('button', { name: 'Select Alpha' });
+    const card = (name: string) => screen.getByRole('button', { name: `Select ${name}` }).closest('article')!;
+    // Waiting outranks working.
+    await waitFor(() => expect(card('Alpha').className).toMatch(/cardWaiting/));
+    expect(card('Alpha').className).not.toMatch(/cardWorking/);
+
+    act(() => useFleetStore.getState().select('b'));
+    const selected = screen.getByRole('heading', { name: 'Selected Beta' }).closest('article')!;
+    expect(selected.className).toMatch(/cardSelected/);
+    expect(selected.className).not.toMatch(/cardWaiting/);
+  });
+
   it('draws a running subtask larger than a finished one', async () => {
     const task = (id: string, title: string, status: string) =>
       ({ id, title, status, parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never;

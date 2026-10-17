@@ -328,35 +328,37 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApp
               className={compact ? `${styles.card} ${styles.compact}` : styles.card}
               aria-label="Permission requested"
             >
-              {!compact && (
               <header className={styles.cardHeader}>
                 <div className={styles.cardHeaderLeft}>
                   <span className={styles.tag}>Permission requested</span>
-                  <span className={styles.cardSubtitle}>
-                    {req.agentName
-                      ? `Agent "${req.agentName}" wants to run:`
-                      : 'An agent wants to run:'}
-                  </span>
+                  {!compact && (
+                    <span className={styles.cardSubtitle}>
+                      {req.agentName
+                        ? `Agent "${req.agentName}" wants to run:`
+                        : 'An agent wants to run:'}
+                    </span>
+                  )}
                 </div>
-                <button
-                  type="button"
-                  className={styles.collapseBtn}
-                  onClick={() => toggleCollapsed(req.requestId)}
-                  aria-expanded={!isCollapsed}
-                  aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
-                  title={isCollapsed ? 'Expand' : 'Collapse'}
-                >
-                  {isCollapsed ? '▸' : '▾'}
-                </button>
+                {!compact && (
+                  <button
+                    type="button"
+                    className={styles.collapseBtn}
+                    onClick={() => toggleCollapsed(req.requestId)}
+                    aria-expanded={!isCollapsed}
+                    aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
+                    title={isCollapsed ? 'Expand' : 'Collapse'}
+                  >
+                    {isCollapsed ? '▸' : '▾'}
+                  </button>
+                )}
               </header>
-              )}
               {isCollapsed ? (
                 <pre className={`${styles.command} ${styles.collapsedSummary}`}>{req.command}</pre>
               ) : (
                 <div className={styles.cardBody}>
               {/* Compact too: the parts leave out separators and parts that need no decision. */}
               <pre
-                className={compact ? `${styles.command} ${styles.collapsedSummary}` : styles.command}
+                className={styles.command}
                 title={compact ? req.command : undefined}
               >
                 {req.command}
@@ -389,15 +391,15 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApp
                   const canPersist = Boolean(seg.suggestedPrefix);
                   return (
                     <div key={idx} className={styles.segmentRow}>
-                      {req.segments.length > 1 && (
+                      {(req.segments.length > 1 || isOpaque) && (
                         <div className={styles.segmentText}>
-                          <code title={compact ? seg.text : undefined}>{seg.text}</code>
+                          {req.segments.length > 1 && <code title={compact ? seg.text : undefined}>{seg.text}</code>}
                           {isOpaque && (
                             <span
                               className={styles.opaqueTag}
-                              title="Contains substitution, executor, redirect, or control-flow — review carefully before allowing."
+                              title="Uses a substitution, redirect, pipe-to-shell or control flow, so what it does isn't just the command it starts. Read it carefully before allowing."
                             >
-                              opaque
+                              complex
                             </span>
                           )}
                         </div>

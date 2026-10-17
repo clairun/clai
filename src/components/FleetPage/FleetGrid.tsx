@@ -1,9 +1,19 @@
 import { memo, useCallback } from 'react';
 import type { AgentIdentity } from '../Agents/agentIdentity';
-import { GRID_GAP, cardPhase, stageSpan, type FleetCard as FleetCardModel, type FleetLive } from '../../fleet/fleetModel';
+import {
+  GRID_GAP,
+  cardPhase,
+  stageSpan,
+  type FleetCard as FleetCardModel,
+  type FleetLive,
+  type FleetPhase,
+} from '../../fleet/fleetModel';
 import FleetCard from './FleetCard';
 import FleetSelectedCard from './FleetSelectedCard';
 import styles from './FleetPage.module.css';
+
+/** An unselected card's border by phase; a selected card shows its phase in the header. */
+const PHASE_BORDER: Partial<Record<FleetPhase, string>> = { working: styles.cardWorking, waiting: styles.cardWaiting };
 
 interface FleetGridProps {
   /** Card ids in slot order; the first is on the stage. */
@@ -45,7 +55,7 @@ const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, onSelect
         return (
           <article
             key={id}
-            className={`${styles.card} ${selected ? styles.cardSelected : cardPhase(card, live) === 'working' ? styles.cardWorking : ''}`}
+            className={`${styles.card} ${selected ? styles.cardSelected : (PHASE_BORDER[cardPhase(card, live)] ?? '')}`}
             aria-current={selected || undefined}
             style={stage ? { gridColumn: `1 / span ${stage.cols}`, gridRow: `1 / span ${stage.rows}` } : undefined}
           >

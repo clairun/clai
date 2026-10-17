@@ -267,18 +267,15 @@
   word-break: normal;
 }
 
-/* ── Compact (a small Fleet card): flat, one line per command part ─── */
+/* ── Compact (a small Fleet card): the same card, denser ── */
 .stackCompact {
   padding: 0;
   gap: 6px;
 }
 
 .compact {
-  padding: 0;
+  padding: 6px 10px 6px 12px;
   gap: 6px;
-  border: none;
-  background: transparent;
-  box-shadow: none;
 }
 
 .compact .cardBody {
@@ -296,9 +293,19 @@
   font-size: 12px;
 }
 
+/* Commands wrap, up to 4 lines each; past that the request area scrolls. */
+.compact .command,
+.compact .segmentText code {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  line-height: 1.35;
+}
+
 .compact .segmentRow {
   flex-direction: row;
-  align-items: center;
+  align-items: flex-start;
   gap: 6px;
   padding: 0;
   border: none;
@@ -308,16 +315,12 @@
 .compact .segmentText {
   flex: 1;
   min-width: 0;
-  flex-wrap: nowrap;
+  align-items: flex-start;
 }
 
 .compact .segmentText code {
   min-width: 0;
   border: none;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  word-break: normal;
 }
 
 .compact .segmentButtons {

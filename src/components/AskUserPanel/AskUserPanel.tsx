@@ -133,21 +133,21 @@ const AskUserPanel = ({ sessionId = null, ask, compact = false }: AskUserPanelPr
       tabIndex={-1}
       onKeyDown={handlePanelKeyDown}
     >
-      {!compact && (
       <header className={styles.header}>
         <span className={styles.chip}>AGENT IS ASKING</span>
-        <button
-          type="button"
-          className={styles.collapseBtn}
-          onClick={() => setCollapsed((c) => !c)}
-          aria-expanded={!collapsed}
-          aria-label={collapsed ? 'Expand question' : 'Collapse question'}
-          title={collapsed ? 'Expand' : 'Collapse'}
-        >
-          {collapsed ? '▸' : '▾'}
-        </button>
+        {!compact && (
+          <button
+            type="button"
+            className={styles.collapseBtn}
+            onClick={() => setCollapsed((c) => !c)}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? 'Expand question' : 'Collapse question'}
+            title={collapsed ? 'Expand' : 'Collapse'}
+          >
+            {collapsed ? '▸' : '▾'}
+          </button>
+        )}
       </header>
-      )}
 
       {collapsed && !compact ? (
         <div className={styles.collapsedSummary}>{pending.question}</div>

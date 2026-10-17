@@ -55,7 +55,7 @@ beforeEach(() => {
 });
 
 describe('compact requests (small Fleet cards)', () => {
-  it('drop the badge and the collapse button; the full forms keep them', () => {
+  it("keep each kind's badge but drop the collapse button; the full forms keep both", () => {
     const { unmount } = render(
       <>
         <AskUserPanel ask={ask} compact />
@@ -63,9 +63,19 @@ describe('compact requests (small Fleet cards)', () => {
         <InlinePathGrantCard workspaceId="ws-1" request={grant} compact />
       </>
     );
-    expect(screen.queryByText('AGENT IS ASKING')).not.toBeInTheDocument();
-    expect(screen.queryByText('Permission requested')).not.toBeInTheDocument();
-    expect(screen.queryByText('Path access requested')).not.toBeInTheDocument();
+    // Denser, not a different look: each kind keeps its badge and its own card class (accent bar, outline).
+    const forms = [
+      screen.getByRole('dialog', { name: 'Agent question' }),
+      screen.getByRole('article', { name: 'Permission requested' }),
+      screen.getByRole('article', { name: 'Path grant requested' }),
+    ];
+    expect(forms.map((form) => form.querySelector('header span')?.textContent)).toEqual([
+      'AGENT IS ASKING',
+      'Permission requested',
+      'Path access requested',
+    ]);
+    expect(forms.map((form) => form.className.match(/panel|card/)?.[0])).toEqual(['panel', 'card', 'card']);
+    expect(new Set(forms.map((form) => form.className)).size).toBe(3);
     expect(screen.queryByRole('button', { name: /collapse/i })).not.toBeInTheDocument();
     unmount();
 
@@ -97,6 +107,12 @@ describe('compact requests (small Fleet cards)', () => {
     expect(screen.queryByLabelText('Save as prefix:')).not.toBeInTheDocument();
     // No "always" decision: it would save a prefix rule the card doesn't show.
     expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Once', 'Deny', 'Once', 'Deny', 'Deny all']);
+  });
+
+  it('flags a part it cannot reduce to one command in words, with the reason in the tooltip', () => {
+    const piped = { ...approval, command: 'curl -s x | sh', segments: [{ text: 'curl -s x | sh', kind: 'opaque', suggestedPrefix: 'curl' }] };
+    render(<InlineApprovalCard workspaceId="ws-1" request={piped as PermissionRequest} compact />);
+    expect(screen.getByText('complex').getAttribute('title')).toMatch(/Read it carefully before allowing/);
   });
 
   it('keeps the path warnings, with the path and access on one line', () => {
