@@ -12,8 +12,8 @@ import type {
 import styles from './InlinePathGrantCard.module.css';
 
 const PATH_GRANT_REQUEST_EVENT = 'path-grants://request';
-// Backend cleared a pending grant without a user decision (run cancelled
-// or ended, or a re-asked grant superseded it). Drop the stale card.
+// A pending grant left the queue: a decision (here or in another view), a
+// cancelled or ended run, or a re-asked grant superseded it. Drop the card.
 const PATH_GRANT_RESOLVED_EVENT = 'path-grants://resolved';
 
 type PathAccess = FilesystemPathAccess;
@@ -154,9 +154,8 @@ const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
       });
     });
 
-    // Remove a card the backend cleared without a user decision (tool call
-    // abandoned mid-wait). requestId is globally unique, so no
-    // workspace filter is needed.
+    // Remove the card once its grant leaves the queue. requestId is
+    // globally unique, so no workspace filter is needed.
     const unlistenResolvedPromise = listen<{ requestId?: string }>(
       PATH_GRANT_RESOLVED_EVENT,
       (event) => {

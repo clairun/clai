@@ -4,12 +4,13 @@ import { GENERATOR_VERSION } from '../Agents/agentIdentity';
 import pillStyles from '../Agents/taskStatus.module.css';
 import {
   cardAttention,
-  cardContent,
   cardItems,
   cardPhase,
+  visibleLastMessage,
   type FleetAttention,
   type FleetCard as FleetCardModel,
   type FleetItem,
+  type FleetLive,
   type FleetPhase,
 } from '../../fleet/fleetModel';
 import styles from './FleetPage.module.css';
@@ -56,15 +57,16 @@ const ItemRow = ({ item }: { item: FleetItem }) => (
 
 interface FleetCardProps {
   card: FleetCardModel;
+  live: FleetLive;
   onSelect: (workspaceId: string) => void;
 }
 
 /** An unselected card: events and minimal text only. */
-const FleetCard = ({ card, onSelect }: FleetCardProps) => {
-  const phase = cardPhase(card);
+const FleetCard = ({ card, live, onSelect }: FleetCardProps) => {
+  const phase = cardPhase(card, live);
   const attention = cardAttention(card);
-  const items = useMemo(() => cardItems(card), [card]);
-  const { body } = cardContent(card);
+  const items = useMemo(() => cardItems(card, live), [card, live]);
+  const body = visibleLastMessage(card, live)?.text;
   const title = card.title || 'Workspace';
 
   return (

@@ -1,8 +1,8 @@
 /**
  * Cross-tree opener for the global SettingsModal.
  *
- * The modal is hosted once in FleetLayout, but deep leaf components (e.g. the
- * chat context bars) need to open it at a specific section — and optionally
+ * The modal is hosted once in MainLayout (`GlobalSettingsHost`), but deep
+ * leaf components (e.g. the chat context bars) need to open it at a specific section — and optionally
  * straight into a sub-action like the "Add Connection" form. Following the
  * existing cross-tree pattern (`assistant-provider-connections-changed`,
  * `mcp-servers-changed`), this is a window CustomEvent rather than threading

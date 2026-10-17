@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
+import AppHeaderActions from '../components/AppHeaderActions';
 import FleetGrid from '../components/FleetPage/FleetGrid';
 import styles from '../components/FleetPage/FleetPage.module.css';
 import {
@@ -8,9 +9,12 @@ import {
   cardPhase,
   gridCapacity,
   placeCards,
+  type FleetLive,
   type PlacedCard,
 } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
+import { useFleetActivityStore } from '../stores/fleetActivityStore';
+import { useTaskStore } from '../workspace/taskStore';
 import { listWorkspaces } from '../workspace/client';
 
 const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
@@ -47,14 +51,20 @@ const FleetPage = () => {
   const now = useFleetStore((s) => s.now);
   const selectedId = useFleetStore((s) => s.selectedId);
   const select = useFleetStore((s) => s.select);
-  const motion = useFleetStore((s) => s.motion);
-  const setMotion = useFleetStore((s) => s.setMotion);
   const loadedAt = useFleetStore((s) => s.loadedAt);
   const loadError = useFleetStore((s) => s.loadError);
   const setTitles = useFleetStore((s) => s.setTitles);
+  const runs = useFleetActivityStore((s) => s.activeRunsByWorkspace);
+  const tasks = useTaskStore((s) => s.tasks);
+  const live: FleetLive = useMemo(() => ({ runs, tasks }), [runs, tasks]);
 
+  // Reload on mount and whenever the window regains focus: that re-judges
+  // recency without a timer, and drops cards of deleted workspaces.
   useEffect(() => {
-    void useFleetStore.getState().loadSnapshot();
+    const load = () => void useFleetStore.getState().loadSnapshot();
+    load();
+    window.addEventListener('focus', load);
+    return () => window.removeEventListener('focus', load);
   }, []);
 
   const gridRef = useRef<HTMLDivElement | null>(null);
@@ -69,9 +79,9 @@ const FleetPage = () => {
   const placed: PlacedCard[] = useMemo(
     () =>
       width > 0
-        ? placeCards(Object.values(cards), { now, capacity, selectedId, prevOrder: order })
+        ? placeCards(Object.values(cards), { now, capacity, selectedId, prevOrder: order, live })
         : [],
-    [cards, now, capacity, selectedId, width, order]
+    [cards, now, capacity, selectedId, width, order, live]
   );
   const placedIds = placed.map((p) => p.id);
   if (placedIds.join(',') !== order.join(',')) setOrder(placedIds);
@@ -86,21 +96,22 @@ const FleetPage = () => {
       .catch(() => {});
   }, [untitled, setTitles]);
 
+  // Every card counts, placed or not, so waiting work that doesn't fit still shows here.
   const counts = useMemo(() => {
     let working = 0;
     let waiting = 0;
-    for (const p of placed) {
-      const phase = cardPhase(cards[p.id]!);
+    for (const card of Object.values(cards)) {
+      const phase = cardPhase(card, live);
       if (phase === 'working') working += 1;
       if (phase === 'waiting') waiting += 1;
     }
     return { working, waiting };
-  }, [placed, cards]);
+  }, [cards, live]);
 
   const handleSelect = useCallback((id: string | null) => select(id), [select]);
 
   return (
-    <div className={styles.page} data-motion={motion ? 'on' : 'off'}>
+    <div className={styles.page}>
       <header className={styles.topBar}>
         <img src="/icon.svg" alt="Clai" className={styles.brandIcon} />
         <h1 className={styles.pageTitle}>Fleet</h1>
@@ -112,18 +123,10 @@ const FleetPage = () => {
             <strong>{counts.waiting}</strong> need you
           </span>
         </div>
-        <button
-          type="button"
-          className={styles.headerButton}
-          aria-pressed={motion}
-          onClick={() => setMotion(!motion)}
-          title="Turn Fleet animations on or off"
-        >
-          Motion {motion ? 'on' : 'off'}
-        </button>
         <button type="button" className={styles.headerButton} onClick={() => navigate('/workspace')}>
           Workspaces
         </button>
+        <AppHeaderActions />
       </header>
       <main className={styles.gridArea} ref={gridRef}>
         {loadError && <p className={styles.notice}>{loadError}</p>}
@@ -134,7 +137,7 @@ const FleetPage = () => {
             cols={capacity.cols}
             rowHeight={rowHeight}
             selectedId={selectedId}
-            motion={motion}
+            live={live}
             onSelect={handleSelect}
           />
         ) : (

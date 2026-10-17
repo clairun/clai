@@ -40,26 +40,6 @@
   color: var(--color-text-secondary);
 }
 
-.settingsButton {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 30px;
-  height: 30px;
-  flex-shrink: 0;
-  border: 1px solid var(--color-border-medium);
-  border-radius: var(--radius-sm);
-  background: var(--color-bg-elevated);
-  color: var(--color-text-secondary);
-  cursor: pointer;
-  transition: border-color var(--transition-fast), color var(--transition-fast);
-}
-
-.settingsButton:hover {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-}
-
 .fleetButton {
   flex-shrink: 0;
   height: 28px;

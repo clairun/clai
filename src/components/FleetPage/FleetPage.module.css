@@ -1,8 +1,7 @@
 /*
  * The Fleet. Static by design: on WebKitGTK any running animation repaints
  * the whole window every frame, so nothing here animates at rest. The only
- * motion is short, finite transitions on state changes, and all of it sits
- * under [data-motion='on'] so one switch turns it off. No backdrop-filter:
+ * motion is short, finite transitions on state changes. No backdrop-filter:
  * cards are translucent over a static gradient instead.
  */
 
@@ -141,6 +140,7 @@
     color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-text-primary) 6%, transparent);
   overflow: hidden;
+  transition: border-color 200ms ease-out, background-color 200ms ease-out;
 }
 
 .card::before {
@@ -173,10 +173,6 @@
   border-color: color-mix(in srgb, var(--ws-tint) 60%, var(--color-border-strong));
   background: color-mix(in srgb, var(--color-bg-elevated) 94%, transparent);
   box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, var(--ws-tint) 40%, transparent);
-}
-
-[data-motion='on'] .card {
-  transition: border-color 200ms ease-out, background-color 200ms ease-out;
 }
 
 .cardInner {

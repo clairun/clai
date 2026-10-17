@@ -6,10 +6,10 @@
 import { useEffect, useState } from 'react';
 import { assistantClient, useAssistantStore } from '../../assistant';
 import { restorePendingAsk } from '../../assistant/pendingAsks';
+import { hydrateSession } from '../../assistant/sessionChat';
 import { getWorkspaceDetails } from '../../workspace/client';
 import type { WorkspaceAgentResponse } from '../../generated/bindings';
 
-const PAGE_LIMIT = 50;
 const NO_FILES = { includeFiles: false };
 const EMPTY_ROSTER: WorkspaceAgentResponse[] = [];
 
@@ -48,26 +48,10 @@ export function useFleetChat(
     if (existing && (existing.totalMessageCount != null || existing.isStreaming)) return undefined;
 
     let cancelled = false;
-    Promise.all([
-      assistantClient.getSession(workspaceId, sessionId),
-      assistantClient.loadSessionMessagesPage({ workspaceId, sessionId, limit: PAGE_LIMIT }),
-      assistantClient.listRuns(workspaceId, sessionId),
-    ])
-      .then(([session, page, runs]) => {
-        if (cancelled || !session) return;
-        useAssistantStore
-          .getState()
-          .loadSessionData(
-            sessionId,
-            session,
-            page.messages,
-            runs,
-            page.toolCalls,
-            [],
-            page.nextCursor ?? null,
-            page.hasMore,
-            page.totalCount
-          );
+    assistantClient
+      .getSession(workspaceId, sessionId)
+      .then(async (session) => {
+        if (!session || !(await hydrateSession(workspaceId, session, { isCurrent: () => !cancelled }))) return;
         void restorePendingAsk(workspaceId, sessionId);
         setResult({ sessionId, error: null });
       })

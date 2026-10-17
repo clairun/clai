@@ -19,6 +19,7 @@ import {
   pickAndStoreWorkspaceImage,
 } from '../../workspace/client';
 import type { ContentPart } from '../../generated/bindings';
+import { openGlobalSettings } from '../../utils/globalSettings';
 import TerminalEmulator from './TerminalEmulator';
 import { useTerminalTarget } from './useTerminalTarget';
 
@@ -87,6 +88,8 @@ async function readClipboardImageAsFile(): Promise<File | null> {
 const NO_CONNECTION_ERROR =
   'Add an enabled assistant provider connection before sending prompts from this workspace.';
 
+const openProviderSetup = () => openGlobalSettings({ tab: 'provider', providerAction: 'new' });
+
 /** Send `query` to `workspaceId`'s main session, binding it in the assistant store. */
 async function sendToWorkspace(
   workspaceId: string,
@@ -95,7 +98,10 @@ async function sendToWorkspace(
 ): Promise<{ error?: string }> {
   const binding = await getOrCreateWorkspaceSession(workspaceId);
   const connectionId = binding.providerConnectionId;
-  if (!connectionId) return { error: NO_CONNECTION_ERROR };
+  if (!connectionId) {
+    openProviderSetup();
+    return { error: NO_CONNECTION_ERROR };
+  }
 
   const store = useAssistantStore.getState();
   store.initSession(binding.session);
@@ -119,11 +125,37 @@ async function sendToWorkspace(
   return {};
 }
 
+/** A workspace being created from the Fleet; prompts sent meanwhile join it instead of creating another. */
+let creatingWorkspace: Promise<string> | null = null;
+
+/** Checks for a provider first, so a first run without one leaves no empty workspace behind. */
+async function createFleetWorkspace(): Promise<string> {
+  const connections = await assistantClient.listProviderConnections();
+  if (!connections.some((c) => c.enabled)) {
+    openProviderSetup();
+    throw NO_CONNECTION_ERROR;
+  }
+  return createWorkspace();
+}
+
+/** Create a workspace and send to it; select it once the send worked, unless the user picked a card meanwhile. */
+export async function sendToNewWorkspace(query: string, images: ContentPart[]): Promise<{ error?: string }> {
+  const creating = (creatingWorkspace ??= createFleetWorkspace());
+  try {
+    const workspaceId = await creating;
+    const result = await sendToWorkspace(workspaceId, query, images);
+    const fleet = useFleetStore.getState();
+    if (!result.error && !fleet.selectedId) fleet.select(workspaceId);
+    return result;
+  } finally {
+    if (creatingWorkspace === creating) creatingWorkspace = null;
+  }
+}
+
 const TerminalEmulatorWrapper = () => {
   const target = useTerminalTarget();
   const targetWorkspaceId = target.workspaceId;
-  // On the Fleet with nothing selected, a prompt starts a new workspace.
-  const createsWorkspace = target.surface === 'fleet' && !targetWorkspaceId;
+  const onFleet = target.surface === 'fleet';
 
   // Track whether the target's main session has a non-terminal run so the
   // input can show queued-message wording while still accepting text. The
@@ -157,15 +189,12 @@ const TerminalEmulatorWrapper = () => {
   const handleSendToAgent = useCallback(
     async (query: string, images: ContentPart[] = []): Promise<{ error?: string }> => {
       try {
-        if (createsWorkspace) {
-          const workspaceId = await createWorkspace();
-          useFleetStore.getState().select(workspaceId);
-          return await sendToWorkspace(workspaceId, query, images);
-        }
-        if (!targetWorkspaceId) {
-          return { error: OPEN_WORKSPACE_ERROR };
-        }
-        return await sendToWorkspace(targetWorkspaceId, query, images);
+        // On the Fleet the selection is read now, not at render: a card
+        // selected since (or by a create that just finished) is the target.
+        const workspaceId = onFleet ? useFleetStore.getState().selectedId : targetWorkspaceId;
+        if (workspaceId) return await sendToWorkspace(workspaceId, query, images);
+        if (onFleet) return await sendToNewWorkspace(query, images);
+        return { error: OPEN_WORKSPACE_ERROR };
       } catch (err) {
         console.error('[TerminalEmulatorWrapper] Workspace assistant error:', err);
         return {
@@ -173,7 +202,7 @@ const TerminalEmulatorWrapper = () => {
         };
       }
     },
-    [createsWorkspace, targetWorkspaceId]
+    [onFleet, targetWorkspaceId]
   );
 
   /**
@@ -276,6 +305,7 @@ const TerminalEmulatorWrapper = () => {
           const fresh = await getOrCreateWorkspaceSession(currentWorkspaceId);
           store.initSession(fresh.session);
           store.setActiveSessionForTab(`workspace:${currentWorkspaceId}`, fresh.session.id);
+          useFleetStore.getState().noteUserSent(currentWorkspaceId, fresh.session.id, null);
           return { message: 'Conversation history cleared.' };
         } catch (err) {
           console.error('[TerminalEmulatorWrapper] Workspace clear error:', err);

@@ -4,6 +4,7 @@ import {
   cardPhase,
   workspaceHue,
   type FleetCard as FleetCardModel,
+  type FleetLive,
   type PlacedCard,
 } from '../../fleet/fleetModel';
 import FleetCard from './FleetCard';
@@ -18,7 +19,7 @@ interface FleetGridProps {
   cols: number;
   rowHeight: number;
   selectedId: string | null;
-  motion: boolean;
+  live: FleetLive;
   onSelect: (workspaceId: string | null) => void;
 }
 
@@ -27,7 +28,7 @@ interface FleetGridProps {
  * selected, a newcomer arrived), each moved card glides from its old spot
  * once (FLIP, 240 ms). Nothing runs at rest, and a resize just snaps.
  */
-const FleetGrid = ({ placed, cards, cols, rowHeight, selectedId, motion, onSelect }: FleetGridProps) => {
+const FleetGrid = ({ placed, cards, cols, rowHeight, selectedId, live, onSelect }: FleetGridProps) => {
   const nodes = useRef(new Map<string, HTMLElement>());
   const rects = useRef(new Map<string, DOMRect>());
   const geometry = useRef('');
@@ -35,7 +36,7 @@ const FleetGrid = ({ placed, cards, cols, rowHeight, selectedId, motion, onSelec
 
   useLayoutEffect(() => {
     const nextGeometry = `${cols}:${Math.round(rowHeight)}`;
-    const animate = motion && geometry.current === nextGeometry;
+    const animate = geometry.current === nextGeometry;
     geometry.current = nextGeometry;
     const next = new Map<string, DOMRect>();
     for (const [id, node] of nodes.current) {
@@ -58,7 +59,7 @@ const FleetGrid = ({ placed, cards, cols, rowHeight, selectedId, motion, onSelec
       node.addEventListener('transitionend', clear);
     }
     rects.current = next;
-  }, [layoutKey, cols, rowHeight, motion]);
+  }, [layoutKey, cols, rowHeight]);
 
   const bind = useCallback(
     (id: string) => (node: HTMLElement | null) => {
@@ -88,7 +89,7 @@ const FleetGrid = ({ placed, cards, cols, rowHeight, selectedId, motion, onSelec
             key={id}
             ref={bind(id)}
             className={`${styles.card} ${selected ? styles.cardSelected : ''}`}
-            data-phase={cardPhase(card)}
+            data-phase={cardPhase(card, live)}
             aria-current={selected || undefined}
             style={
               {
@@ -99,9 +100,9 @@ const FleetGrid = ({ placed, cards, cols, rowHeight, selectedId, motion, onSelec
             }
           >
             {selected ? (
-              <FleetSelectedCard card={card} onClose={handleClose} />
+              <FleetSelectedCard card={card} live={live} onClose={handleClose} />
             ) : (
-              <FleetCard card={card} onSelect={handleSelect} />
+              <FleetCard card={card} live={live} onSelect={handleSelect} />
             )}
           </article>
         );

@@ -25,7 +25,7 @@ const COMMANDS: CommandEntry[] = [
   },
   {
     command: '/settings',
-    description: "Open the current workspace's settings.",
+    description: "Open the current workspace's settings, or the app's outside a workspace.",
     scope: 'workspace',
   },
   {

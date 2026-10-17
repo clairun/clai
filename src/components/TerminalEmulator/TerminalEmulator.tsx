@@ -1,6 +1,7 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { useFleetStore } from '../../fleet/fleetStore';
 import { useTerminalTarget } from './useTerminalTarget';
+import { openGlobalSettings } from '../../utils/globalSettings';
 import WorkspaceContextBar from '../../workspace/components/WorkspaceContextBar';
 import CommandHelpModal from './CommandHelpModal';
 import WorkspaceTerminal from './WorkspaceTerminal';
@@ -504,6 +505,12 @@ const TerminalEmulator = ({
       } else if (result?.message) {
         addOutputMessage(result.message, 'success');
       }
+      return;
+    }
+
+    // Off a workspace page there is no workspace-settings host: open the app's.
+    if (commandName === 'settings' && !isWorkspaceRoute) {
+      openGlobalSettings();
       return;
     }
 

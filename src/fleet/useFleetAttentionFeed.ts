@@ -23,18 +23,10 @@ export function useFleetAttentionFeed(): void {
         listen<PermissionRequest | PathGrantRequest>(`${channel}://request`, (event) => {
           if (event.payload) store().applyRequest(kind, event.payload);
         }),
+        // Fires for every way a request leaves the queue, user decisions included.
         listen<{ requestId?: string }>(`${channel}://resolved`, (event) => {
           if (event.payload?.requestId) store().resolveRequest(kind, event.payload.requestId);
-        }),
-        listen<{ workspaceId?: string | null; pendingCount?: number }>(
-          `${channel}://attention`,
-          (event) => {
-            const { workspaceId, pendingCount } = event.payload ?? {};
-            if (workspaceId && typeof pendingCount === 'number') {
-              store().setAttentionCount(kind, workspaceId, pendingCount);
-            }
-          }
-        )
+        })
       );
     }
     return () => {
