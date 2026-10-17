@@ -22,12 +22,18 @@ import type {
   ProbeModelsRequest,
   ProviderCatalogEntry,
   ProviderDescriptor,
+  PendingAsk,
   TestResult,
   UpdateProviderConnectionRequest,
 } from '../generated/bindings';
 
 export async function getSession(workspaceId: string, sessionId: string): Promise<AssistantSession | null> {
   return invoke('assistant_get_session', { workspaceId, sessionId });
+}
+
+/** Questions `ask_user` is waiting on in this workspace, so a reloaded view can show them again. */
+export async function listPendingAsks(workspaceId: string): Promise<PendingAsk[]> {
+  return invoke('assistant_list_pending_asks', { workspaceId });
 }
 
 export async function deleteSession(workspaceId: string, sessionId: string): Promise<void> {

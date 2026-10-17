@@ -15,6 +15,8 @@ import { useTask, useTaskStore, useWorkspaceTasks } from '../workspace/taskStore
 import * as assistantClient from '../assistant/client';
 import useAssistantStore, { isRunActive } from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
+import { restorePendingAsk } from '../assistant/pendingAsks';
+import { hydrateSession, useSessionChatActions } from '../assistant/sessionChat';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
 import { mainIdentity } from '../components/Agents/agentIdentity';
@@ -59,7 +61,6 @@ import styles from './Workspace.module.css';
 
 const DEFAULT_WORKSPACE_ID = 'default';
 const REFRESH_INTERVAL_MS = 5000;
-const MESSAGE_PAGE_LIMIT = 100;
 // The workspace page is the one caller that wants the filesystem walk: it
 // re-walks on every poll so memories created by a running agent surface
 // without the user having to re-enter the workspace, and so the artifact
@@ -1861,28 +1862,16 @@ const Workspace = () => {
             (hasUnloadedUpdate && !streamingRuns?.some(isRunActive));
 
           if (shouldHydrateSession) {
-            const [messagePage, runs] = await Promise.all([
-              assistantClient.loadSessionMessagesPage({
-                workspaceId,
-                sessionId: nextDetails.session.id,
-                limit: MESSAGE_PAGE_LIMIT,
-              }),
-              streamingRuns ?? assistantClient.listRuns(workspaceId, nextDetails.session.id),
-            ]);
-            if (currentWorkspaceIdRef.current !== workspaceId) return;
-
-            store.loadSessionData(
-              nextDetails.session.id,
-              nextDetails.session,
-              messagePage.messages,
-              runs,
-              messagePage.toolCalls,
-              nextDetails.queuedMessageIds || [],
-              messagePage.nextCursor ?? null,
-              messagePage.hasMore,
-              messagePage.totalCount
-            );
+            const hydrated = await hydrateSession(workspaceId, nextDetails.session, {
+              queuedMessageIds: nextDetails.queuedMessageIds || [],
+              runs: streamingRuns ?? undefined,
+              isCurrent: () => currentWorkspaceIdRef.current === workspaceId,
+            });
+            if (!hydrated) return;
             lastLoadedSessionUpdatedAtRef.current = nextDetails.session.updatedAt || null;
+            if (needsInitialHydration) {
+              void restorePendingAsk(workspaceId, nextDetails.session.id);
+            }
           }
         }
       } catch (err) {
@@ -2103,69 +2092,11 @@ const Workspace = () => {
   // details cover the first render before hydration.
   const queuedMessageIds =
     storeQueuedMessageIds ?? details?.queuedMessageIds ?? EMPTY_QUEUED_IDS;
-  const handleDeleteQueuedMessage = useCallback(
-    (messageId: string) => {
-      if (!sessionId) return;
-      // MessageDeleted from the backend removes it from the store; on a
-      // lost race ("already picked up") the chip clears via
-      // queued_messages_delivered instead, so both outcomes self-resolve.
-      assistantClient.deleteQueuedMessage(workspaceId, sessionId, messageId).catch((err) => {
-        console.error('[Workspace] Failed to delete queued message:', err);
-      });
-    },
-    [sessionId, workspaceId]
-  );
-  const handleEditQueuedMessage = useCallback(
-    async (messageId: string, text: string) => {
-      if (!sessionId) return;
-      // AssistantMessageUpdated from the backend swaps the text in the
-      // store. On a lost race ("already picked up") the edit errors and the
-      // original text is left untouched.
-      try {
-        await assistantClient.editQueuedMessage(workspaceId, sessionId, messageId, text);
-      } catch (err) {
-        console.error('[Workspace] Failed to edit queued message:', err);
-      }
-    },
-    [sessionId, workspaceId]
-  );
-  const handleLoadOlderMessages = useCallback(() => {
-    if (!sessionId) return;
-    const store = useAssistantStore.getState();
-    const current = store.sessions[sessionId];
-    if (
-      !current?.hasOlderMessages ||
-      !current.olderMessageCursor ||
-      current.isLoadingOlderMessages
-    ) {
-      return;
-    }
-
-    store.setOlderMessagesLoading(sessionId, true);
-    assistantClient
-      .loadSessionMessagesPage({
-        workspaceId,
-        sessionId,
-        before: current.olderMessageCursor,
-        limit: MESSAGE_PAGE_LIMIT,
-      })
-      .then((page) => {
-        useAssistantStore
-          .getState()
-          .prependMessagePage(
-            sessionId,
-            page.messages,
-            page.toolCalls,
-            page.nextCursor ?? null,
-            page.hasMore,
-            page.totalCount
-          );
-      })
-      .catch((err) => {
-        console.error('[Workspace] Failed to load older messages:', err);
-        useAssistantStore.getState().setOlderMessagesLoading(sessionId, false);
-      });
-  }, [sessionId, workspaceId]);
+  const {
+    onDeleteQueuedMessage: handleDeleteQueuedMessage,
+    onEditQueuedMessage: handleEditQueuedMessage,
+    onLoadOlderMessages: handleLoadOlderMessages,
+  } = useSessionChatActions(workspaceId, sessionId);
 
   const forkPromptStartedRef = useRef<Set<string>>(new Set());
   useEffect(() => {

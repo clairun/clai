@@ -25,7 +25,7 @@ const COMMANDS: CommandEntry[] = [
   },
   {
     command: '/settings',
-    description: "Open the current workspace's settings.",
+    description: "Open the current workspace's settings, or the app's outside a workspace.",
     scope: 'workspace',
   },
   {
@@ -46,6 +46,7 @@ const SHORTCUTS: { keys: string; description: string }[] = [
   { keys: 'Shift+Enter', description: 'New line' },
   { keys: 'Ctrl/Cmd+L', description: 'Focus the input' },
   { keys: 'Ctrl/Cmd+\\', description: 'Toggle terminal mode' },
+  { keys: 'Ctrl/Cmd+K', description: "Choose the Fleet terminal's workspace" },
   { keys: 'Ctrl+Shift+C / V', description: 'Copy / paste in the terminal (Cmd+C/V on macOS)' },
 ];
 

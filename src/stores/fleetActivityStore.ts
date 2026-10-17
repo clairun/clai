@@ -26,6 +26,8 @@ interface FleetActivityState {
   runNowSkipped: string[];
   markRunStarted: (workspaceId: string, runId: string) => void;
   markRunEnded: (workspaceId: string, runId: string) => void;
+  /** Replace a workspace's runs with a fresh read (the Fleet snapshot). */
+  setRuns: (workspaceId: string, runIds: readonly string[]) => void;
   markRunNowSkipped: (workspaceId: string) => void;
   dismissRunNowSkipped: (workspaceId: string) => void;
 }
@@ -56,6 +58,17 @@ export const useFleetActivityStore = create<FleetActivityState>()((set, get) => 
         delete map[workspaceId];
       } else {
         map[workspaceId] = next;
+      }
+      return { activeRunsByWorkspace: map };
+    }),
+
+  setRuns: (workspaceId, runIds) =>
+    set((state) => {
+      const map = { ...state.activeRunsByWorkspace };
+      if (runIds.length === 0) {
+        delete map[workspaceId];
+      } else {
+        map[workspaceId] = [...runIds];
       }
       return { activeRunsByWorkspace: map };
     }),

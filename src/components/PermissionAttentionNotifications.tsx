@@ -83,9 +83,12 @@ const PermissionAttentionNotifications = () => {
   // re-bind on every navigation — toasts arrive asynchronously, and
   // re-subscribing would drop in-flight events.
   const currentWorkspaceIdRef = useRef<string | null>(null);
+  // On the Fleet the cards are the notification: a waiting card moves up and turns amber.
+  const onFleetRef = useRef(false);
   useEffect(() => {
     const match = location.pathname.match(/^\/workspace\/([^/]+)/);
     currentWorkspaceIdRef.current = match ? decodeURIComponent(match[1]!) : null;
+    onFleetRef.current = location.pathname === '/fleet';
   }, [location.pathname]);
 
   const dismiss = useCallback((id: string) => {
@@ -101,7 +104,7 @@ const PermissionAttentionNotifications = () => {
     (item: NotificationItem | null) => {
       if (!item) return;
       // Same-workspace events are surfaced inline; don't double-notify.
-      if (item.workspaceId === currentWorkspaceIdRef.current) return;
+      if (item.workspaceId === currentWorkspaceIdRef.current || onFleetRef.current) return;
 
       setNotifications((current) => {
         // De-dupe by requestId in case the backend re-emits.

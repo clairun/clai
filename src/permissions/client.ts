@@ -1,6 +1,11 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { PermissionRequest, SegmentDecision } from '../generated/bindings';
 
+export const allowOnce = (): SegmentDecision => ({ kind: 'allowOnce' });
+export const denyOnce = (): SegmentDecision => ({ kind: 'denyOnce' });
+export const allowAlways = (prefix: string): SegmentDecision => ({ kind: 'allowAlways', scope: 'agent', prefix });
+export const denyAlways = (prefix: string): SegmentDecision => ({ kind: 'denyAlways', scope: 'agent', prefix });
+
 /**
  * Send the user's per-segment decisions for a pending shell-permission
  * approval. The backend persists any AllowAlways/DenyAlways entries to

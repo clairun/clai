@@ -90,7 +90,7 @@ const renderFleet = (initialPath = '/workspace/a') =>
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route element={<FleetLayout />}>
-          <Route path="/fleet" element={<div data-testid="fleet-index" />} />
+          <Route path="/workspace" element={<div data-testid="fleet-index" />} />
           <Route path="/workspace/:workspaceId" element={<div data-testid="workspace" />} />
         </Route>
       </Routes>
@@ -122,7 +122,7 @@ describe('FleetLayout attention', () => {
     try {
       renderFleet();
       await screen.findByText('Alpha');
-      expect(screen.getByRole('status', { name: 'Fleet summary' })).toHaveTextContent('1 need attention');
+      expect(screen.getByRole('status', { name: 'Summary' })).toHaveTextContent('1 need attention');
     } finally {
       permissionAttention.counts = {};
     }
@@ -151,7 +151,7 @@ describe('FleetLayout workspace deletion', () => {
 
     await waitFor(() => expect(deleteWorkspace).toHaveBeenCalledWith('a'));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    // Deleting the open workspace redirects to the fleet index, and that too
+    // Deleting the open workspace redirects to the workspace index, and that too
     // must not wait on the refresh.
     expect(await screen.findByTestId('fleet-index')).toBeInTheDocument();
 

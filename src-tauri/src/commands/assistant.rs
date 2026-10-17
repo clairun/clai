@@ -594,6 +594,13 @@ pub async fn assistant_submit_user_input(
     )
 }
 
+/// The workspace's `ask_user` questions still awaiting an answer, so a
+/// reloaded webview can re-render their answer panels.
+#[tauri::command]
+pub async fn assistant_list_pending_asks(workspace_id: String) -> Vec<ask_user::PendingAsk> {
+    ask_user::pending_for_workspace(&workspace_id)
+}
+
 #[tauri::command]
 pub async fn assistant_cancel_run(
     workspace_id: String,

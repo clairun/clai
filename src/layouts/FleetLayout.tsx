@@ -15,9 +15,7 @@ import {
 } from '../workspace/client';
 import WorkspaceRail from '../components/Fleet/WorkspaceRail';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
-import AppUpdateBadge from '../components/AppUpdateBadge';
-import { SettingsModal, TABS } from '../components/Settings';
-import { OPEN_GLOBAL_SETTINGS_EVENT, type OpenGlobalSettingsDetail } from '../utils/globalSettings';
+import AppTopBar from '../components/AppTopBar';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ProgressDialog from '../components/ProgressDialog';
 import { useFleetActivity } from '../hooks/useFleetActivity';
@@ -97,17 +95,6 @@ const FleetLayout = () => {
   });
   const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [deleting, setDeleting] = useState(false);
-  const [globalSettingsOpen, setGlobalSettingsOpen] = useState(false);
-  const [globalSettingsTab, setGlobalSettingsTab] = useState<typeof TABS[keyof typeof TABS]>(TABS.PROVIDER);
-  // Set when the modal was opened by a deep link that wants the provider
-  // tab's "Add Connection" form already open (e.g. the first-run badge in
-  // the chat context bar). Cleared on close so a later manual open of
-  // Settings doesn't replay the form.
-  const [globalSettingsProviderAction, setGlobalSettingsProviderAction] = useState<'new' | null>(null);
-  // Same idea for a deep link that names one shared agent (e.g. the link on a
-  // crew member in workspace settings): the agents tab opens with that
-  // definition in its editor. Cleared on close.
-  const [globalSettingsAgentId, setGlobalSettingsAgentId] = useState<string | null>(null);
   const [forkBusyId, setForkBusyId] = useState<string | null>(null);
   const [runNowBusyId, setRunNowBusyId] = useState<string | null>(null);
   const [pauseBusyId, setPauseBusyId] = useState<string | null>(null);
@@ -147,21 +134,6 @@ const FleetLayout = () => {
     const interval = window.setInterval(loadWorkspaces, REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
   }, [loadWorkspaces]);
-
-  // Deep links into the global settings modal from leaf components (e.g. the
-  // "Configure a provider first" badge in the chat context bar) arrive as a
-  // window event — this layout is the modal's only host.
-  useEffect(() => {
-    const handleOpenSettings = (event: Event) => {
-      const detail = (event as CustomEvent<OpenGlobalSettingsDetail>).detail || {};
-      setGlobalSettingsTab(detail.tab ?? TABS.PROVIDER);
-      setGlobalSettingsProviderAction(detail.providerAction ?? null);
-      setGlobalSettingsAgentId(detail.agentDefinitionId ?? null);
-      setGlobalSettingsOpen(true);
-    };
-    window.addEventListener(OPEN_GLOBAL_SETTINGS_EVENT, handleOpenSettings);
-    return () => window.removeEventListener(OPEN_GLOBAL_SETTINGS_EVENT, handleOpenSettings);
-  }, []);
 
   // Publish the rail's current width so the globally-fixed terminal card (in
   // MainLayout, a sibling of our Outlet) can center over the detail pane rather
@@ -331,12 +303,12 @@ const FleetLayout = () => {
     // modal sitting over a workspace that was already gone, which is what
     // read as a hung dialog.
     setPendingDelete(null);
-    // If we just deleted the open workspace, fall back to /fleet so the index
+    // If we just deleted the open workspace, fall back to /workspace so the index
     // can re-pick a most-recent target (or show the empty state). Before the
     // refresh, so the route stops pointing at a dead id immediately rather
     // than one `listWorkspaces` round trip later.
     if (selectedId === id) {
-      navigate('/fleet', { replace: true });
+      navigate('/workspace', { replace: true });
     }
     await loadWorkspaces();
   }, [pendingDelete, loadWorkspaces, selectedId, navigate]);
@@ -471,45 +443,20 @@ const FleetLayout = () => {
 
   return (
     <div className={styles.layout}>
-      <div className={styles.topBar}>
-        <img src="/icon.svg" alt="Clai" className={styles.brandIcon} />
-        <div className={styles.counters} role="status" aria-label="Fleet summary">
-          <span className={styles.counterChip}>
-            <strong>{counters.total}</strong> workspace{counters.total === 1 ? '' : 's'}
-          </span>
-          <span className={styles.counterSep}>·</span>
-          <span className={styles.counterChip}>
-            <strong>{counters.periodic}</strong> periodic
-          </span>
-          <span className={styles.counterSep}>·</span>
-          <span className={styles.counterChip}>
-            <strong>{counters.running}</strong> running
-          </span>
-          <span className={styles.counterSep}>·</span>
-          <span
-            className={`${styles.counterChip} ${counters.attention > 0 ? styles.counterChipAttention : ''}`}
-          >
-            <strong>{counters.attention}</strong> need attention
-          </span>
-        </div>
-        <AppUpdateBadge />
-        <button
-          type="button"
-          className={styles.settingsButton}
-          onClick={() => {
-            setGlobalSettingsTab(TABS.PROVIDER);
-            setGlobalSettingsProviderAction(null);
-            setGlobalSettingsOpen(true);
-          }}
-          title="Settings"
-          aria-label="Open settings"
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-            <circle cx="12" cy="12" r="3" />
-            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-          </svg>
-        </button>
-      </div>
+      <AppTopBar nav={{ label: 'Fleet', to: '/fleet' }}>
+        <span>
+          <strong>{counters.total}</strong> workspace{counters.total === 1 ? '' : 's'}
+        </span>
+        <span>
+          <strong>{counters.periodic}</strong> periodic
+        </span>
+        <span>
+          <strong>{counters.running}</strong> running
+        </span>
+        <span data-attention={counters.attention > 0 || undefined}>
+          <strong>{counters.attention}</strong> need attention
+        </span>
+      </AppTopBar>
 
       <div className={styles.body} ref={bodyRef}>
         {(error || flash) && (
@@ -552,18 +499,6 @@ const FleetLayout = () => {
         workspaceId={settingsState.workspaceId || ''}
         details={settingsState.details}
         onChanged={handleSettingsChanged}
-      />
-
-      <SettingsModal
-        isOpen={globalSettingsOpen}
-        onClose={() => {
-          setGlobalSettingsOpen(false);
-          setGlobalSettingsProviderAction(null);
-          setGlobalSettingsAgentId(null);
-        }}
-        initialTab={globalSettingsTab}
-        initialProviderAction={globalSettingsProviderAction}
-        initialAgentDefinitionId={globalSettingsAgentId}
       />
 
       <ProgressDialog

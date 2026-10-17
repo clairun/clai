@@ -153,6 +153,32 @@ export type FilesystemPathGrant = { path: string, access: FilesystemPathAccess,
 origin?: GrantOrigin | null, };
 
 /**
+ * The text of the main session's newest assistant reply, cut to a preview.
+ */
+export type FleetMessagePreview = { messageId: string, text: string, truncated: boolean, createdAt: bigint, };
+
+export type FleetWorkspace = { workspaceId: string, title: string, starred: boolean, 
+/**
+ * When any session (main, task or other) was last touched; 0 when the
+ * workspace has no session yet.
+ */
+lastActivityAt: bigint, 
+/**
+ * The manager's conversation; `None` until someone talks to it.
+ */
+mainSessionId: string | null, 
+/**
+ * Non-terminal runs (queued, running or waiting for a tool) in any
+ * session of the workspace, not only the main one; empty when nothing
+ * runs.
+ */
+activeRunIds: Array<string>, 
+/**
+ * Unfinished tasks plus the most recently finished ones, newest first.
+ */
+tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingAsks: Array<PendingAsk>, lastAssistantMessage: FleetMessagePreview | null, };
+
+/**
  * Provenance for a `FilesystemPathGrant`. Lets the agent-settings UI tell
  * the user *why* a path is in the grant list: was it added by hand, derived
  * from the credentials preset, or accepted via an in-run approval modal?
@@ -271,6 +297,12 @@ path: string,
 access: FilesystemPathAccess, } | { "kind": "allowAlways", path: string, access: FilesystemPathAccess, scope: PermissionScope, };
 
 export type PathGrantRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, requestedPath: string, requestedAccess: FilesystemPathAccess, reason: string, };
+
+/**
+ * A question awaiting the human: the `AskUserRequested` payload plus where
+ * it was asked. Kept so a reloaded webview can re-render the answer panel.
+ */
+export type PendingAsk = { pendingId: string, workspaceId: string, sessionId: string, runId: string, question: string, options: Array<AskUserOption> | null, multiSelect: boolean, extraContext: string | null, requestedAt: bigint, };
 
 export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, segments: Array<SegmentApproval>, 
 /**

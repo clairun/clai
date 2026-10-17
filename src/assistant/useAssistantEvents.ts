@@ -13,6 +13,7 @@ import { listen } from '@tauri-apps/api/event';
 import useAssistantStore from './sessionStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
+import { useFleetStore } from '../fleet/fleetStore';
 import type { AssistantEventEnvelope, AssistantUiEvent } from '../generated/bindings';
 
 const ASSISTANT_EVENT_NAME = 'assistant://event';
@@ -25,6 +26,7 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
   const { sessionId } = envelope;
   const event: AssistantUiEvent = envelope.event;
   const store = useAssistantStore.getState();
+  useFleetStore.getState().applyEvent(envelope);
 
   switch (event.type) {
     case 'session_created':
