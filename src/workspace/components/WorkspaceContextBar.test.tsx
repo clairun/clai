@@ -26,6 +26,7 @@ vi.mock('../../assistant', () => ({
 }));
 
 import WorkspaceContextBar from './WorkspaceContextBar';
+import { applyNewWorkspaceDraft, newWorkspaceDraft } from '../../fleet/newWorkspaceDraft';
 import type { WorkspaceDetails } from '../../generated/bindings';
 
 const server = (id: string, name: string) => ({
@@ -217,5 +218,50 @@ describe('WorkspaceContextBar provider picker', () => {
     await waitFor(() => expect(select.disabled).toBe(false));
     expect(select.value).toBe('conn-a');
     consoleError.mockRestore();
+  });
+});
+
+describe('WorkspaceContextBar for a new workspace (no workspace yet)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    Object.assign(newWorkspaceDraft, { providerConnectionId: '', mcpServerIds: [], disabledMcpServerIds: [] });
+    mocks.setWorkspaceProvider.mockResolvedValue(undefined);
+    mocks.updateWorkspaceSessionMcp.mockResolvedValue(undefined);
+    mocks.getMcpServers.mockResolvedValue([server('srv-a', 'Alpha'), server('srv-b', 'Beta')]);
+    mocks.listProviderConnections.mockResolvedValue([
+      { id: 'conn-a', name: 'Alpha', enabled: true },
+      { id: 'conn-b', name: 'Beta', enabled: true },
+    ]);
+  });
+
+  it('shows the model picker (defaulting to the first connection) and Add MCP', async () => {
+    render(<WorkspaceContextBar workspaceId={null} />);
+    const select = await screen.findByRole<HTMLSelectElement>('combobox');
+    expect(select.value).toBe('conn-a');
+    expect(screen.getByText('Add MCP')).toBeTruthy();
+    expect(mocks.getWorkspaceDetails).not.toHaveBeenCalled();
+  });
+
+  it('holds the choices and applies them to the workspace once created', async () => {
+    render(<WorkspaceContextBar workspaceId={null} />);
+    const select = await screen.findByRole<HTMLSelectElement>('combobox');
+    await userEvent.selectOptions(select, 'conn-b');
+    await waitFor(() => expect(select.value).toBe('conn-b'));
+
+    await userEvent.click(screen.getByText('Add MCP'));
+    await userEvent.click((await screen.findAllByRole('button', { name: 'Add' }))[0]!);
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Add' })).toHaveLength(1));
+    await userEvent.click(screen.getByRole('button', { name: 'Add' }));
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Remove' })).toHaveLength(2));
+    await userEvent.click(screen.getByRole('button', { name: 'Close MCP server selector' }));
+    await userEvent.click(await screen.findByTitle('Alpha: click to disable'));
+    await screen.findByTitle('Alpha: click to enable');
+
+    expect(mocks.setWorkspaceProvider).not.toHaveBeenCalled();
+    expect(mocks.updateWorkspaceSessionMcp).not.toHaveBeenCalled();
+
+    await applyNewWorkspaceDraft('ws-new');
+    expect(mocks.setWorkspaceProvider).toHaveBeenCalledWith('ws-new', 'conn-b');
+    expect(mocks.updateWorkspaceSessionMcp).toHaveBeenCalledWith('ws-new', ['srv-b'], ['srv-a']);
   });
 });

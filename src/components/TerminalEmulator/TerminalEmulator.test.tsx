@@ -449,6 +449,8 @@ describe('TerminalEmulator on the Fleet', () => {
     const user = userEvent.setup();
     const send = renderFleetComposer();
     expect(screen.getByText('→ New workspace')).toBeInTheDocument();
+    // Model and MCP for the workspace to be created: same bar, same height.
+    expect(screen.getByTestId('context-bar')).toBeInTheDocument();
 
     await user.type(screen.getByRole('textbox'), 'hello{Enter}');
     expect(send).not.toHaveBeenCalled();

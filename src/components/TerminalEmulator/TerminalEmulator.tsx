@@ -657,10 +657,11 @@ const TerminalEmulator = ({
           box); it is hidden — not unmounted — while the terminal is on screen,
           so composer state is preserved too. */}
       <div style={{ display: showTerminal ? 'none' : 'contents' }}>
-          {/* Workspace context bar — MCP badges inside the terminal on workspace routes */}
-          {chatWorkspaceId && (
+          {/* Workspace context bar — model and MCP for the target; on the Fleet
+              with no card selected, for the workspace the next prompt creates */}
+          {(chatWorkspaceId || isFleetRoute) && (
             <div className={styles.workspaceContextWrapper}>
-              <WorkspaceContextBar key={chatWorkspaceId} workspaceId={chatWorkspaceId} />
+              <WorkspaceContextBar key={chatWorkspaceId ?? 'new'} workspaceId={chatWorkspaceId} />
             </div>
           )}
 

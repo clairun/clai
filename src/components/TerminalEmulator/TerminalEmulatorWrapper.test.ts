@@ -6,12 +6,16 @@ const getOrCreateWorkspaceSession = vi.fn();
 const listProviderConnections = vi.fn();
 const sendMessage = vi.fn();
 const openGlobalSettings = vi.fn();
+const applyNewWorkspaceDraft = vi.fn();
 
 vi.mock('../../workspace/client', () => ({
   createWorkspace: () => createWorkspace(),
   getOrCreateWorkspaceSession: (id: string) => getOrCreateWorkspaceSession(id),
   storeWorkspaceImage: vi.fn(),
   pickAndStoreWorkspaceImage: vi.fn(),
+}));
+vi.mock('../../fleet/newWorkspaceDraft', () => ({
+  applyNewWorkspaceDraft: (id: string) => applyNewWorkspaceDraft(id),
 }));
 vi.mock('../../assistant/client', () => ({
   listProviderConnections: () => listProviderConnections(),
@@ -39,6 +43,8 @@ describe('sending from the Fleet with no card selected', () => {
     const results = await Promise.all([sendToNewWorkspace('a', []), sendToNewWorkspace('b', [])]);
     expect(results).toEqual([{}, {}]);
     expect(createWorkspace).toHaveBeenCalledTimes(1);
+    expect(applyNewWorkspaceDraft).toHaveBeenCalledWith('new');
+    expect(applyNewWorkspaceDraft.mock.invocationCallOrder[0]).toBeLessThan(sendMessage.mock.invocationCallOrder[0]!);
     expect(sendMessage.mock.calls.map((call) => call[0])).toEqual(['new', 'new']);
     expect(useFleetStore.getState().selectedId).toBe('new');
   });

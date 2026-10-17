@@ -5,13 +5,14 @@
  * (see `useTerminalTarget`) is the open workspace's manager session, or on
  * the Fleet the selected card's — keyed `workspace:<id>` in the assistant
  * store. On the Fleet with no card selected, a prompt creates a workspace
- * (default model) and sends to it.
+ * (with the model and MCP chosen in the terminal) and sends to it.
  */
 
 import { useCallback } from 'react';
 import { useAssistantStore, assistantClient } from '../../assistant';
 import { readImage } from '@tauri-apps/plugin-clipboard-manager';
 import { useFleetStore } from '../../fleet/fleetStore';
+import { applyNewWorkspaceDraft } from '../../fleet/newWorkspaceDraft';
 import {
   createWorkspace,
   getOrCreateWorkspaceSession,
@@ -135,7 +136,9 @@ async function createFleetWorkspace(): Promise<string> {
     openProviderSetup();
     throw NO_CONNECTION_ERROR;
   }
-  return createWorkspace();
+  const workspaceId = await createWorkspace();
+  await applyNewWorkspaceDraft(workspaceId);
+  return workspaceId;
 }
 
 /** Create a workspace and send to it; select it once the send worked, unless the user picked a card meanwhile. */

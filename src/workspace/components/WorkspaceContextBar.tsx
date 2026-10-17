@@ -7,6 +7,7 @@ import ContextBadge from '../../components/ContextPanel/ContextBadge';
 import McpServerAvatar from '../../components/ContextPanel/McpServerAvatar';
 import McpServerSelector from '../../components/ContextPanel/McpServerSelector';
 import ProviderSetupBadge from '../../components/ContextPanel/ProviderSetupBadge';
+import { newWorkspaceDraft } from '../../fleet/newWorkspaceDraft';
 import { getWorkspaceDetails, updateWorkspaceSessionMcp, setWorkspaceProvider } from '../client';
 import styles from './WorkspaceContextBar.module.css';
 
@@ -22,8 +23,16 @@ const DETAILS_OPTIONS = {
 };
 
 interface WorkspaceContextBarProps {
-  workspaceId: string;
+  /** `null`: the Fleet's new-workspace draft, applied when the workspace is created. */
+  workspaceId: string | null;
 }
+
+const draftDetails = () => ({
+  kind: 'general',
+  selectedMcpServerIds: newWorkspaceDraft.mcpServerIds,
+  disabledMcpServerIds: newWorkspaceDraft.disabledMcpServerIds,
+  providerConnectionIds: [newWorkspaceDraft.providerConnectionId],
+});
 
 /**
  * WorkspaceContextBar — shows MCP server badges and provider info for workspaces.
@@ -53,12 +62,13 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
 
   // Load workspace details to determine type and MCP config
   useEffect(() => {
-    if (!workspaceId) return;
     let cancelled = false;
 
     const loadDetails = async () => {
       try {
-        const details = await getWorkspaceDetails(workspaceId, DETAILS_OPTIONS);
+        const details = workspaceId
+          ? await getWorkspaceDetails(workspaceId, DETAILS_OPTIONS)
+          : draftDetails();
         if (cancelled) return;
         const agent = details?.kind === 'agent';
         setIsAgent(agent);
@@ -161,13 +171,12 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
     // The backend receives the effective (enabled) list plus the disabled
     // remainder, so the toggle persists across restarts and disabled
     // servers are excluded from runs.
-    (attachedIds: string[], disabledIds: string[]) => save(() =>
-      updateWorkspaceSessionMcp(
-        workspaceId,
-        attachedIds.filter((id) => !disabledIds.includes(id)),
-        disabledIds
-      )
-    ),
+    (attachedIds: string[], disabledIds: string[]) => save(async () => {
+      const enabledIds = attachedIds.filter((id) => !disabledIds.includes(id));
+      if (workspaceId) return updateWorkspaceSessionMcp(workspaceId, enabledIds, disabledIds);
+      newWorkspaceDraft.mcpServerIds = enabledIds;
+      newWorkspaceDraft.disabledMcpServerIds = disabledIds;
+    }),
     [workspaceId, save]
   );
 
@@ -214,7 +223,10 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
     (e: React.ChangeEvent<HTMLSelectElement>) => {
       const id = e.target.value;
       setSelectedProviderId(id);
-      save(() => setWorkspaceProvider(workspaceId, id));
+      save(async () => {
+        if (workspaceId) return setWorkspaceProvider(workspaceId, id);
+        newWorkspaceDraft.providerConnectionId = id;
+      });
     },
     [workspaceId, save]
   );
@@ -282,7 +294,7 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
             </svg>
             <select
               className={styles.providerSelect}
-              value={selectedProviderId}
+              value={selectedProviderId || enabledProviders[0]?.id}
               disabled={saving}
               onChange={handleProviderChange}
             >
