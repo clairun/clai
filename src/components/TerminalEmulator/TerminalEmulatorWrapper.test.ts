@@ -53,6 +53,7 @@ describe('sending from the Fleet with no card selected', () => {
 
   it('sets up the new workspace from the draft before sending, images included', async () => {
     createWorkspace.mockResolvedValue('new');
+    listProviderConnections.mockResolvedValue([{ id: 'c', enabled: true }, { id: 'c2', enabled: true }]);
     Object.assign(newWorkspaceDraft, { providerConnectionId: 'c2', mcpServerIds: ['m1'], disabledMcpServerIds: ['m2'] });
     const stored = { type: 'image', id: 'img', path: 'img.png', media_type: 'image/png' };
     storeWorkspaceImage.mockResolvedValue(stored);
@@ -67,6 +68,16 @@ describe('sending from the Fleet with no card selected', () => {
     const sentAt = sendMessage.mock.invocationCallOrder[0]!;
     expect(setWorkspaceProvider.mock.invocationCallOrder[0]).toBeLessThan(sentAt);
     expect(updateWorkspaceSessionMcp.mock.invocationCallOrder[0]).toBeLessThan(sentAt);
+  });
+
+  it('gives the new workspace the default model when the drafted connection is gone or disabled', async () => {
+    createWorkspace.mockResolvedValue('new');
+    listProviderConnections.mockResolvedValue([{ id: 'off', enabled: false }, { id: 'c', enabled: true }]);
+    for (const stale of ['deleted', 'off']) {
+      newWorkspaceDraft.providerConnectionId = stale;
+      await sendToNewWorkspace('a', []);
+      expect(setWorkspaceProvider).toHaveBeenLastCalledWith('new', 'c');
+    }
   });
 
   it('keeps a card the user selected while the workspace was being created', async () => {
@@ -92,5 +103,19 @@ describe('sending from the Fleet with no card selected', () => {
     expect(useFleetStore.getState().selectedId).toBeNull();
     await sendToNewWorkspace('b', []);
     expect(createWorkspace).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a draft image for a retry after a failed send, and forgets it once sent', async () => {
+    createWorkspace.mockResolvedValue('new');
+    storeWorkspaceImage.mockResolvedValue({ type: 'image', id: 'img', path: 'img.png', media_type: 'image/png' });
+    const draftImage = draftImagePart({ dataBase64: 'AAAA', mediaType: 'image/png', filename: null });
+    getOrCreateWorkspaceSession.mockResolvedValueOnce({ session: { id: 's' }, providerConnectionId: null });
+    expect((await sendToNewWorkspace('a', [draftImage])).error).toBeDefined();
+    expect(await sendToNewWorkspace('a', [draftImage])).toEqual({});
+    expect(storeWorkspaceImage).toHaveBeenCalledTimes(2);
+
+    // Sent: the image is no longer held, so nothing is left to store.
+    await sendToNewWorkspace('a', [draftImage]);
+    expect(storeWorkspaceImage).toHaveBeenCalledTimes(2);
   });
 });

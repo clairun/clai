@@ -38,9 +38,10 @@ interface InlineApprovalCardProps {
    */
   request?: PermissionRequest;
   /**
-   * For a small Fleet card: no badge or collapse, each command part once on
-   * one line with short decision chips (full labels in the tooltips), and
-   * no prefix editing.
+   * For a small Fleet card: no badge or collapse, the command and each part
+   * on one line, with short decision chips (full labels in the tooltips). No
+   * prefix editing, so no "always" decisions: the rule they save would be
+   * hidden. The full card keeps them.
    */
   compact?: boolean;
 }
@@ -353,7 +354,13 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApp
                 <pre className={`${styles.command} ${styles.collapsedSummary}`}>{req.command}</pre>
               ) : (
                 <div className={styles.cardBody}>
-              {!compact && <pre className={styles.command}>{req.command}</pre>}
+              {/* Compact too: the parts leave out separators and parts that need no decision. */}
+              <pre
+                className={compact ? `${styles.command} ${styles.collapsedSummary}` : styles.command}
+                title={compact ? req.command : undefined}
+              >
+                {req.command}
+              </pre>
               <section className={styles.segments}>
                 {isSharedAgent && !compact && (
                   <p className={styles.segmentsLabel}>
@@ -382,7 +389,7 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApp
                   const canPersist = Boolean(seg.suggestedPrefix);
                   return (
                     <div key={idx} className={styles.segmentRow}>
-                      {(compact || req.segments.length > 1) && (
+                      {req.segments.length > 1 && (
                         <div className={styles.segmentText}>
                           <code title={compact ? seg.text : undefined}>{seg.text}</code>
                           {isOpaque && (
@@ -416,30 +423,30 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApp
                           disabled={isSubmitting}
                           {...chipText('Allow once', 'Once')}
                         />
-                        {canPersist && (
+                        {canPersist && !compact && (
                           <button
                             type="button"
                             className={`${styles.btn} ${styles.btnAllow} ${cell.decision === 'allowAlways' ? styles.btnSelected : ''}`}
                             onClick={() => handleSegmentDecision(req, idx, 'allowAlways')}
                             disabled={isSubmitting}
-                            {...chipText(
-                              isSharedAgent ? 'Always allow (every workspace)' : 'Always allow (this agent)',
-                              'Always',
-                              savedOn
-                            )}
-                          />
+                            title={savedOn}
+                          >
+                            {isSharedAgent
+                              ? 'Always allow (every workspace)'
+                              : 'Always allow (this agent)'}
+                          </button>
                         )}
-                        <button
-                          type="button"
-                          className={`${styles.btn} ${styles.btnDeny} ${cell.decision === 'denyAlways' ? styles.btnSelected : ''}`}
-                          onClick={() => handleSegmentDecision(req, idx, 'denyAlways')}
-                          disabled={isSubmitting}
-                          {...chipText(
-                            isSharedAgent ? 'Always deny (every workspace)' : 'Always deny (this agent)',
-                            'Never',
-                            savedOn
-                          )}
-                        />
+                        {!compact && (
+                          <button
+                            type="button"
+                            className={`${styles.btn} ${styles.btnDeny} ${cell.decision === 'denyAlways' ? styles.btnSelected : ''}`}
+                            onClick={() => handleSegmentDecision(req, idx, 'denyAlways')}
+                            disabled={isSubmitting}
+                            title={savedOn}
+                          >
+                            {isSharedAgent ? 'Always deny (every workspace)' : 'Always deny (this agent)'}
+                          </button>
+                        )}
                         <button
                           type="button"
                           className={`${styles.btn} ${styles.btnDenyOnce} ${cell.decision === 'denyOnce' ? styles.btnSelected : ''}`}
@@ -457,17 +464,17 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApp
               )}
               {req.segments.length > 1 && (
                 <footer className={styles.cardFooter}>
-                  <button
-                    type="button"
-                    className={`${styles.btn} ${styles.btnAllow}`}
-                    onClick={() => allowAllAlways(req)}
-                    disabled={isSubmitting}
-                    {...chipText(
-                      'Allow all (always)',
-                      'Allow all',
-                      'Persist every persistable prefix and run. Segments without a stable prefix fall back to allow-once.'
-                    )}
-                  />
+                  {!compact && (
+                    <button
+                      type="button"
+                      className={`${styles.btn} ${styles.btnAllow}`}
+                      onClick={() => allowAllAlways(req)}
+                      disabled={isSubmitting}
+                      title="Persist every persistable prefix and run. Segments without a stable prefix fall back to allow-once."
+                    >
+                      Allow all (always)
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={`${styles.btn} ${styles.btnDenyAll}`}

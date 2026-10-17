@@ -2423,23 +2423,36 @@ async fn pick_image(app: &AppHandle) -> Result<Option<PickedImage>, String> {
     let source = file_path
         .into_path()
         .map_err(|error| format!("Invalid file path: {}", error))?;
+    read_image_file(&source).await.map(Some)
+}
 
-    let media_type = image_media_type_from_extension(&source)
+/// Read an image file, refusing one over the image store's size limit before
+/// reading it, so the error shows when the image is picked.
+async fn read_image_file(source: &Path) -> Result<PickedImage, String> {
+    use crate::assistant::image_store::MAX_IMAGE_BYTES;
+
+    let media_type = image_media_type_from_extension(source)
         .ok_or_else(|| "Unsupported image type. Use PNG, JPEG, GIF, or WebP.".to_string())?;
     let filename = source
         .file_name()
         .and_then(|n| n.to_str())
         .map(|n| n.to_string());
 
-    let bytes = tokio::fs::read(&source)
-        .await
-        .map_err(|error| format!("Could not read image file: {}", error))?;
+    let read_error = |error: std::io::Error| format!("Could not read image file: {}", error);
+    let size = tokio::fs::metadata(source).await.map_err(read_error)?.len();
+    if size > MAX_IMAGE_BYTES as u64 {
+        return Err(format!(
+            "Image is too large ({} bytes, max {})",
+            size, MAX_IMAGE_BYTES
+        ));
+    }
+    let bytes = tokio::fs::read(source).await.map_err(read_error)?;
 
-    Ok(Some(PickedImage {
+    Ok(PickedImage {
         bytes,
         media_type,
         filename,
-    }))
+    })
 }
 
 /// Persist an image chosen via the native file dialog and return a
@@ -4151,6 +4164,23 @@ mod tests {
         assert!(resolve_artifact_destination_dir(root.path(), "proj/.git").is_err());
         assert!(resolve_artifact_destination_dir(root.path(), "proj/.git/inner").is_err());
         assert!(resolve_artifact_destination_dir(root.path(), "proj/file.txt").is_err());
+    }
+
+    #[tokio::test]
+    async fn read_image_file_refuses_an_image_over_the_limit() {
+        use crate::assistant::image_store::MAX_IMAGE_BYTES;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_IMAGE_BYTES as u64).unwrap();
+        let image = read_image_file(&path).await.unwrap();
+        assert_eq!(image.bytes.len(), MAX_IMAGE_BYTES);
+        assert_eq!(image.filename.as_deref(), Some("shot.png"));
+
+        file.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
+        let error = read_image_file(&path).await.err().unwrap();
+        assert!(error.starts_with("Image is too large"), "{error}");
     }
 
     #[tokio::test]

@@ -83,19 +83,20 @@ describe('compact requests (small Fleet cards)', () => {
     // The full approval still shows the whole command and the prefix fields.
     expect(screen.getByText('cd /srv/app && cargo test')).toBeInTheDocument();
     expect(screen.getAllByLabelText('Save as prefix:')).toHaveLength(2);
+    const fullApproval = within(screen.getByRole('article', { name: 'Permission requested' }));
+    expect(fullApproval.getAllByRole('button', { name: 'Always allow (this agent)' })).toHaveLength(2);
+    expect(fullApproval.getByRole('button', { name: 'Allow all (always)' })).toBeInTheDocument();
   });
 
-  it('shows each command part once, on its own line with its decisions', () => {
+  it('shows the whole command, then each part on its own line with its one-time decisions', () => {
     render(<InlineApprovalCard workspaceId="ws-1" request={approval} compact />);
-    expect(screen.queryByText('cd /srv/app && cargo test')).not.toBeInTheDocument();
+    // The parts alone would hide the `&&` and any part that needs no decision.
+    expect(screen.getByText('cd /srv/app && cargo test')).toHaveAttribute('title', 'cd /srv/app && cargo test');
     expect(screen.getAllByText('cd /srv/app')).toHaveLength(1);
     expect(screen.getAllByText('cargo test')).toHaveLength(1);
     expect(screen.queryByLabelText('Save as prefix:')).not.toBeInTheDocument();
-    expect(screen.getAllByRole('button', { name: 'Once' })).toHaveLength(2);
-    expect(screen.getAllByRole('button', { name: 'Never' })[0]).toHaveAttribute(
-      'title',
-      "Always deny (this agent). Saved on this workspace's own agent"
-    );
+    // No "always" decision: it would save a prefix rule the card doesn't show.
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Once', 'Deny', 'Once', 'Deny', 'Deny all']);
   });
 
   it('keeps the path warnings, with the path and access on one line', () => {

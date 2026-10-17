@@ -1,4 +1,4 @@
-import type { ContentPart } from '../generated/bindings';
+import type { ContentPart, ProviderConnection } from '../generated/bindings';
 import {
   setWorkspaceProvider,
   storeWorkspaceImage,
@@ -17,10 +17,16 @@ export const newWorkspaceDraft = {
   disabledMcpServerIds: [] as string[],
 };
 
-export async function applyNewWorkspaceDraft(workspaceId: string): Promise<void> {
-  const { providerConnectionId, mcpServerIds, disabledMcpServerIds } = newWorkspaceDraft;
+/** The draft's connection while it is enabled, else the default: the first enabled one. */
+export function draftConnectionId(connections: ProviderConnection[]): string | undefined {
+  const enabled = connections.filter((c) => c.enabled);
+  return (enabled.find((c) => c.id === newWorkspaceDraft.providerConnectionId) ?? enabled[0])?.id;
+}
+
+export async function applyNewWorkspaceDraft(workspaceId: string, connections: ProviderConnection[]): Promise<void> {
+  const providerConnectionId = draftConnectionId(connections);
   if (providerConnectionId) await setWorkspaceProvider(workspaceId, providerConnectionId);
-  await updateWorkspaceSessionMcp(workspaceId, mcpServerIds, disabledMcpServerIds);
+  await updateWorkspaceSessionMcp(workspaceId, newWorkspaceDraft.mcpServerIds, newWorkspaceDraft.disabledMcpServerIds);
 }
 
 /** Images attached to the new-workspace prompt: there is no image store until the workspace exists. */
@@ -35,8 +41,8 @@ export function draftImagePart(image: PickedImage): ContentPart {
 
 /**
  * Store the draft images among `parts` in the new workspace, in order. Kept
- * after storing: a failed send keeps them attached for a retry, which may
- * create another workspace.
+ * until `dropDraftImages`: a failed send keeps them attached for a retry,
+ * which may create another workspace.
  */
 export function storeDraftImages(workspaceId: string, parts: ContentPart[]): Promise<ContentPart[]> {
   return Promise.all(
@@ -47,4 +53,9 @@ export function storeDraftImages(workspaceId: string, parts: ContentPart[]): Pro
         : part;
     })
   );
+}
+
+/** Forget the draft images among `parts`, once the prompt carrying them is sent. */
+export function dropDraftImages(parts: ContentPart[]): void {
+  for (const part of parts) if (part.type === 'image') draftImages.delete(part.id);
 }

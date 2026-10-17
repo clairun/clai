@@ -91,8 +91,9 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
     const runsBefore = useFleetActivityStore.getState().activeRunsByWorkspace;
     let seeded: Reducer = (s) => s;
     let loadError: string | null = null;
+    const keep = get().selectedId;
     try {
-      const snapshot = await fleetSnapshot(SNAPSHOT_LIMIT, get().selectedId);
+      const snapshot = await fleetSnapshot(SNAPSHOT_LIMIT, keep);
       const now = Date.now();
       const { seedTasks } = useTaskStore.getState();
       const { setRuns, activeRunsByWorkspace: runsNow } = useFleetActivityStore.getState();
@@ -115,16 +116,19 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
     }
     const fleet = buffer.reduce((s, reducer) => reducer(s), seeded(get().fleet));
     const now = Date.now();
-    // A selected card that is gone (deleted, or no longer recent) leaves nothing selected.
+    // The selection this load kept, if gone (deleted, or no longer recent), leaves nothing
+    // selected; one made while it ran is not in it, so another load brings it.
     const { selectedId } = get();
+    const missing = selectedId !== null && !fleet.cards[selectedId];
     set({
       fleet,
       now,
       buffer: null,
       loadedAt: now,
       loadError,
-      selectedId: selectedId && fleet.cards[selectedId] ? selectedId : null,
+      selectedId: missing && selectedId === keep ? null : selectedId,
     });
+    if (missing && selectedId !== keep) void get().loadSnapshot();
   },
 
   select: (workspaceId) => set({ selectedId: workspaceId, now: Date.now() }),

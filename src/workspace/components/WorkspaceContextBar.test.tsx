@@ -260,7 +260,7 @@ describe('WorkspaceContextBar for a new workspace (no workspace yet)', () => {
     expect(mocks.setWorkspaceProvider).not.toHaveBeenCalled();
     expect(mocks.updateWorkspaceSessionMcp).not.toHaveBeenCalled();
 
-    await applyNewWorkspaceDraft('ws-new');
+    await applyNewWorkspaceDraft('ws-new', await mocks.listProviderConnections());
     expect(mocks.setWorkspaceProvider).toHaveBeenCalledWith('ws-new', 'conn-b');
     expect(mocks.updateWorkspaceSessionMcp).toHaveBeenCalledWith('ws-new', ['srv-b'], ['srv-a']);
   });

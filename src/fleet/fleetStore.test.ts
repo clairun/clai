@@ -6,6 +6,7 @@ vi.mock('./client', () => ({
   fleetSnapshot: vi.fn(() => new Promise<FleetWorkspace[]>((resolve) => (resolveSnapshot = resolve))),
 }));
 
+const { fleetSnapshot } = await import('./client');
 const { useFleetStore } = await import('./fleetStore');
 const { EMPTY_FLEET } = await import('./fleetModel');
 const { useFleetActivityStore } = await import('../stores/fleetActivityStore');
@@ -92,6 +93,21 @@ describe('fleet store snapshot', () => {
     resolveSnapshot([{ ...snapshot, workspaceId: 'other' }]);
     await loading;
     expect(useFleetStore.getState().selectedId).toBeNull();
+  });
+
+  it('keeps a workspace picked while a load runs, and loads it next', async () => {
+    const loading = useFleetStore.getState().loadSnapshot();
+    useFleetStore.getState().select('picked');
+    // The pick's own load is skipped: one is already running, started without it.
+    void useFleetStore.getState().loadSnapshot();
+    resolveSnapshot([snapshot]);
+    await loading;
+    expect(useFleetStore.getState().selectedId).toBe('picked');
+    expect(vi.mocked(fleetSnapshot).mock.calls.map((call) => call[1])).toEqual([null, 'picked']);
+
+    resolveSnapshot([snapshot, { ...snapshot, workspaceId: 'picked' }]);
+    await vi.waitFor(() => expect(useFleetStore.getState().fleet.cards.picked).toBeDefined());
+    expect(useFleetStore.getState().selectedId).toBe('picked');
   });
 
   it('ignores streaming events entirely', () => {

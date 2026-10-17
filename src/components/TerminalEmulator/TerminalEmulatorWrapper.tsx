@@ -15,8 +15,9 @@ import { readImage } from '@tauri-apps/plugin-clipboard-manager';
 import { useFleetStore } from '../../fleet/fleetStore';
 import {
   applyNewWorkspaceDraft,
+  draftConnectionId,
   draftImagePart,
-  newWorkspaceDraft,
+  dropDraftImages,
   storeDraftImages,
 } from '../../fleet/newWorkspaceDraft';
 import {
@@ -137,8 +138,7 @@ async function sendToWorkspace(
 async function imageAttachError(workspaceId: string | null): Promise<string | null> {
   const connectionId = workspaceId
     ? (await getOrCreateWorkspaceSession(workspaceId)).providerConnectionId
-    : newWorkspaceDraft.providerConnectionId ||
-      (await assistantClient.listProviderConnections()).find((c) => c.enabled)?.id;
+    : draftConnectionId(await assistantClient.listProviderConnections());
   if (!connectionId) return 'Add an enabled assistant provider connection before attaching images.';
   const supported = await assistantClient.connectionSupportsImages(connectionId);
   return supported ? null : 'The selected model does not support image input.';
@@ -155,7 +155,7 @@ async function createFleetWorkspace(): Promise<string> {
     throw NO_CONNECTION_ERROR;
   }
   const workspaceId = await createWorkspace();
-  await applyNewWorkspaceDraft(workspaceId);
+  await applyNewWorkspaceDraft(workspaceId, connections);
   return workspaceId;
 }
 
@@ -165,6 +165,7 @@ export async function sendToNewWorkspace(query: string, images: ContentPart[]): 
   try {
     const workspaceId = await creating;
     const result = await sendToWorkspace(workspaceId, query, await storeDraftImages(workspaceId, images));
+    if (!result.error) dropDraftImages(images);
     const fleet = useFleetStore.getState();
     if (!result.error && !fleet.selectedId) fleet.select(workspaceId);
     return result;
