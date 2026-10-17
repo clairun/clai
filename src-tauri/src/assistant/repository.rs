@@ -451,6 +451,39 @@ pub async fn list_messages_before(
     rows.iter().map(map_message_row).collect()
 }
 
+/// The session's newest assistant message with non-blank text, skipping
+/// rows of a run still in flight: their text is partial.
+pub async fn last_completed_assistant_text(
+    pool: &DbPool,
+    session_id: &str,
+) -> Result<Option<AssistantMessage>, String> {
+    let row = sqlx::query(&format!(
+        r#"
+        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json, created_at
+        FROM assistant_messages AS m
+        WHERE session_id = ?
+          AND role = 'assistant'
+          AND EXISTS (
+              SELECT 1 FROM json_each(m.content_json) AS part
+              WHERE json_extract(part.value, '$.type') = 'text'
+                AND trim(json_extract(part.value, '$.text'), char(32, 9, 10, 13)) <> ''
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM assistant_runs AS r
+              WHERE r.id = m.run_id AND r.status IN {ACTIVE_RUN_STATUSES}
+          )
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#
+    ))
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to load the last assistant message: {}", e))?;
+
+    row.as_ref().map(map_message_row).transpose()
+}
+
 pub async fn count_session_messages(pool: &DbPool, session_id: &str) -> Result<u32, String> {
     let count = sqlx::query_scalar::<_, i64>(
         "SELECT COUNT(*) FROM assistant_messages WHERE session_id = ?",

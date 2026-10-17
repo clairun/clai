@@ -7,9 +7,10 @@
  * (`FleetLive`).
  *
  * What a card shows follows the owner's rules: live activity is highlighted,
- * finished subtasks and resolved requests stay as low-emphasis history, the
- * last assistant message appears only once the workspace has stopped, and
- * the user's own message shows until the next message or event arrives.
+ * finished subtasks and answered questions stay as low-emphasis history
+ * (answered approvals and grants leave), the last completed assistant message
+ * always shows, and the user's own message shows until the next message or
+ * event arrives.
  */
 import type {
   AssistantEventEnvelope,
@@ -132,10 +133,12 @@ const dropUserMessage = (card: FleetCard): FleetCard =>
 
 const requestKey = (kind: FleetRequest['kind'], id: string) => `${kind}:${id}`;
 
+/** An answered question stays as history; an answered approval or grant leaves the card. */
 const resolve = (card: FleetCard, key: string, at: number): FleetCard => {
   const request = card.requests[key];
   if (!request || request.resolvedAt != null) return card;
-  return { ...card, requests: { ...card.requests, [key]: { ...request, resolvedAt: at } } };
+  const { [key]: _, ...rest } = card.requests;
+  return { ...card, requests: request.kind === 'ask' ? { ...card.requests, [key]: { ...request, resolvedAt: at } } : rest };
 };
 
 const askRequest = (ask: FleetAsk, at: number): FleetRequest => ({
@@ -274,17 +277,11 @@ export const applyUserSent = (
     userMessage: message ? { id: message.id, text: messageText(message), at } : null,
   }));
 
-/** Requests still open in `current` but absent from `open` were resolved meanwhile; new open ones are added. */
-const reconcile = (
-  current: Record<string, FleetRequest>,
-  open: Record<string, FleetRequest>,
-  now: number
-): Record<string, FleetRequest> => {
-  const next = { ...open };
-  for (const [key, request] of Object.entries(current)) {
-    next[key] = request.resolvedAt == null && !open[key] ? { ...request, resolvedAt: now } : request;
-  }
-  return next;
+/** Requests still open in `card` but absent from `open` were resolved meanwhile; new open ones are added. */
+const reconcile = (card: FleetCard, open: Record<string, FleetRequest>, now: number): Record<string, FleetRequest> => {
+  let next = { ...card, requests: { ...open, ...card.requests } };
+  for (const key of Object.keys(card.requests)) if (!open[key]) next = resolve(next, key, now);
+  return next.requests;
 };
 
 /**
@@ -318,7 +315,7 @@ export const seedFleet = (
       lastActivityAt: Math.max(card.lastActivityAt, activity),
       lastMessage:
         lastMessage && (!card.lastMessage || lastMessage.at >= card.lastMessage.at) ? lastMessage : card.lastMessage,
-      requests: reconcile(card.requests, open, now),
+      requests: reconcile(card, open, now),
     };
   }
   return { cards };
@@ -426,7 +423,7 @@ export const cardItems = (card: FleetCard, live: FleetLive): FleetItem[] => {
     items.push({
       key,
       text: request.text,
-      status: request.kind === 'ask' ? 'Answered' : 'Resolved',
+      status: 'Answered',
       tone: 'done',
       agents: request.agentName ? [{ name: request.agentName, seed: request.agentName }] : [],
       at: request.resolvedAt,
@@ -435,7 +432,7 @@ export const cardItems = (card: FleetCard, live: FleetLive): FleetItem[] => {
   items.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone] || b.at - a.at);
   const liveCount = items.filter((i) => TONE_RANK[i.tone] < 2).length;
   const shown = items.slice(0, liveCount + HISTORY_LIMIT);
-  const notes = [['user', card.userMessage], ['assistant', visibleLastMessage(card, live)]] as const;
+  const notes = [['user', card.userMessage], ['assistant', card.lastMessage]] as const;
   for (const [note, message] of notes) {
     if (message) shown.push({ key: `${note}:${message.id}`, text: message.text, status: '', tone: 'note', agents: [], at: message.at, note });
   }
@@ -482,10 +479,6 @@ export const liveAgents = (card: FleetCard, live: FleetLive): LiveAgent[] => {
   if (mainRunning) agents.unshift({ seed: 'main', name: 'Main', main: true, running: true, doing: 'running the workspace chat' });
   return agents.sort((a, b) => Number(b.running) - Number(a.running));
 };
-
-/** The last assistant message, only once the workspace has stopped. */
-export const visibleLastMessage = (card: FleetCard, live: FleetLive): FleetNote | null =>
-  cardPhase(card, live) === 'stopped' ? card.lastMessage : null;
 
 // ── Which cards, where ───────────────────────────────────────────────────
 

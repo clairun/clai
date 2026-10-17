@@ -12,7 +12,7 @@ use ts_rs::TS;
 use crate::assistant::conversation::content_text;
 use crate::assistant::repository;
 use crate::assistant::tools::ask_user::{self, PendingAsk};
-use crate::assistant::types::{AssistantMessage, MessageRole};
+use crate::assistant::types::AssistantMessage;
 use crate::assistant::workspace_agents::workspace_agent_display_names;
 use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskResponse};
 use crate::commands::path_grants::PathGrantRequest;
@@ -25,8 +25,6 @@ const DEFAULT_WORKSPACE_LIMIT: u32 = 8;
 const MAX_WORKSPACE_LIMIT: u32 = 32;
 const OPEN_TASK_LIMIT: i64 = 20;
 const FINISHED_TASK_LIMIT: i64 = 10;
-/// How many of the newest main-session rows to search for assistant text.
-const LAST_MESSAGE_SCAN: i64 = 10;
 const LAST_MESSAGE_MAX_CHARS: usize = 600;
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -142,7 +140,10 @@ async fn workspace_snapshot(
 ) -> Result<FleetWorkspace, String> {
     let main_session = repository::find_manager_session(pool, &locator.default_agent_id).await?;
     let last_assistant_message = match &main_session {
-        Some(session) => last_assistant_message(pool, &session.id).await?,
+        Some(session) => repository::last_completed_assistant_text(pool, &session.id)
+            .await?
+            .as_ref()
+            .and_then(preview),
         None => None,
     };
 
@@ -183,18 +184,6 @@ async fn workspace_snapshot(
     })
 }
 
-async fn last_assistant_message(
-    pool: &DbPool,
-    session_id: &str,
-) -> Result<Option<FleetMessagePreview>, String> {
-    let newest_first =
-        repository::list_messages_before(pool, session_id, None, LAST_MESSAGE_SCAN).await?;
-    Ok(newest_first
-        .iter()
-        .filter(|message| message.role == MessageRole::Assistant)
-        .find_map(preview))
-}
-
 /// `None` for a reply with no text (tool calls or thinking only).
 fn preview(message: &AssistantMessage) -> Option<FleetMessagePreview> {
     let text = content_text(&message.content);
@@ -215,7 +204,7 @@ fn preview(message: &AssistantMessage) -> Option<FleetMessagePreview> {
 mod tests {
     use super::*;
     use crate::assistant::types::{
-        AssistantRun, ContentPart, RunStatus, RunTrigger, SessionContext,
+        AssistantRun, ContentPart, MessageRole, RunStatus, RunTrigger, SessionContext,
     };
     use crate::config::{workspace_config, AppConfig, WorkspaceConfig};
     use crate::workspace_index::WorkspaceIndex;
@@ -268,14 +257,24 @@ mod tests {
     }
 
     async fn assistant_message(pool: &DbPool, session_id: &str, content: Vec<ContentPart>) {
+        message(pool, session_id, MessageRole::Assistant, content, None).await;
+    }
+
+    async fn message(
+        pool: &DbPool,
+        session_id: &str,
+        role: MessageRole,
+        content: Vec<ContentPart>,
+        run_id: Option<String>,
+    ) {
         repository::create_message(
             pool,
             repository::CreateMessageParams {
                 session_id: session_id.to_string(),
-                role: MessageRole::Assistant,
+                role,
                 content,
                 provider_metadata: None,
-                run_id: None,
+                run_id,
             },
         )
         .await
@@ -389,6 +388,50 @@ mod tests {
             .expect("snapshot");
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].workspace_id, BUSY);
+    }
+
+    /// A CLI run stores one assistant row, then a row per tool result: the
+    /// reply's text sits behind however many tools the run called.
+    #[tokio::test]
+    async fn last_message_is_found_past_tool_rows_and_skips_runs_in_flight() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = state_with(&[BUSY], &temp);
+        let pool = state.workspace_db(BUSY).await.expect("db");
+        let session = repository::create_session(
+            &pool,
+            SessionContext {
+                automation_id: Some(MANAGER.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session");
+        let text = |text: &str| {
+            vec![ContentPart::Text {
+                text: text.to_string(),
+            }]
+        };
+        assistant_message(&pool, &session.id, text("Done.")).await;
+        for _ in 0..30 {
+            message(&pool, &session.id, MessageRole::Tool, Vec::new(), None).await;
+        }
+        let run = start_run(&pool, &session.id, RunStatus::Running).await;
+        let in_flight = Some(run.id.clone());
+        message(
+            &pool,
+            &session.id,
+            MessageRole::Assistant,
+            text("Half a sen"),
+            in_flight,
+        )
+        .await;
+
+        let snapshot = snapshot(&state, None, None).await.expect("snapshot");
+        let preview = snapshot[0]
+            .last_assistant_message
+            .as_ref()
+            .expect("preview");
+        assert_eq!(preview.text, "Done.");
     }
 
     /// A state where BUSY has session activity and `waiting` has none, so

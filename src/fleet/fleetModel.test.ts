@@ -24,7 +24,6 @@ import {
   liveAgents,
   pickCards,
   seedFleet,
-  visibleLastMessage,
   type FleetCard,
   type FleetLive,
   type FleetState,
@@ -162,7 +161,7 @@ describe('fleet reducer', () => {
     expect(applyRequestResolved(s, 'approval', 'a1', 9)).toBe(s);
   });
 
-  it('keeps finished subtasks and resolved requests as history, oldest first, live work at the bottom; open requests are not items', () => {
+  it('keeps finished subtasks and answered questions as history, oldest first, live work at the bottom; open requests are not items', () => {
     const live = withTasks(task('done', 'completed', 1), task('live', 'running', 2));
     let s = apply(EMPTY_FLEET, askEvent('q1', 3), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, 4));
     s = applyRequest(s, { kind: 'approval', request: approval('a1') }, 5);
@@ -171,8 +170,10 @@ describe('fleet reducer', () => {
       ['ask:q1', 'done', 'Answered'],
       ['task:live', 'live', 'Waiting for subtasks'],
     ]);
+    // An answered approval or grant leaves the card; an answered question stays.
     s = applyRequestResolved(s, 'approval', 'a1', 6);
-    expect(cardItems(card(s), live).map((i) => i.key)).toEqual(['task:done', 'ask:q1', 'approval:a1', 'task:live']);
+    s = applyRequestResolved(applyRequest(s, { kind: 'grant', request: approval('g1') }, 7), 'grant', 'g1', 8);
+    expect(cardItems(card(s), live).map((i) => i.key)).toEqual(['task:done', 'ask:q1', 'task:live']);
   });
 
   it('keeps what answering needs on each open request, oldest first', () => {
@@ -246,11 +247,11 @@ describe('fleet reducer', () => {
     ]);
   });
 
-  it('shows the last assistant message only once the workspace has stopped', () => {
+  it('keeps showing the last completed assistant message while the workspace works', () => {
     const s = apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'All done.') } }, 3));
-    expect(visibleLastMessage(card(s), { runs: { [WS]: ['r'] }, tasks: {} })).toBeNull();
-    expect(visibleLastMessage(card(s), withTasks(task('t1', 'running', 2)))).toBeNull();
-    expect(visibleLastMessage(card(s), withTasks(task('t1', 'completed', 5)))?.text).toBe('All done.');
+    const notes = (live: FleetLive) => cardItems(card(s), live).filter((i) => i.note).map((i) => i.text);
+    expect(notes({ runs: { [WS]: ['r'] }, tasks: {} })).toEqual(['All done.']);
+    expect(notes(withTasks(task('t1', 'running', 2)))).toEqual(['All done.']);
   });
 });
 
@@ -281,7 +282,7 @@ describe('snapshot', () => {
     expect(c.requests['ask:stale']!.resolvedAt).toBe(50);
     expect(c.requests['ask:kept']).toMatchObject({ at: 3, resolvedAt: null });
     expect(c.requests['ask:new']).toMatchObject({ kind: 'ask', ask: { pendingId: 'new', sessionId: MAIN }, text: '?', at: 7, resolvedAt: null });
-    expect(c.requests['approval:gone']!.resolvedAt).toBe(50);
+    expect(c.requests['approval:gone']).toBeUndefined();
     // A request has no timestamp of its own: it takes the workspace's activity.
     expect(c.requests['grant:g1']).toMatchObject({ at: 10, resolvedAt: null });
   });
