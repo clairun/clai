@@ -464,6 +464,9 @@ pub async fn submit_permission_decision(
             request_id
         ));
     };
+    // The request has left the queue, so say so even if persisting fails.
+    emit_permission_resolved(&app, &request_id);
+    emit_attention(&app, entry.workspace_id.clone(), remaining);
 
     // Persist always-decisions before delivering so the grant survives a
     // crash between user click and command execution. If a request lacks
@@ -478,8 +481,6 @@ pub async fn submit_permission_decision(
     let _ = entry
         .sender
         .send(PendingApprovalOutcome::Decision(decisions));
-    emit_permission_resolved(&app, &request_id);
-    emit_attention(&app, entry.workspace_id, remaining);
     Ok(())
 }
 

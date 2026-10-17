@@ -41,8 +41,9 @@ pub struct FleetWorkspace {
     pub last_activity_at: i64,
     /// The manager's conversation; `None` until someone talks to it.
     pub main_session_id: Option<String>,
-    /// Queued or running runs in any session of the workspace, not only the
-    /// main one; empty when nothing runs.
+    /// Non-terminal runs (queued, running or waiting for a tool) in any
+    /// session of the workspace, not only the main one; empty when nothing
+    /// runs.
     pub active_run_ids: Vec<String>,
     /// Unfinished tasks plus the most recently finished ones, newest first.
     pub tasks: Vec<WorkspaceTaskResponse>,
@@ -64,7 +65,8 @@ pub struct FleetMessagePreview {
 }
 
 /// The `limit` most recently active workspaces (default 8, max 32), most
-/// recent first.
+/// recent first, followed by any older workspace with a pending approval,
+/// path grant or question.
 #[tauri::command]
 pub async fn fleet_snapshot(
     limit: Option<u32>,
@@ -101,7 +103,19 @@ async fn snapshot(state: &AppState, limit: Option<u32>) -> Result<Vec<FleetWorks
         }
     }
     ranked.sort_by_key(|(last_activity_at, ..)| Reverse(*last_activity_at));
-    ranked.truncate(limit);
+    // A workspace waiting on the user stays past `limit`: waiting doesn't
+    // bump its activity, and the Fleet mutes the toasts that would otherwise
+    // surface the request.
+    let approvals = state.pending_approvals.counts_snapshot().await;
+    let path_grants = state.pending_path_grants.counts_snapshot().await;
+    let mut rank = 0;
+    ranked.retain(|(_, locator, _)| {
+        rank += 1;
+        rank <= limit
+            || approvals.contains_key(&locator.id)
+            || path_grants.contains_key(&locator.id)
+            || !ask_user::pending_for_workspace(&locator.id).is_empty()
+    });
 
     let mut workspaces = Vec::with_capacity(ranked.len());
     for (last_activity_at, locator, pool) in ranked {
@@ -367,5 +381,28 @@ mod tests {
         let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].workspace_id, BUSY);
+
+        let grant = PathGrantRequest {
+            request_id: "grant".to_string(),
+            workspace_id: Some(IDLE.to_string()),
+            agent_id: None,
+            agent_name: None,
+            requested_path: "/tmp".to_string(),
+            requested_access: crate::config::FilesystemPathAccess::ReadOnly,
+            reason: String::new(),
+        };
+        let _waiting = state
+            .pending_path_grants
+            .register(grant, "run".to_string())
+            .await;
+        let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
+        assert_eq!(
+            top.iter()
+                .map(|w| w.workspace_id.as_str())
+                .collect::<Vec<_>>(),
+            vec![BUSY, IDLE],
+            "a workspace waiting on the user stays past the limit"
+        );
+        assert_eq!(top[1].pending_path_grants.len(), 1);
     }
 }

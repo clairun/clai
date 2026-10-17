@@ -168,8 +168,9 @@ lastActivityAt: bigint,
  */
 mainSessionId: string | null, 
 /**
- * Queued or running runs in any session of the workspace, not only the
- * main one; empty when nothing runs.
+ * Non-terminal runs (queued, running or waiting for a tool) in any
+ * session of the workspace, not only the main one; empty when nothing
+ * runs.
  */
 activeRunIds: Array<string>, 
 /**

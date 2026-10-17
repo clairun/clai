@@ -763,7 +763,7 @@ pub async fn workspace_has_active_run(pool: &DbPool) -> Result<bool, String> {
     Ok(!workspace_active_run_ids(pool).await?.is_empty())
 }
 
-/// Queued or running runs in any session of this workspace database.
+/// Non-terminal runs in any session of this workspace database.
 pub async fn workspace_active_run_ids(pool: &DbPool) -> Result<Vec<String>, String> {
     sqlx::query_scalar(&format!(
         r#"
