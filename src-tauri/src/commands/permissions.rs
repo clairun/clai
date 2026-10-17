@@ -36,12 +36,10 @@ use crate::AppState;
 
 pub const PERMISSION_REQUEST_EVENT: &str = "permissions://request";
 pub const PERMISSION_ATTENTION_EVENT: &str = "permissions://attention";
-/// Emitted when a pending request is cleared *without* a user decision —
-/// the run was cancelled or ended (reaping a wait orphaned by a CLI
-/// transport drop), or a re-asked command superseded the stale request.
-/// The inline approval card removes the now-useless card on this. Normal
-/// user submissions remove the card optimistically on the frontend, so
-/// they don't emit this.
+/// Emitted whenever a pending request leaves the queue: a user decision,
+/// a cancelled or ended run (reaping a wait orphaned by a CLI transport
+/// drop), or a re-asked command superseding the stale request. Every view
+/// showing the request drops it on this.
 pub const PERMISSION_RESOLVED_EVENT: &str = "permissions://resolved";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
@@ -480,6 +478,7 @@ pub async fn submit_permission_decision(
     let _ = entry
         .sender
         .send(PendingApprovalOutcome::Decision(decisions));
+    emit_permission_resolved(&app, &request_id);
     emit_attention(&app, entry.workspace_id, remaining);
     Ok(())
 }
@@ -625,8 +624,7 @@ pub fn emit_attention(app: &tauri::AppHandle, workspace_id: Option<String>, pend
     }
 }
 
-/// Tell the frontend to drop the inline approval card for `request_id`
-/// because the request was cleared backend-side without a user decision.
+/// Tell the frontend to drop the approval card for `request_id`.
 pub fn emit_permission_resolved(app: &tauri::AppHandle, request_id: &str) {
     if let Err(e) = app.emit(
         PERMISSION_RESOLVED_EVENT,

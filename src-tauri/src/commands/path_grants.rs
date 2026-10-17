@@ -40,12 +40,10 @@ use crate::AppState;
 
 pub const PATH_GRANT_REQUEST_EVENT: &str = "path-grants://request";
 pub const PATH_GRANT_ATTENTION_EVENT: &str = "path-grants://attention";
-/// Emitted when a pending path-grant request is cleared *without* a user
-/// decision — the run was cancelled or ended (reaping a wait orphaned by
-/// a CLI transport drop), or a re-asked grant superseded the stale request.
-/// The inline path-grant card removes the now-useless card on this. Normal
-/// submissions clear the card optimistically on the frontend, so they don't
-/// emit this.
+/// Emitted whenever a pending path-grant request leaves the queue: a user
+/// decision, a cancelled or ended run (reaping a wait orphaned by a CLI
+/// transport drop), or a re-asked grant superseding the stale request.
+/// Every view showing the request drops it on this.
 pub const PATH_GRANT_RESOLVED_EVENT: &str = "path-grants://resolved";
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -378,6 +376,7 @@ pub async fn submit_path_grant_decision(
     let _ = entry
         .sender
         .send(PendingPathGrantOutcome::Decision(validated));
+    emit_path_grant_resolved(&app, &request_id);
     emit_attention(&app, entry.workspace_id, remaining);
     Ok(())
 }
@@ -510,8 +509,7 @@ pub fn emit_attention(app: &tauri::AppHandle, workspace_id: Option<String>, pend
     }
 }
 
-/// Tell the frontend to drop the inline path-grant card for `request_id`
-/// because the request was cleared backend-side without a user decision.
+/// Tell the frontend to drop the path-grant card for `request_id`.
 pub fn emit_path_grant_resolved(app: &tauri::AppHandle, request_id: &str) {
     if let Err(e) = app.emit(
         PATH_GRANT_RESOLVED_EVENT,
