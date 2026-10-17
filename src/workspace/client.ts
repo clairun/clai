@@ -112,6 +112,18 @@ export async function pickAndStoreWorkspaceImage(
   return invoke('workspace_pick_and_store_image', { workspaceId });
 }
 
+/** An image picked in the native dialog, not stored yet. */
+export interface PickedImage {
+  dataBase64: string;
+  mediaType: string;
+  filename: string | null;
+}
+
+/** Pick an image for a workspace that does not exist yet; store it with `storeWorkspaceImage`. */
+export async function pickImage(): Promise<PickedImage | null> {
+  return invoke('workspace_pick_image');
+}
+
 /** Delete an artifact file or folder (recursive) from the workspace. Backend
  *  refuses the root and protected dirs (.clai/.git/target/…). */
 export async function deleteWorkspacePath(workspaceId: string, path: string): Promise<void> {

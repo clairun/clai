@@ -5,19 +5,26 @@
  * (see `useTerminalTarget`) is the open workspace's manager session, or on
  * the Fleet the selected card's — keyed `workspace:<id>` in the assistant
  * store. On the Fleet with no card selected, a prompt creates a workspace
- * (with the model and MCP chosen in the terminal) and sends to it.
+ * (with the model and MCP chosen in the terminal) and sends to it, images
+ * included.
  */
 
 import { useCallback } from 'react';
 import { useAssistantStore, assistantClient } from '../../assistant';
 import { readImage } from '@tauri-apps/plugin-clipboard-manager';
 import { useFleetStore } from '../../fleet/fleetStore';
-import { applyNewWorkspaceDraft } from '../../fleet/newWorkspaceDraft';
+import {
+  applyNewWorkspaceDraft,
+  draftImagePart,
+  newWorkspaceDraft,
+  storeDraftImages,
+} from '../../fleet/newWorkspaceDraft';
 import {
   createWorkspace,
   getOrCreateWorkspaceSession,
   storeWorkspaceImage,
   pickAndStoreWorkspaceImage,
+  pickImage,
 } from '../../workspace/client';
 import type { ContentPart } from '../../generated/bindings';
 import { openGlobalSettings } from '../../utils/globalSettings';
@@ -126,6 +133,17 @@ async function sendToWorkspace(
   return {};
 }
 
+/** Why images can't go to `workspaceId` (`null`: the Fleet's new workspace), or `null` if they can. */
+async function imageAttachError(workspaceId: string | null): Promise<string | null> {
+  const connectionId = workspaceId
+    ? (await getOrCreateWorkspaceSession(workspaceId)).providerConnectionId
+    : newWorkspaceDraft.providerConnectionId ||
+      (await assistantClient.listProviderConnections()).find((c) => c.enabled)?.id;
+  if (!connectionId) return 'Add an enabled assistant provider connection before attaching images.';
+  const supported = await assistantClient.connectionSupportsImages(connectionId);
+  return supported ? null : 'The selected model does not support image input.';
+}
+
 /** A workspace being created from the Fleet; prompts sent meanwhile join it instead of creating another. */
 let creatingWorkspace: Promise<string> | null = null;
 
@@ -146,7 +164,7 @@ export async function sendToNewWorkspace(query: string, images: ContentPart[]): 
   const creating = (creatingWorkspace ??= createFleetWorkspace());
   try {
     const workspaceId = await creating;
-    const result = await sendToWorkspace(workspaceId, query, images);
+    const result = await sendToWorkspace(workspaceId, query, await storeDraftImages(workspaceId, images));
     const fleet = useFleetStore.getState();
     if (!result.error && !fleet.selectedId) fleet.select(workspaceId);
     return result;
@@ -209,82 +227,56 @@ const TerminalEmulatorWrapper = () => {
   );
 
   /**
-   * Resolve + store a pasted/attached image, gated on the active connection's
-   * image capability. Returns the stored `ContentPart` to attach, or an error
-   * string to surface in the composer. The gate is the same backend resolver
-   * the send-filter uses, so the UI never offers what the provider would drop.
+   * Resolve + store a pasted/attached image, gated on the target connection's
+   * image capability. Returns the `ContentPart` to attach, or an error string
+   * to surface in the composer. The gate is the same backend resolver the
+   * send-filter uses, so the UI never offers what the provider would drop. On
+   * the Fleet with no card selected the image waits in the new-workspace draft.
    */
   const handleAttachImage = useCallback(
     async (file: File): Promise<{ part?: ContentPart; error?: string }> => {
-      const currentWorkspaceId = targetWorkspaceId;
-      if (!currentWorkspaceId) {
-        return { error: OPEN_WORKSPACE_ERROR };
-      }
+      if (!targetWorkspaceId && !onFleet) return { error: OPEN_WORKSPACE_ERROR };
       try {
-        const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
-        const connectionId = binding.providerConnectionId;
-        if (!connectionId) {
-          return {
-            error: 'Add an enabled assistant provider connection before attaching images.',
-          };
-        }
-        const supported = await assistantClient.connectionSupportsImages(connectionId);
-        if (!supported) {
-          return { error: 'The selected model does not support image input.' };
-        }
+        const error = await imageAttachError(targetWorkspaceId);
+        if (error) return { error };
         const dataBase64 = await fileToBase64(file);
-        const part = await storeWorkspaceImage(
-          currentWorkspaceId,
-          dataBase64,
-          file.type,
-          file.name || null,
-        );
+        const filename = file.name || null;
+        const part = targetWorkspaceId
+          ? await storeWorkspaceImage(targetWorkspaceId, dataBase64, file.type, filename)
+          : draftImagePart({ dataBase64, mediaType: file.type, filename });
         return { part };
       } catch (err) {
         console.error('[TerminalEmulatorWrapper] Workspace image attach error:', err);
         return { error: errorMessage(err, 'Could not attach image.') };
       }
     },
-    [targetWorkspaceId]
+    [targetWorkspaceId, onFleet]
   );
 
   /**
    * Reliable cross-platform attach: open the native file dialog, gate on the
-   * active connection, and store the chosen image. Clipboard paste is flaky in
+   * target connection, and store the chosen image. Clipboard paste is flaky in
    * the Linux WebKitGTK webview, so this picker is the primary affordance.
    */
   const handlePickImage = useCallback(async (): Promise<{
     part?: ContentPart;
     error?: string;
   }> => {
-    const currentWorkspaceId = targetWorkspaceId;
-    if (!currentWorkspaceId) {
-      return { error: OPEN_WORKSPACE_ERROR };
-    }
+    if (!targetWorkspaceId && !onFleet) return { error: OPEN_WORKSPACE_ERROR };
     try {
-      const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
-      const connectionId = binding.providerConnectionId;
-      if (!connectionId) {
-        return {
-          error: 'Add an enabled assistant provider connection before attaching images.',
-        };
-      }
-      const supported = await assistantClient.connectionSupportsImages(connectionId);
-      if (!supported) {
-        return { error: 'The selected model does not support image input.' };
-      }
+      const error = await imageAttachError(targetWorkspaceId);
+      if (error) return { error };
       // Dialog runs backend-side: the picked path never crosses the
       // renderer boundary, closing the arbitrary-file-read hole.
-      const part = await pickAndStoreWorkspaceImage(currentWorkspaceId);
-      if (!part) {
-        return {}; // user cancelled, no attachment, no error
-      }
-      return { part };
+      const part = targetWorkspaceId
+        ? await pickAndStoreWorkspaceImage(targetWorkspaceId)
+        : await pickImage().then((image) => image && draftImagePart(image));
+      return part ? { part } : {}; // null: user cancelled, no attachment, no error
     } catch (err) {
       console.error('[TerminalEmulatorWrapper] Workspace image pick error:', err);
       return { error: errorMessage(err, 'Could not attach image.') };
     }
-  }, [targetWorkspaceId]);
+  }, [targetWorkspaceId, onFleet]);
 
   const handleAgentCommand = useCallback(
     async (command: string): Promise<{ error?: string; message?: string }> => {

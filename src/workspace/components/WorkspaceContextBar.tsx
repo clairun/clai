@@ -27,6 +27,10 @@ interface WorkspaceContextBarProps {
   workspaceId: string | null;
 }
 
+// App-wide lists, kept across mounts: the bar remounts on every target
+// switch, and must not vanish (and change height) while they reload.
+let lastLists: { servers: McpServerResponse[]; connections: ProviderConnection[] } | null = null;
+
 const draftDetails = () => ({
   kind: 'general',
   selectedMcpServerIds: newWorkspaceDraft.mcpServerIds,
@@ -44,11 +48,11 @@ const draftDetails = () => ({
  */
 const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => {
   const [showMcpSelector, setShowMcpSelector] = useState(false);
-  const [availableMcpServers, setAvailableMcpServers] = useState<McpServerResponse[]>([]);
-  const [providerConnections, setProviderConnections] = useState<ProviderConnection[]>([]);
+  const [availableMcpServers, setAvailableMcpServers] = useState(lastLists?.servers ?? []);
+  const [providerConnections, setProviderConnections] = useState(lastLists?.connections ?? []);
   // Distinguishes "no providers configured" from "providers not loaded yet",
   // so the setup call-to-action doesn't flash on every startup.
-  const [connectionsLoaded, setConnectionsLoaded] = useState(false);
+  const [connectionsLoaded, setConnectionsLoaded] = useState(lastLists !== null);
   const [localMcpServerIds, setLocalMcpServerIds] = useState<string[]>([]);
   const [localDisabledIds, setLocalDisabledIds] = useState<string[]>([]);
   const [isAgent, setIsAgent] = useState(false);
@@ -114,9 +118,10 @@ const WorkspaceContextBar = memo(({ workspaceId }: WorkspaceContextBarProps) => 
           getMcpServers(),
           assistantClient.listProviderConnections().catch(() => [] as ProviderConnection[]),
         ]);
+        lastLists = { servers: servers || [], connections: connections || [] };
         if (!cancelled) {
-          setAvailableMcpServers(servers || []);
-          setProviderConnections(connections || []);
+          setAvailableMcpServers(lastLists.servers);
+          setProviderConnections(lastLists.connections);
           setConnectionsLoaded(true);
         }
       } catch {

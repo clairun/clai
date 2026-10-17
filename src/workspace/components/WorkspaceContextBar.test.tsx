@@ -265,3 +265,20 @@ describe('WorkspaceContextBar for a new workspace (no workspace yet)', () => {
     expect(mocks.updateWorkspaceSessionMcp).toHaveBeenCalledWith('ws-new', ['srv-b'], ['srv-a']);
   });
 });
+
+describe('WorkspaceContextBar across target switches', () => {
+  it('renders at once on remount, without waiting for the app-wide lists again', async () => {
+    vi.clearAllMocks();
+    mocks.getWorkspaceDetails.mockResolvedValue(details({ providerConnectionIds: ['conn-a'] }));
+    mocks.getMcpServers.mockResolvedValue([server('srv-a', 'Alpha')]);
+    mocks.listProviderConnections.mockResolvedValue([{ id: 'conn-a', name: 'Alpha', enabled: true }]);
+    const { unmount } = render(<WorkspaceContextBar workspaceId="ws-1" />);
+    await screen.findByRole('combobox');
+    unmount();
+
+    mocks.getMcpServers.mockReturnValue(new Promise(() => {}));
+    render(<WorkspaceContextBar workspaceId={null} />);
+    expect(screen.getByRole('combobox')).toBeTruthy();
+    expect(screen.getByText('Add MCP')).toBeTruthy();
+  });
+});

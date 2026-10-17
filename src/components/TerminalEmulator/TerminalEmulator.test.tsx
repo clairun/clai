@@ -480,6 +480,32 @@ describe('TerminalEmulator on the Fleet', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('shows the same controls with and without a selected card', () => {
+    const controls = () => [
+      screen.queryByTestId('context-bar'),
+      screen.queryByRole('button', { name: 'Attach image' }),
+    ];
+    const renderWith = () =>
+      render(
+        <MemoryRouter initialEntries={['/fleet']}>
+          <TerminalEmulator onSendToChat={vi.fn(async () => ({}))} onPickImage={vi.fn(async () => ({}))} />
+        </MemoryRouter>
+      );
+
+    useFleetStore.setState({ selectedId: null });
+    const { unmount } = renderWith();
+    expect(controls().every(Boolean)).toBe(true);
+    unmount();
+
+    useFleetStore.setState((s) => ({
+      selectedId: 'ws-a',
+      fleet: { ...s.fleet, cards: { 'ws-a': { ...emptyCard('ws-a'), title: 'Alpha' } } },
+    }));
+    renderWith();
+    expect(controls().every(Boolean)).toBe(true);
+    useFleetStore.setState({ selectedId: null });
+  });
+
   it('sends to the selected card without asking, and shows it as the target', async () => {
     useFleetStore.setState((s) => ({
       selectedId: 'ws-a',

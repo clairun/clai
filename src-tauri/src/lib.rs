@@ -509,6 +509,7 @@ pub fn run() {
             commands::workspace::workspace_move_path,
             commands::workspace::workspace_store_image,
             commands::workspace::workspace_pick_and_store_image,
+            commands::workspace::workspace_pick_image,
             commands::workspace::workspace_download_file,
             commands::workspace::workspace_update_session_mcp,
             commands::workspace::workspace_set_provider,

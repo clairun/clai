@@ -2393,30 +2393,24 @@ fn image_media_type_from_extension(path: &Path) -> Option<&'static str> {
     }
 }
 
-/// Persist an image chosen via the native file dialog and return a
-/// ready-to-attach [`ContentPart::Image`].
+/// An image file the user chose in the native dialog, read but not stored.
+struct PickedImage {
+    bytes: Vec<u8>,
+    media_type: &'static str,
+    filename: Option<String>,
+}
+
+/// Open the native image dialog and read the chosen file; `None` if cancelled.
 ///
-/// This is the reliable cross-platform attach path: clipboard image paste is
-/// unreliable in the Linux WebKitGTK webview, so the composer also offers a
-/// file picker that routes here. Reads the host file the user explicitly
-/// selected, infers the MIME from its extension, then reuses the same image
-/// store (size cap, MIME allowlist, workspace-root sandbox) as the paste path.
-#[tauri::command]
-pub async fn workspace_pick_and_store_image(
-    workspace_id: String,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Option<ContentPart>, String> {
+/// The dialog runs in the backend, so the chosen path comes from a genuine
+/// OS user selection — never a renderer-supplied string. A compromised
+/// renderer can `invoke` the commands below, but cannot dictate which file is
+/// read (it can only pop the picker), so it can't exfiltrate arbitrary
+/// files (e.g. `~/.ssh/id_rsa`). The commands are async, so
+/// `blocking_pick_file` runs off the main thread (required by the plugin).
+async fn pick_image(app: &AppHandle) -> Result<Option<PickedImage>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let root_path = resolve_agent_workspace_root(state.inner(), &workspace_id)?;
-
-    // The dialog runs in the backend, so the chosen path comes from a genuine
-    // OS user selection — never a renderer-supplied string. A compromised
-    // renderer can `invoke` this command, but cannot dictate which file is
-    // read (it can only pop the picker), so it can't exfiltrate arbitrary
-    // files (e.g. `~/.ssh/id_rsa`) into the image store. This command is async,
-    // so `blocking_pick_file` runs off the main thread (required by the plugin).
     let picked = app
         .dialog()
         .file()
@@ -2441,12 +2435,58 @@ pub async fn workspace_pick_and_store_image(
         .await
         .map_err(|error| format!("Could not read image file: {}", error))?;
 
-    Ok(Some(store_workspace_image(
-        root_path.as_path(),
-        &bytes,
+    Ok(Some(PickedImage {
+        bytes,
         media_type,
         filename,
+    }))
+}
+
+/// Persist an image chosen via the native file dialog and return a
+/// ready-to-attach [`ContentPart::Image`].
+///
+/// This is the reliable cross-platform attach path: clipboard image paste is
+/// unreliable in the Linux WebKitGTK webview, so the composer also offers a
+/// file picker that routes here. Reuses the same image store (size cap, MIME
+/// allowlist, workspace-root sandbox) as the paste path.
+#[tauri::command]
+pub async fn workspace_pick_and_store_image(
+    workspace_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<ContentPart>, String> {
+    let root_path = resolve_agent_workspace_root(state.inner(), &workspace_id)?;
+    let Some(image) = pick_image(&app).await? else {
+        return Ok(None);
+    };
+    Ok(Some(store_workspace_image(
+        root_path.as_path(),
+        &image.bytes,
+        image.media_type,
+        image.filename,
     )?))
+}
+
+/// A picked image for `workspace_store_image`, shaped like its request.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickedImageResponse {
+    pub data_base64: String,
+    pub media_type: String,
+    pub filename: Option<String>,
+}
+
+/// Pick an image for a prompt whose workspace does not exist yet (the Fleet's
+/// new-workspace prompt). The frontend stores it with `workspace_store_image`
+/// once the workspace is created.
+#[tauri::command]
+pub async fn workspace_pick_image(app: AppHandle) -> Result<Option<PickedImageResponse>, String> {
+    use base64::Engine as _;
+    Ok(pick_image(&app).await?.map(|image| PickedImageResponse {
+        data_base64: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+        media_type: image.media_type.to_string(),
+        filename: image.filename,
+    }))
 }
 
 #[derive(Debug, Clone, Deserialize)]

@@ -106,6 +106,10 @@ const TerminalEmulator = ({
   // Chat-side features (context bar, attachments, drafts) follow the target,
   // which on the Fleet is the selected card.
   const chatWorkspaceId = target.workspaceId;
+  // Whether prompts have somewhere to go: the target, or on the Fleet the
+  // workspace they create. Both look the same, so the composer's height never
+  // depends on the selection.
+  const canPrompt = Boolean(chatWorkspaceId) || isFleetRoute;
   const fleetTargetTitle = useFleetStore((s) =>
     isFleetRoute && chatWorkspaceId ? s.fleet.cards[chatWorkspaceId]?.title || 'workspace' : null
   );
@@ -659,7 +663,7 @@ const TerminalEmulator = ({
       <div style={{ display: showTerminal ? 'none' : 'contents' }}>
           {/* Workspace context bar — model and MCP for the target; on the Fleet
               with no card selected, for the workspace the next prompt creates */}
-          {(chatWorkspaceId || isFleetRoute) && (
+          {canPrompt && (
             <div className={styles.workspaceContextWrapper}>
               <WorkspaceContextBar key={chatWorkspaceId ?? 'new'} workspaceId={chatWorkspaceId} />
             </div>
@@ -747,16 +751,10 @@ const TerminalEmulator = ({
               />
             </div>
 
-            {confirmingCreate && isFleetRoute && !fleetTargetTitle && (
-              <p className={styles.confirmCreate} role="status">
-                Create a new workspace with this message? <kbd>Enter</kbd> to confirm · <kbd>Esc</kbd> to cancel
-              </p>
-            )}
-
             {/* Action toolbar: attach + terminal-mode, below the input */}
-            {((onPickImage && chatWorkspaceId) || terminalAvailable) && (
+            {canPrompt && (
               <div className={styles.composerToolbar}>
-                {onPickImage && chatWorkspaceId && (
+                {onPickImage && (
                   <button
                     type="button"
                     className={styles.attachButton}
@@ -796,6 +794,12 @@ const TerminalEmulator = ({
                   >
                     {'>_'}
                   </button>
+                )}
+                {/* In the toolbar row, so asking doesn't grow the composer. */}
+                {confirmingCreate && isFleetRoute && !fleetTargetTitle && (
+                  <p className={styles.confirmCreate} role="status">
+                    Create a new workspace with this message? <kbd>Enter</kbd> to confirm · <kbd>Esc</kbd> to cancel
+                  </p>
                 )}
               </div>
             )}
