@@ -381,20 +381,36 @@ mod tests {
         let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].workspace_id, BUSY);
+    }
 
-        // Each kind of wait alone keeps IDLE past the limit.
-        let kept = |top: Vec<FleetWorkspace>| {
-            top.iter()
-                .map(|w| w.workspace_id.clone())
-                .collect::<Vec<_>>()
-        };
-        let waiting = vec![BUSY.to_string(), IDLE.to_string()];
+    /// A state where BUSY has session activity and `waiting` has none, so
+    /// `limit = 1` keeps only BUSY unless `waiting` waits on the user.
+    async fn busy_and(waiting: &str, temp: &tempfile::TempDir) -> AppState {
+        let state = state_with(&[BUSY, waiting], temp);
+        let pool = state.workspace_db(BUSY).await.expect("db");
+        repository::create_session(&pool, SessionContext::default())
+            .await
+            .expect("session");
+        state
+    }
 
+    async fn ids_at_limit_one(state: &AppState) -> Vec<String> {
+        let top = snapshot(state, Some(1)).await.expect("snapshot");
+        top.into_iter().map(|w| w.workspace_id).collect()
+    }
+
+    // Each test waits on its own workspace: pending questions live in a
+    // process-wide map shared by parallel tests.
+    #[tokio::test]
+    async fn pending_approval_keeps_workspace_past_limit() {
+        const WAITING: &str = "55555555-5555-4555-8555-555555555555";
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = busy_and(WAITING, &temp).await;
         let approval = PermissionRequest {
             persists_to_shared_agent: false,
             also_affects_workspaces: Vec::new(),
             request_id: "approval".to_string(),
-            workspace_id: Some(IDLE.to_string()),
+            workspace_id: Some(WAITING.to_string()),
             agent_id: None,
             agent_name: None,
             command: "cmd".to_string(),
@@ -404,16 +420,17 @@ mod tests {
             .pending_approvals
             .register(approval, "run".to_string())
             .await;
-        let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
-        assert_eq!(kept(top), waiting, "a pending approval");
-        state
-            .pending_approvals
-            .purge_workspace_canceling_runs(IDLE, |_| {})
-            .await;
+        assert_eq!(ids_at_limit_one(&state).await, [BUSY, WAITING]);
+    }
 
-        let ask = ask_user::register_for_test(PendingAsk {
+    #[tokio::test]
+    async fn pending_question_keeps_workspace_past_limit() {
+        const WAITING: &str = "66666666-6666-4666-8666-666666666666";
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = busy_and(WAITING, &temp).await;
+        let _ask = ask_user::register_for_test(PendingAsk {
             pending_id: "fleet-ask".to_string(),
-            workspace_id: IDLE.to_string(),
+            workspace_id: WAITING.to_string(),
             session_id: "session".to_string(),
             run_id: "run".to_string(),
             question: "?".to_string(),
@@ -422,13 +439,17 @@ mod tests {
             extra_context: None,
             requested_at: 0,
         });
-        let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
-        assert_eq!(kept(top), waiting, "a pending question");
-        drop(ask);
+        assert_eq!(ids_at_limit_one(&state).await, [BUSY, WAITING]);
+    }
 
+    #[tokio::test]
+    async fn pending_path_grant_keeps_workspace_past_limit() {
+        const WAITING: &str = "77777777-7777-4777-8777-777777777777";
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = busy_and(WAITING, &temp).await;
         let grant = PathGrantRequest {
             request_id: "grant".to_string(),
-            workspace_id: Some(IDLE.to_string()),
+            workspace_id: Some(WAITING.to_string()),
             agent_id: None,
             agent_name: None,
             requested_path: "/tmp".to_string(),
@@ -439,8 +460,9 @@ mod tests {
             .pending_path_grants
             .register(grant, "run".to_string())
             .await;
-        let top = super::snapshot(&state, Some(1)).await.expect("snapshot");
+        let top = snapshot(&state, Some(1)).await.expect("snapshot");
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[1].workspace_id, WAITING);
         assert_eq!(top[1].pending_path_grants.len(), 1);
-        assert_eq!(kept(top), waiting, "a pending path grant");
     }
 }
