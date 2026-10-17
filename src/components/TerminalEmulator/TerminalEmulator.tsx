@@ -549,8 +549,9 @@ const TerminalEmulator = ({
       e.preventDefault();
       handleCommandExecution(inputValue);
     }
-    // Escape: Clear output
-    else if (e.key === 'Escape') {
+    // Escape: clear output, if any; otherwise it is free for the page (the Fleet deselects).
+    else if (e.key === 'Escape' && outputMessages.length > 0) {
+      e.preventDefault();
       setOutputMessages([]);
     }
   };
@@ -709,7 +710,7 @@ const TerminalEmulator = ({
                     : isWorkspaceRoute
                       ? 'Message this workspace…  (!cmd runs a terminal command)'
                       : fleetTargetTitle
-                        ? `Message ${fleetTargetTitle}…`
+                        ? `Message ${fleetTargetTitle}…  (Esc for a new workspace)`
                         : isFleetRoute
                           ? 'Type to start a new workspace…'
                           : 'Open a workspace to chat, or run a /command (/help)...'

@@ -1,8 +1,8 @@
 /*
- * The Fleet. Static by design: on WebKitGTK any running animation repaints
- * the whole window every frame, so nothing here animates at rest. The only
- * motion is short, finite transitions on state changes. No backdrop-filter:
- * cards are translucent over a static gradient instead.
+ * The Fleet. Static by design: on WebKitGTK any animation repaints the
+ * whole window every frame, and even a short transition blinks, so nothing
+ * here moves. No backdrop-filter: cards are translucent over a static
+ * gradient instead. Every card has the same border; state shows inside it.
  */
 
 .page {
@@ -16,6 +16,17 @@
     radial-gradient(900px 500px at 100% 0%, color-mix(in srgb, var(--color-accent) 10%, transparent), transparent 70%),
     radial-gradient(1000px 700px at 50% 120%, color-mix(in srgb, var(--color-primary-dark) 12%, transparent), transparent 70%),
     var(--color-bg-primary);
+}
+
+/* The shared parts the Fleet mounts (top bar, the selected card's chat and
+ * request cards) bring their own fades and slide-ins: off here. A 0s single
+ * run paints only the end state. */
+.page *,
+.page *::before,
+.page *::after {
+  animation-duration: 0s !important;
+  animation-iteration-count: 1 !important;
+  transition: none !important;
 }
 
 .headerButton {
@@ -46,7 +57,6 @@
 
 .grid {
   display: grid;
-  grid-auto-flow: row dense;
   height: 100%;
 }
 
@@ -92,46 +102,20 @@
   position: relative;
   min-width: 0;
   min-height: 0;
-  border: 1px solid color-mix(in srgb, var(--ws-tint) 26%, var(--color-border-light));
+  border: 1px solid var(--color-border-light);
   border-radius: var(--radius-lg);
   background:
     linear-gradient(160deg, color-mix(in srgb, var(--ws-tint) 14%, transparent), transparent 55%),
     color-mix(in srgb, var(--color-bg-elevated) 78%, transparent);
   box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-text-primary) 6%, transparent);
   overflow: hidden;
-  transition: border-color 200ms ease-out, background-color 200ms ease-out;
 }
 
-.card::before {
-  content: '';
-  position: absolute;
-  inset: 0 0 auto 0;
-  height: 2px;
-  background: var(--ws-tint);
-  opacity: 0.7;
-}
-
-.card[data-phase='working']::before {
-  opacity: 1;
-}
-
-.card[data-phase='waiting'] {
-  border-color: var(--color-warning-border);
-  background:
-    linear-gradient(160deg, var(--color-warning-bg), transparent 60%),
-    color-mix(in srgb, var(--color-bg-elevated) 86%, transparent);
-  box-shadow: var(--shadow-md);
-}
-
-.card[data-phase='waiting']::before {
-  background: var(--color-warning);
-  opacity: 1;
-}
-
+/* Grown over its neighbours, so opaque. */
 .cardSelected {
-  border-color: color-mix(in srgb, var(--ws-tint) 60%, var(--color-border-strong));
-  background: color-mix(in srgb, var(--color-bg-elevated) 94%, transparent);
-  box-shadow: var(--shadow-md), 0 0 0 1px color-mix(in srgb, var(--ws-tint) 40%, transparent);
+  z-index: 1;
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-md);
 }
 
 .cardInner {
@@ -249,12 +233,15 @@
   color: var(--ws-tint);
 }
 
+/* Pinned to the bottom like a chat: overflow clips the oldest, at the top. */
 .items {
   list-style: none;
   margin: 0;
   padding: 0;
   display: flex;
+  flex: 1;
   flex-direction: column;
+  justify-content: flex-end;
   gap: 4px;
   min-height: 0;
   overflow: hidden;
@@ -262,6 +249,7 @@
 
 .item {
   display: flex;
+  flex-shrink: 0;
   align-items: center;
   gap: 8px;
   min-height: 24px;
@@ -277,6 +265,13 @@
 .tone_attention {
   color: var(--color-warning);
   font-weight: 600;
+}
+
+.itemTime {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 .faces {

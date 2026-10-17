@@ -19,13 +19,12 @@ import {
   cardPhase,
   emptyCard,
   gridCapacity,
-  placeCards,
+  pickCards,
   seedFleet,
   visibleLastMessage,
   type FleetCard,
   type FleetLive,
   type FleetState,
-  type PlacedCard,
 } from './fleetModel';
 
 const WS = 'ws-1';
@@ -160,18 +159,18 @@ describe('fleet reducer', () => {
     expect(applyRequestResolved(s, 'approval', 'a1', 9)).toBe(s);
   });
 
-  it('keeps finished subtasks and resolved requests as low-emphasis history', () => {
+  it('keeps finished subtasks and resolved requests as history, oldest first, live work at the bottom', () => {
     const live = withTasks(task('done', 'completed', 1), task('live', 'running', 2));
     let s = apply(EMPTY_FLEET, askEvent('q1', 3), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, 4));
     s = applyRequest(s, 'approval', approval('a1'), 5);
-    expect(cardItems(card(s), live).map((i) => [i.key, i.tone])).toEqual([
-      ['approval:a1', 'attention'],
-      ['task:live', 'live'],
-      ['ask:q1', 'done'],
-      ['task:done', 'done'],
+    expect(cardItems(card(s), live).map((i) => [i.key, i.tone, i.status])).toEqual([
+      ['task:done', 'done', 'Completed'],
+      ['ask:q1', 'done', 'Answered'],
+      ['task:live', 'live', 'Waiting for subtasks'],
+      ['approval:a1', 'attention', 'Approve command'],
     ]);
     s = applyRequestResolved(s, 'approval', 'a1', 6);
-    expect(cardItems(card(s), live)[0]).toMatchObject({ key: 'task:live' });
+    expect(cardItems(card(s), live).at(-1)).toMatchObject({ key: 'task:live' });
   });
 
   it('folds subtasks into their top-level task and stays live while any descendant runs', () => {
@@ -192,9 +191,9 @@ describe('fleet reducer', () => {
       task('stuck', 'failed', 1, { failureReason: 'blocked' }),
     );
     expect(cardItems(emptyCard(WS), live).map((i) => [i.status, i.statusKey])).toEqual([
-      ['Completed', 'completed'],
-      ['Failed · interrupted', 'failed'],
       ['Blocked', 'blocked'],
+      ['Failed · interrupted', 'failed'],
+      ['Completed', 'completed'],
     ]);
   });
 
@@ -271,7 +270,7 @@ describe('snapshot', () => {
   });
 });
 
-describe('card placement', () => {
+describe('card picking', () => {
   const NOW = 1_000_000_000;
   const mk = (id: string, lastActivityAt: number, patch: Partial<FleetCard> = {}): FleetCard => ({
     ...emptyCard(id, id),
@@ -280,31 +279,8 @@ describe('card placement', () => {
   });
   const waitingCard = (id: string, lastActivityAt: number, since = lastActivityAt) =>
     mk(id, lastActivityAt, { requests: { 'ask:q': { kind: 'ask', text: '?', agentName: null, at: since, resolvedAt: null } } });
-  const ids = (placed: { id: string }[]) => placed.map((p) => p.id);
-  const place = (cards: FleetCard[], cols: number, rows: number, selectedId: string | null = null, prevOrder: string[] = [], live = NO_LIVE) =>
-    placeCards(cards, { now: NOW, capacity: { cols, rows }, selectedId, prevOrder, live });
-
-  /** What CSS grid `row dense` auto-placement does with the output: rows used. */
-  const rowsUsed = (placed: PlacedCard[], cols: number) => {
-    const taken: boolean[][] = [];
-    const free = (r: number, c: number, w: number, h: number) => {
-      if (c + w > cols) return false;
-      for (let i = r; i < r + h; i += 1) for (let j = c; j < c + w; j += 1) if (taken[i]?.[j]) return false;
-      return true;
-    };
-    let used = 0;
-    for (const p of placed) {
-      let r = 0;
-      let c = 0;
-      while (!free(r, c, p.cols, p.rows)) {
-        c += 1;
-        if (c >= cols) [r, c] = [r + 1, 0];
-      }
-      for (let i = r; i < r + p.rows; i += 1) for (let j = c; j < c + p.cols; j += 1) (taken[i] ??= [])[j] = true;
-      used = Math.max(used, r + p.rows);
-    }
-    return used;
-  };
+  const pick = (cards: FleetCard[], cols: number, rows: number, selectedId: string | null = null, prevOrder: string[] = [], live = NO_LIVE) =>
+    pickCards(cards, { now: NOW, capacity: { cols, rows }, selectedId, prevOrder, live });
 
   it('derives capacity from the screen size', () => {
     expect(gridCapacity(300, 150)).toEqual({ cols: 1, rows: 1 });
@@ -315,71 +291,22 @@ describe('card placement', () => {
   it('never shows old idle workspaces, but always shows live and selected ones', () => {
     const old = NOW - RECENT_WINDOW_MS - 1;
     const cards = [mk('recent', NOW - 1000), mk('old', old), mk('old-but-running', old), waitingCard('old-waiting', old), mk('old-selected', old)];
-    const placed = place(cards, 4, 3, 'old-selected', [], { runs: { 'old-but-running': ['r'] }, tasks: {} });
-    expect(ids(placed).sort()).toEqual(['old-but-running', 'old-selected', 'old-waiting', 'recent']);
+    const picked = pick(cards, 4, 3, 'old-selected', [], { runs: { 'old-but-running': ['r'] }, tasks: {} });
+    expect([...picked].sort()).toEqual(['old-but-running', 'old-selected', 'old-waiting', 'recent']);
   });
 
-  it('shows the most recent when more are active than fit', () => {
-    const placed = place([mk('a', NOW - 3), mk('b', NOW - 1), mk('c', NOW - 2)], 2, 1);
-    expect(ids(placed)).toEqual(['b', 'c']);
+  it('shows the most recent when more are active than fit, but the selected and waiting ones first', () => {
+    expect(pick([mk('a', NOW - 3), mk('b', NOW - 1), mk('c', NOW - 2)], 2, 1)).toEqual(['b', 'c']);
+    expect(pick([mk('a', NOW - 3), waitingCard('w', NOW - 9), mk('b', NOW - 1), mk('sel', NOW - 8)], 3, 1, 'sel')).toEqual(['sel', 'w', 'b']);
   });
 
-  it('puts the selected card first and larger', () => {
-    const placed = place([mk('a', NOW - 1), mk('b', NOW - 2), mk('sel', NOW - 50)], 3, 2, 'sel');
-    expect(placed).toEqual([
-      { id: 'sel', cols: 2, rows: 2 },
-      { id: 'a', cols: 1, rows: 1 },
-      { id: 'b', cols: 1, rows: 1 },
-    ]);
+  it('keeps every card in its slot when one is selected or starts waiting', () => {
+    const prev = ['a', 'b', 'c'];
+    expect(pick([mk('a', NOW - 1), mk('b', NOW - 2), mk('c', NOW - 3)], 3, 1, 'c', prev)).toEqual(prev);
+    expect(pick([mk('a', NOW - 1), mk('b', NOW - 2), waitingCard('c', NOW - 3)], 3, 1, null, prev)).toEqual(prev);
   });
 
-  it('keeps the selected card inside a 3×2 grid when another card is waiting', () => {
-    const placed = place([waitingCard('w', NOW - 1), mk('sel', NOW - 2)], 3, 2, 'sel');
-    expect(placed).toEqual([
-      { id: 'sel', cols: 2, rows: 2 },
-      { id: 'w', cols: 1, rows: 1 },
-    ]);
-    expect(rowsUsed(placed, 3)).toBe(2);
-  });
-
-  it('moves waiting cards up (oldest first) and grows them; others keep their order', () => {
-    const cards = [mk('a', NOW - 1), mk('b', NOW - 2), waitingCard('w2', NOW - 3, 20), waitingCard('w1', NOW - 4, 10)];
-    expect(place(cards, 4, 2, null, ['b', 'a'])).toEqual([
-      { id: 'w1', cols: 2, rows: 1 },
-      { id: 'w2', cols: 2, rows: 1 },
-      { id: 'b', cols: 1, rows: 1 },
-      { id: 'a', cols: 1, rows: 1 },
-    ]);
-  });
-
-  it("doesn't grow a waiting card when that would push a later card out", () => {
-    const placed = place([waitingCard('w', NOW - 3), mk('a', NOW - 1), mk('b', NOW - 2)], 3, 1);
-    expect(placed).toEqual([
-      { id: 'w', cols: 1, rows: 1 },
-      { id: 'a', cols: 1, rows: 1 },
-      { id: 'b', cols: 1, rows: 1 },
-    ]);
-  });
-
-  it('never spills below the grid, whatever the mix', () => {
-    for (let cols = 1; cols <= 4; cols += 1) {
-      for (let rows = 1; rows <= 3; rows += 1) {
-        for (let waiting = 0; waiting <= 5; waiting += 1) {
-          for (let idle = 0; idle <= 5; idle += 1) {
-            for (const selected of [null, 'i0', 'w0']) {
-              const cards = [
-                ...Array.from({ length: waiting }, (_, i) => waitingCard(`w${i}`, NOW - i - 1)),
-                ...Array.from({ length: idle }, (_, i) => mk(`i${i}`, NOW - i - 1)),
-              ];
-              const sel = cards.some((c) => c.workspaceId === selected) ? selected : null;
-              const placed = place(cards, cols, rows, sel);
-              expect(rowsUsed(placed, cols)).toBeLessThanOrEqual(rows);
-              expect(placed.length).toBe(Math.min(cards.length, cols * rows - (sel ? Math.min(2, cols) * Math.min(2, rows) - 1 : 0)));
-              if (sel) expect(placed[0]!.id).toBe(sel);
-            }
-          }
-        }
-      }
-    }
+  it('gives newcomers the next slots and closes the gap a leaving card left', () => {
+    expect(pick([mk('a', NOW - 1), mk('c', NOW - 3), mk('new', NOW)], 3, 1, null, ['a', 'b', 'c'])).toEqual(['a', 'c', 'new']);
   });
 });

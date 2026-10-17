@@ -393,7 +393,11 @@ const OPEN_STATUS: Record<FleetRequest['kind'], string> = {
   grant: 'Grant access',
 };
 
-/** Live items first (attention, then work in progress), then up to `HISTORY_LIMIT` resolved items, newest first. */
+/**
+ * Every live item plus the `HISTORY_LIMIT` newest resolved ones, in reading
+ * order like a chat: history oldest first, then work in progress, then what
+ * needs the user, so the bottom of the card is always the most current.
+ */
 export const cardItems = (card: FleetCard, live: FleetLive): FleetItem[] => {
   const items: FleetItem[] = taskItems(workspaceTasks(card, live));
   for (const [key, request] of Object.entries(card.requests)) {
@@ -409,7 +413,9 @@ export const cardItems = (card: FleetCard, live: FleetLive): FleetItem[] => {
   }
   items.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone] || b.at - a.at);
   const liveCount = items.filter((i) => TONE_RANK[i.tone] < 2).length;
-  return items.slice(0, liveCount + HISTORY_LIMIT);
+  return items
+    .slice(0, liveCount + HISTORY_LIMIT)
+    .sort((a, b) => TONE_RANK[b.tone] - TONE_RANK[a.tone] || a.at - b.at);
 };
 
 /** The last assistant message, only once the workspace has stopped. */
@@ -434,87 +440,45 @@ export const gridCapacity = (width: number, height: number): GridCapacity => ({
   rows: Math.min(MAX_ROWS, Math.max(1, Math.floor((height + GRID_GAP) / (CARD_MIN_HEIGHT + GRID_GAP)))),
 });
 
-export interface PlacedCard {
-  id: string;
-  cols: number;
-  rows: number;
-}
-
-const MAX_GROWN_WAITING = 2;
-
 /**
- * Pick, order and size the visible cards. Eligible: the selected card,
- * anything live, and workspaces active within `RECENT_WINDOW_MS`. When they
- * don't all fit, the selected card wins, then waiting ones (oldest first),
- * then the most recent. On screen: selected, waiting, then cards already
- * visible keep their place (`prevOrder`), then newcomers by recency, so
- * activity alone never reshuffles the grid.
- *
- * Sizes are checked against the grid's `row dense` auto-placement, which
- * puts each card at the first spot its shape fits: a card grows only where
- * it fits and leaves a cell for every card after it, so nothing spills
- * below the grid.
+ * The visible cards, in slot order. Eligible: the selected card, anything
+ * live, and workspaces active within `RECENT_WINDOW_MS`. When they don't all
+ * fit, the selected card wins, then waiting ones (oldest first), then the
+ * most recent. Cards already visible keep their slots (`prevOrder`) and
+ * newcomers take the next ones, so nothing moves to highlight a card.
  */
-export const placeCards = (
+export const pickCards = (
   cards: readonly FleetCard[],
   options: { now: number; capacity: GridCapacity; selectedId: string | null; prevOrder: readonly string[]; live: FleetLive }
-): PlacedCard[] => {
+): string[] => {
   const { now, capacity, selectedId, prevOrder, live } = options;
-  const { cols, rows } = capacity;
   const meta = cards
     .map((card) => ({ id: card.workspaceId, card, phase: cardPhase(card, live), since: cardAttention(card).since ?? 0 }))
     .filter(
       (m) => m.id === selectedId || m.phase !== 'stopped' || m.card.lastActivityAt >= now - RECENT_WINDOW_MS
     );
-  const selected = meta.filter((m) => m.id === selectedId);
-  const waiting = meta.filter((m) => m.id !== selectedId && m.phase === 'waiting').sort((a, b) => a.since - b.since);
-  const recent = meta
-    .filter((m) => m.id !== selectedId && m.phase !== 'waiting')
-    .sort((a, b) => b.card.lastActivityAt - a.card.lastActivityAt);
+  const rank = (m: (typeof meta)[number]): [number, number] =>
+    m.id === selectedId ? [0, 0] : m.phase === 'waiting' ? [1, m.since] : [2, -m.card.lastActivityAt];
+  const chosen = new Set(
+    meta
+      .sort((a, b) => {
+        const [ra, ka] = rank(a);
+        const [rb, kb] = rank(b);
+        return ra - rb || ka - kb;
+      })
+      .slice(0, capacity.cols * capacity.rows)
+      .map((m) => m.id)
+  );
+  const kept = prevOrder.filter((id) => chosen.has(id));
+  return [...kept, ...meta.filter((m) => chosen.has(m.id) && !kept.includes(m.id)).map((m) => m.id)];
+};
 
-  const selectedSize = { cols: Math.min(2, cols), rows: Math.min(2, rows) };
-  const room = cols * rows - (selected.length ? selectedSize.cols * selectedSize.rows : 0);
-  const chosen = new Set([...waiting, ...recent].slice(0, Math.max(0, room)).map((m) => m.id));
-  const rest = recent.filter((m) => chosen.has(m.id));
-  const order = [
-    ...selected,
-    ...waiting.filter((m) => chosen.has(m.id)),
-    ...prevOrder.flatMap((id) => rest.filter((m) => m.id === id)),
-    ...rest.filter((m) => !prevOrder.includes(m.id)),
-  ];
-
-  const taken = new Array<boolean>(cols * rows).fill(false);
-  const cellsFree = (at: number, w: number, h: number) => {
-    if ((at % cols) + w > cols || Math.floor(at / cols) + h > rows) return false;
-    for (let r = 0; r < h; r += 1) for (let c = 0; c < w; c += 1) if (taken[at + r * cols + c]) return false;
-    return true;
-  };
-  const place = (w: number, h: number): boolean => {
-    const at = taken.findIndex((_, i) => cellsFree(i, w, h));
-    if (at < 0) return false;
-    for (let r = 0; r < h; r += 1) for (let c = 0; c < w; c += 1) taken[at + r * cols + c] = true;
-    return true;
-  };
-
-  let grown = 0;
-  const placed: PlacedCard[] = [];
-  order.forEach((m, index) => {
-    const isSelected = m.id === selectedId;
-    const free = taken.filter((t) => !t).length;
-    const later = order.length - index - 1;
-    const wants = isSelected
-      ? selectedSize
-      : m.phase === 'waiting' && grown < MAX_GROWN_WAITING && cols >= 2 && free - 2 >= later
-        ? { cols: 2, rows: 1 }
-        : { cols: 1, rows: 1 };
-    if (wants.cols * wants.rows > 1 && place(wants.cols, wants.rows)) {
-      if (!isSelected) grown += 1;
-      placed.push({ id: m.id, ...wants });
-    } else if (place(1, 1)) {
-      placed.push({ id: m.id, cols: 1, rows: 1 });
-    }
-  });
-  return placed;
+/** The card `step` slots after `selectedId` (±1), wrapping; from no selection, the first or the last. */
+export const cycleCard = (order: readonly string[], selectedId: string | null, step: 1 | -1): string | null => {
+  if (order.length === 0) return null;
+  const at = selectedId ? order.indexOf(selectedId) : -1;
+  if (at < 0) return step > 0 ? order[0]! : order[order.length - 1]!;
+  return order[(at + step + order.length) % order.length]!;
 };
 
 /** One of eight hues per workspace, stable across runs. */

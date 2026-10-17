@@ -2,14 +2,15 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import AppTopBar from '../components/AppTopBar';
 import FleetGrid from '../components/FleetPage/FleetGrid';
 import styles from '../components/FleetPage/FleetPage.module.css';
+import { listAgentDefinitions } from '../api/client';
+import { identityFor, type AgentIdentity } from '../components/Agents/agentIdentity';
 import {
-  GRID_GAP,
   RECENT_WINDOW_MS,
   cardPhase,
+  cycleCard,
   gridCapacity,
-  placeCards,
+  pickCards,
   type FleetLive,
-  type PlacedCard,
 } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
@@ -55,9 +56,20 @@ const FleetPage = () => {
   const live: FleetLive = useMemo(() => ({ runs, tasks }), [runs, tasks]);
 
   // Reload on mount and whenever the window regains focus: that re-judges
-  // recency without a timer, and drops cards of deleted workspaces.
+  // recency without a timer, and drops cards of deleted workspaces. The
+  // agent library gives the cards' faces their picked look.
+  const [faces, setFaces] = useState<Record<string, AgentIdentity>>({});
   useEffect(() => {
-    const load = () => void useFleetStore.getState().loadSnapshot();
+    const load = () => {
+      void useFleetStore.getState().loadSnapshot();
+      listAgentDefinitions()
+        .then((definitions) =>
+          setFaces(Object.fromEntries(definitions.map((d) => [d.id, identityFor({ id: d.id, avatar: d.avatar })])))
+        )
+        .catch(() => {
+          // Faces fall back to the ones their ids map to.
+        });
+    };
     load();
     window.addEventListener('focus', load);
     return () => window.removeEventListener('focus', load);
@@ -66,25 +78,43 @@ const FleetPage = () => {
   const gridRef = useRef<HTMLDivElement | null>(null);
   const { width, height } = useBoxSize(gridRef);
   const capacity = useMemo(() => gridCapacity(width, height), [width, height]);
-  const rowHeight = capacity.rows > 0 ? (height - GRID_GAP * (capacity.rows - 1)) / capacity.rows : 0;
 
-  // The previous order, so cards already on screen keep their place.
-  // Updated during render (React's derived-state pattern); placement is a
+  // The previous order, so cards already on screen keep their slots.
+  // Updated during render (React's derived-state pattern); picking is a
   // fixed point of its own order, so this settles in one extra pass.
   const [order, setOrder] = useState<string[]>([]);
-  const placed: PlacedCard[] = useMemo(
+  const placed = useMemo(
     () =>
-      width > 0
-        ? placeCards(Object.values(cards), { now, capacity, selectedId, prevOrder: order, live })
-        : [],
+      width > 0 ? pickCards(Object.values(cards), { now, capacity, selectedId, prevOrder: order, live }) : [],
     [cards, now, capacity, selectedId, width, order, live]
   );
-  const placedIds = placed.map((p) => p.id);
-  if (placedIds.join(',') !== order.join(',')) setOrder(placedIds);
+  if (placed.join(',') !== order.join(',')) setOrder(placed);
+
+  // From anywhere on the page, the terminal included: Ctrl+Tab and
+  // Ctrl+Shift+Tab cycle the selection through the slots (capture beats the
+  // terminal's keydown); Escape deselects, unless something else used it
+  // first (the terminal clearing its output, or an open dialog).
+  useEffect(() => {
+    const onCycle = (e: KeyboardEvent) => {
+      if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      select(cycleCard(placed, useFleetStore.getState().selectedId, e.shiftKey ? -1 : 1));
+    };
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector('[role="dialog"]')) select(null);
+    };
+    window.addEventListener('keydown', onCycle, true);
+    window.addEventListener('keydown', onEscape);
+    return () => {
+      window.removeEventListener('keydown', onCycle, true);
+      window.removeEventListener('keydown', onEscape);
+    };
+  }, [placed, select]);
 
   // Cards born from live events (or a workspace just created here) have no
   // title yet: the snapshot has it, once per new set of untitled cards.
-  const untitled = placed.filter((p) => !cards[p.id]?.title).map((p) => p.id).join(',');
+  const untitled = placed.filter((id) => !cards[id]?.title).join(',');
   useEffect(() => {
     if (untitled) void useFleetStore.getState().loadSnapshot();
   }, [untitled]);
@@ -113,16 +143,17 @@ const FleetPage = () => {
           <strong>{counts.waiting}</strong> need you
         </span>
       </AppTopBar>
-      <main className={styles.gridArea} ref={gridRef}>
+      <main className={styles.gridArea} ref={gridRef} aria-label="Fleet">
         {loadError && <p className={styles.notice}>{loadError}</p>}
         {placed.length > 0 ? (
           <FleetGrid
-            placed={placed}
+            order={placed}
             cards={cards}
             cols={capacity.cols}
-            rowHeight={rowHeight}
+            rows={capacity.rows}
             selectedId={selectedId}
             live={live}
+            faces={faces}
             onSelect={handleSelect}
           />
         ) : (

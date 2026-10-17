@@ -1,6 +1,6 @@
 import { memo, useMemo } from 'react';
 import AgentAvatar from '../Agents/AgentAvatar';
-import { GENERATOR_VERSION } from '../Agents/agentIdentity';
+import { GENERATOR_VERSION, type AgentIdentity } from '../Agents/agentIdentity';
 import pillStyles from '../Agents/taskStatus.module.css';
 import {
   cardAttention,
@@ -29,14 +29,22 @@ export const attentionLabel = (a: FleetAttention): string =>
 export const phaseLabel = (phase: FleetPhase, attention: FleetAttention): string =>
   phase === 'waiting' ? `Needs you · ${attentionLabel(attention)}` : phase === 'working' ? 'Working' : 'Idle';
 
-const ItemRow = ({ item }: { item: FleetItem }) => (
+/** `14:05` today, `Oct 16` before. */
+const eventTime = (at: number): string => {
+  const date = new Date(at);
+  return date.toDateString() === new Date().toDateString()
+    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+};
+
+const ItemRow = ({ item, faces }: { item: FleetItem; faces: Record<string, AgentIdentity> }) => (
   <li className={`${styles.item} ${styles[`tone_${item.tone}`]}`}>
     {item.agents.length > 0 && (
       <span className={styles.faces}>
         {item.agents.slice(0, 3).map((agent) => (
           <AgentAvatar
             key={agent.seed}
-            identity={{ seed: agent.seed, generatorVersion: GENERATOR_VERSION }}
+            identity={faces[agent.seed] ?? { seed: agent.seed, generatorVersion: GENERATOR_VERSION }}
             size={16}
             ring={false}
             label={agent.name}
@@ -52,17 +60,20 @@ const ItemRow = ({ item }: { item: FleetItem }) => (
     >
       {item.status}
     </span>
+    <time className={styles.itemTime}>{eventTime(item.at)}</time>
   </li>
 );
 
 interface FleetCardProps {
   card: FleetCardModel;
   live: FleetLive;
+  /** Picked agent faces, by agent definition id. */
+  faces: Record<string, AgentIdentity>;
   onSelect: (workspaceId: string) => void;
 }
 
 /** An unselected card: events and minimal text only. */
-const FleetCard = ({ card, live, onSelect }: FleetCardProps) => {
+const FleetCard = ({ card, live, faces, onSelect }: FleetCardProps) => {
   const phase = cardPhase(card, live);
   const attention = cardAttention(card);
   const items = useMemo(() => cardItems(card, live), [card, live]);
@@ -101,7 +112,7 @@ const FleetCard = ({ card, live, onSelect }: FleetCardProps) => {
       {items.length > 0 && (
         <ul className={styles.items} aria-label="Activity">
           {items.map((item) => (
-            <ItemRow key={item.key} item={item} />
+            <ItemRow key={item.key} item={item} faces={faces} />
           ))}
         </ul>
       )}
