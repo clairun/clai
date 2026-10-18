@@ -190,7 +190,11 @@ tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest
  * The newest user and assistant messages with text across every
  * session, oldest first; tool calls and results are left out.
  */
-recentMessages: Array<FleetHighlight>, };
+recentMessages: Array<FleetHighlight>, 
+/**
+ * The enabled agents, Main first, then teammates in roster order.
+ */
+agents: Array<AgentRefSnapshot>, };
 
 /**
  * Provenance for a `FilesystemPathGrant`. Lets the agent-settings UI tell

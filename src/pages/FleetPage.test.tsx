@@ -23,6 +23,7 @@ const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspac
   starred: false,
   lastActivityAt: BigInt(Date.now() - ageMs),
   lastOpenedAt: 0n,
+  agents: [],
   mainSessionId: null,
   activeRunIds: [],
   tasks: [],

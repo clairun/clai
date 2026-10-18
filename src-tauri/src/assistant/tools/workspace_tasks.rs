@@ -492,13 +492,7 @@ fn agent_snapshot(
     definition_id: Option<&str>,
 ) -> Box<AgentRefSnapshot> {
     Box::new(match rows.iter().find(|row| row.id == id) {
-        Some(row) => AgentRefSnapshot {
-            workspace_agent_id: row.id.clone(),
-            agent_definition_id: Some(row.agent_definition_id.clone()),
-            display_name: row.display_name().to_string(),
-            is_default: row.role == "manager",
-            avatar: row.avatar.clone(),
-        },
+        Some(row) => row.into(),
         None => AgentRefSnapshot {
             workspace_agent_id: id.to_string(),
             agent_definition_id: definition_id.map(str::to_string),

@@ -12,8 +12,8 @@ use ts_rs::TS;
 use crate::assistant::conversation::content_text;
 use crate::assistant::repository;
 use crate::assistant::tools::ask_user::{self, PendingAsk};
-use crate::assistant::types::{AssistantMessage, MessageOrigin, MessageRole};
-use crate::assistant::workspace_agents::workspace_agent_display_names;
+use crate::assistant::types::{AgentRefSnapshot, AssistantMessage, MessageOrigin, MessageRole};
+use crate::assistant::workspace_agents::{agent_display_names, load_workspace_agent_rows};
 use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskResponse};
 use crate::commands::path_grants::PathGrantRequest;
 use crate::commands::permissions::PermissionRequest;
@@ -55,6 +55,8 @@ pub struct FleetWorkspace {
     /// The newest user and assistant messages with text across every
     /// session, oldest first; tool calls and results are left out.
     pub recent_messages: Vec<FleetHighlight>,
+    /// The enabled agents, Main first, then teammates in roster order.
+    pub agents: Vec<AgentRefSnapshot>,
 }
 
 /// The text of the main session's newest assistant reply, cut to a preview.
@@ -191,15 +193,17 @@ async fn workspace_snapshot(
         FINISHED_TASK_LIMIT,
     )
     .await?;
-    // Agent names come from config.json; skip the read when there is no task.
-    let tasks = if rows.is_empty() {
-        Vec::new()
-    } else {
-        let agent_names = workspace_agent_display_names(state, &locator.id);
-        rows.into_iter()
-            .map(|row| row.into_response(&locator.id, &agent_names))
-            .collect()
-    };
+    let roster = load_workspace_agent_rows(state, &locator.id).unwrap_or_default();
+    let agent_names = agent_display_names(&roster);
+    let tasks = rows
+        .into_iter()
+        .map(|row| row.into_response(&locator.id, &agent_names))
+        .collect();
+    let agents = roster
+        .iter()
+        .filter(|agent| agent.enabled)
+        .map(AgentRefSnapshot::from)
+        .collect();
 
     Ok(FleetWorkspace {
         pending_permissions: state
@@ -221,6 +225,7 @@ async fn workspace_snapshot(
         tasks,
         last_assistant_message,
         recent_messages,
+        agents,
     })
 }
 
@@ -704,5 +709,81 @@ mod tests {
         assert_eq!(delegated.session_id, task.id);
         assert_eq!(delegated.origin, manager);
         assert_eq!(recent[kept_old + 2].role, MessageRole::Assistant);
+    }
+
+    #[tokio::test]
+    async fn agents_list_enabled_faces_main_first() {
+        use crate::config::global_agents::AgentDefinition;
+        use crate::config::workspace_config::{
+            AgentAvatarRef, WorkspaceAgent, WorkspaceAssignment,
+        };
+
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = state_with(&[IDLE], &temp);
+        let face = AgentAvatarRef {
+            seed: "reviewer-face".to_string(),
+            generator_version: 1,
+        };
+        let definition = |id: &str, avatar: Option<AgentAvatarRef>| {
+            let mut behavior = WorkspaceAgent::new_manager(id.to_string(), 1);
+            behavior.name = id.to_string();
+            behavior.avatar = avatar;
+            AgentDefinition {
+                id: id.to_string(),
+                revision: 1,
+                archived: false,
+                behavior,
+            }
+        };
+        state
+            .config_manager
+            .lock()
+            .expect("config lock")
+            .update(|config| {
+                config
+                    .agent_definitions
+                    .push(definition("Reviewer", Some(face.clone())));
+                config.agent_definitions.push(definition("Writer", None));
+            })
+            .expect("seed definitions");
+        // The disabled one joined first: only `enabled` keeps it off the strip.
+        let assignment = |id: &str, definition: &str, enabled, created_at| WorkspaceAssignment {
+            id: id.to_string(),
+            agent_definition_id: definition.to_string(),
+            enabled,
+            context: String::new(),
+            filesystem_grants: Vec::new(),
+            created_at,
+            updated_at: created_at,
+        };
+        state
+            .update_workspace_config(IDLE, |config| {
+                config
+                    .assignments
+                    .push(assignment("wa-writer", "Writer", false, 2));
+                config
+                    .assignments
+                    .push(assignment("wa-reviewer", "Reviewer", true, 3));
+                Ok(())
+            })
+            .expect("seed assignments");
+
+        let snapshot = snapshot(&state, None, None).await.expect("snapshot");
+
+        let agents = &snapshot[0].agents;
+        assert_eq!(
+            agents
+                .iter()
+                .map(|a| (a.workspace_agent_id.as_str(), a.is_default))
+                .collect::<Vec<_>>(),
+            vec![(MANAGER, true), ("wa-reviewer", false)]
+        );
+        assert_eq!(agents[1].display_name, "Reviewer");
+        assert_eq!(agents[1].agent_definition_id.as_deref(), Some("Reviewer"));
+        assert_eq!(
+            agents[1].avatar,
+            Some(face),
+            "the face comes from the roster"
+        );
     }
 }
