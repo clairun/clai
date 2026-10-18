@@ -11,6 +11,7 @@ import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
 import { WorkspaceFileContext, type WorkspaceFileLocation } from '../Chat/WorkspaceFileContext';
 import VirtualizedList from '../common/VirtualizedList';
+import { isRunMarkerText } from '../../assistant/runMarker';
 import type {
   AssistantMessage,
   ContentPart,
@@ -353,9 +354,7 @@ const isHiddenMessage = (message: AssistantMessage | undefined): boolean => {
 
   if (message.role !== 'user') return false;
   const text = getTextContent(message);
-  if (text.startsWith('--- New scheduled run at') || text.startsWith('--- Manual run at')) {
-    return true;
-  }
+  if (isRunMarkerText(text)) return true;
   // Hide only when there's nothing to show — neither text nor image parts. An
   // image-only user message (no caption) must still render its thumbnail.
   return !text && getImageContent(message).length === 0;
@@ -908,13 +907,7 @@ const UserMessageBlock = ({
   const imageParts = getImageContent(message);
   if (!textContent && imageParts.length === 0) return null;
 
-  // Hide run boundary markers (persisted trigger messages for the LLM, not for the user)
-  if (
-    textContent.startsWith('--- New scheduled run at') ||
-    textContent.startsWith('--- Manual run at')
-  ) {
-    return null;
-  }
+  if (isRunMarkerText(textContent)) return null;
 
   const isEditing = editDraft !== null;
   const trimmedDraft = (editDraft ?? '').trim();

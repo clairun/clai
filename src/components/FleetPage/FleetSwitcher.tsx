@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { GENERATOR_VERSION, type AgentIdentity } from '../Agents/agentIdentity';
 import {
@@ -13,24 +13,29 @@ import { phaseLabel } from './FleetCard';
 import styles from './FleetPage.module.css';
 
 interface FleetSwitcherProps {
-  /** Card ids in slot order. */
+  /** Card ids, most recently opened first (`recentlyOpened`). */
   order: string[];
   cards: Record<string, FleetCard>;
   selectedId: string | null;
   live: FleetLive;
   faces: Record<string, AgentIdentity>;
-  onSelect: (workspaceId: string) => void;
+  /** `null`: the "New workspace" entry, nothing selected. */
+  onSelect: (workspaceId: string | null) => void;
 }
+
+/** The last entry: deselects, so the terminal starts a new workspace. */
+const NEW_WORKSPACE = 'fleet:new-workspace';
 
 /**
  * The OS-style switcher, from anywhere on the page, the terminal included
  * (capture beats the terminal's keydown). Ctrl+Tab opens it; while Ctrl is
  * held, Tab / Shift+Tab move only its highlight. Releasing Ctrl selects the
- * highlighted card once; Escape or leaving the window closes it unchanged.
+ * highlighted card once ("New workspace", the last entry, deselects); Escape or leaving the window closes it unchanged.
  * Static: no animation, no blur.
  */
 const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: FleetSwitcherProps) => {
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  const entries = useMemo(() => [...order, NEW_WORKSPACE], [order]);
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
@@ -43,11 +48,11 @@ const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: Flee
       if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey || order.length === 0) return;
       e.preventDefault();
       e.stopPropagation();
-      setHighlightId(cycleCard(order, highlightId ?? selectedId, e.shiftKey ? -1 : 1));
+      setHighlightId(cycleCard(entries, highlightId ?? selectedId ?? NEW_WORKSPACE, e.shiftKey ? -1 : 1));
     };
     const onKeyUp = (e: KeyboardEvent) => {
       if (highlightId && e.key === 'Control') {
-        onSelect(highlightId);
+        onSelect(highlightId === NEW_WORKSPACE ? null : highlightId);
         setHighlightId(null);
       }
     };
@@ -60,7 +65,7 @@ const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: Flee
       window.removeEventListener('keyup', onKeyUp, true);
       window.removeEventListener('blur', onBlur);
     };
-  }, [order, selectedId, highlightId, onSelect]);
+  }, [order, entries, selectedId, highlightId, onSelect]);
 
   if (!highlightId) return null;
   return (
@@ -98,6 +103,9 @@ const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: Flee
             </li>
           );
         })}
+        <li className={styles.switcherRow} role="option" aria-selected={highlightId === NEW_WORKSPACE}>
+          <span className={styles.switcherTitle}>New workspace</span>
+        </li>
       </ul>
     </div>
   );

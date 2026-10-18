@@ -35,11 +35,9 @@
 
 /* Every box from the viewport down to a card's content is sized by flexing,
  * never by a percentage height: if any link resolved as indefinite, the grid's
- * `fr` rows would be sized from the cards' content, and the stage's chat
- * would resize every row. */
+ * rows would be sized from the cards' content. */
 
-/* The shared parts the Fleet mounts (top bar, the selected card's chat and
- * request cards) bring their own fades and slide-ins: off here. A 0s single
+/* The shared parts the Fleet mounts (top bar, request cards) bring their own fades and slide-ins: off here. A 0s single
  * run paints only the end state. */
 .page *,
 .page *::before,
@@ -47,25 +45,6 @@
   animation-duration: 0s !important;
   animation-iteration-count: 1 !important;
   transition: none !important;
-}
-
-.headerButton {
-  flex-shrink: 0;
-  height: 28px;
-  padding: 0 12px;
-  border: 1px solid var(--color-border-medium);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--color-bg-elevated) 80%, transparent);
-  color: var(--color-text-secondary);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-}
-
-.headerButton:hover,
-.headerButton:focus-visible {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
 }
 
 .gridArea {
@@ -81,28 +60,15 @@
 }
 
 .board {
-  display: flex;
-  flex: 1;
-  gap: 16px;
-  min-height: 0;
-}
-
-.stage {
-  flex: 1 1 0;
-}
-
-/* The miniatures fill what the stage leaves, `--rows` of them on screen;
- * the rest scroll. Sized against this box (`cqh`), so their content never
- * sizes them. */
-.miniArea {
   container-type: size;
-  flex: 1 1 0;
-  min-width: 0;
+  flex: 1;
   min-height: 0;
   overflow-y: auto;
 }
 
-.minis {
+/* `--rows` of cards on screen, the rest scroll. Sized against the board
+ * (`cqh`), so their content never sizes them. */
+.cards {
   display: grid;
   gap: 16px;
   min-height: 100%;
@@ -185,10 +151,6 @@
   gap: 8px;
   padding: 12px 14px;
   min-height: 0;
-  cursor: default;
-}
-
-.card:not(.cardSelected) .cardInner {
   cursor: pointer;
 }
 
@@ -225,8 +187,7 @@
   color: var(--color-text-tertiary);
 }
 
-.cardTitle,
-.selectedTitle {
+.cardTitle {
   min-width: 0;
   margin: 0;
   padding: 0;
@@ -240,10 +201,6 @@
   overflow: hidden;
   text-overflow: ellipsis;
   cursor: pointer;
-}
-
-.selectedTitle {
-  cursor: default;
 }
 
 .cardTitle:focus-visible {
@@ -270,25 +227,6 @@
 
 .phase[data-phase='waiting'] {
   color: var(--fleet-warn-text);
-}
-
-.closeButton {
-  flex-shrink: 0;
-  width: 26px;
-  height: 26px;
-  border: 0;
-  border-radius: var(--radius-sm);
-  background: none;
-  color: var(--color-text-past);
-  font-size: 18px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.closeButton:hover,
-.closeButton:focus-visible {
-  color: var(--color-text-primary);
-  background: var(--color-bg-hover);
 }
 
 .faces {
@@ -454,17 +392,21 @@
   overflow: hidden;
 }
 
-.meta {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-top: 4px;
+.stamp {
   font-size: 12px;
+  font-weight: 500;
   color: var(--color-text-past);
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+
+.stamp b {
+  font-weight: 650;
+  color: var(--color-text-secondary);
+}
+
+.stamp svg {
+  margin-right: 3px;
+  vertical-align: -1px;
 }
 
 /* ── A highlight as a bubble: who says it (left), to whom (right) ── */
@@ -537,11 +479,6 @@
     -webkit-line-clamp: 1;
   }
 
-  /* The meta line under the bubble already names who speaks to whom. */
-  .said .who figcaption {
-    display: none;
-  }
-
   .said {
     padding: 2px 2px 0;
   }
@@ -561,15 +498,6 @@
   .fromYou:last-child .bubbleText {
     -webkit-line-clamp: 2;
   }
-
-  .scene .meta {
-    margin-top: 2px;
-  }
-}
-
-.meta b {
-  font-weight: 650;
-  color: var(--color-text-secondary);
 }
 
 /* The user's own words, on the right. */
@@ -597,7 +525,7 @@
   color: var(--color-text-past);
 }
 
-/* Stale: fade the drawing, not the small text, so meta stays readable. */
+/* Stale: fade the drawing, not the caption, so it stays readable. */
 .scene[data-mood='stale'] :is(.face, .bubble) {
   opacity: var(--fleet-stale-fade);
   filter: grayscale(0.6);
@@ -694,15 +622,18 @@
   font-variant-numeric: tabular-nums;
 }
 
-.lineStatus[data-outcome='done'] svg {
+.lineStatus[data-outcome='done'] svg,
+.stamp[data-outcome='done'] svg {
   color: var(--fleet-ok-text);
 }
 
-.lineStatus[data-outcome='failed'] {
+.lineStatus[data-outcome='failed'],
+.stamp[data-outcome='failed'] {
   color: var(--fleet-bad-text);
 }
 
-.lineStatus[data-live='running'] {
+.lineStatus[data-live='running'],
+.stamp[data-live='running'] {
   color: var(--fleet-run-text);
 }
 
@@ -784,21 +715,6 @@
   font-weight: 600;
   line-height: 1.35;
   white-space: pre-wrap;
-}
-
-.chat {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: auto;
-}
-
-.chatEmpty {
-  margin: auto;
-  font-size: 13px;
-  color: var(--color-text-tertiary);
 }
 
 /* ── Ctrl+Tab switcher: static, no blur ──────────────────────────────── */
@@ -943,14 +859,18 @@
   cursor: auto;
 }
 
-.zoomPanel .meta {
-  flex-shrink: 0;
-  margin-top: 6px;
-  color: var(--color-text-secondary);
+.zoomStamp {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--color-text-past);
 }
 
-.zoomPanel[data-y='up'] .meta {
-  margin: 0 0 6px;
+.zoomStamp b {
+  font-weight: 650;
+  color: var(--color-text-secondary);
 }
 
 @media (prefers-reduced-motion: reduce) {

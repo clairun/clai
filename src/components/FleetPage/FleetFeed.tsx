@@ -185,11 +185,45 @@ const zoomable = (line: FleetLine, open: Open) => ({
   },
 });
 
-const Outcome = ({ line, now }: { line: FleetLine; now: number }) => (
+/** A date and time, for the zoomed message. */
+const fullTime = (at: number): string =>
+  new Date(at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
+
+/**
+ * A bubble's first words, small: when, how a task ended or that it waits its
+ * turn, and whom it is for when no face there says so. The faces' names are
+ * the only names a bubble shows.
+ */
+const Stamp = ({ line, time, route = false }: { line: FleetLine; time: string; route?: boolean }) => {
+  const status =
+    line.outcome === 'failed' || line.outcome === 'stopped'
+      ? line.outcome
+      : line.live === 'running'
+        ? 'working'
+        : line.live === 'queued'
+          ? 'next'
+          : null;
+  return (
+    <span className={styles.stamp} data-outcome={line.outcome ?? undefined} data-live={line.live ?? undefined}>
+      {line.outcome === 'failed' ? <Cross /> : line.outcome === 'done' ? <Check /> : null}
+      {time}
+      {route && line.to.kind !== 'you' && (
+        <>
+          {' → '}
+          <b>{nameOf(line.to)}</b>
+        </>
+      )}
+      {status && ` · ${status}`}
+      {' · '}
+    </span>
+  );
+};
+
+const Outcome = ({ line, time }: { line: FleetLine; time: string }) => (
   <span className={styles.lineStatus} data-outcome={line.outcome ?? undefined} data-live={line.live ?? undefined}>
     {line.outcome === 'failed' ? <Cross /> : line.outcome === 'done' ? <Check /> : null}
     {line.outcome === 'failed' ? 'failed · ' : line.outcome === 'stopped' ? 'stopped · ' : line.live === 'running' ? 'working · ' : ''}
-    {shortTime(line.at, now)}
+    {time}
   </span>
 );
 
@@ -224,7 +258,7 @@ const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: 
         <span className={styles.rowText} title={line.text}>
           <Route line={line} /> {line.headline}
         </span>
-        <Outcome line={line} now={now} />
+        <Outcome line={line} time={shortTime(line.at, now)} />
       </button>
     </li>
   );
@@ -254,21 +288,18 @@ const Said = ({
   const thinking = line.live === 'running';
   const style = useAgentColor((to && line.to.kind === 'agent' ? to : from) ?? mainIdentity());
   const tone = line.outcome ?? (line.live ? 'task' : line.to.kind === 'you' ? 'you' : 'say');
-  const meta = (
-    <span className={styles.meta}>
-      <Route line={line} /> · <Outcome line={line} now={now} />
-    </span>
-  );
+  const time = shortTime(line.at, now);
   if (!from) {
+    // No faces: a word to Main goes without saying, one to a task names it.
     return (
       <div className={styles.fromYou} data-row {...zoomable(line, open)}>
         <div className={styles.bubble}>
           <Tail right />
           <span className={styles.bubbleText} title={line.text}>
-            {line.text}
+            <Stamp line={line} time={time} route={line.to.kind === 'agent'} />
+            <span>{line.text}</span>
           </span>
         </div>
-        {meta}
       </div>
     );
   }
@@ -288,10 +319,10 @@ const Said = ({
         <div className={styles.bubble}>
           <Tail />
           <span className={styles.bubbleText} title={line.text}>
-            {line.text}
+            <Stamp line={line} time={time} />
+            <span>{line.text}</span>
           </span>
         </div>
-        {meta}
       </div>
       {to && (
         <Who
@@ -382,8 +413,8 @@ const useFullText = (workspaceId: string, line: FleetLine): string => {
   return full || line.markdown;
 };
 
-/** The zoomed highlight: the whole message as markdown, and the route. */
-const Zoomed = ({ workspaceId, line, now, faces }: { workspaceId: string; line: FleetLine; now: number; faces: Faces }) => {
+/** The zoomed highlight: the whole message as markdown, after who said it to whom and when. */
+const Zoomed = ({ workspaceId, line, faces }: { workspaceId: string; line: FleetLine; faces: Faces }) => {
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
   const text = useFullText(workspaceId, line);
@@ -393,12 +424,12 @@ const Zoomed = ({ workspaceId, line, now, faces }: { workspaceId: string; line: 
       <div className={`${styles.bubble} ${styles.zoomBubble}`} style={style}>
         <Tail />
         <div className={styles.zoomText}>
+          <p className={styles.zoomStamp}>
+            <Route line={line} /> · <Outcome line={line} time={fullTime(line.at)} />
+          </p>
           <MarkdownMessage content={text} />
         </div>
       </div>
-      <span className={styles.meta}>
-        <Route line={line} /> · <Outcome line={line} now={now} />
-      </span>
     </>
   );
 };
@@ -470,7 +501,7 @@ const FleetFeed = ({
           label={`Message from ${nameOf(zoom.line.from)}`}
           onClosed={closed}
         >
-          <Zoomed workspaceId={workspaceId} line={zoom.line} now={now} faces={faces} />
+          <Zoomed workspaceId={workspaceId} line={zoom.line} faces={faces} />
         </FleetZoom>
       )}
     </div>

@@ -8,20 +8,24 @@ import { identityFor, type AgentIdentity } from '../components/Agents/agentIdent
 import {
   RECENT_WINDOW_MS,
   cardPhase,
+  mainRunning,
   pickCards,
+  recentlyOpened,
   type FleetLive,
 } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useMinute } from '../fleet/useMinute';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
+import { markWorkspaceOpened } from '../workspace/client';
 
 const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
 
 /**
  * The Fleet: one card per recently active workspace, with the shared
- * terminal at the bottom. Clicking a card selects it: its conversation takes
- * the stage, the others stay miniatures beside it, and the terminal talks to it.
+ * terminal at the bottom. Clicking a card selects it: it is highlighted and
+ * the terminal talks to it; with nothing selected the terminal starts a new
+ * workspace.
  */
 const FleetPage = () => {
   const cards = useFleetStore((s) => s.fleet.cards);
@@ -79,6 +83,17 @@ const FleetPage = () => {
     return () => window.removeEventListener('keydown', onEscape);
   }, [select]);
 
+  // Selected is seen: the rail's unread dot clears, as on the Workspace page
+  // (see the same stamp there), and again on leaving while Main is working.
+  const selectedWorking = !!selectedId && !!cards[selectedId] && mainRunning(cards[selectedId], live);
+  useEffect(() => {
+    if (!selectedId) return undefined;
+    markWorkspaceOpened(selectedId).catch(() => {});
+    return () => {
+      markWorkspaceOpened(selectedId).catch(() => {});
+    };
+  }, [selectedId, selectedWorking]);
+
   // Cards born from live events (or a workspace just created here) have no
   // title yet: the snapshot has it, once per new set of untitled cards.
   const untitled = placed.filter((id) => !cards[id]?.title).join(',');
@@ -98,6 +113,7 @@ const FleetPage = () => {
     return { working, waiting };
   }, [cards, live]);
 
+  const switcherOrder = useMemo(() => recentlyOpened(placed, cards), [placed, cards]);
   const handleSelect = useCallback((id: string | null) => select(id), [select]);
 
   return (
@@ -131,7 +147,7 @@ const FleetPage = () => {
           )
         )}
       </main>
-      <FleetSwitcher order={placed} cards={cards} selectedId={selectedId} live={live} faces={faces} onSelect={handleSelect} />
+      <FleetSwitcher order={switcherOrder} cards={cards} selectedId={selectedId} live={live} faces={faces} onSelect={handleSelect} />
     </div>
   );
 };

@@ -14,6 +14,7 @@ import { fleetSnapshot } from './client';
 import {
   EMPTY_FLEET,
   applyAssistantEvent,
+  applyOpened,
   applyRequest,
   applyRequestResolved,
   applyUserSent,
@@ -129,5 +130,8 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
     if (missing && selectedId !== keep) void get().loadSnapshot();
   },
 
-  select: (workspaceId) => set({ selectedId: workspaceId, now: Date.now() }),
+  select: (workspaceId) => {
+    const now = Date.now();
+    set((s) => ({ selectedId: workspaceId, now, fleet: workspaceId ? applyOpened(s.fleet, workspaceId, now) : s.fleet }));
+  },
 }));

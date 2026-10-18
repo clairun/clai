@@ -17,6 +17,7 @@ import {
   STALE_MS,
   RECENT_WINDOW_MS,
   applyAssistantEvent,
+  applyOpened,
   applyRequest,
   applyRequestResolved,
   applyUserSent,
@@ -35,6 +36,7 @@ import {
   emptyCard,
   liveAgents,
   pickCards,
+  recentlyOpened,
   seedFleet,
   type FleetCard,
   type FleetLine,
@@ -225,6 +227,32 @@ describe('the highlight feed', () => {
       'Researcher → Main: Found 3 leaks. [done]',
       'Main → You: Summary',
     ]);
+  });
+
+  it("never says an automation's run marker, live or seeded", () => {
+    const marker = '--- New scheduled run at 2026-10-18 12:00 ---\nRun the next scheduled pass.';
+    let s = apply(withMain(), created(message('mark', 'user', marker), NOW - 30), created(message('u1', 'user', 'Real words.'), NOW - 20));
+    s = seedFleet(s, [
+      {
+        workspaceId: WS,
+        title: 'W',
+        starred: false,
+        lastActivityAt: BigInt(NOW),
+        lastOpenedAt: 0n,
+        mainSessionId: MAIN,
+        activeRunIds: [],
+        tasks: [],
+        pendingPermissions: [],
+        pendingPathGrants: [],
+        pendingAsks: [],
+        lastAssistantMessage: null,
+        recentMessages: [
+          { messageId: 'seed-mark', sessionId: MAIN, role: 'user', origin: { kind: 'user' }, text: '--- Manual run at 12:01 ---', truncated: false, createdAt: BigInt(NOW - 10), runId: null },
+        ],
+      },
+    ]);
+    expect(lines(s)).toEqual(['You → Main: Real words.']);
+    expect(card(s).said.map((m) => m.id)).toEqual(['u1']);
   });
 
   it('marks a live message cut to fit the card, so the zoom fetches it whole', () => {
@@ -538,17 +566,9 @@ describe('card picking', () => {
     expect(pick([mk('a', NOW - 1), mk('b', NOW - 3), mk('new', NOW)], null, prev)).toEqual(['a', 'b', 'new']);
   });
 
-  it('lays four miniatures 2 × 2 beside the stage and six 3 × 2 without one; fewer grow', () => {
-    expect([0, 1, 2, 3, 4, 9].map((n) => boardShape(n, true))).toEqual([
-      { cols: 1, rows: 1 },
-      { cols: 1, rows: 1 },
-      { cols: 1, rows: 2 },
-      { cols: 2, rows: 2 },
-      { cols: 2, rows: 2 },
-      { cols: 2, rows: 2 },
-    ]);
-    expect([1, 2, 3, 4, 5, 6, 10].map((n) => boardShape(n, false))).toEqual([
-      { cols: 1, rows: 1 },
+  it('lays six cards 3 × 2 and scrolls beyond; fewer grow, but never past half the width', () => {
+    expect([1, 2, 3, 4, 5, 6, 10].map(boardShape)).toEqual([
+      { cols: 2, rows: 1 },
       { cols: 2, rows: 1 },
       { cols: 3, rows: 1 },
       { cols: 2, rows: 2 },
@@ -556,6 +576,21 @@ describe('card picking', () => {
       { cols: 3, rows: 2 },
       { cols: 3, rows: 2 },
     ]);
+  });
+
+  it('switches most recently opened first, the never opened by activity; opening one moves it first', () => {
+    const cards = Object.fromEntries(
+      [mk('busy', NOW - 1), mk('old', NOW - 9, { lastOpenedAt: NOW - 50 }), mk('last', NOW - 8, { lastOpenedAt: NOW - 5 }), mk('quiet', NOW - 7)].map(
+        (c) => [c.workspaceId, c]
+      )
+    );
+    const ids = ['busy', 'old', 'last', 'quiet', 'gone'];
+    expect(recentlyOpened(ids, cards)).toEqual(['last', 'old', 'busy', 'quiet']);
+    const opened = applyOpened({ cards }, 'quiet', NOW);
+    expect(recentlyOpened(ids, opened.cards)).toEqual(['quiet', 'last', 'old', 'busy']);
+    // Agent activity alone reorders nothing among opened cards.
+    expect(recentlyOpened(ids, { ...cards, old: { ...cards.old!, lastActivityAt: NOW } })).toEqual(['last', 'old', 'busy', 'quiet']);
+    expect(applyOpened({ cards }, 'unknown', NOW).cards).toBe(cards);
   });
 });
 

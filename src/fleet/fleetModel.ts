@@ -22,6 +22,7 @@ import type {
   TaskStatus,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
+import { isRunMarkerText } from '../assistant/runMarker';
 import type { PendingAskUser } from '../assistant/sessionStore';
 import { taskDisplayStatus } from '../utils/taskDisplay';
 
@@ -75,6 +76,8 @@ export interface FleetCard {
   /** From the snapshot, or set when the user sends or clears from the terminal. */
   mainSessionId: string | null;
   lastActivityAt: number;
+  /** When the user last opened the workspace (here or on its page); 0 = never. */
+  lastOpenedAt: number;
   /** Open requests, by `kind:id`. */
   requests: Record<string, FleetRequest>;
   /** Oldest first, at most `SAID_LIMIT`. */
@@ -98,6 +101,7 @@ export const emptyCard = (workspaceId: string, title = ''): FleetCard => ({
   title,
   mainSessionId: null,
   lastActivityAt: 0,
+  lastOpenedAt: 0,
   requests: {},
   said: [],
 });
@@ -143,10 +147,15 @@ const saidOf = (message: AssistantMessage, at: number): FleetSaid => ({
   at,
 });
 
-/** Keeps `said` in time order and at most `SAID_LIMIT` long; an event replaces what a seed said. */
+/**
+ * Keeps `said` in time order and at most `SAID_LIMIT` long; an event replaces
+ * what a seed said. An automation's run marker is never said.
+ */
 const addSaid = (card: FleetCard, said: readonly FleetSaid[], replace: boolean): FleetCard => {
   const held = new Set(card.said.map((s) => s.id));
-  const incoming = said.filter((s) => s.text && (replace || !held.has(s.id)));
+  const incoming = said.filter(
+    (s) => s.text && !(s.role === 'user' && isRunMarkerText(s.text)) && (replace || !held.has(s.id))
+  );
   if (incoming.length === 0) return card;
   const ids = new Set(incoming.map((s) => s.id));
   const next = [...card.said.filter((s) => !ids.has(s.id)), ...incoming].sort((a, b) => a.at - b.at);
@@ -282,6 +291,10 @@ export const applyUserSent = (
     return message ? addSaid(next, [saidOf(message, at)], true) : next;
   });
 
+/** The user opened the workspace at `at`: the switcher's order knows it before the next snapshot. */
+export const applyOpened = (state: FleetState, workspaceId: string, at: number): FleetState =>
+  state.cards[workspaceId] ? updateCard(state, workspaceId, (card) => ({ ...card, lastOpenedAt: Math.max(card.lastOpenedAt, at) })) : state;
+
 /**
  * Apply a snapshot. The Fleet becomes exactly the snapshot's workspaces, so a
  * deleted one (or one no longer among the most recent) loses its card;
@@ -330,6 +343,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
         title: ws.title || card.title,
         mainSessionId,
         lastActivityAt: Math.max(card.lastActivityAt, activity),
+        lastOpenedAt: Math.max(card.lastOpenedAt, Number(ws.lastOpenedAt)),
         requests,
       },
       seed,
@@ -543,7 +557,7 @@ export const shortTime = (at: number, now: number): string => {
 };
 
 /** A run of the workspace that belongs to no task is its Main's. */
-const mainRunning = (card: FleetCard, live: FleetLive): boolean => {
+export const mainRunning = (card: FleetCard, live: FleetLive): boolean => {
   const taskRuns = new Set(workspaceTasks(card, live).map((t) => t.runId));
   return (live.runs[card.workspaceId] ?? []).some((id) => !taskRuns.has(id));
 };
@@ -697,7 +711,7 @@ export type FleetLoudness = 'needs' | 'done' | null;
 
 export interface FleetPanel {
   card: FleetCard;
-  /** `null` on the stage, or while the card shows an open request. */
+  /** `null` while the card shows an open request. */
   feed: FleetFeed | null;
   selected: boolean;
 }
@@ -809,8 +823,8 @@ export const liveAgents = (card: FleetCard, live: FleetLive): LiveAgent[] => {
  * The cards, in order. Eligible: the selected card, anything live, and
  * workspaces active within `RECENT_WINDOW_MS`. Cards already shown keep
  * their place (`prevOrder`); newcomers follow, waiting ones first (oldest
- * first), then the most recent. Selecting a card moves nothing: it takes the
- * stage and the others keep their order beside it.
+ * first), then the most recent. Selecting a card moves nothing: it is only
+ * highlighted.
  */
 export const pickCards = (
   cards: readonly FleetCard[],
@@ -842,18 +856,30 @@ export const cycleCard = (order: readonly string[], selectedId: string | null, s
   return order[(at + step + order.length) % order.length]!;
 };
 
-/** The miniatures' grid: columns, and rows on screen before it scrolls. */
+/**
+ * The switcher's order: most recently opened by the user first, so it doesn't
+ * reshuffle while agents work; never opened, or a tie, by latest activity.
+ */
+export const recentlyOpened = (ids: readonly string[], cards: Record<string, FleetCard>): string[] =>
+  ids
+    .filter((id) => cards[id])
+    .sort((a, b) => {
+      const ca = cards[a]!;
+      const cb = cards[b]!;
+      return cb.lastOpenedAt - ca.lastOpenedAt || cb.lastActivityAt - ca.lastActivityAt;
+    });
+
+/** The grid: columns, and rows on screen before it scrolls. */
 export interface BoardShape {
   cols: number;
   rows: number;
 }
 
 /**
- * Beside the stage, four miniatures 2 × 2; with nothing selected, six
- * cards 3 × 2. Beyond that the miniatures scroll; with fewer, each grows.
+ * Six cards 3 × 2, scrolling beyond; with fewer, each grows. Never fewer than
+ * two columns, so a lone card's bubbles don't stretch into very long lines.
  */
-export const boardShape = (count: number, staged: boolean): BoardShape => {
-  if (staged) return count <= 1 ? { cols: 1, rows: 1 } : count === 2 ? { cols: 1, rows: 2 } : { cols: 2, rows: 2 };
-  if (count <= 3) return { cols: Math.max(1, count), rows: 1 };
+export const boardShape = (count: number): BoardShape => {
+  if (count <= 3) return { cols: Math.max(2, count), rows: 1 };
   return count === 4 ? { cols: 2, rows: 2 } : { cols: 3, rows: 2 };
 };

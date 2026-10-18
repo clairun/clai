@@ -6,7 +6,7 @@ import FleetPage from './FleetPage';
 import WorkspacePicker from '../components/TerminalEmulator/WorkspacePicker';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
-import { EMPTY_FLEET, emptyCard } from '../fleet/fleetModel';
+import { EMPTY_FLEET, emptyCard, shortTime } from '../fleet/fleetModel';
 import type { FleetWorkspace } from '../generated/bindings';
 
 const mockInvoke = vi.hoisted(() => vi.fn(async () => undefined));
@@ -15,17 +15,6 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 vi.mock('../fleet/client', () => ({ fleetSnapshot: vi.fn() }));
 vi.mock('../api/client', () => ({ listAgentDefinitions: vi.fn(async () => []) }));
 vi.mock('../components/AppUpdateBadge', () => ({ default: () => null }));
-vi.mock('../components/FleetPage/FleetSelectedCard', () => ({
-  default: ({ card, selected, onSelect }: { card: { workspaceId: string; title: string }; selected: boolean; onSelect: (id: string) => void }) =>
-    selected ? (
-      <h2>Selected {card.title}</h2>
-    ) : (
-      <button type="button" aria-label={`Select ${card.title}`} onClick={() => onSelect(card.workspaceId)}>
-        {card.title}
-      </button>
-    ),
-}));
-
 const { fleetSnapshot } = vi.mocked(await import('../fleet/client'));
 
 const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspace => ({
@@ -100,48 +89,62 @@ describe('FleetPage', () => {
     expect(fleetSnapshot).toHaveBeenCalledTimes(2);
   });
 
-  it('opens the switcher on Ctrl+Tab, moves only its highlight while Ctrl is held, and selects on release', async () => {
-    fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha'), workspace('b', 'Beta'), workspace('c', 'Gamma')]);
+  it('opens the switcher on Ctrl+Tab, most recently opened first, moves only its highlight while Ctrl is held, and selects on release', async () => {
+    const opened = (ago: number) => BigInt(Date.now() - ago);
+    fleetSnapshot.mockResolvedValue([
+      { ...workspace('a', 'Alpha'), lastOpenedAt: opened(3 * 60_000) },
+      // Busiest, but never opened: after the opened ones.
+      workspace('b', 'Beta'),
+      { ...workspace('c', 'Gamma', 60_000), lastOpenedAt: opened(60_000) },
+    ]);
     renderFleet();
     await screen.findByRole('button', { name: 'Select Alpha' });
     const terminal = screen.getByRole('textbox', { name: 'Terminal' });
     const press = (shiftKey = false) => fireEvent.keyDown(terminal, { key: 'Tab', ctrlKey: true, shiftKey });
-    const titles = () => screen.getAllByRole('button', { name: /^Select / }).map((b) => b.textContent);
+    const entries = () => screen.getAllByRole('option').map((o) => o.textContent);
     const highlighted = () =>
       within(screen.getByRole('listbox', { name: 'Switch workspace' })).getByRole('option', { selected: true })
         .textContent;
-    const order = titles(); // slot order
-    const ids: Record<string, string> = { Alpha: 'a', Beta: 'b', Gamma: 'c' };
+    const slots = () => screen.getAllByRole('button', { name: /^Select / }).map((b) => b.textContent);
+    const before = slots();
 
     expect(press()).toBe(false); // default (a tab, or a focus move) prevented
-    expect(screen.getAllByRole('option').map((o) => o.textContent)).toEqual(
-      order.map((title) => expect.stringContaining(title!))
-    );
-    expect(highlighted()).toContain(order[0]);
+    expect(entries()).toEqual([
+      expect.stringContaining('Gamma'),
+      expect.stringContaining('Alpha'),
+      expect.stringContaining('Beta'),
+      'New workspace',
+    ]);
+    expect(highlighted()).toContain('Gamma');
     press();
     press(true);
     press();
-    expect(highlighted()).toContain(order[1]);
+    expect(highlighted()).toContain('Alpha');
     expect(useFleetStore.getState().selectedId).toBeNull();
-    expect(screen.queryByRole('heading', { name: /^Selected / })).not.toBeInTheDocument();
 
     fireEvent.keyUp(terminal, { key: 'Control' });
-    expect(useFleetStore.getState().selectedId).toBe(ids[order[1]!]);
+    expect(useFleetStore.getState().selectedId).toBe('a');
+    expect(mockInvoke).toHaveBeenCalledWith('workspace_mark_opened', { workspaceId: 'a' });
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
-    // The same as a click: it takes the stage, the others keep their order beside it.
-    expect([screen.getByRole('heading', { name: /^Selected / }), ...screen.getAllByRole('button', { name: /^Select / })].map((e) => e.textContent)).toEqual([
-      `Selected ${order[1]}`,
-      order[0],
-      order[2],
-    ]);
+    // The same as a click: the card is highlighted, nothing moves.
+    expect(slots()).toEqual(before);
+    expect(screen.getByRole('button', { name: 'Select Alpha' }).closest('article')).toHaveAttribute('aria-current', 'true');
 
-    // Escape closes it with no change.
+    // Opened now, it leads; the next one is the one opened before.
     press();
-    expect(highlighted()).toContain(order[2]); // the next card after the selected one
+    expect(entries()[0]).toContain('Alpha');
+    expect(highlighted()).toContain('Gamma');
+    // Escape closes it with no change.
     fireEvent.keyDown(terminal, { key: 'Escape', ctrlKey: true });
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
     fireEvent.keyUp(terminal, { key: 'Control' });
-    expect(useFleetStore.getState().selectedId).toBe(ids[order[1]!]);
+    expect(useFleetStore.getState().selectedId).toBe('a');
+
+    // "New workspace", the last entry, deselects: the terminal then starts one.
+    press(true);
+    expect(highlighted()).toBe('New workspace');
+    fireEvent.keyUp(terminal, { key: 'Control' });
+    expect(useFleetStore.getState().selectedId).toBeNull();
   });
 
   it('colours the border of a working card, but the selected one wins', async () => {
@@ -157,9 +160,9 @@ describe('FleetPage', () => {
     expect(card('Alpha').className).not.toMatch(/cardWorking/);
 
     act(() => useFleetStore.getState().select('b'));
-    const selected = screen.getByRole('heading', { name: 'Selected Beta' }).closest('article')!;
-    expect(selected.className).toMatch(/cardSelected/);
-    expect(selected.className).not.toMatch(/cardWorking/);
+    expect(card('Beta')).toHaveAttribute('aria-current', 'true');
+    expect(card('Beta').className).toMatch(/cardSelected/);
+    expect(card('Beta').className).not.toMatch(/cardWorking/);
   });
 
   it('colours the border of a card that needs the user, but the selected one wins', async () => {
@@ -179,9 +182,8 @@ describe('FleetPage', () => {
     expect(card('Alpha').className).not.toMatch(/cardWorking/);
 
     act(() => useFleetStore.getState().select('b'));
-    const selected = screen.getByRole('heading', { name: 'Selected Beta' }).closest('article')!;
-    expect(selected.className).toMatch(/cardSelected/);
-    expect(selected.className).not.toMatch(/cardWaiting/);
+    expect(card('Beta').className).toMatch(/cardSelected/);
+    expect(card('Beta').className).not.toMatch(/cardWaiting/);
   });
 
   it('draws loud only the card that needs you, never the selected one: burst, sticker and "!?"', async () => {
@@ -209,7 +211,7 @@ describe('FleetPage', () => {
     expect(document.querySelectorAll('[data-loud]')).toHaveLength(1);
 
     act(() => useFleetStore.getState().select('a'));
-    expect(screen.getByRole('heading', { name: 'Selected Alpha' }).closest('article')).not.toHaveAttribute('data-loud');
+    expect(card('Alpha')).not.toHaveAttribute('data-loud');
   });
 
   it('draws loud every card that needs you and nothing else; only the newest running task rushes in with "GO!"', async () => {
@@ -284,7 +286,8 @@ describe('FleetPage', () => {
     const card = within((await screen.findByText('Shipped v2')).closest('article')!);
     // Three bubbles fit, newest last: Main's, yours, Main's.
     const bubbles = card.getAllByRole('button', { name: /On it|Thanks|Shipped/ });
-    expect(bubbles.map((b) => b.querySelector('[title]')?.textContent)).toEqual(['On it. Two tasks out.', 'Thanks!', 'Shipped v2']);
+    const words = (b: HTMLElement) => b.querySelector('[title] > span:last-child')?.textContent;
+    expect(bubbles.map(words)).toEqual(['On it. Two tasks out.', 'Thanks!', 'Shipped v2']);
     // Two rows of what came before; older ones hide.
     const rows = within(card.getByRole('list', { name: 'Earlier' }));
     expect(rows.getAllByRole('listitem').map((row) => row.textContent)).toEqual([
@@ -294,11 +297,27 @@ describe('FleetPage', () => {
     expect(card.queryByText(/Look into the leaks/)).not.toBeInTheDocument();
     // The running task's row keeps its agent's face awake.
     expect(rows.getAllByRole('listitem')[1]!.querySelector('[class*=rowThinking]')).not.toBeNull();
-    // Main's word to you: no "you" mark, and its route names only Main.
+    // Each bubble starts with its time; no line under it. Main is named once,
+    // under its face; your word to Main needs no label at all.
+    const now = Date.now();
+    const stamp = (b: HTMLElement) => b.querySelector('[title] > span:first-child')!.textContent;
+    expect(bubbles.map(stamp)).toEqual([30, 20, 10].map((min) => `${shortTime(now - min * 60_000, now)} · `));
     expect(card.queryByText('you')).not.toBeInTheDocument();
-    expect(bubbles[0]!.querySelector('[class*=meta]')!.textContent).toMatch(/^Main · /);
-    expect(bubbles[1]!.querySelector('[class*=meta]')!.textContent).toMatch(/^You → Main · /);
+    expect(bubbles[0]!.textContent!.match(/Main/g)).toHaveLength(1);
+    expect(bubbles[0]!.querySelector('figcaption')).toHaveTextContent('Main');
+    expect(bubbles[1]!.textContent).not.toMatch(/You|Main/);
     expect(card.getByText(/^Now/)).toBeInTheDocument();
+  });
+
+  it('names the task a word of yours went to, in the time token', async () => {
+    const t = { id: 't1', title: 'Harvest W12', status: 'running', parentTaskId: null, sessionId: 'task-s1', createdAt: BigInt(Date.now() - 60_000), updatedAt: BigInt(Date.now() - 60_000), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never;
+    fleetSnapshot.mockResolvedValue([
+      // Its own workspace: the task store outlives each test.
+      { ...workspace('tw', 'Tasked'), mainSessionId: 'main-t', tasks: [t], recentMessages: [said('u1', 'Faster, please.', 30_000, { sessionId: 'task-s1' })] },
+    ]);
+    renderFleet();
+    const bubble = (await screen.findByText('Faster, please.')).closest<HTMLElement>('[role=button]')!;
+    expect(bubble.querySelector('[title] > span:first-child')).toHaveTextContent(/^\S+( \S+)? → Scout ·$/);
   });
 
   describe('zoom', () => {
@@ -316,9 +335,11 @@ describe('FleetPage', () => {
       fireEvent.click(origin);
       const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
       expect(within(dialog).getByText('v2').tagName).toBe('STRONG');
+      // The zoom says who to whom and when, in full, before the words.
+      expect(dialog.querySelector('p')).toHaveTextContent(/^Main · \d/);
       expect(dialog).toHaveFocus();
       // Zooming is not selecting the card.
-      expect(screen.queryByRole('heading', { name: 'Selected Alpha' })).not.toBeInTheDocument();
+      expect(useFleetStore.getState().selectedId).toBeNull();
       expect(mockInvoke).not.toHaveBeenCalledWith('assistant_get_message', expect.anything());
 
       fireEvent.keyDown(window, { key: 'Escape' });
@@ -408,7 +429,7 @@ describe('FleetPage', () => {
     renderFleet();
     fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
     expect(useFleetStore.getState().selectedId).toBe('a');
-    expect(screen.getAllByRole('article').map((a) => a.textContent)).toEqual(['Selected Alpha', expect.stringContaining('Staged')]);
+    expect(screen.getAllByRole('button', { name: /^Select / }).map((b) => b.textContent)).toEqual(['Staged', 'Alpha']);
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Terminal' }), { key: 'Escape' });
     expect(useFleetStore.getState().selectedId).toBeNull();
     expect(screen.getAllByRole('button', { name: /^Select / }).map((b) => b.textContent)).toEqual(['Staged', 'Alpha']);
@@ -418,7 +439,7 @@ describe('FleetPage', () => {
     expect(useFleetStore.getState().selectedId).toBeNull();
   });
 
-  it('brings a workspace that is not on the Fleet to the stage when picked', async () => {
+  it('brings a workspace that is not on the Fleet onto it, selected, when picked', async () => {
     const OLD_MS = 90 * 86_400_000;
     fleetSnapshot.mockImplementation(async (_limit: number, keep: string | null) =>
       keep === 'old' ? [workspace('s', 'Staged'), workspace('old', 'Old report', OLD_MS)] : [workspace('s', 'Staged')]
@@ -436,22 +457,31 @@ describe('FleetPage', () => {
 
     fireEvent.click(await screen.findByRole('option', { name: /Old report/ }));
     expect(useFleetStore.getState().selectedId).toBe('old');
-    await waitFor(async () => expect(await articles()).toEqual(['Selected Old report', expect.stringContaining('Staged')]));
+    await waitFor(async () => expect(await articles()).toEqual([expect.stringMatching(/^Staged/), expect.stringMatching(/^Old report/)]));
+    expect(screen.getByRole('button', { name: 'Select Old report' }).closest('article')).toHaveAttribute('aria-current', 'true');
     mockInvoke.mockImplementation(async () => undefined);
   });
 
-  it('puts the stage beside four miniatures 2 × 2, and six cards 3 × 2 with none selected; the rest scroll', async () => {
+  it('lays six cards 3 × 2, the rest scroll, and selecting one only highlights it; two cards keep two columns', async () => {
     fleetSnapshot.mockResolvedValue(Array.from({ length: 8 }, (_, i) => workspace(`w${i}`, `W${i}`, i * 1000)));
-    renderFleet();
+    const { unmount } = renderFleet();
     await screen.findByRole('button', { name: 'Select W7' });
-    const minis = () => screen.getByRole('button', { name: 'Select W7' }).closest('article')!.parentElement!;
-    expect([minis().style.getPropertyValue('--cols'), minis().style.getPropertyValue('--rows'), minis().children.length]).toEqual(['3', '2', 8]);
+    const grid = () => screen.getByRole('button', { name: 'Select W7' }).closest('article')!.parentElement!;
+    const shape = () => [grid().style.getPropertyValue('--cols'), grid().style.getPropertyValue('--rows'), grid().children.length];
+    expect(shape()).toEqual(['3', '2', 8]);
     fireEvent.click(screen.getByRole('button', { name: 'Select W2' }));
-    expect(screen.getByRole('heading', { name: 'Selected W2' })).toBeInTheDocument();
-    expect([minis().style.getPropertyValue('--cols'), minis().style.getPropertyValue('--rows'), minis().children.length]).toEqual(['2', '2', 7]);
+    expect(shape()).toEqual(['3', '2', 8]);
+    expect(document.querySelectorAll('[aria-current]')).toHaveLength(1);
+    unmount();
+
+    fleetSnapshot.mockResolvedValue([workspace('w0', 'W0')]);
+    useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null, loadedAt: null });
+    renderFleet();
+    const lone = (await screen.findByRole('button', { name: 'Select W0' })).closest('article')!.parentElement!;
+    expect(lone.style.getPropertyValue('--cols')).toBe('2');
   });
 
-  it('counts one waiting workspace as "1 needs you", and small cards never mark a workspace seen', async () => {
+  it('counts one waiting workspace as "1 needs you", and an unselected card never marks a workspace seen', async () => {
     const ask = { pendingId: 'q', workspaceId: 'b', sessionId: 'main', runId: 'r', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
     fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha'), { ...workspace('b', 'Beta'), pendingAsks: [ask] }]);
     renderFleet();
@@ -464,9 +494,8 @@ describe('FleetPage', () => {
     fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000), workspace('b', 'Beta', 2000)]);
     renderFleet();
     fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
-    const articles = screen.getAllByRole('article');
-    expect(articles[0]!.className).toMatch(/cardSelected/);
-    for (const article of articles.slice(1)) expect(article.className).not.toMatch(/cardSelected/);
+    const selected = screen.getAllByRole('article').filter((article) => /cardSelected/.test(article.className));
+    expect(selected.map((article) => article.textContent)).toEqual([expect.stringMatching(/^Alpha/)]);
   });
 
   describe('a small card with an open request', () => {
