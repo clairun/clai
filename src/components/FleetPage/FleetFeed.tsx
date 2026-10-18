@@ -103,7 +103,7 @@ export const Who = ({
   children?: ReactNode;
 }) => (
   <figure className={styles.who} title={label}>
-    <span className={`${fx.actor} ${styles.face}`} style={{ width: size, height: size }}>
+    <span className={`${fx.actor} ${styles.face}`} style={{ width: size, height: size }} data-anchor>
       {ghosts &&
         [0, 1].map((i) => (
           <span key={i} className={fx.ghost} aria-hidden="true">
@@ -210,9 +210,13 @@ const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: 
         }}
       >
         <span className={styles.rowFaces} aria-hidden="true">
-          {from && <AgentAvatar identity={from} size={16} ring={false} />}
+          {from && (
+            <span className={styles.rowFace} data-anchor>
+              <AgentAvatar identity={from} size={16} ring={false} />
+            </span>
+          )}
           {to && (
-            <span className={thinking ? styles.rowThinking : undefined}>
+            <span className={`${styles.rowFace} ${thinking ? styles.rowThinking : ''}`} data-anchor>
               <AgentAvatar identity={to} size={16} ring={false} activity={thinking ? 'running' : 'none'} />
             </span>
           )}
@@ -378,28 +382,39 @@ const useFullText = (workspaceId: string, line: FleetLine): string => {
   return full || line.markdown;
 };
 
-/** The zoomed highlight: the speaker's face, the whole message as markdown, and the route. */
+/** The zoomed highlight: the whole message as markdown, and the route. */
 const Zoomed = ({ workspaceId, line, now, faces }: { workspaceId: string; line: FleetLine; now: number; faces: Faces }) => {
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
   const text = useFullText(workspaceId, line);
   const style = useAgentColor((to && line.to.kind === 'agent' ? to : from) ?? mainIdentity());
   return (
-    <div className={styles.zoomSaid} data-from={from ? undefined : 'you'} style={style}>
-      {from && <Who identity={from} name={nameOf(line.from)} size={44} />}
-      <div className={styles.zoomSay}>
-        <div className={`${styles.bubble} ${styles.zoomBubble}`}>
-          <Tail right={!from} />
-          <div className={styles.zoomText}>
-            <MarkdownMessage content={text} />
-          </div>
+    <>
+      <div className={`${styles.bubble} ${styles.zoomBubble}`} style={style}>
+        <Tail />
+        <div className={styles.zoomText}>
+          <MarkdownMessage content={text} />
         </div>
-        <span className={styles.meta}>
-          <Route line={line} /> · <Outcome line={line} now={now} />
-        </span>
       </div>
-    </div>
+      <span className={styles.meta}>
+        <Route line={line} /> · <Outcome line={line} now={now} />
+      </span>
+    </>
   );
+};
+
+interface Zoom {
+  line: FleetLine;
+  origin: HTMLElement;
+  at: DOMRect;
+  side: 'left' | 'right';
+}
+
+/** The zoom grows from the speaker's face; your words, with no face, from their tail. */
+const zoomFrom = (line: FleetLine, origin: HTMLElement): Zoom => {
+  const face = origin.querySelector<HTMLElement>('[data-anchor]');
+  const tail = origin.querySelector<HTMLElement>(`.${styles.tail}`);
+  return { line, origin, at: (face ?? tail ?? origin).getBoundingClientRect(), side: face ? 'right' : 'left' };
 };
 
 /**
@@ -423,12 +438,13 @@ const FleetFeed = ({
   faces: Faces;
 }) => {
   const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines);
-  const [zoom, setZoom] = useState<{ line: FleetLine; origin: HTMLElement } | null>(null);
-  const open = useCallback<Open>((line, origin) => setZoom((z) => z ?? { line, origin }), []);
+  const [zoom, setZoom] = useState<Zoom | null>(null);
+  const open = useCallback<Open>((line, origin) => setZoom((z) => z ?? zoomFrom(line, origin)), []);
   const closed = useCallback(() => setZoom(null), []);
   const split = feed.lines.length - count;
   const rows = feed.lines.slice(Math.max(0, split - rowCount), split);
   const bubbles = feed.lines.slice(split);
+  const zoomFace = zoom && faceFor(zoom.line.from, faces);
   return (
     <div ref={ref} className={styles.scene} data-mood={feed.mood}>
       <p className={styles.captionRow}>
@@ -446,7 +462,14 @@ const FleetFeed = ({
       ))}
       {feed.lines.length === 0 && <p className={styles.nothing}>No messages yet.</p>}
       {zoom && (
-        <FleetZoom origin={zoom.origin} label={`Message from ${nameOf(zoom.line.from)}`} onClosed={closed}>
+        <FleetZoom
+          origin={zoom.origin}
+          at={zoom.at}
+          side={zoom.side}
+          face={zoomFace && <AgentAvatar identity={zoomFace} size={Math.round(zoom.at.width)} ring={false} />}
+          label={`Message from ${nameOf(zoom.line.from)}`}
+          onClosed={closed}
+        >
           <Zoomed workspaceId={workspaceId} line={zoom.line} now={now} faces={faces} />
         </FleetZoom>
       )}

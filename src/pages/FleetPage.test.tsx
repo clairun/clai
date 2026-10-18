@@ -330,6 +330,40 @@ describe('FleetPage', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
 
+    const faceAt = (left: number, top: number, size = 36) =>
+      vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+        const at = this.hasAttribute('data-anchor') ? { left, top, width: size, height: size } : { left: 0, top: 0, width: 0, height: 0 };
+        return { ...at, x: at.left, y: at.top, right: at.left + at.width, bottom: at.top + at.height, toJSON: () => at } as DOMRect;
+      });
+    const faceCopy = (dialog: HTMLElement) => dialog.parentElement!.querySelector<HTMLElement>('[class*=zoomFace]')!;
+
+    it("grows the bubble out of the speaker's face, which stays where it is on the card", async () => {
+      faceAt(100, 200);
+      seed();
+      renderFleet();
+      fireEvent.click(await bubble(/^Shipped v2/));
+      const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
+      // A face high on the left: right and down from it, the tail's tip on the face.
+      expect(dialog).toHaveAttribute('data-x', 'right');
+      expect(dialog).toHaveAttribute('data-y', 'down');
+      expect(dialog.style).toMatchObject({ left: '152px', top: '190px', width: '560px', maxHeight: '562px', transformOrigin: '-22px 28px' });
+      expect(faceCopy(dialog).style).toMatchObject({ left: '100px', top: '200px', width: '36px', height: '36px' });
+    });
+
+    it('opens leftward and upward from a face low by the right edge, inside the viewport', async () => {
+      faceAt(950, 600);
+      seed();
+      renderFleet();
+      fireEvent.click(await bubble(/^Shipped v2/));
+      const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
+      expect(dialog).toHaveAttribute('data-x', 'left');
+      expect(dialog).toHaveAttribute('data-y', 'up');
+      // jsdom's viewport is 1024×768: the panel ends 16px left of the face and 28px under its middle.
+      expect(dialog.style).toMatchObject({ right: '90px', bottom: '122px', width: '560px', maxHeight: '630px' });
+      expect(dialog.style.transformOrigin).toBe('calc(100% + 22px) calc(100% - 28px)');
+      expect(faceCopy(dialog).style).toMatchObject({ left: '950px', top: '600px' });
+    });
+
     it('zooms a collapsed row too', async () => {
       vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
         return this.hasAttribute('data-row') ? 100 : 0;
