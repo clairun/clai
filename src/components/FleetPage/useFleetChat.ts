@@ -1,22 +1,23 @@
 /**
- * Load the stage card's main session into the assistant store, the same way
- * the workspace page does, so the stage has Main's full last message and the
- * shared terminal knows whether a run is in flight; and its whole task
- * history, which the snapshot cuts to the recent tasks.
+ * Load the selected card's main session into the assistant store, the same
+ * way the workspace page does, so the shared chat components render it and
+ * the shared terminal knows whether a run is in flight.
  */
 import { useEffect, useState } from 'react';
 import { assistantClient, useAssistantStore } from '../../assistant';
 import { restorePendingAsk } from '../../assistant/pendingAsks';
 import { hydrateSession } from '../../assistant/sessionChat';
 import { getWorkspaceDetails } from '../../workspace/client';
-import { useTaskStore } from '../../workspace/taskStore';
+import type { WorkspaceAgentResponse } from '../../generated/bindings';
 
 const NO_FILES = { includeFiles: false };
+const EMPTY_ROSTER: WorkspaceAgentResponse[] = [];
 
 export function useFleetChat(
   workspaceId: string,
   sessionId: string | null
-): { error: string | null; loading: boolean } {
+): { roster: readonly WorkspaceAgentResponse[]; error: string | null; loading: boolean } {
+  const [roster, setRoster] = useState<WorkspaceAgentResponse[]>(EMPTY_ROSTER);
   // The outcome of the last load, by session; set only from the load's callbacks.
   const [result, setResult] = useState<{ sessionId: string; error: string | null } | null>(null);
   const loaded = useAssistantStore((s) =>
@@ -27,10 +28,10 @@ export function useFleetChat(
     let cancelled = false;
     getWorkspaceDetails(workspaceId, NO_FILES)
       .then((details) => {
-        if (!cancelled) useTaskStore.getState().seedTasks(workspaceId, details.tasks);
+        if (!cancelled) setRoster(details.assignedAgents);
       })
       .catch(() => {
-        // The stage shows the tasks the snapshot had.
+        // Faces fall back to generic ones; the chat still works.
       });
     return () => {
       cancelled = true;
@@ -68,6 +69,7 @@ export function useFleetChat(
 
   const current = sessionId && result?.sessionId === sessionId ? result : null;
   return {
+    roster,
     error: current?.error ?? null,
     loading: !!sessionId && !loaded && !current,
   };

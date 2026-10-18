@@ -1,76 +1,57 @@
 import { useCallback, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router';
 import { useAssistantStore } from '../../assistant';
-import type { AgentIdentity } from '../Agents/agentIdentity';
+import { useSessionChatActions } from '../../assistant/sessionChat';
+import ChatMessageList from '../AssistantChat/ChatMessageList';
+import { resolveSessionOwner } from '../AssistantChat/messageSender';
+import AskUserPanel from '../AskUserPanel/AskUserPanel';
+import InlineApprovalCard from '../InlineApprovalCard';
+import InlinePathGrantCard from '../InlinePathGrantCard';
+import { mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
 import { markWorkspaceOpened } from '../../workspace/client';
-import {
-  cardAttention,
-  cardPhase,
-  fullMessageText,
-  requestScene,
-  type FleetCard,
-  type FleetLive,
-  type FleetLoudness,
-  type FleetScene as Scene,
-} from '../../fleet/fleetModel';
-import type { AssistantMessage, AssistantRun } from '../../generated/bindings';
-import { LiveFaces, PhaseLabel, stickerFor } from './FleetCard';
-import FleetRequestPanel from './FleetRequestPanel';
-import FleetScene, { type StageExtras } from './FleetScene';
+import { cardAttention, cardPhase, openRequests, type FleetCard, type FleetLive } from '../../fleet/fleetModel';
+import type { AssistantMessage, AssistantRun, ToolInvocation } from '../../generated/bindings';
+import { LiveFaces, phaseLabel } from './FleetCard';
 import { useFleetChat } from './useFleetChat';
 import styles from './FleetPage.module.css';
 
+const MAIN_IDENTITY = mainIdentity();
 const EMPTY_MESSAGES: AssistantMessage[] = [];
-
-/** Main's last finished message in full; the card keeps a clipped copy. */
-const lastAssistantText = (messages: readonly AssistantMessage[]): { id: string; text: string } | null => {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const message = messages[i]!;
-    if (message.role !== 'assistant') continue;
-    const text = fullMessageText(message);
-    if (text) return { id: message.id, text };
-  }
-  return null;
-};
+const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
+const EMPTY_IDS: string[] = [];
+const EMPTY_STREAMING: Record<string, string> = {};
+const EMPTY_RUNS: AssistantRun[] = [];
 
 interface FleetSelectedCardProps {
   card: FleetCard;
-  /** What the panel says, in full (`cardScene` with `stage`); `null` while it shows an open request. */
-  scene: Scene | null;
-  /** Keys of the rows that shout (`fleetLoudness`). */
-  shouts: ReadonlySet<string>;
   live: FleetLive;
   selected: boolean;
   /** Picked agent faces, by agent definition id. */
   faces: Record<string, AgentIdentity>;
-  /** The page's clock: the last Fleet event or the minute tick, whichever is later. */
-  now: number;
-  /** Drawn loud: never while selected. */
-  loud?: FleetLoudness;
   onSelect: (workspaceId: string | null) => void;
 }
 
-/**
- * The stage card: the same comic panel as a small card, with nothing left
- * out. Every running task, every result in full, Main's last message as
- * markdown and, in Earlier, the workspace's 50 most recent tasks (what
- * `list_recent_tasks` loads; older ones are not paged in), in the order they
- * happened; it scrolls, kept at the newest. An open request
- * takes the panel, as on a small card, with every decision the chat offers.
- */
-const FleetSelectedCard = ({ card, scene, shouts, live, selected, faces, now, loud = null, onSelect }: FleetSelectedCardProps) => {
+/** The stage card: the workspace's chat, in full, with its pending requests. */
+const FleetSelectedCard = ({ card, live, selected, faces, onSelect }: FleetSelectedCardProps) => {
   const navigate = useNavigate();
   const { workspaceId, mainSessionId: sessionId } = card;
-  const { error, loading } = useFleetChat(workspaceId, sessionId);
+  const { roster, error, loading } = useFleetChat(workspaceId, sessionId);
+  const owner = useMemo(() => resolveSessionOwner(roster), [roster]);
   const session = useAssistantStore((s) => (sessionId ? s.sessions[sessionId] : undefined));
-  const streaming = useAssistantStore((s) => (sessionId ? s.streamingText[sessionId] : undefined));
+  const streamingText = useAssistantStore(
+    (s) => (sessionId && s.streamingText[sessionId]) || EMPTY_STREAMING
+  );
   const messages = session?.messages ?? EMPTY_MESSAGES;
-  const isStreaming = !!session?.isStreaming;
-  const lastRun = (session?.runs ?? []).reduce<AssistantRun | null>(
+  const runs = session?.runs ?? EMPTY_RUNS;
+  const lastRun = runs.reduce<AssistantRun | null>(
     (latest, run) => (!latest || run.startedAt > latest.startedAt ? run : latest),
     null
   );
-  const runError = !isStreaming && lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
+  const runError =
+    lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
+
+  const actions = useSessionChatActions(workspaceId, sessionId);
+  const isStreaming = !!session?.isStreaming;
 
   // Selected is seen: the rail's unread dot clears, as on the Workspace page
   // (see the same stamp there), and again on leaving while a run is in flight.
@@ -81,20 +62,12 @@ const FleetSelectedCard = ({ card, scene, shouts, live, selected, faces, now, lo
       markWorkspaceOpened(workspaceId).catch(() => {});
     };
   }, [selected, workspaceId, isStreaming]);
-  const onOpenTask = useCallback(
+  const openTask = useCallback(
     (taskId: string) => navigate(`/workspace/${encodeURIComponent(workspaceId)}`, { state: { openTaskId: taskId } }),
     [navigate, workspaceId]
   );
 
-  const request = useMemo(() => requestScene(card, live), [card, live]);
-  const last = useMemo(() => lastAssistantText(messages), [messages]);
-  const streamed = streaming ? Object.values(streaming).join('').trim() : '';
-  // The session's copy is the card's message in full, unless an event brought a newer one.
-  const message = last && (!card.lastMessage || card.lastMessage.id === last.id) ? last.text : (card.lastMessage?.text ?? null);
-  const stage: StageExtras = { onOpenTask, message, streaming: isStreaming && streamed ? streamed : null };
-
   const title = card.title || 'Workspace';
-  const phase = cardPhase(card, live);
 
   return (
     <div className={styles.cardInner} onClick={selected ? undefined : () => onSelect(workspaceId)}>
@@ -117,7 +90,9 @@ const FleetSelectedCard = ({ card, scene, shouts, live, selected, faces, now, lo
           )}
         </h2>
         <LiveFaces card={card} live={live} faces={faces} />
-        <PhaseLabel phase={phase} attention={cardAttention(card)} sticker={stickerFor(loud, request)} />
+        <span className={styles.phase} data-phase={cardPhase(card, live)}>
+          {phaseLabel(cardPhase(card, live), cardAttention(card))}
+        </span>
         <button
           type="button"
           className={styles.headerButton}
@@ -131,14 +106,40 @@ const FleetSelectedCard = ({ card, scene, shouts, live, selected, faces, now, lo
           </button>
         )}
       </header>
-      {request ? (
-        <FleetRequestPanel scene={request} workspaceId={workspaceId} faces={faces} loud={loud === 'needs'} now={now} stage />
-      ) : (
-        scene && <FleetScene scene={scene} shouts={shouts} now={now} faces={faces} stage={stage} />
-      )}
-      {runError && <p className={styles.runError}>Main's last run failed: {runError}</p>}
-      {error && <p className={styles.nothing}>{error}</p>}
-      {loading && !scene?.toYou && !request && <p className={styles.nothing}>Loading conversation…</p>}
+      <div className={styles.chat}>
+        {messages.length > 0 ? (
+          <ChatMessageList
+            key={workspaceId}
+            workspaceId={workspaceId}
+            messages={messages}
+            toolCalls={session?.toolCalls ?? EMPTY_TOOL_CALLS}
+            streamingText={streamingText}
+            isStreaming={isStreaming}
+            runError={runError}
+            runStartedAt={session?.runStartedAt ?? null}
+            runningIdentity={MAIN_IDENTITY}
+            queuedMessageIds={session?.queuedMessageIds ?? EMPTY_IDS}
+            onDeleteQueuedMessage={actions.onDeleteQueuedMessage}
+            onEditQueuedMessage={actions.onEditQueuedMessage}
+            hasOlderMessages={!!session?.hasOlderMessages}
+            isLoadingOlderMessages={!!session?.isLoadingOlderMessages}
+            onLoadOlderMessages={actions.onLoadOlderMessages}
+            taskRoster={roster}
+            owner={owner}
+            onOpenTask={openTask}
+          />
+        ) : (
+          <p className={styles.chatEmpty}>
+            {error ?? (loading ? 'Loading conversation…' : 'No messages yet. Type below to talk to this workspace.')}
+          </p>
+        )}
+        <AskUserPanel sessionId={sessionId} />
+        {openRequests(card).map(
+          (r) => r.kind === 'ask' && r.ask.sessionId !== sessionId && <AskUserPanel key={r.ask.pendingId} ask={r.ask} />
+        )}
+        <InlineApprovalCard workspaceId={workspaceId} />
+        <InlinePathGrantCard workspaceId={workspaceId} />
+      </div>
     </div>
   );
 };

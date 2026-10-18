@@ -80,10 +80,34 @@
   padding: 4px 20px calc(var(--terminal-rest-height, 80px) + 12px + 16px);
 }
 
-.grid {
-  display: grid;
+.board {
+  display: flex;
   flex: 1;
+  gap: 16px;
   min-height: 0;
+}
+
+.stage {
+  flex: 1 1 0;
+}
+
+/* The miniatures fill what the stage leaves, `--rows` of them on screen;
+ * the rest scroll. Sized against this box (`cqh`), so their content never
+ * sizes them. */
+.miniArea {
+  container-type: size;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.minis {
+  display: grid;
+  gap: 16px;
+  min-height: 100%;
+  grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+  grid-auto-rows: calc((100cqh - (var(--rows) - 1) * 16px) / var(--rows));
 }
 
 .notice {
@@ -278,9 +302,8 @@
 
 /* ── A small card as a comic panel ───────────────────────────────────────
  * Read top to bottom in the order things happened: caption box (when), the
- * Earlier lines, results, Main's word to the reader, then what runs now.
- * Rows that don't fit are hidden whole from the top, oldest first
- * (`useNewestInView`), so the live row always shows. */
+ * older highlights as one-line rows, then the newest as bubbles. Rows that
+ * don't fit are hidden whole from the top, oldest first (`useNewestInView`). */
 .scene {
   container-type: size;
   display: flex;
@@ -447,171 +470,114 @@
   text-overflow: ellipsis;
 }
 
-.metaEnd {
-  justify-content: flex-end;
-}
-
-/* ── A running task: Main (left) hands it to the agent (right) ── */
-.talk {
+/* ── A highlight as a bubble: who says it (left), to whom (right) ── */
+.said {
+  position: relative;
   display: grid;
-  grid-template-columns: 44px minmax(0, 1fr) 60px;
+  grid-template-columns: 36px minmax(0, 1fr) 40px;
   align-items: center;
   gap: 16px;
-  padding: 16px 10px 6px 8px;
+  padding: 6px 4px 2px;
   border-radius: var(--radius-md);
+}
+
+.said .bubble {
+  --bubble-border: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.said[data-tone='task'] {
+  padding-top: 16px;
   background: color-mix(in srgb, var(--agent-color) 9%, transparent);
 }
 
-.talk .bubble {
+.said[data-tone='task'] .bubble {
   --bubble-border: color-mix(in srgb, var(--color-primary) 75%, transparent);
-  font-size: 16px;
   font-weight: 600;
-  line-height: 1.35;
 }
 
-.talk .bubbleText {
-  -webkit-line-clamp: 2;
-}
-
-/* Two or more conversations share the panel. */
-.talkCompact {
-  grid-template-columns: 32px minmax(0, 1fr) 52px;
-  gap: 14px;
-  padding: 12px 8px 4px 6px;
-}
-
-.talkCompact .bubble {
-  padding: 4px 10px;
-  border-radius: 14px;
-  font-size: 14px;
-}
-
-.metaRun {
-  color: var(--fleet-run-text);
-}
-
-/* ── Just finished: the bubble flips to the agent ── */
-.result {
-  position: relative;
-  grid-template-columns: 36px minmax(0, 1fr) 52px;
-  padding-top: 6px;
+.said[data-tone='done'] {
   background: var(--color-success-alpha-06);
 }
 
-.result .bubble {
+.said[data-tone='done'] .bubble {
   --bubble-border: var(--color-success);
-  font-size: 15px;
-  font-weight: 550;
-  line-height: 1.35;
 }
 
-.resultFailed {
+.said[data-tone='failed'] {
   background: color-mix(in srgb, var(--color-critical) 5%, transparent);
 }
 
-.resultFailed .bubble {
+.said[data-tone='failed'] .bubble {
   --bubble-border: var(--color-critical);
 }
 
-.result.talkCompact {
-  grid-template-columns: 28px minmax(0, 1fr) 44px;
-  padding-top: 4px;
-}
-
-.result > .who:first-child {
-  opacity: 0.6;
-}
-
-.asked {
-  margin: 0 0 2px;
-  font-size: 12px;
-  color: var(--color-text-past);
-  text-align: right;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.metaOk {
-  color: var(--fleet-ok-text);
-}
-
-.metaBad {
-  color: var(--fleet-bad-text);
-}
-
-/* ── Main's word to the reader ── */
-.toYou {
-  display: grid;
-  grid-template-columns: 48px minmax(0, 1fr);
-  align-items: end;
-  gap: 18px;
-}
-
-.toYou .who {
-  margin-bottom: 18px;
-}
-
-.toYou .tail {
-  top: auto;
-  bottom: 8px;
-}
-
-.toYou .bubble {
-  --bubble-border: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-/* Four lines of the message on the smallest panel, six where there is room. */
-.toYou .bubbleText {
-  -webkit-line-clamp: 4;
-}
-
-@container (min-height: 260px) {
-  .toYou .bubbleText {
-    -webkit-line-clamp: 6;
-  }
-}
-
-/* The shortest panels: every first row still fits whole. */
-@container (max-height: 180px) {
-  .toYou .bubbleText {
-    -webkit-line-clamp: 2;
-  }
-
-  .result .asked {
-    display: none;
-  }
-}
-
-/* On a working card it sits smaller and greyer beneath the action. */
-.toYouQuiet {
-  grid-template-columns: 32px minmax(0, 1fr);
-  gap: 16px;
-}
-
-.toYouQuiet .who {
-  margin-bottom: 18px;
-}
-
-.toYouQuiet .bubble {
+.said[data-tone='say'] .bubble,
+.said[data-tone='stopped'] .bubble {
   --bubble-border: var(--color-border-medium);
-  padding: 6px 10px;
-  border-width: 1.5px;
-  color: var(--color-text-secondary);
-  font-size: 13px;
 }
 
-.toYou.toYouQuiet .bubbleText {
+/* Main's word to the reader: the reader is "you", not a face. */
+.toYouMark {
+  justify-self: center;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-past);
+}
+
+.said .bubbleText {
   -webkit-line-clamp: 2;
 }
 
-/* The user's own message, until the next event. */
+/* The newest says more where the panel has room. */
+.said:last-child .bubbleText {
+  -webkit-line-clamp: 3;
+}
+
+@container (min-height: 340px) {
+  .said:last-child .bubbleText {
+    -webkit-line-clamp: 5;
+  }
+}
+
+/* A short miniature keeps both bubbles and a row or two: tighter bubbles. */
+@container (max-height: 260px) {
+  .said {
+    padding: 2px 2px 0;
+  }
+
+  .said[data-tone='task'] {
+    padding-top: 12px;
+  }
+
+  .said .bubble,
+  .fromYou .bubble {
+    padding: 4px 10px;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .said:last-child .bubbleText {
+    -webkit-line-clamp: 2;
+  }
+
+  .scene .meta {
+    margin-top: 2px;
+  }
+}
+
+.meta b {
+  font-weight: 650;
+  color: var(--color-text-secondary);
+}
+
+/* The user's own words, on the right. */
 .fromYou {
   display: flex;
   flex-direction: column;
   align-items: flex-end;
+  padding-right: 22px;
 }
 
 .fromYou .bubble {
@@ -637,12 +603,12 @@
   filter: grayscale(0.6);
 }
 
-/* ── Earlier: one grey line per item, the oldest rows of the panel ── */
-.earlier {
+/* ── Older highlights: one line each, the newest nearest the bubbles ── */
+.rows {
   display: contents;
 }
 
-.earlierItem {
+.row {
   display: flex;
   flex-shrink: 0;
   width: 100%;
@@ -655,19 +621,27 @@
   color: var(--color-text-past);
 }
 
-.earlierItem:last-child {
+.row:last-child {
   padding-bottom: 6px;
   height: 29px;
   border-bottom: 1px dashed var(--color-border-light);
 }
 
-.earlierFace {
+.rowFaces {
+  display: inline-flex;
   flex-shrink: 0;
-  opacity: 0.6;
-  filter: grayscale(0.8);
+  gap: 2px;
+  opacity: 0.7;
 }
 
-.earlierText {
+/* A task still in flight keeps its agent's face awake. */
+.rowThinking {
+  display: inline-flex;
+  border-radius: 50%;
+  box-shadow: 0 0 0 1.5px var(--color-primary);
+}
+
+.rowText {
   flex: 1;
   min-width: 0;
   white-space: nowrap;
@@ -675,12 +649,12 @@
   text-overflow: ellipsis;
 }
 
-.earlierText b {
+.rowText b {
   font-weight: 650;
   color: var(--color-text-secondary);
 }
 
-.earlierStatus {
+.lineStatus {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -689,16 +663,16 @@
   font-variant-numeric: tabular-nums;
 }
 
-.earlierStatus svg {
+.lineStatus[data-outcome='done'] svg {
   color: var(--fleet-ok-text);
 }
 
-.earlierFailed {
+.lineStatus[data-outcome='failed'] {
   color: var(--fleet-bad-text);
 }
 
-.earlierFailed svg {
-  color: inherit;
+.lineStatus[data-live='running'] {
+  color: var(--fleet-run-text);
 }
 
 /* ── A card that needs you: the agent asking, the answer below ──
@@ -769,10 +743,6 @@
   padding: 6px 12px;
 }
 
-.requestStage .asks .bubble {
-  padding: 10px 14px;
-}
-
 /* Lines of a command before it scrolls inside the bubble (read by the approval card). */
 .asks {
   --command-lines: 3;
@@ -785,124 +755,19 @@
   white-space: pre-wrap;
 }
 
-.requestStage .asks {
-  grid-template-columns: 64px minmax(0, 1fr);
-  gap: 22px;
-  --command-lines: 14;
+.chat {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
 }
 
-.requestStage .askText {
-  font-size: 17px;
-  line-height: 1.45;
-}
-
-/* ── The stage: the same panel, nothing left out; it scrolls ── */
-.scene[data-size='stage'] {
-  container-type: normal;
-  gap: 14px;
-  overflow-y: auto;
-}
-
-.scene[data-size='stage'] .bubbleText {
-  display: block;
-  -webkit-line-clamp: none;
-  overflow: visible;
-}
-
-.scene[data-size='stage'] .asked {
-  white-space: normal;
-}
-
-.scene[data-size='stage'] .talk {
-  grid-template-columns: 56px minmax(0, 1fr) 76px;
-  gap: 20px;
-  padding: 20px 12px 10px;
-}
-
-.scene[data-size='stage'] .talkCompact {
-  grid-template-columns: 44px minmax(0, 1fr) 64px;
-  gap: 18px;
-}
-
-.scene[data-size='stage'] .talk .bubble {
-  font-size: 18px;
-}
-
-.scene[data-size='stage'] .talkCompact .bubble {
-  padding: 8px 13px;
-  font-size: 16px;
-}
-
-.scene[data-size='stage'] .result .bubble {
-  font-size: 15px;
-  font-weight: 400;
-}
-
-.scene[data-size='stage'] .toYou {
-  grid-template-columns: 56px minmax(0, 1fr);
-}
-
-.scene[data-size='stage'] .toYou .bubble,
-.scene[data-size='stage'] .fromYou .bubble {
-  font-size: 15px;
-}
-
-.scene[data-size='stage'] .earlierItem {
-  flex-wrap: wrap;
-  height: auto;
-  min-height: 22px;
-  row-gap: 2px;
-}
-
-.scene[data-size='stage'] .earlierItem:last-child {
-  margin-bottom: 8px;
-  height: auto;
-}
-
-/* Markdown inside a bubble: the chat's renderer, without its outer margins. */
-.markdown {
-  min-width: 0;
-  font-weight: 400;
-}
-
-.markdown > div > :first-child > :first-child {
-  margin-top: 0;
-}
-
-.markdown > div > :first-child > :last-child {
-  margin-bottom: 0;
-}
-
-.earlierResult {
-  flex-basis: 100%;
-  padding-left: 24px;
-  color: var(--color-text-past);
-  line-height: 1.45;
-}
-
-/* A task title that opens the task: plain text that underlines on hover. */
-.taskLink {
-  display: inline;
-  padding: 0;
-  border: 0;
-  background: none;
-  color: inherit;
-  font: inherit;
-  text-align: inherit;
-  cursor: pointer;
-}
-
-.taskLink:hover,
-.taskLink:focus-visible {
-  text-decoration: underline;
-  text-underline-offset: 3px;
-}
-
-.runError {
-  margin: 0;
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--fleet-bad-text);
+.chatEmpty {
+  margin: auto;
+  font-size: 13px;
+  color: var(--color-text-tertiary);
 }
 
 /* ── Ctrl+Tab switcher: static, no blur ──────────────────────────────── */

@@ -2,7 +2,7 @@ import { renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
 vi.mock('../../assistant/client', () => ({ getSession: vi.fn(async () => null) }));
-vi.mock('../../workspace/client', () => ({ getWorkspaceDetails: vi.fn(async () => ({ tasks: [] })) }));
+vi.mock('../../workspace/client', () => ({ getWorkspaceDetails: vi.fn(async () => ({ assignedAgents: [] })) }));
 
 const { useFleetChat } = await import('./useFleetChat');
 

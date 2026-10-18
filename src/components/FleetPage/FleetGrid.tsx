@@ -1,12 +1,11 @@
-import { memo, useCallback, useMemo, useRef } from 'react';
+import { memo, useCallback, useMemo, useRef, type CSSProperties } from 'react';
 import type { AgentIdentity } from '../Agents/agentIdentity';
 import {
-  GRID_GAP,
+  boardShape,
+  cardFeed,
   cardPhase,
-  cardScene,
   fleetLoudness,
   openRequests,
-  stageSpan,
   type FleetCard as FleetCardModel,
   type FleetLive,
   type FleetPhase,
@@ -21,11 +20,9 @@ import styles from './FleetPage.module.css';
 const PHASE_BORDER: Partial<Record<FleetPhase, string>> = { working: styles.cardWorking, waiting: styles.cardWaiting };
 
 interface FleetGridProps {
-  /** Card ids in slot order; the first is on the stage. */
+  /** Card ids in order. */
   order: string[];
   cards: Record<string, FleetCardModel>;
-  cols: number;
-  rows: number;
   selectedId: string | null;
   live: FleetLive;
   faces: Record<string, AgentIdentity>;
@@ -35,61 +32,64 @@ interface FleetGridProps {
 }
 
 /**
- * The card grid: the stage card, in its large form, spans the top-left
- * 2 × 2; the rest flow into the 1 × 1 slots around it. Nothing animates: on
- * WebKitGTK even a short transition blinks. The drawn effects switch on here.
+ * The board: the selected workspace's conversation on the stage at the left,
+ * the others as miniatures beside it (`boardShape`), scrolling when there are
+ * more. With nothing selected, every card is a miniature. Nothing animates:
+ * on WebKitGTK even a short transition blinks. The drawn effects switch on here.
  */
-const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, now, onSelect }: FleetGridProps) => {
+const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect }: FleetGridProps) => {
   const handleSelect = useCallback((id: string) => onSelect(id), [onSelect]);
   const gridRef = useRef<HTMLDivElement | null>(null);
-  useThoughtBeat(gridRef, order.some((id) => cards[id] && cardPhase(cards[id], live) === 'working'));
-  // Each panel's scene, once: the stage's in full. A card with an open request shows that instead.
+  useThoughtBeat(gridRef, order.some((id) => id !== selectedId && cards[id] && cardPhase(cards[id], live) === 'working'));
+  const staged = selectedId && cards[selectedId] && order.includes(selectedId) ? cards[selectedId] : null;
+  // Each miniature's feed, once. A card with an open request shows that instead.
   const panels = useMemo(
     () =>
-      order.flatMap((id, slot) => {
+      order.flatMap((id) => {
         const card = cards[id];
         if (!card) return [];
-        const scene = openRequests(card).length > 0 ? null : cardScene(card, live, now, { stage: slot === 0 });
-        return [{ card, scene, selected: id === selectedId }];
+        const selected = id === selectedId;
+        const feed = selected || openRequests(card).length > 0 ? null : cardFeed(card, live, now);
+        return [{ card, feed, selected }];
       }),
     [order, cards, live, now, selectedId]
   );
   const loud = useMemo(() => fleetLoudness(panels), [panels]);
+  const minis = panels.filter((p) => !p.selected);
+  const shape = boardShape(minis.length, !!staged);
+  const deselect = (e: React.MouseEvent) => {
+    if (e.target === e.currentTarget) onSelect(null);
+  };
 
   return (
-    <div
-      ref={gridRef}
-      className={`${styles.grid} ${fx.fx}`}
-      data-fx={FLEET_FX}
-      style={{
-        gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
-        gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
-        gap: GRID_GAP,
-      }}
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onSelect(null);
-      }}
-    >
-      {panels.map(({ card, scene, selected }, slot) => {
-        const id = card.workspaceId;
-        const stage = slot === 0 ? stageSpan({ cols, rows }) : null;
-        const cardLoud = loud.cards[id] ?? null;
-        return (
-          <article
-            key={id}
-            className={`${styles.card} ${selected ? styles.cardSelected : (PHASE_BORDER[cardPhase(card, live)] ?? '')}`}
-            aria-current={selected || undefined}
-            data-loud={cardLoud ?? undefined}
-            style={stage ? { gridColumn: `1 / span ${stage.cols}`, gridRow: `1 / span ${stage.rows}` } : undefined}
+    <div ref={gridRef} className={`${styles.board} ${fx.fx}`} data-fx={FLEET_FX} onClick={deselect}>
+      {staged && (
+        <article className={`${styles.card} ${styles.cardSelected} ${styles.stage}`} aria-current>
+          <FleetSelectedCard card={staged} live={live} selected faces={faces} onSelect={onSelect} />
+        </article>
+      )}
+      {minis.length > 0 && (
+        <div className={styles.miniArea} data-staged={staged ? true : undefined}>
+          <div
+            className={styles.minis}
+            style={{ '--cols': shape.cols, '--rows': shape.rows } as CSSProperties}
+            onClick={deselect}
           >
-            {stage ? (
-              <FleetSelectedCard card={card} scene={scene} shouts={loud.rows} live={live} selected={selected} faces={faces} now={now} loud={cardLoud} onSelect={onSelect} />
-            ) : (
-              <FleetCard card={card} scene={scene} shouts={loud.rows} live={live} faces={faces} now={now} loud={cardLoud} onSelect={handleSelect} />
-            )}
-          </article>
-        );
-      })}
+            {minis.map(({ card, feed }) => {
+              const cardLoud = loud.cards[card.workspaceId] ?? null;
+              return (
+                <article
+                  key={card.workspaceId}
+                  className={`${styles.card} ${PHASE_BORDER[cardPhase(card, live)] ?? ''}`}
+                  data-loud={cardLoud ?? undefined}
+                >
+                  <FleetCard card={card} feed={feed} shouts={loud.rows} live={live} faces={faces} now={now} loud={cardLoud} onSelect={handleSelect} />
+                </article>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

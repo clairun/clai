@@ -133,7 +133,7 @@ describe('FleetLayout attention', () => {
   it('counts an open question as needing attention, like the Fleet does', async () => {
     permissionAttention.counts = { a: 1 };
     const ask = { pendingId: 'q', question: 'Ship it?', sessionId: 'main' } as FleetAsk;
-    const request = { kind: 'ask' as const, ask, text: ask.question, agentName: null, at: 1, resolvedAt: null };
+    const request = { kind: 'ask' as const, ask, text: ask.question, agentName: null, at: 1 };
     useFleetStore.setState({ fleet: { cards: { a: { ...emptyCard('a'), requests: { 'ask:q': request } }, b: { ...emptyCard('b'), requests: { 'ask:q': request } } } } });
     listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta'), entry('c', 'Gamma')]);
     getSchedulerPaused.mockResolvedValue(false);

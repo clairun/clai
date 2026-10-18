@@ -12,10 +12,10 @@ import {
   type FleetLoudness,
   type FleetPhase,
   type FleetRequestScene,
-  type FleetScene as Scene,
+  type FleetFeed as Feed,
 } from '../../fleet/fleetModel';
 import FleetRequestPanel from './FleetRequestPanel';
-import FleetScene from './FleetScene';
+import FleetFeed from './FleetFeed';
 import fx from './FleetEffects';
 import styles from './FleetPage.module.css';
 
@@ -100,9 +100,9 @@ export const LiveFaces = ({ card, live, faces }: { card: FleetCardModel; live: F
 
 interface FleetCardProps {
   card: FleetCardModel;
-  /** What the panel says (`cardScene`); `null` while it shows an open request. */
-  scene: Scene | null;
-  /** Keys of the rows that shout (`fleetLoudness`). */
+  /** What the miniature says (`cardFeed`); `null` while it shows an open request. */
+  feed: Feed | null;
+  /** Keys of the lines that shout (`fleetLoudness`). */
   shouts: ReadonlySet<string>;
   live: FleetLive;
   /** Picked agent faces, by agent definition id. */
@@ -114,8 +114,8 @@ interface FleetCardProps {
   onSelect: (workspaceId: string) => void;
 }
 
-/** An unselected card: a comic panel of what happened, or its open request, answerable in place. */
-const FleetCard = ({ card, scene, shouts, live, faces, now, loud = null, onSelect }: FleetCardProps) => {
+/** A miniature: the workspace's conversation as highlights, or its open request, answerable in place. */
+const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect }: FleetCardProps) => {
   const phase = cardPhase(card, live);
   const attention = cardAttention(card);
   const request = useMemo(() => requestScene(card, live), [card, live]);
@@ -137,7 +137,7 @@ const FleetCard = ({ card, scene, shouts, live, faces, now, loud = null, onSelec
         </button>
         <PhaseLabel phase={phase} attention={attention} sticker={stickerFor(loud, request)} />
       </header>
-      {scene && <FleetScene scene={scene} shouts={shouts} now={now} faces={faces} />}
+      {feed && <FleetFeed feed={feed} shouts={shouts} now={now} faces={faces} />}
       {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={faces} loud={loud === 'needs'} now={now} />}
     </div>
   );

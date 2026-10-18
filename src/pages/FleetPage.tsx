@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import AppTopBar from '../components/AppTopBar';
 import FleetGrid from '../components/FleetPage/FleetGrid';
 import FleetSwitcher from '../components/FleetPage/FleetSwitcher';
@@ -8,8 +8,6 @@ import { identityFor, type AgentIdentity } from '../components/Agents/agentIdent
 import {
   RECENT_WINDOW_MS,
   cardPhase,
-  gridCapacity,
-  gridShape,
   pickCards,
   type FleetLive,
 } from '../fleet/fleetModel';
@@ -20,32 +18,10 @@ import { useTaskStore } from '../workspace/taskStore';
 
 const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
 
-/** Content-box size of `ref`, updated only when it actually resizes. */
-function useBoxSize(ref: React.RefObject<HTMLElement | null>) {
-  const [size, setSize] = useState({ width: 0, height: 0 });
-  useLayoutEffect(() => {
-    const node = ref.current;
-    if (!node || typeof ResizeObserver === 'undefined') return undefined;
-    const observer = new ResizeObserver(([entry]) => {
-      if (!entry) return;
-      const { width, height } = entry.contentRect;
-      setSize((prev) =>
-        Math.round(prev.width) === Math.round(width) && Math.round(prev.height) === Math.round(height)
-          ? prev
-          : { width, height }
-      );
-    });
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [ref]);
-  return size;
-}
-
 /**
- * The Fleet: one card per recently active workspace, sized to the screen,
- * with the shared terminal at the bottom. Clicking a card selects it — it
- * swaps onto the stage, showing the workspace's chat, and the terminal
- * talks to it.
+ * The Fleet: one card per recently active workspace, with the shared
+ * terminal at the bottom. Clicking a card selects it: its conversation takes
+ * the stage, the others stay miniatures beside it, and the terminal talks to it.
  */
 const FleetPage = () => {
   const cards = useFleetStore((s) => s.fleet.cards);
@@ -81,18 +57,13 @@ const FleetPage = () => {
     return () => window.removeEventListener('focus', load);
   }, []);
 
-  const gridRef = useRef<HTMLDivElement | null>(null);
-  const { width, height } = useBoxSize(gridRef);
-  const capacity = useMemo(() => gridCapacity(width, height), [width, height]);
-
   // The previous order, so cards already on screen keep their slots.
   // Updated during render (React's derived-state pattern); picking is a
   // fixed point of its own order, so this settles in one extra pass.
   const [order, setOrder] = useState<string[]>([]);
   const placed = useMemo(
-    () =>
-      width > 0 ? pickCards(Object.values(cards), { now, capacity, selectedId, prevOrder: order, live }) : [],
-    [cards, now, capacity, selectedId, width, order, live]
+    () => pickCards(Object.values(cards), { now, selectedId, prevOrder: order, live }),
+    [cards, now, selectedId, order, live]
   );
   if (placed.join(',') !== order.join(',')) setOrder(placed);
 
@@ -129,8 +100,6 @@ const FleetPage = () => {
 
   const handleSelect = useCallback((id: string | null) => select(id), [select]);
 
-  const shape = gridShape(capacity, placed.length);
-
   return (
     <div className={styles.page}>
       <AppTopBar nav={{ label: 'Workspaces', to: '/workspace' }}>
@@ -141,14 +110,12 @@ const FleetPage = () => {
           <strong>{counts.waiting}</strong> {counts.waiting === 1 ? 'needs' : 'need'} you
         </span>
       </AppTopBar>
-      <main className={styles.gridArea} ref={gridRef} aria-label="Fleet">
+      <main className={styles.gridArea} aria-label="Fleet">
         {loadError && <p className={styles.notice}>{loadError}</p>}
         {placed.length > 0 ? (
           <FleetGrid
             order={placed}
             cards={cards}
-            cols={shape.cols}
-            rows={shape.rows}
             selectedId={selectedId}
             live={live}
             faces={faces}

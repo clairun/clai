@@ -122,7 +122,7 @@ describe('FleetPage', () => {
     fireEvent.keyUp(terminal, { key: 'Control' });
     expect(useFleetStore.getState().selectedId).toBe(ids[order[1]!]);
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
-    // The same swap as a click: it takes the stage, the stage card takes its slot.
+    // The same as a click: it takes the stage, the others keep their order beside it.
     expect([screen.getByRole('heading', { name: /^Selected / }), ...screen.getAllByRole('button', { name: /^Select / })].map((e) => e.textContent)).toEqual([
       `Selected ${order[1]}`,
       order[0],
@@ -131,7 +131,7 @@ describe('FleetPage', () => {
 
     // Escape closes it with no change.
     press();
-    expect(highlighted()).toContain(order[0]); // the next slot after the stage, now
+    expect(highlighted()).toContain(order[2]); // the next card after the selected one
     fireEvent.keyDown(terminal, { key: 'Escape', ctrlKey: true });
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
     fireEvent.keyUp(terminal, { key: 'Control' });
@@ -248,66 +248,59 @@ describe('FleetPage', () => {
     }
   });
 
-  it('draws a running task as Main’s bubble to its agent, and an old finished one in Earlier', async () => {
-    const task = (id: string, title: string, status: string) =>
-      ({ id, title, status, parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never;
+  it('draws the newest two highlights as bubbles and collapses the older ones to rows; a running task keeps thinking', async () => {
+    const at = (ago: number) => BigInt(Date.now() - ago);
+    const task = (id: string, title: string, status: string, ago: number, extra = {}) =>
+      ({ id, title, status, parentTaskId: null, createdAt: at(ago), updatedAt: at(ago), completedAt: status === 'running' ? null : at(ago - 1000), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s', ...extra }) as never;
+    const said = (messageId: string, text: string, ago: number, patch = {}) =>
+      ({ messageId, sessionId: 'main-a', role: 'user', origin: { kind: 'user' }, text, truncated: false, createdAt: at(ago), runId: null, ...patch }) as FleetWorkspace['recentMessages'][number];
     fleetSnapshot.mockResolvedValue([
-      workspace('staged', 'Staged'),
-      { ...workspace('live', 'Alpha', 1000), tasks: [task('t1', 'Old research', 'completed'), task('t2', 'New research', 'running')] },
+      {
+        ...workspace('a', 'Alpha'),
+        mainSessionId: 'main-a',
+        tasks: [task('t1', 'Old research', 'running', 50 * 60_000), task('t2', 'Fix the build', 'failed', 40 * 60_000, { error: 'Cargo ran out of disk. Free 2 GB.' })],
+        recentMessages: [
+          said('u1', 'Look into the leaks. All of them.', 60 * 60_000),
+          said('u2', 'Then fix the build', 45 * 60_000),
+          said('a1', 'On it. Two tasks out.', 30 * 60_000, { role: 'assistant' }),
+          said('u3', 'Thanks!', 20 * 60_000),
+          said('a2', 'Shipped **v2**', 10 * 60_000, { role: 'assistant' }),
+        ],
+      },
     ]);
     renderFleet();
-    const card = within((await screen.findByText('New research')).closest('article')!);
-    expect(card.getByText('Now')).toBeInTheDocument();
-    expect(card.getByTitle('Scout, on it')).toHaveTextContent('Scout');
-    expect(card.getByRole('img', { name: 'Scout is working' })).toBeInTheDocument();
-    expect(within(card.getByRole('list', { name: 'Earlier' })).getByText('Old research')).toBeInTheDocument();
-    // Its outcome is a tick, said in words to a screen reader.
-    expect(within(card.getByRole('list', { name: 'Earlier' })).getByRole('img', { name: 'done' })).toBeInTheDocument();
-  });
-
-  it('flips a task that just finished to its result, with Main’s question shrunk to one line', async () => {
-    const done = {
-      id: 't1', title: 'Fix the build', status: 'failed', error: 'Cargo ran out of disk. Free 2 GB.', parentTaskId: null,
-      updatedAt: BigInt(Date.now() - 60_000), completedAt: BigInt(Date.now() - 60_000), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s',
-    } as never;
-    fleetSnapshot.mockResolvedValue([workspace('staged', 'Staged'), { ...workspace('f', 'Alpha', 1000), tasks: [done] }]);
-    renderFleet();
-    const card = within((await screen.findByText('Cargo ran out of disk.')).closest('article')!);
-    expect(card.getByText('Main asked: Fix the build')).toBeInTheDocument();
-    expect(card.getByText(/failed ·/)).toBeInTheDocument();
-    expect(card.queryByRole('list', { name: 'Earlier' })).not.toBeInTheDocument();
-  });
-
-  it('shows Main’s last message as plain text, addressed to the reader', async () => {
-    fleetSnapshot.mockResolvedValue([
-      workspace('staged', 'Staged'),
-      { ...workspace('a', 'Alpha', 1000), lastAssistantMessage: { messageId: 'm1', text: 'Shipped **v2**', truncated: false, createdAt: BigInt(Date.now()) } },
+    const card = within((await screen.findByText('Shipped v2')).closest('article')!);
+    const rows = within(card.getByRole('list', { name: 'Earlier' }));
+    expect(rows.getAllByRole('listitem').map((row) => row.textContent)).toEqual([
+      expect.stringMatching(/^You → Main Look into the leaks\.\d/),
+      expect.stringMatching(/^Main → Scout Old research\s*working ·/),
+      expect.stringMatching(/^You → Main Then fix the build/),
+      expect.stringMatching(/^Main → Scout Fix the build\d/),
+      expect.stringMatching(/^Scout → Main Cargo ran out of disk\.failed ·/),
+      expect.stringMatching(/^Main → You On it\./),
     ]);
-    renderFleet();
-    const bubble = await screen.findByText('Shipped v2');
-    const card = within(bubble.closest('article')!);
-    expect(card.getByText(/^to you ·/)).toBeInTheDocument();
-    expect(card.getByText(/^Last word ·/)).toBeInTheDocument();
+    // The running task's row keeps its agent's face awake.
+    expect(rows.getAllByRole('listitem')[1]!.querySelector('[class*=rowThinking]')).not.toBeNull();
+    // The newest two are bubbles, in order: yours, then Main's.
+    expect(card.getByText('Thanks!').closest('[data-row]')!.compareDocumentPosition(card.getByText('Shipped v2')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(card.getByText(/^Now/)).toBeInTheDocument();
   });
 
-  it('deselects on Escape, from the terminal too, and on a click on the empty grid, leaving the card on the stage', async () => {
+  it('deselects on Escape, from the terminal too, and on a click on the empty board; nothing moves', async () => {
     fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000)]);
     renderFleet();
     fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
     expect(useFleetStore.getState().selectedId).toBe('a');
-    const stage = () => screen.getAllByRole('article')[0]!;
-    expect(stage()).toHaveTextContent('Selected Alpha');
-    expect(stage().style.gridColumn).toBe('1 / span 2');
+    expect(screen.getAllByRole('article').map((a) => a.textContent)).toEqual(['Selected Alpha', expect.stringContaining('Staged')]);
     fireEvent.keyDown(screen.getByRole('textbox', { name: 'Terminal' }), { key: 'Escape' });
     expect(useFleetStore.getState().selectedId).toBeNull();
-    expect(stage()).toHaveTextContent('Alpha');
-    expect(stage()).not.toHaveTextContent('Staged');
+    expect(screen.getAllByRole('button', { name: /^Select / }).map((b) => b.textContent)).toEqual(['Staged', 'Alpha']);
 
     fireEvent.click(screen.getByRole('button', { name: 'Select Alpha' }));
-    fireEvent.click(stage().parentElement!);
+    fireEvent.click(screen.getAllByRole('article')[0]!.parentElement!);
     expect(useFleetStore.getState().selectedId).toBeNull();
-    expect(screen.getAllByRole('article').map((a) => a.textContent)).toEqual(['Alpha', expect.stringContaining('Staged')]);
   });
+
   it('brings a workspace that is not on the Fleet to the stage when picked', async () => {
     const OLD_MS = 90 * 86_400_000;
     fleetSnapshot.mockImplementation(async (_limit: number, keep: string | null) =>
@@ -322,7 +315,7 @@ describe('FleetPage', () => {
       </MemoryRouter>
     );
     const articles = async () => (await screen.findAllByRole('article')).map((a) => a.textContent);
-    expect(await articles()).toEqual(['Staged']);
+    expect(await articles()).toEqual([expect.stringMatching(/^Staged/)]);
 
     fireEvent.click(await screen.findByRole('option', { name: /Old report/ }));
     expect(useFleetStore.getState().selectedId).toBe('old');
@@ -330,12 +323,15 @@ describe('FleetPage', () => {
     mockInvoke.mockImplementation(async () => undefined);
   });
 
-  it('gives a short Fleet only the tracks its cards fill, so they reach the terminal', async () => {
-    fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha'), workspace('b', 'Beta', 1000), workspace('c', 'Gamma', 2000)]);
+  it('puts the stage beside four miniatures 2 × 2, and six cards 3 × 2 with none selected; the rest scroll', async () => {
+    fleetSnapshot.mockResolvedValue(Array.from({ length: 8 }, (_, i) => workspace(`w${i}`, `W${i}`, i * 1000)));
     renderFleet();
-    const grid = (await screen.findAllByRole('article'))[0]!.parentElement!;
-    expect(grid.style.gridTemplateRows).toBe('repeat(2, minmax(0, 1fr))');
-    expect(grid.style.gridTemplateColumns).toBe('repeat(3, minmax(0, 1fr))');
+    await screen.findByRole('button', { name: 'Select W7' });
+    const minis = () => screen.getByRole('button', { name: 'Select W7' }).closest('article')!.parentElement!;
+    expect([minis().style.getPropertyValue('--cols'), minis().style.getPropertyValue('--rows'), minis().children.length]).toEqual(['3', '2', 8]);
+    fireEvent.click(screen.getByRole('button', { name: 'Select W2' }));
+    expect(screen.getByRole('heading', { name: 'Selected W2' })).toBeInTheDocument();
+    expect([minis().style.getPropertyValue('--cols'), minis().style.getPropertyValue('--rows'), minis().children.length]).toEqual(['2', '2', 7]);
   });
 
   it('counts one waiting workspace as "1 needs you", and small cards never mark a workspace seen', async () => {
@@ -374,14 +370,14 @@ describe('FleetPage', () => {
       await screen.findByRole('button', { name: 'Select Beta' });
       return () => within(screen.getByRole('button', { name: 'Select Beta' }).closest('article')!);
     };
-    const stageText = () => screen.getAllByRole('article')[0]!.textContent;
+    const otherText = () => screen.getByRole('button', { name: 'Select Staged' }).closest('article')!.textContent;
 
     it('takes the body with the full question, answers it, and never selects the card from inside', async () => {
       const tasks = [{ id: 't1', title: 'Old task', status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never];
       const card = await setup({ tasks, pendingAsks: [ask('q1', 'Ship it?', 5n, [{ label: 'Yes', description: null }, { label: 'No', description: null }])] });
-      expect(card().queryByRole('list', { name: 'Earlier' })).not.toBeInTheDocument();
+      expect(card().queryByText('Old task')).not.toBeInTheDocument();
       const row = card().getByRole('region', { name: /needs you$/ });
-      const before = stageText();
+      const before = otherText();
 
       fireEvent.click(within(row).getByText('Ship it?'));
       fireEvent.click(within(row).getByRole('button', { name: 'No' }));
@@ -391,13 +387,13 @@ describe('FleetPage', () => {
         })
       );
       expect(useFleetStore.getState().selectedId).toBeNull();
-      expect(stageText()).toBe(before);
+      expect(otherText()).toBe(before);
 
       act(() =>
         useFleetStore.getState().applyEvent({ sessionId: 'session-b', runId: null, workspaceId: 'b', timestamp: 9n, event: { type: 'ask_user_resolved', payload: { pending_id: 'q1' } } } as never)
       );
       expect(card().queryByRole('region', { name: /needs you$/ })).not.toBeInTheDocument();
-      expect(within(card().getByRole('list', { name: 'Earlier' })).getByText('Ship it?')).toBeInTheDocument();
+      expect(card().queryByText('Ship it?')).not.toBeInTheDocument();
 
       fireEvent.click(card().getByRole('button', { name: 'Select Beta' }));
       expect(useFleetStore.getState().selectedId).toBe('b');

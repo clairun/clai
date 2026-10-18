@@ -6,17 +6,17 @@
  * not copied here: they come from `fleetActivityStore` and `taskStore`
  * (`FleetLive`).
  *
- * What a card shows follows the owner's rules: live activity is highlighted,
- * finished subtasks and answered questions stay as low-emphasis history
- * (answered approvals and grants leave), the last completed assistant message
- * always shows, and the user's own message shows until the next message or
- * event arrives.
+ * A card keeps the messages said in the workspace (`said`): what the user,
+ * Main and the agents told each other. `cardFeed` turns them, with the
+ * tasks, into the miniature's highlights, in the order they happened.
  */
 import type {
+  AgentRefSnapshot,
   AssistantEventEnvelope,
   AssistantMessage,
   AssistantUiEvent,
   FleetWorkspace,
+  MessageOrigin,
   PathGrantRequest,
   PermissionRequest,
   TaskStatus,
@@ -24,11 +24,12 @@ import type {
 } from '../generated/bindings';
 import type { PendingAskUser } from '../assistant/sessionStore';
 import { taskDisplayStatus } from '../utils/taskDisplay';
-import { buildTaskTree, type TaskNode } from '../utils/taskTree';
 
 /** A workspace with no event in this window and nothing live gets no card. */
 export const RECENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 const NOTE_CHARS = 600;
+/** Messages a card keeps; a miniature shows fewer. */
+export const SAID_LIMIT = 24;
 
 export type FleetRequestKind = 'approval' | 'grant';
 
@@ -48,15 +49,20 @@ export type FleetRequest = {
   text: string;
   agentName: string | null;
   at: number;
-  resolvedAt: number | null;
 } & (
   | { kind: 'ask'; ask: FleetAsk }
   | { kind: 'approval'; request: PermissionRequest }
   | { kind: 'grant'; request: PathGrantRequest }
 );
 
-export interface FleetNote {
+/** A message said in the workspace, as the feed needs it. */
+export interface FleetSaid {
   id: string;
+  sessionId: string;
+  role: 'user' | 'assistant';
+  /** Who sent a user message; `null` for an assistant message. */
+  origin: MessageOrigin | null;
+  /** Clipped to `NOTE_CHARS`. */
   text: string;
   at: number;
 }
@@ -67,10 +73,10 @@ export interface FleetCard {
   /** From the snapshot, or set when the user sends or clears from the terminal. */
   mainSessionId: string | null;
   lastActivityAt: number;
-  /** By `kind:id`. */
+  /** Open requests, by `kind:id`. */
   requests: Record<string, FleetRequest>;
-  lastMessage: FleetNote | null;
-  userMessage: FleetNote | null;
+  /** Oldest first, at most `SAID_LIMIT`. */
+  said: FleetSaid[];
 }
 
 export interface FleetState {
@@ -91,8 +97,7 @@ export const emptyCard = (workspaceId: string, title = ''): FleetCard => ({
   mainSessionId: null,
   lastActivityAt: 0,
   requests: {},
-  lastMessage: null,
-  userMessage: null,
+  said: [],
 });
 
 const updateCard = (
@@ -127,18 +132,32 @@ export const messageText = (message: AssistantMessage): string => clip(fullMessa
 export const isTaskLive = (status: TaskStatus): boolean =>
   status === 'queued' || status === 'running' || status === 'stopping';
 
-/** A message or event the card displays arrived: the user's own message gives way. */
-const dropUserMessage = (card: FleetCard): FleetCard =>
-  card.userMessage ? { ...card, userMessage: null } : card;
+const saidOf = (message: AssistantMessage, at: number): FleetSaid => ({
+  id: message.id,
+  sessionId: message.sessionId,
+  role: message.role === 'assistant' ? 'assistant' : 'user',
+  origin: message.role === 'assistant' ? null : message.origin,
+  text: messageText(message),
+  at,
+});
+
+/** Keeps `said` in time order and at most `SAID_LIMIT` long; an event replaces what a seed said. */
+const addSaid = (card: FleetCard, said: readonly FleetSaid[], replace: boolean): FleetCard => {
+  const held = new Set(card.said.map((s) => s.id));
+  const incoming = said.filter((s) => s.text && (replace || !held.has(s.id)));
+  if (incoming.length === 0) return card;
+  const ids = new Set(incoming.map((s) => s.id));
+  const next = [...card.said.filter((s) => !ids.has(s.id)), ...incoming].sort((a, b) => a.at - b.at);
+  return { ...card, said: next.slice(-SAID_LIMIT) };
+};
 
 const requestKey = (kind: FleetRequest['kind'], id: string) => `${kind}:${id}`;
 
-/** An answered question stays as history; an answered approval or grant leaves the card. */
-const resolve = (card: FleetCard, key: string, at: number): FleetCard => {
-  const request = card.requests[key];
-  if (!request || request.resolvedAt != null) return card;
+/** An answered request leaves the card. */
+const resolve = (card: FleetCard, key: string): FleetCard => {
+  if (!card.requests[key]) return card;
   const { [key]: _, ...rest } = card.requests;
-  return { ...card, requests: request.kind === 'ask' ? { ...card.requests, [key]: { ...request, resolvedAt: at } } : rest };
+  return { ...card, requests: rest };
 };
 
 const askRequest = (ask: FleetAsk, at: number): FleetRequest => ({
@@ -147,7 +166,6 @@ const askRequest = (ask: FleetAsk, at: number): FleetRequest => ({
   text: ask.question,
   agentName: null,
   at,
-  resolvedAt: null,
 });
 
 /** The variants the Fleet reads. Everything else, streaming above all, is ignored. */
@@ -178,26 +196,25 @@ export const applyAssistantEvent = (
 
   return updateCard(state, workspaceId, (current) => {
     const card = bump(current, at);
-    const inMain = card.mainSessionId === sessionId;
     switch (event.type) {
       case 'message_created': {
+        // Every session's user messages: the user's, an agent's and a task's
+        // report. An assistant message is said when it completes.
         const { message } = event.payload;
-        if (!inMain) return card;
-        return message.role === 'user' && message.origin.kind === 'user'
-          ? { ...card, userMessage: { id: message.id, text: messageText(message), at } }
-          : dropUserMessage(card);
+        return message.role === 'user' ? addSaid(card, [saidOf(message, at)], true) : card;
       }
-      case 'message_deleted':
-        return card.userMessage?.id === event.payload.message_id ? { ...card, userMessage: null } : card;
-      case 'assistant_message_completed': {
-        if (!inMain) return card;
-        const text = messageText(event.payload.message);
-        const next = dropUserMessage(card);
-        return text ? { ...next, lastMessage: { id: event.payload.message.id, text, at } } : next;
+      case 'message_deleted': {
+        const said = card.said.filter((s) => s.id !== event.payload.message_id);
+        return said.length === card.said.length ? card : { ...card, said };
       }
+      case 'assistant_message_completed':
+        // Main's replies, to the user. A task's own replies reach Main as its report;
+        // before the main session is known, keep them and let `cardFeed` choose.
+        if (card.mainSessionId && card.mainSessionId !== sessionId) return card;
+        return addSaid(card, [saidOf(event.payload.message, at)], true);
       case 'ask_user_requested':
         return {
-          ...dropUserMessage(card),
+          ...card,
           requests: {
             ...card.requests,
             [requestKey('ask', event.payload.pending_id)]: askRequest(
@@ -214,11 +231,9 @@ export const applyAssistantEvent = (
           },
         };
       case 'ask_user_resolved':
-        return resolve(card, requestKey('ask', event.payload.pending_id), at);
-      case 'task_updated':
-        return dropUserMessage(card);
+        return resolve(card, requestKey('ask', event.payload.pending_id));
       default:
-        // Run lifecycle: activity, but not a displayed event.
+        // Run and task lifecycle: activity; the tasks themselves come from the task store.
         return card;
     }
   });
@@ -234,7 +249,6 @@ const toRequest = (pending: FleetPendingRequest, at: number): FleetRequest => ({
   text: requestText(pending.request),
   agentName: pending.request.agentName,
   at,
-  resolvedAt: null,
 });
 
 export const applyRequest = (state: FleetState, pending: FleetPendingRequest, at: number): FleetState => {
@@ -242,25 +256,15 @@ export const applyRequest = (state: FleetState, pending: FleetPendingRequest, at
   if (!workspaceId) return state;
   const key = requestKey(pending.kind, requestId);
   return updateCard(state, workspaceId, (card) =>
-    card.requests[key]
-      ? card
-      : {
-          ...dropUserMessage(bump(card, at)),
-          requests: { ...card.requests, [key]: toRequest(pending, at) },
-        }
+    card.requests[key] ? card : { ...bump(card, at), requests: { ...card.requests, [key]: toRequest(pending, at) } }
   );
 };
 
-export const applyRequestResolved = (
-  state: FleetState,
-  kind: FleetRequestKind,
-  requestId: string,
-  at: number
-): FleetState => {
+export const applyRequestResolved = (state: FleetState, kind: FleetRequestKind, requestId: string): FleetState => {
   const key = requestKey(kind, requestId);
-  const owner = Object.values(state.cards).find((card) => card.requests[key]?.resolvedAt === null);
+  const owner = Object.values(state.cards).find((card) => card.requests[key]);
   if (!owner) return state;
-  return updateCard(state, owner.workspaceId, (card) => resolve(card, key, at));
+  return updateCard(state, owner.workspaceId, (card) => resolve(card, key));
 };
 
 /** The user sent `message` (or cleared the chat, `message` null) on `sessionId`: it is the main. */
@@ -271,52 +275,62 @@ export const applyUserSent = (
   message: AssistantMessage | null,
   at: number
 ): FleetState =>
-  updateCard(state, workspaceId, (card) => ({
-    ...bump(card, at),
-    mainSessionId: sessionId,
-    userMessage: message ? { id: message.id, text: messageText(message), at } : null,
-  }));
-
-/** Requests still open in `card` but absent from `open` were resolved meanwhile; new open ones are added. */
-const reconcile = (card: FleetCard, open: Record<string, FleetRequest>, now: number): Record<string, FleetRequest> => {
-  let next = { ...card, requests: { ...open, ...card.requests } };
-  for (const key of Object.keys(card.requests)) if (!open[key]) next = resolve(next, key, now);
-  return next.requests;
-};
+  updateCard(state, workspaceId, (card) => {
+    const next = { ...bump(card, at), mainSessionId: sessionId };
+    return message ? addSaid(next, [saidOf(message, at)], true) : next;
+  });
 
 /**
  * Apply a snapshot. The Fleet becomes exactly the snapshot's workspaces, so a
  * deleted one (or one no longer among the most recent) loses its card;
- * history the store already holds for the others is kept. Events buffered
- * while it loaded are replayed afterwards by the store.
+ * history the store already holds for the others is kept, and a message an
+ * event already brought is not said twice. Open requests become the
+ * snapshot's. Events buffered while it loaded are replayed afterwards by the
+ * store.
  */
-export const seedFleet = (
-  state: FleetState,
-  snapshot: readonly FleetWorkspace[],
-  now: number
-): FleetState => {
+export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]): FleetState => {
   const cards: FleetState['cards'] = {};
   for (const ws of snapshot) {
     const card = state.cards[ws.workspaceId] ?? emptyCard(ws.workspaceId);
     const activity = Number(ws.lastActivityAt);
+    const mainSessionId = ws.mainSessionId ?? card.mainSessionId;
+    const seed: FleetSaid[] = ws.recentMessages.map((m) => ({
+      id: m.messageId,
+      sessionId: m.sessionId,
+      role: m.role === 'assistant' ? 'assistant' : 'user',
+      origin: m.role === 'assistant' ? null : m.origin,
+      text: m.truncated ? `${m.text}…` : m.text,
+      at: Number(m.createdAt),
+    }));
     const preview = ws.lastAssistantMessage;
-    const lastMessage: FleetNote | null = preview
-      ? { id: preview.messageId, text: preview.truncated ? `${preview.text}…` : preview.text, at: Number(preview.createdAt) }
-      : null;
+    if (preview && mainSessionId && !seed.some((m) => m.id === preview.messageId)) {
+      seed.push({
+        id: preview.messageId,
+        sessionId: mainSessionId,
+        role: 'assistant',
+        origin: null,
+        text: preview.truncated ? `${preview.text}…` : preview.text,
+        at: Number(preview.createdAt),
+      });
+    }
     // Approvals and grants carry no timestamp; the workspace's activity orders them among waiting cards.
-    const open: Record<string, FleetRequest> = {};
-    for (const a of ws.pendingAsks) open[requestKey('ask', a.pendingId)] = askRequest(a, Number(a.requestedAt));
-    for (const r of ws.pendingPermissions) open[requestKey('approval', r.requestId)] = toRequest({ kind: 'approval', request: r }, activity);
-    for (const r of ws.pendingPathGrants) open[requestKey('grant', r.requestId)] = toRequest({ kind: 'grant', request: r }, activity);
-    cards[ws.workspaceId] = {
-      ...card,
-      title: ws.title || card.title,
-      mainSessionId: ws.mainSessionId ?? card.mainSessionId,
-      lastActivityAt: Math.max(card.lastActivityAt, activity),
-      lastMessage:
-        lastMessage && (!card.lastMessage || lastMessage.at >= card.lastMessage.at) ? lastMessage : card.lastMessage,
-      requests: reconcile(card, open, now),
-    };
+    const requests: Record<string, FleetRequest> = {};
+    for (const a of ws.pendingAsks) requests[requestKey('ask', a.pendingId)] = askRequest(a, Number(a.requestedAt));
+    for (const r of ws.pendingPermissions) requests[requestKey('approval', r.requestId)] = toRequest({ kind: 'approval', request: r }, activity);
+    for (const r of ws.pendingPathGrants) requests[requestKey('grant', r.requestId)] = toRequest({ kind: 'grant', request: r }, activity);
+    // A request the store already holds keeps its own time.
+    for (const key of Object.keys(requests)) if (card.requests[key]) requests[key] = card.requests[key];
+    cards[ws.workspaceId] = addSaid(
+      {
+        ...card,
+        title: ws.title || card.title,
+        mainSessionId,
+        lastActivityAt: Math.max(card.lastActivityAt, activity),
+        requests,
+      },
+      seed,
+      false
+    );
   }
   return { cards };
 };
@@ -336,9 +350,7 @@ export interface FleetAttention {
 
 /** The card's open requests, oldest first: the order they are answered in. */
 export const openRequests = (card: FleetCard): FleetRequest[] =>
-  Object.values(card.requests)
-    .filter((r) => r.resolvedAt == null)
-    .sort((a, b) => a.at - b.at);
+  Object.values(card.requests).sort((a, b) => a.at - b.at);
 
 export const cardAttention = (card: FleetCard): FleetAttention => {
   const open = openRequests(card);
@@ -367,7 +379,11 @@ export const agentOf = (task: WorkspaceTaskResponse): FleetAgentRef => ({
   seed: task.assignedAgentDefinitionId || task.assignedToWorkspaceAgentId,
 });
 
-const subtree = (node: TaskNode): WorkspaceTaskResponse[] => [node.task, ...node.children.flatMap(subtree)];
+/** An agent as a message names it, with the same face seed as its tasks. */
+const agentRef = (agent: AgentRefSnapshot): FleetAgentRef => ({
+  name: agent.displayName,
+  seed: agent.agentDefinitionId || agent.workspaceAgentId,
+});
 
 /** Every distinct agent with a task on the card, live ones first, then the most recent. */
 export const cardAgents = (card: FleetCard, live: FleetLive): FleetAgentRef[] => {
@@ -377,88 +393,61 @@ export const cardAgents = (card: FleetCard, live: FleetLive): FleetAgentRef[] =>
   return [...new Map(tasks.map((t) => [agentOf(t).seed, agentOf(t)])).values()];
 };
 
-// ── The comic page: what a small card says ────────────────────────────────
+
+// ── A miniature: the workspace's conversation, as highlights ─────────────
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-/** A finished task keeps the speech bubble this long, then moves to Earlier. */
+/** A task that just ended keeps the panel's caption "Just finished" this long. */
 export const FRESH_MS = 10 * 60 * 1000;
 /** A card whose last word is older than this is stale: its drawing fades. */
 export const STALE_MS = DAY_MS;
-/** Speaking rows a card draws: running tasks first, then just-finished ones. */
-export const TALK_LIMIT = 3;
-export const EARLIER_LIMIT = 2;
+/** The newest highlights drawn as bubbles; older ones collapse to one-line rows. */
+export const BUBBLES = 2;
+/** Highlights a miniature has; rows that don't fit hide from the top. */
+export const FEED_LIMIT = 16;
 const SENTENCE_CHARS = 200;
+/**
+ * How a task's assignment message starts (`assignment_text` in
+ * `workspace_tasks.rs`): its task's creation says it, by title.
+ */
+const ASSIGNMENT_PREFIX = 'You have been assigned a workspace-local task';
 
 export interface FleetAgentRef {
   name: string;
   seed: string;
 }
 
-/** A top-level task in flight: Main hands it over, the agent thinks. */
-export interface FleetRunningTalk {
-  key: string;
-  taskId: string;
-  title: string;
-  agent: FleetAgentRef;
-  queued: boolean;
-  /** Other agents working on its subtasks. */
-  helpers: number;
-  /** When it was handed over. */
-  at: number;
-}
+export type FleetSpeaker = { kind: 'you' } | { kind: 'main' } | { kind: 'agent'; agent: FleetAgentRef };
 
-/** A task that just ended: the agent answers, and Main's question shrinks. */
-export interface FleetResultTalk {
-  key: string;
-  taskId: string;
-  asked: string;
-  result: string;
-  failed: boolean;
-  agent: FleetAgentRef;
-  at: number;
-}
+export type FleetOutcome = 'done' | 'failed' | 'stopped';
 
-export type FleetOutcome = 'done' | 'failed' | 'stopped' | 'answered';
-
-export interface FleetEarlierItem {
+/** One thing said in the workspace: who to whom, what, and how a task ended. */
+export interface FleetLine {
   key: string;
-  /** `null` for an answered question. */
-  taskId: string | null;
-  title: string;
-  /** The stage's full result; empty on a small card. */
-  result: string;
-  /** `null` for a question the user answered. */
-  agent: FleetAgentRef | null;
-  outcome: FleetOutcome;
   at: number;
+  from: FleetSpeaker;
+  to: FleetSpeaker;
+  /** As plain text, for a bubble that clamps its lines. */
+  text: string;
+  /** The first sentence, for a one-line row. */
+  headline: string;
+  /** A task's result. */
+  outcome: FleetOutcome | null;
+  /** A task handed over and not ended yet: its agent is (or will be) working. */
+  live: 'running' | 'queued' | null;
 }
 
 export type FleetMood = 'working' | 'fresh' | 'idle' | 'stale';
 
-export interface FleetSpeech extends FleetNote {
-  /** The message as plain text, for a bubble that clamps its lines. */
-  plain: string;
-  /** The first sentence, where the card has room for little more. */
-  headline: string;
-}
-
 /**
- * What a small card says, in comic form: the caption says when, the bubbles
- * say what. Everything comes from events (tasks, messages, answers) and the
- * time of the last one, so polling that changes nothing changes nothing here.
+ * What a miniature says: the caption says when, the lines say what, oldest
+ * first. Lines come from events and tasks only, so polling that changes
+ * nothing changes nothing here; the mood and caption age with the clock.
  */
-export interface FleetScene {
+export interface FleetFeed {
   mood: FleetMood;
   caption: FleetCaption;
-  running: FleetRunningTalk[];
-  finished: FleetResultTalk[];
-  /** Main's own run is in flight. */
-  mainBusy: boolean;
-  /** Main's last message, to the reader. */
-  toYou: FleetSpeech | null;
-  userMessage: FleetNote | null;
-  /** Newest first. */
-  earlier: FleetEarlierItem[];
+  lines: FleetLine[];
 }
 
 /** One markdown line as plain text: no block markers, emphasis or link targets. */
@@ -551,86 +540,98 @@ const mainRunning = (card: FleetCard, live: FleetLive): boolean => {
   return (live.runs[card.workspaceId] ?? []).some((id) => !taskRuns.has(id));
 };
 
-/** The headline of how a task ended, or (`full`) everything it said. */
-const resultOf = (task: WorkspaceTaskResponse, full: boolean): string => {
-  const said = task.status === 'failed' ? task.error : task.resultSummary;
-  const text = full ? (said ?? '').trim() : firstSentence(said);
-  return text || (task.status === 'failed' ? taskDisplayStatus(task).label : task.title);
-};
+
+const YOU: FleetSpeaker = { kind: 'you' };
+const MAIN: FleetSpeaker = { kind: 'main' };
+const agentSpeaker = (agent: FleetAgentRef): FleetSpeaker => ({ kind: 'agent', agent });
+const OUTCOMES: Partial<Record<TaskStatus, FleetOutcome>> = { completed: 'done', failed: 'failed', stopped: 'stopped' };
+
+/** How a task ended, in a few words. */
+const resultOf = (task: WorkspaceTaskResponse): string =>
+  (task.status === 'failed' ? task.error : task.resultSummary)?.trim() ||
+  (task.status === 'failed' ? taskDisplayStatus(task).label : task.title);
+
+const line = (
+  key: string,
+  at: number,
+  from: FleetSpeaker,
+  to: FleetSpeaker,
+  text: string,
+  outcome: FleetOutcome | null = null,
+  live: FleetLine['live'] = null
+): FleetLine => ({ key, at, from, to, text: plainText(text), headline: firstSentence(text), outcome, live });
 
 /**
- * What a card says. A small card draws `TALK_LIMIT` speaking rows and
- * `EARLIER_LIMIT` history lines, each result cut to its first sentence; the
- * stage (`stage: true`) draws everything, in full, and scrolls.
+ * A miniature's highlights, oldest first: the user's messages and Main's
+ * replies on the main session, what agents told each other (Main to a task,
+ * a task's report to whoever handed it over), and each task handed over and
+ * ended. Tool calls are never said. A task's report is how it ended; its own
+ * status says so only when no report has arrived.
  */
-export const cardScene = (card: FleetCard, live: FleetLive, now: number, { stage = false } = {}): FleetScene => {
-  const talkLimit = stage ? Infinity : TALK_LIMIT;
-  const running: FleetRunningTalk[] = [];
-  const finished: FleetResultTalk[] = [];
-  const earlier: FleetEarlierItem[] = [];
-  for (const node of buildTaskTree(workspaceTasks(card, live))) {
-    const root = node.task;
-    const group = subtree(node);
-    const agent = agentOf(root);
-    if (group.some((t) => isTaskLive(t.status))) {
-      const helpers = new Set(group.map((t) => agentOf(t).seed).filter((seed) => seed !== agent.seed)).size;
-      running.push({ key: `task:${root.id}`, taskId: root.id, title: root.title, agent, queued: root.status === 'queued', helpers, at: Number(root.createdAt) });
-      continue;
-    }
-    const at = Math.max(...group.map((t) => Number(t.completedAt ?? t.updatedAt)));
-    const failed = root.status === 'failed';
-    if (root.status !== 'stopped' && at >= now - FRESH_MS) {
-      finished.push({ key: `task:${root.id}`, taskId: root.id, asked: root.title, result: resultOf(root, stage), failed, agent, at });
+export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFeed => {
+  const tasks = workspaceTasks(card, live);
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const bySession = new Map(tasks.flatMap((t) => (t.sessionId ? [[t.sessionId, t] as const] : [])));
+  const main = card.mainSessionId;
+  const ownerOf = (sessionId: string): FleetSpeaker | null => {
+    if (sessionId === main) return MAIN;
+    const task = bySession.get(sessionId);
+    return task ? agentSpeaker(agentOf(task)) : null;
+  };
+
+  const lines: FleetLine[] = [];
+  const reported = new Set<string>();
+  for (const said of card.said) {
+    const to = said.role === 'assistant' ? (said.sessionId === main ? YOU : null) : ownerOf(said.sessionId);
+    const origin = said.origin;
+    if (!to) continue;
+    if (!origin) {
+      lines.push(line(said.id, said.at, MAIN, to, said.text));
+    } else if (origin.kind === 'user') {
+      lines.push(line(said.id, said.at, YOU, to, said.text));
+    } else if (origin.kind === 'agent') {
+      if (said.text.startsWith(ASSIGNMENT_PREFIX)) continue;
+      const from = origin.agent.isDefault ? MAIN : agentSpeaker(agentRef(origin.agent));
+      lines.push(line(said.id, said.at, from, to, said.text));
     } else {
-      const outcome = failed ? 'failed' : root.status === 'stopped' ? 'stopped' : 'done';
-      const result = stage && root.status !== 'stopped' ? plainText(resultOf(root, true)) : '';
-      earlier.push({ key: `task:${root.id}`, taskId: root.id, title: root.title, result, agent, outcome, at });
+      reported.add(`${origin.taskId}:${origin.cycleNo}`);
+      lines.push(line(said.id, said.at, agentSpeaker(agentRef(origin.agent)), to, said.text, OUTCOMES[origin.status] ?? null));
     }
   }
-  for (const [key, request] of Object.entries(card.requests)) {
-    if (request.resolvedAt != null) earlier.push({ key, taskId: null, title: request.text, result: '', agent: null, outcome: 'answered', at: request.resolvedAt });
+  for (const task of tasks) {
+    const agent = agentSpeaker(agentOf(task));
+    const parent = task.parentTaskId ? byId.get(task.parentTaskId) : undefined;
+    const boss = parent ? agentSpeaker(agentOf(parent)) : MAIN;
+    const state = task.status === 'queued' ? 'queued' : isTaskLive(task.status) ? 'running' : null;
+    lines.push(line(`task:${task.id}`, Number(task.createdAt), boss, agent, task.title, null, state));
+    const outcome = OUTCOMES[task.status];
+    if (outcome && !reported.has(`${task.id}:${task.cycleNo}`)) {
+      lines.push(line(`ended:${task.id}`, Number(task.completedAt ?? task.updatedAt), agent, boss, resultOf(task), outcome));
+    }
   }
+  lines.sort((a, b) => a.at - b.at);
+  const shown = lines.slice(-FEED_LIMIT);
 
-  finished.sort((a, b) => b.at - a.at);
-  const shownRunning = running.slice(0, talkLimit);
-  const shownFinished = finished.slice(0, talkLimit - shownRunning.length);
-  // Results with no room to speak are already history.
-  for (const f of finished.slice(shownFinished.length)) {
-    earlier.push({ key: f.key, taskId: f.taskId, title: f.asked, result: '', agent: f.agent, outcome: f.failed ? 'failed' : 'done', at: f.at });
-  }
-  earlier.sort((a, b) => b.at - a.at);
-
-  const mainBusy = mainRunning(card, live);
-  const lastWord = card.lastMessage?.at ?? card.lastActivityAt;
+  const working = tasks.filter((t) => isTaskLive(t.status)).length;
+  const ended = [...shown].reverse().find((l) => l.outcome === 'done' || l.outcome === 'failed');
+  const lastWord = shown.at(-1)?.at ?? card.lastActivityAt;
   const mood: FleetMood =
-    running.length > 0 || mainBusy
+    working > 0 || mainRunning(card, live)
       ? 'working'
-      : shownFinished.length > 0
+      : ended && now - ended.at < FRESH_MS
         ? 'fresh'
         : lastWord > 0 && now - lastWord >= STALE_MS
           ? 'stale'
           : 'idle';
   const caption: FleetCaption =
     mood === 'working'
-      ? { kind: 'working', count: running.length }
+      ? { kind: 'working', count: working }
       : mood === 'fresh'
-        ? { kind: 'fresh', at: shownFinished[0]!.at }
+        ? { kind: 'fresh', at: ended!.at }
         : lastWord > 0
           ? { kind: mood, at: lastWord }
           : { kind: 'empty' };
-
-  return {
-    mood,
-    caption,
-    running: shownRunning,
-    finished: shownFinished,
-    mainBusy,
-    toYou: card.lastMessage
-      ? { ...card.lastMessage, plain: plainText(card.lastMessage.text), headline: firstSentence(card.lastMessage.text) }
-      : null,
-    userMessage: card.userMessage,
-    earlier: stage ? earlier : earlier.slice(0, EARLIER_LIMIT),
-  };
+  return { mood, caption, lines: shown };
 };
 
 /**
@@ -650,15 +651,15 @@ export type FleetLoudness = 'needs' | 'done' | null;
 
 export interface FleetPanel {
   card: FleetCard;
-  /** `null` while the card shows an open request. */
-  scene: FleetScene | null;
+  /** `null` on the stage, or while the card shows an open request. */
+  feed: FleetFeed | null;
   selected: boolean;
 }
 
 export interface FleetLoud {
   /** Loudness by workspace id; a card missing here is quiet. */
   cards: Record<string, FleetLoudness>;
-  /** Keys of the rows that shout: the newest running task, the loud card's newest result. */
+  /** Keys of the lines that shout: the newest running task, the loud card's newest result. */
   rows: ReadonlySet<string>;
 }
 
@@ -670,19 +671,19 @@ export interface FleetLoud {
  */
 export const fleetLoudness = (panels: FleetPanel[]): FleetLoud => {
   const cards: Record<string, FleetLoudness> = {};
-  let go: FleetRunningTalk | undefined;
-  let done: { id: string; talk: FleetResultTalk } | undefined;
-  for (const { card, scene, selected } of panels) {
+  let go: FleetLine | undefined;
+  let done: { id: string; line: FleetLine } | undefined;
+  for (const { card, feed, selected } of panels) {
     if (!selected && openRequests(card).length > 0) cards[card.workspaceId] = 'needs';
-    for (const talk of scene?.running ?? []) if (!talk.queued && (!go || talk.at > go.at)) go = talk;
-    if (selected || scene?.mood !== 'fresh') continue;
+    for (const l of feed?.lines ?? []) if (l.live === 'running' && (!go || l.at > go.at)) go = l;
+    if (selected || feed?.mood !== 'fresh') continue;
     // A failure is news too, but not a cheer.
-    for (const talk of scene.finished) if (!talk.failed && (!done || talk.at > done.talk.at)) done = { id: card.workspaceId, talk };
+    for (const l of feed.lines) if (l.outcome === 'done' && (!done || l.at > done.line.at)) done = { id: card.workspaceId, line: l };
   }
   const rows = new Set(go ? [go.key] : []);
   if (done && Object.keys(cards).length === 0) {
     cards[done.id] = 'done';
-    rows.add(done.talk.key);
+    rows.add(done.line.key);
   }
   return { cards, rows };
 };
@@ -755,93 +756,58 @@ export const liveAgents = (card: FleetCard, live: FleetLive): LiveAgent[] => {
   return agents.sort((a, b) => Number(b.running) - Number(a.running));
 };
 
-// ── Which cards, where ───────────────────────────────────────────────────
 
-export const CARD_MIN_WIDTH = 320;
-export const CARD_MIN_HEIGHT = 200;
-export const GRID_GAP = 16;
-const MAX_COLS = 4;
-const MAX_ROWS = 3;
-
-export interface GridCapacity {
-  cols: number;
-  rows: number;
-}
-
-export const gridCapacity = (width: number, height: number): GridCapacity => ({
-  cols: Math.min(MAX_COLS, Math.max(1, Math.floor((width + GRID_GAP) / (CARD_MIN_WIDTH + GRID_GAP)))),
-  rows: Math.min(MAX_ROWS, Math.max(1, Math.floor((height + GRID_GAP) / (CARD_MIN_HEIGHT + GRID_GAP)))),
-});
-
-/** The stage: the top-left 2 × 2 slot (smaller on a smaller grid). */
-export const stageSpan = (capacity: GridCapacity): GridCapacity => ({
-  cols: Math.min(2, capacity.cols),
-  rows: Math.min(2, capacity.rows),
-});
+// ── Which cards, in which order ─────────────────────────────────────────
 
 /**
- * The tracks `count` cards fill, within `capacity`: the stage plus the columns
- * beside it, then full rows below. Sizing the grid by its capacity instead
- * leaves the unused rows and columns empty, so a short Fleet stops short of
- * the terminal.
- */
-export const gridShape = (capacity: GridCapacity, count: number): GridCapacity => {
-  const stage = stageSpan(capacity);
-  const side = capacity.cols - stage.cols;
-  const small = Math.max(0, count - 1);
-  if (small <= side * stage.rows) {
-    return { cols: stage.cols + Math.ceil(small / stage.rows), rows: stage.rows };
-  }
-  const below = Math.ceil((small - side * stage.rows) / capacity.cols);
-  return { cols: capacity.cols, rows: Math.min(capacity.rows, stage.rows + below) };
-};
-
-/**
- * The visible cards, in slot order; slot 0 is the stage. Eligible: the
- * selected card, anything live, and workspaces active within
- * `RECENT_WINDOW_MS`. When they don't all fit, the selected card wins, then
- * waiting ones (oldest first), then the most recent. Cards already visible
- * keep their slots (`prevOrder`) and newcomers take the next ones. The stage
- * starts with the most recent card; selecting a card swaps it with the stage
- * card, and nothing else moves.
+ * The cards, in order. Eligible: the selected card, anything live, and
+ * workspaces active within `RECENT_WINDOW_MS`. Cards already shown keep
+ * their place (`prevOrder`); newcomers follow, waiting ones first (oldest
+ * first), then the most recent. Selecting a card moves nothing: it takes the
+ * stage and the others keep their order beside it.
  */
 export const pickCards = (
   cards: readonly FleetCard[],
-  options: { now: number; capacity: GridCapacity; selectedId: string | null; prevOrder: readonly string[]; live: FleetLive }
+  options: { now: number; selectedId: string | null; prevOrder: readonly string[]; live: FleetLive }
 ): string[] => {
-  const { now, capacity, selectedId, prevOrder, live } = options;
-  const stage = stageSpan(capacity);
+  const { now, selectedId, prevOrder, live } = options;
   const meta = cards
     .map((card) => ({ id: card.workspaceId, card, phase: cardPhase(card, live), since: cardAttention(card).since ?? 0 }))
     .filter(
       (m) => m.id === selectedId || m.phase !== 'stopped' || m.card.lastActivityAt >= now - RECENT_WINDOW_MS
     );
   const rank = (m: (typeof meta)[number]): [number, number] =>
-    m.id === selectedId ? [0, 0] : m.phase === 'waiting' ? [1, m.since] : [2, -m.card.lastActivityAt];
-  const chosen = meta
-    .sort((a, b) => {
-      const [ra, ka] = rank(a);
-      const [rb, kb] = rank(b);
-      return ra - rb || ka - kb;
-    })
-    .slice(0, capacity.cols * capacity.rows - stage.cols * stage.rows + 1);
-  if (chosen.length === 0) return [];
+    m.phase === 'waiting' ? [0, m.since] : [1, -m.card.lastActivityAt];
+  const chosen = meta.sort((a, b) => {
+    const [ra, ka] = rank(a);
+    const [rb, kb] = rank(b);
+    return ra - rb || ka - kb;
+  });
   const ids = new Set(chosen.map((m) => m.id));
-  let order = prevOrder.filter((id) => ids.has(id));
-  if (order[0] !== prevOrder[0] || order.length === 0) {
-    const mostRecent = chosen.reduce((a, b) => (b.card.lastActivityAt > a.card.lastActivityAt ? b : a)).id;
-    order = [mostRecent, ...order.filter((id) => id !== mostRecent)];
-  }
+  const order = prevOrder.filter((id) => ids.has(id));
   order.push(...chosen.filter((m) => !order.includes(m.id)).map((m) => m.id));
-  const at = selectedId ? order.indexOf(selectedId) : -1;
-  if (at > 0) [order[0], order[at]] = [order[at]!, order[0]!];
   return order;
 };
 
-/** The card `step` slots after `selectedId` (±1), wrapping; from no selection, the first or the last. */
 export const cycleCard = (order: readonly string[], selectedId: string | null, step: 1 | -1): string | null => {
   if (order.length === 0) return null;
   const at = selectedId ? order.indexOf(selectedId) : -1;
   if (at < 0) return step > 0 ? order[0]! : order[order.length - 1]!;
   return order[(at + step + order.length) % order.length]!;
+};
+
+/** The miniatures' grid: columns, and rows on screen before it scrolls. */
+export interface BoardShape {
+  cols: number;
+  rows: number;
+}
+
+/**
+ * Beside the stage, four miniatures 2 × 2; with nothing selected, six
+ * cards 3 × 2. Beyond that the miniatures scroll; with fewer, each grows.
+ */
+export const boardShape = (count: number, staged: boolean): BoardShape => {
+  if (staged) return count <= 1 ? { cols: 1, rows: 1 } : count === 2 ? { cols: 1, rows: 2 } : { cols: 2, rows: 2 };
+  if (count <= 3) return { cols: Math.max(1, count), rows: 1 };
+  return count === 4 ? { cols: 2, rows: 2 } : { cols: 3, rows: 2 };
 };

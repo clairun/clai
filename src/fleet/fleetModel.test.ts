@@ -9,17 +9,18 @@ import type {
 } from '../generated/bindings';
 import {
   EMPTY_FLEET,
-  EARLIER_LIMIT,
+  FEED_LIMIT,
   FRESH_MS,
+  SAID_LIMIT,
   STALE_MS,
-  TALK_LIMIT,
   RECENT_WINDOW_MS,
   applyAssistantEvent,
   applyRequest,
   applyRequestResolved,
   applyUserSent,
   cardAttention,
-  cardScene,
+  boardShape,
+  cardFeed,
   captionText,
   fleetLoudness,
   shoutLevel,
@@ -29,12 +30,11 @@ import {
   openRequests,
   cardPhase,
   emptyCard,
-  gridCapacity,
-  gridShape,
   liveAgents,
   pickCards,
   seedFleet,
   type FleetCard,
+  type FleetLine,
   type FleetLive,
   type FleetPanel,
   type FleetState,
@@ -48,8 +48,8 @@ const NOW = Date.UTC(2026, 9, 18, 12);
 const env = (event: AssistantUiEvent, at: number, sessionId = MAIN, workspaceId = WS): AssistantEventEnvelope =>
   ({ sessionId, runId: null, workspaceId, timestamp: BigInt(at), event }) as AssistantEventEnvelope;
 
-const message = (id: string, role: 'user' | 'assistant', text: string, origin: AssistantMessage['origin'] = { kind: 'user' }): AssistantMessage =>
-  ({ id, sessionId: MAIN, role, content: [{ type: 'text', text }], createdAt: 0n, providerMetadata: null, origin }) as AssistantMessage;
+const message = (id: string, role: 'user' | 'assistant', text: string, origin: AssistantMessage['origin'] = { kind: 'user' }, sessionId = MAIN): AssistantMessage =>
+  ({ id, sessionId, role, content: [{ type: 'text', text }], createdAt: 0n, providerMetadata: null, origin }) as AssistantMessage;
 
 const run = (id: string): AssistantRun =>
   ({ id, sessionId: MAIN, status: 'running', trigger: 'user_message', connectionId: 'c', protocolId: 'p', modelId: 'm', startedAt: 0n, completedAt: null, error: null }) as AssistantRun;
@@ -63,6 +63,7 @@ const task = (id: string, status: WorkspaceTaskResponse['status'], updatedAt: nu
     failureReason: null,
     runId: null,
     sessionId: `task-session-${id}`,
+    cycleNo: 1n,
     parentTaskId: null,
     assignedAgentDisplayName: 'Researcher',
     assignedAgentDefinitionId: 'def-r',
@@ -91,6 +92,24 @@ const card = (state: FleetState, id = WS): FleetCard => state.cards[id]!;
 /** A workspace whose main session is `MAIN`, as the snapshot or a send would set it. */
 const withMain = (state: FleetState = EMPTY_FLEET) => applyUserSent(state, WS, MAIN, null, 0);
 
+const MANAGER = { workspaceAgentId: 'wa-main', agentDefinitionId: 'def-main', displayName: 'Manager', isDefault: true };
+const WRITER = { workspaceAgentId: 'wa-w', agentDefinitionId: 'def-w', displayName: 'Writer', isDefault: false };
+const RESEARCHER = { workspaceAgentId: 'wa-r', agentDefinitionId: 'def-r', displayName: 'Researcher', isDefault: false };
+const fromAgent = (agent = MANAGER): AssistantMessage['origin'] => ({ kind: 'agent', agent, sessionId: MAIN, runId: null, replyAddress: null });
+const report = (taskId: string, status: WorkspaceTaskResponse['status'], agent = RESEARCHER): AssistantMessage['origin'] =>
+  ({ kind: 'task', taskId, agent, title: `Task ${taskId}`, cycleNo: 1n, status }) as AssistantMessage['origin'];
+
+const created = (m: AssistantMessage, at: number) => env({ type: 'message_created', payload: { message: m } } as AssistantUiEvent, at, m.sessionId);
+const completed = (m: AssistantMessage, at: number) => env({ type: 'assistant_message_completed', payload: { message: m } } as AssistantUiEvent, at, m.sessionId);
+
+/** A line as `from → to: headline [outcome|live]`, for readable expectations. */
+const said = (l: FleetLine) => {
+  const name = (s: FleetLine['from']) => (s.kind === 'agent' ? s.agent.name : s.kind === 'you' ? 'You' : 'Main');
+  return `${name(l.from)} → ${name(l.to)}: ${l.headline}${l.outcome ? ` [${l.outcome}]` : ''}${l.live ? ` [${l.live}]` : ''}`;
+};
+const feedOf = (state: FleetState, live = NO_LIVE, now = NOW) => cardFeed(card(state), live, now);
+const lines = (state: FleetState, live = NO_LIVE) => feedOf(state, live).lines.map(said);
+
 describe('fleet reducer', () => {
   it('ignores streaming variants without producing a new state', () => {
     const base = apply(EMPTY_FLEET, env({ type: 'run_started', payload: { run: run('r1') } }, 1));
@@ -98,80 +117,41 @@ describe('fleet reducer', () => {
       { type: 'assistant_delta', payload: { message_id: 'm', text: 'x' } },
       { type: 'assistant_thinking_delta', payload: { message_id: 'm', text: 'x' } },
       { type: 'assistant_message_updated', payload: { message: message('m', 'assistant', 'x') } },
+      { type: 'tool_call_started', payload: { invocation: {} } },
+      { type: 'tool_call_completed', payload: { invocation: {} } },
     ] as AssistantUiEvent[];
     for (const event of streaming) {
       expect(applyAssistantEvent(base, env(event, 99))).toBe(base);
     }
   });
 
-  it("shows the user's own message until another message or event arrives", () => {
-    let s = apply(withMain(), env({ type: 'message_created', payload: { message: message('u1', 'user', 'Please deploy') } }, 1));
-    expect(card(s).userMessage?.text).toBe('Please deploy');
-    // Run lifecycle is not a displayed event: the message stays, but counts as activity.
-    s = apply(s, env({ type: 'run_started', payload: { run: run('r1') } }, 2));
-    expect(card(s).userMessage?.text).toBe('Please deploy');
-    expect(card(s).lastActivityAt).toBe(2);
-    s = apply(s, env({ type: 'task_updated', payload: { task: task('t1', 'running', 3) } }, 3));
-    expect(card(s).userMessage).toBeNull();
-    s = apply(s, env({ type: 'message_created', payload: { message: message('u2', 'user', 'Also this') } }, 4));
-    s = apply(s, env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'On it') } }, 5));
-    expect(card(s).userMessage).toBeNull();
-    expect(card(s).lastMessage?.text).toBe('On it');
+  it('keeps every message said, in time order, at most SAID_LIMIT; a deleted one leaves', () => {
+    let s = withMain();
+    for (let i = 0; i < SAID_LIMIT + 3; i++) s = apply(s, created(message(`u${i}`, 'user', `Message ${i}.`), 100 - i));
+    expect(card(s).said).toHaveLength(SAID_LIMIT);
+    expect(card(s).said[0]!.id).toBe(`u${SAID_LIMIT - 1}`);
+    expect(card(s).said.at(-1)!.id).toBe('u0');
+    s = apply(s, env({ type: 'message_deleted', payload: { message_id: 'u0' } } as AssistantUiEvent, 200));
+    expect(card(s).said.map((m) => m.id)).not.toContain('u0');
   });
 
-  it('does not take a task-result message for the user', () => {
-    const s = apply(
-      withMain(),
-      env({ type: 'message_created', payload: { message: message('u1', 'user', 'go') } }, 1),
-      env({ type: 'message_created', payload: { message: message('m2', 'user', 'result', { kind: 'task', taskId: 't', agent: { workspaceAgentId: 'a', displayName: 'R', isDefault: false }, title: 'T', cycleNo: 1n, status: 'completed' }) } }, 2),
-    );
-    expect(card(s).userMessage).toBeNull();
+  it('keeps no assistant message of a task session, and nothing of a tool-only message', () => {
+    let s = apply(withMain(), completed(message('t1', 'assistant', 'Working on it', { kind: 'user' }, 'task-session-t'), 1));
+    s = apply(s, completed(message('a1', 'assistant', ''), 2));
+    expect(card(s).said).toEqual([]);
   });
 
-  it('reads messages from the main session only, and never guesses which one that is', () => {
-    const fromTask = [
-      env({ type: 'message_created', payload: { message: message('u1', 'user', 'from the human') } }, 1, 'task-session'),
-      env({ type: 'assistant_message_completed', payload: { message: message('x', 'assistant', 'task text') } }, 2, 'task-session'),
-    ];
-    // No main known yet: nothing is adopted, whatever the origin.
-    let s = apply(EMPTY_FLEET, ...fromTask);
-    expect(card(s).mainSessionId).toBeNull();
-    expect(card(s).userMessage).toBeNull();
-    expect(card(s).lastMessage).toBeNull();
-    expect(card(s).lastActivityAt).toBe(2);
-    s = apply(withMain(), ...fromTask);
-    expect(card(s).mainSessionId).toBe(MAIN);
-    expect(card(s).userMessage).toBeNull();
-    expect(card(s).lastMessage).toBeNull();
-  });
-
-  it('/clear moves the main to the fresh session', () => {
-    let s = apply(withMain(), env({ type: 'message_created', payload: { message: message('u1', 'user', 'old') } }, 1));
-    s = applyUserSent(s, WS, 'fresh', null, 2);
-    expect(card(s).mainSessionId).toBe('fresh');
-    expect(card(s).userMessage).toBeNull();
-    s = apply(s, env({ type: 'assistant_message_completed', payload: { message: message('a', 'assistant', 'Hi again') } }, 3, 'fresh'));
-    expect(card(s).lastMessage?.text).toBe('Hi again');
-  });
-
-  it('drops a deleted user message', () => {
-    let s = apply(withMain(), env({ type: 'message_created', payload: { message: message('u1', 'user', 'oops') } }, 1));
-    s = apply(s, env({ type: 'message_deleted', payload: { message_id: 'other' } } as AssistantUiEvent, 2));
-    expect(card(s).userMessage?.id).toBe('u1');
-    s = apply(s, env({ type: 'message_deleted', payload: { message_id: 'u1' } } as AssistantUiEvent, 3));
-    expect(card(s).userMessage).toBeNull();
-  });
-
-  it('resolves each request by its own resolved event, user decisions included', () => {
+  it('resolves each request by its own resolved event; an answered one leaves', () => {
     let s = applyRequest(EMPTY_FLEET, { kind: 'approval', request: approval('a1') }, 1);
     s = applyRequest(s, { kind: 'approval', request: approval('a2') }, 2);
     s = applyRequest(s, { kind: 'grant', request: approval('a1') }, 3);
     expect(cardAttention(card(s))).toMatchObject({ approvals: 2, grants: 1, total: 3, since: 1 });
-    s = applyRequestResolved(s, 'approval', 'a1', 4);
+    s = applyRequestResolved(s, 'approval', 'a1');
     expect(cardAttention(card(s))).toMatchObject({ approvals: 1, grants: 1, total: 2, since: 2 });
-    expect(card(s).requests['grant:a1']!.resolvedAt).toBeNull();
-    // A duplicate resolve keeps the first time.
-    expect(applyRequestResolved(s, 'approval', 'a1', 9)).toBe(s);
+    expect(card(s).requests['approval:a1']).toBeUndefined();
+    expect(applyRequestResolved(s, 'approval', 'a1')).toBe(s);
+    s = apply(s, askEvent('q1', 4), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, 5));
+    expect(card(s).requests['ask:q1']).toBeUndefined();
   });
 
   it('keeps what answering needs on each open request, oldest first', () => {
@@ -184,7 +164,7 @@ describe('fleet reducer', () => {
       'task-session'
     );
     let s = applyRequest(apply(EMPTY_FLEET, ask), { kind: 'approval', request: approval('a1') }, 5);
-    s = applyRequestResolved(applyRequest(s, { kind: 'grant', request: approval('g1') }, 6), 'grant', 'g1', 7);
+    s = applyRequestResolved(applyRequest(s, { kind: 'grant', request: approval('g1') }, 6), 'grant', 'g1');
     expect(openRequests(card(s))).toMatchObject([
       {
         kind: 'ask',
@@ -205,93 +185,131 @@ describe('fleet reducer', () => {
     expect(cardPhase(asking, { runs: { [WS]: ['r'] }, tasks: {} })).toBe('waiting');
   });
 
-  it('turns finished tasks and answered questions into Earlier, newest first; answered approvals leave; open requests stay out', () => {
-    const live = withTasks(task('done', 'completed', 1), task('live', 'running', 2));
-    let s = apply(EMPTY_FLEET, askEvent('q1', 3), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, 4));
-    s = applyRequest(s, { kind: 'approval', request: approval('a1') }, 5);
-    s = applyRequestResolved(s, 'approval', 'a1', 6);
-    s = applyRequestResolved(applyRequest(s, { kind: 'grant', request: approval('g1') }, 7), 'grant', 'g1', 8);
-    const scene = cardScene(card(s), live, NOW);
-    expect(scene.earlier.map((e) => [e.key, e.outcome, e.agent?.name ?? null])).toEqual([
-      ['ask:q1', 'answered', null],
-      ['task:done', 'done', 'Researcher'],
-    ]);
-    expect(scene.running.map((r) => r.key)).toEqual(['task:live']);
+  it('says a request through whoever asked: a subtask\'s agent, a named agent, or Main', () => {
+    expect(requestScene(emptyCard(WS), NO_LIVE)).toBeNull();
+    const live = withTasks(task('sub', 'running', NOW, { sessionId: 'sub-session', assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w' }));
+    let s = apply(EMPTY_FLEET, askEvent('q1', NOW - 120_000));
+    expect(requestScene(card(s), live)).toMatchObject({ count: 1, asker: null, caption: { kind: 'waiting', at: NOW - 120_000 } });
+    s = apply(s, env({ type: 'ask_user_requested', payload: { pending_id: 'q2', question: 'Which?', options: null, multi_select: false } } as AssistantUiEvent, NOW - 200_000, 'sub-session'));
+    expect(requestScene(card(s), live)).toMatchObject({ count: 2, asker: { name: 'Writer', seed: 'def-w' }, request: { text: 'Which?' } });
+    const named = applyRequest(EMPTY_FLEET, { kind: 'approval', request: { ...(approval('a1') as object), agentName: 'Committer' } as never }, 5);
+    expect(requestScene(card(named), NO_LIVE)?.asker).toEqual({ name: 'Committer', seed: 'Committer' });
   });
 
-  it('draws a live task as one running talk, its subtasks as helpers', () => {
-    const live = withTasks(
-      task('root', 'completed', 1),
-      task('child', 'running', 2, { parentTaskId: 'root', assignedAgentDefinitionId: 'def-w', assignedAgentDisplayName: 'Writer' }),
-      task('next', 'queued', 3),
+});
+
+describe('the highlight feed', () => {
+  const live = withTasks(
+    task('t', 'completed', NOW - 50_000, { resultSummary: 'Found **3** leaks. Details follow.', completedAt: BigInt(NOW - 20_000) } as never),
+    task('r', 'running', NOW - 40_000, { title: 'Draft the post', assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w', assignedToWorkspaceAgentId: 'wa-w' })
+  );
+
+  it('says every kind of highlight, in the order it happened', () => {
+    const s = apply(
+      withMain(),
+      created(message('u1', 'user', 'Find the leaks. Then fix them.'), NOW - 60_000),
+      created(message('m2t', 'user', 'Also check **staging**.', fromAgent(), 'task-session-t'), NOW - 45_000),
+      created(message('w2t', 'user', 'Need the numbers.', fromAgent(WRITER), 'task-session-t'), NOW - 30_000),
+      created(message('rep', 'user', 'Found 3 leaks.', report('t', 'completed')), NOW - 19_000),
+      completed(message('a1', 'assistant', '## Summary\nThree leaks found.'), NOW - 10_000)
     );
-    expect(cardScene(emptyCard(WS), live, NOW).running).toEqual([
-      { key: 'task:root', taskId: 'root', title: 'Task root', agent: { name: 'Researcher', seed: 'def-r' }, queued: false, helpers: 1, at: 1 },
-      { key: 'task:next', taskId: 'next', title: 'Task next', agent: { name: 'Researcher', seed: 'def-r' }, queued: true, helpers: 0, at: 3 },
+    expect(lines(s, live)).toEqual([
+      'You → Main: Find the leaks.',
+      'Main → Researcher: Task t',
+      'Main → Researcher: Also check staging.',
+      'Main → Writer: Draft the post [running]',
+      'Writer → Researcher: Need the numbers.',
+      'Researcher → Main: Found 3 leaks. [done]',
+      'Main → You: Summary',
     ]);
   });
 
-  it('flips a just-finished task to its result for FRESH_MS, then moves it to Earlier', () => {
-    const at = NOW - 60_000;
-    const live = withTasks(task('t', 'completed', at, { resultSummary: 'Shipped **v2** to `main`. Tests pass.' }));
-    expect(cardScene(emptyCard(WS), live, NOW)).toMatchObject({
-      mood: 'fresh',
-      caption: { kind: 'fresh', at },
-      finished: [{ asked: 'Task t', result: 'Shipped v2 to main.', failed: false, at }],
-      earlier: [],
-    });
-    const later = cardScene(emptyCard(WS), live, at + FRESH_MS + 1);
-    expect(later.finished).toEqual([]);
-    expect(later.earlier).toMatchObject([{ key: 'task:t', title: 'Task t', outcome: 'done' }]);
-    // A stopped task is no result to show, however recent.
-    const stopped = cardScene(emptyCard(WS), withTasks(task('s', 'stopped', NOW - 5)), NOW);
-    expect(stopped.finished).toEqual([]);
-    expect(stopped.earlier).toMatchObject([{ key: 'task:s', outcome: 'stopped' }]);
-  });
-
-  it('says why a task failed, falling back to its label, and the title when a result is empty', () => {
-    const live = withTasks(
-      task('a', 'failed', NOW - 3, { error: 'Cargo ran out of disk. Free 2 GB.' }),
-      task('b', 'failed', NOW - 2, { failureReason: 'restart' }),
-      task('c', 'completed', NOW - 1, { resultSummary: '   ' }),
+  it("says how a task ended from its status when no report came, and a subtask answers its parent's agent", () => {
+    const tasks = withTasks(
+      task('p', 'running', NOW - 9_000),
+      task('f', 'failed', NOW - 8_000, { parentTaskId: 'p', assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w', error: 'Disk full. Retry later.', completedAt: BigInt(NOW - 5_000) } as never),
+      task('x', 'stopped', NOW - 7_000, { completedAt: BigInt(NOW - 6_000) } as never),
+      task('q', 'queued', NOW - 4_000)
     );
-    expect(cardScene(emptyCard(WS), live, NOW).finished.map((f) => [f.result, f.failed])).toEqual([
-      ['Task c', false],
-      ['Failed · interrupted', true],
-      ['Cargo ran out of disk.', true],
+    expect(lines(withMain(), tasks)).toEqual([
+      'Main → Researcher: Task p [running]',
+      'Researcher → Writer: Task f',
+      'Main → Researcher: Task x',
+      'Researcher → Main: Task x [stopped]',
+      'Writer → Researcher: Disk full. [failed]',
+      'Main → Researcher: Task q [queued]',
     ]);
   });
 
-  it('draws at most TALK_LIMIT talks, running first; results without room go to Earlier, at most EARLIER_LIMIT', () => {
-    const many = Array.from({ length: TALK_LIMIT + 1 }, (_, i) => task(`r${i}`, 'running', NOW));
-    const running = cardScene(emptyCard(WS), withTasks(...many), NOW);
-    expect(running.running).toHaveLength(TALK_LIMIT);
-    expect(captionText(running.caption, NOW)).toBe(`Now · ${TALK_LIMIT + 1} at once`);
-
-    const done = (id: string, ago: number) => task(id, 'completed', NOW - ago);
-    const mixed = cardScene(emptyCard(WS), withTasks(task('r', 'running', NOW), done('f1', 1), done('f2', 2), done('f3', 3), done('old', FRESH_MS + 5)), NOW);
-    expect(mixed.finished.map((f) => f.key)).toEqual(['task:f1', 'task:f2']);
-    expect(mixed.earlier.map((e) => e.key)).toEqual(['task:f3', 'task:old']);
-    expect(EARLIER_LIMIT).toBe(2);
+  it("does not repeat a task's assignment, and keeps no message whose session is neither the main nor a task's", () => {
+    const s = apply(
+      withMain(),
+      created(message('assign', 'user', 'You have been assigned a workspace-local task by a workspace agent.', fromAgent(), 'task-session-t'), NOW - 49_000),
+      created(message('elsewhere', 'user', 'Hello', { kind: 'user' }, 'other-session'), NOW - 1)
+    );
+    expect(lines(s, live)).toEqual(['Main → Researcher: Task t', 'Main → Writer: Draft the post [running]', 'Researcher → Main: Found 3 leaks. [done]']);
   });
 
-  it('keeps Main’s last word, with its first sentence, while the workspace works; a run of no task is Main’s', () => {
-    const s = apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', '## Done\nAll **green**. Next: deploy.') } }, NOW - 5));
-    const scene = cardScene(card(s), { runs: { [WS]: ['main-run'] }, tasks: {} }, NOW);
-    expect(scene).toMatchObject({ mood: 'working', caption: { kind: 'working', count: 0 }, mainBusy: true, toYou: { text: '## Done\nAll **green**. Next: deploy.', headline: 'Done' } });
-    expect(cardScene(card(s), withTasks(task('t', 'running', 1, { runId: 'task-run' } as never)), NOW).mainBusy).toBe(false);
+  it("keeps a running task's line live until it ends, and never says a tool call", () => {
+    const s = apply(withMain(), env({ type: 'tool_call_started', payload: { invocation: {} } } as unknown as AssistantUiEvent, NOW - 1));
+    const feed = feedOf(s, live);
+    expect(feed.lines.find((l) => l.key === 'task:r')).toMatchObject({ live: 'running', to: { kind: 'agent', agent: { name: 'Writer' } } });
+    expect(feed.lines.find((l) => l.key === 'task:t')?.live).toBeNull();
+    expect(feed.lines).toHaveLength(3);
   });
 
-  it('captions an idle card with its last word, and a stale one in days', () => {
-    const at = (ago: number) => card(apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'Hi.') } }, NOW - ago)));
-    const caption = (scene: { caption: Parameters<typeof captionText>[0] }, clock = NOW) => captionText(scene.caption, clock);
-    expect(cardScene(at(60_000), NO_LIVE, NOW).mood).toBe('idle');
-    expect(caption(cardScene(at(60_000), NO_LIVE, NOW))).toBe('Last word · 1 min ago');
-    expect(cardScene(at(STALE_MS), NO_LIVE, NOW).mood).toBe('stale');
-    expect(caption(cardScene(at(STALE_MS), NO_LIVE, NOW))).toBe('Yesterday');
-    expect(caption(cardScene(at(3 * STALE_MS + 5), NO_LIVE, NOW))).toBe('3 days ago');
-    expect(cardScene(emptyCard(WS), NO_LIVE, NOW)).toMatchObject({ mood: 'idle', toYou: null });
-    expect(caption(cardScene(emptyCard(WS), NO_LIVE, NOW))).toBe('Nothing yet');
+  it('holds at most FEED_LIMIT lines, the newest', () => {
+    let s = withMain();
+    for (let i = 0; i < FEED_LIMIT + 4; i++) s = apply(s, created(message(`u${i}`, 'user', `Line ${i}`), NOW - 1000 + i));
+    const shown = feedOf(s).lines;
+    expect(shown).toHaveLength(FEED_LIMIT);
+    expect(shown.at(-1)!.headline).toBe(`Line ${FEED_LIMIT + 3}`);
+  });
+
+  it('is working while a task or Main runs; just finished for FRESH_MS after a result; then idle or stale', () => {
+    expect(feedOf(withMain(), live)).toMatchObject({ mood: 'working', caption: { kind: 'working', count: 1 } });
+    expect(feedOf(withMain(), { runs: { [WS]: ['main-run'] }, tasks: {} })).toMatchObject({ mood: 'working', caption: { kind: 'working', count: 0 } });
+    const ended = withTasks(task('t', 'completed', NOW - 50_000, { completedAt: BigInt(NOW - 20_000) } as never));
+    expect(feedOf(withMain(), ended)).toMatchObject({ mood: 'fresh', caption: { kind: 'fresh', at: NOW - 20_000 } });
+    expect(cardFeed(card(withMain()), ended, NOW - 20_000 + FRESH_MS)).toMatchObject({ mood: 'idle', caption: { kind: 'idle', at: NOW - 20_000 } });
+    expect(cardFeed(card(withMain()), ended, NOW + STALE_MS)).toMatchObject({ mood: 'stale' });
+    expect(captionText(feedOf(withMain()).caption, NOW)).toBe('Nothing yet');
+  });
+
+  it('changes only with what happened: the same tasks fetched again give the same feed', () => {
+    const again = () => withTasks(task('t', 'completed', NOW - 10, { resultSummary: 'Done.' }), task('r', 'running', NOW));
+    expect(cardFeed(emptyCard(WS), again(), NOW)).toEqual(cardFeed(emptyCard(WS), again(), NOW));
+  });
+
+  it('shouts a beat in full, then at half strength, then not at all, over FRESH_MS', () => {
+    expect([0, FRESH_MS / 2 - 1, FRESH_MS / 2, FRESH_MS - 1, FRESH_MS].map((age) => shoutLevel(NOW - age, NOW))).toEqual(['full', 'full', 'half', 'half', null]);
+  });
+
+  it('draws loud every unselected card that needs the user, else only the newest good result; only the newest running task rushes in', () => {
+    const panel = (id: string, tasks: WorkspaceTaskResponse[], { asking = false, selected = false, now = NOW } = {}): FleetPanel => {
+      const c = asking ? { ...card(apply(EMPTY_FLEET, askEvent(`q-${id}`, 1))), workspaceId: id } : emptyCard(id);
+      const live = { runs: {}, tasks: { [id]: Object.fromEntries(tasks.map((t) => [t.id, { ...t, workspaceId: id }])) } };
+      return { card: c, feed: asking || selected ? null : cardFeed(c, live, now), selected };
+    };
+    const page = (asking: boolean) => [
+      panel('r1', [task('run1', 'running', NOW - 3 * 60_000)]),
+      panel('r2', [task('run2', 'running', NOW - 60_000), task('queued', 'queued', NOW)]),
+      panel('f1', [task('done1', 'completed', NOW - 2 * 60_000)]),
+      panel('f2', [task('done2', 'completed', NOW - 60_000), task('fail', 'failed', NOW - 10)]),
+      ...(asking ? [panel('ask', [], { asking: true })] : []),
+    ];
+    const loud = (panels: FleetPanel[]) => {
+      const { cards, rows } = fleetLoudness(panels);
+      return { cards, rows: [...rows] };
+    };
+    expect(loud(page(true))).toEqual({ cards: { ask: 'needs' }, rows: ['task:run2'] });
+    expect(loud(page(false))).toEqual({ cards: { f2: 'done' }, rows: ['task:run2', 'ended:done2'] });
+    // Every request stays loud; a selected card never is, so the next result cheers.
+    expect(loud([panel('a', [], { asking: true }), panel('b', [], { asking: true }), panel('c', [], { asking: true, selected: true })]).cards).toEqual({ a: 'needs', b: 'needs' });
+    expect(loud([...page(false).slice(0, 3), { ...page(false)[3]!, feed: null, selected: true }]).cards).toEqual({ f1: 'done' });
+    // A failure is not a cheer, and a result stops cheering after FRESH_MS.
+    expect(loud([panel('x', [task('f', 'failed', NOW - 60_000)])]).cards).toEqual({});
+    expect(loud([panel('x', [task('t', 'completed', NOW - 60_000)], { now: NOW + FRESH_MS })])).toEqual({ cards: {}, rows: [] });
   });
 
   it('words captions against the clock, so they age by the minute while the scene waits for events', () => {
@@ -309,71 +327,6 @@ describe('fleet reducer', () => {
     expect(captionText({ kind: 'waiting', at: NOW }, NOW + 10)).toBe('Waiting on you · under a minute');
     expect(captionText({ kind: 'fresh', at: NOW }, NOW + 10)).toBe('Just now');
     expect(captionText({ kind: 'fresh', at: NOW }, NOW + 3 * 60_000)).toBe('Just finished · 3 min ago');
-  });
-
-  it('draws everything on the stage: every talk, every result in full, the whole history with its results', () => {
-    const many = Array.from({ length: TALK_LIMIT + 2 }, (_, i) => task(`r${i}`, 'running', NOW));
-    const old = Array.from({ length: EARLIER_LIMIT + 3 }, (_, i) =>
-      task(`old${i}`, 'completed', NOW - FRESH_MS - 10 - i, { resultSummary: `Old **${i}**. More.` })
-    );
-    const live = withTasks(...many, ...old, task('f', 'completed', NOW - 1, { resultSummary: 'One. Two.' }), task('s', 'stopped', NOW - FRESH_MS - 99));
-    const stage = cardScene(emptyCard(WS), live, NOW, { stage: true });
-    expect(stage.running).toHaveLength(TALK_LIMIT + 2);
-    expect(stage.finished).toMatchObject([{ taskId: 'f', result: 'One. Two.' }]);
-    expect(stage.earlier).toHaveLength(EARLIER_LIMIT + 4);
-    expect(stage.earlier[0]).toMatchObject({ taskId: 'old0', result: 'Old 0. More.' });
-    expect(stage.earlier.find((e) => e.key === 'task:s')).toMatchObject({ outcome: 'stopped', result: '' });
-    // A small card of the same workspace keeps its limits and headlines.
-    const small = cardScene(emptyCard(WS), live, NOW);
-    expect([small.running.length, small.earlier.length, small.earlier[0]?.result]).toEqual([TALK_LIMIT, EARLIER_LIMIT, '']);
-  });
-
-  it('says a request through whoever asked: a subtask\'s agent, a named agent, or Main', () => {
-    expect(requestScene(emptyCard(WS), NO_LIVE)).toBeNull();
-    const live = withTasks(task('sub', 'running', NOW, { sessionId: 'sub-session', assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w' }));
-    let s = apply(EMPTY_FLEET, askEvent('q1', NOW - 120_000));
-    expect(requestScene(card(s), live)).toMatchObject({ count: 1, asker: null, caption: { kind: 'waiting', at: NOW - 120_000 } });
-    s = apply(s, env({ type: 'ask_user_requested', payload: { pending_id: 'q2', question: 'Which?', options: null, multi_select: false } } as AssistantUiEvent, NOW - 200_000, 'sub-session'));
-    expect(requestScene(card(s), live)).toMatchObject({ count: 2, asker: { name: 'Writer', seed: 'def-w' }, request: { text: 'Which?' } });
-    const named = applyRequest(EMPTY_FLEET, { kind: 'approval', request: { ...(approval('a1') as object), agentName: 'Committer' } as never }, 5);
-    expect(requestScene(card(named), NO_LIVE)?.asker).toEqual({ name: 'Committer', seed: 'Committer' });
-  });
-
-  it('shouts a beat in full, then at half strength, then not at all, over FRESH_MS', () => {
-    expect([0, FRESH_MS / 2 - 1, FRESH_MS / 2, FRESH_MS - 1, FRESH_MS].map((age) => shoutLevel(NOW - age, NOW))).toEqual(['full', 'full', 'half', 'half', null]);
-  });
-
-  it('draws loud every unselected card that needs the user, else only the newest good result; only the newest running task rushes in', () => {
-    const panel = (id: string, tasks: WorkspaceTaskResponse[], { asking = false, selected = false, now = NOW } = {}): FleetPanel => {
-      const c = asking ? { ...card(apply(EMPTY_FLEET, askEvent(`q-${id}`, 1))), workspaceId: id } : emptyCard(id);
-      const live = { runs: {}, tasks: { [id]: Object.fromEntries(tasks.map((t) => [t.id, { ...t, workspaceId: id }])) } };
-      return { card: c, scene: asking ? null : cardScene(c, live, now), selected };
-    };
-    const page = (asking: boolean) => [
-      panel('r1', [task('run1', 'running', NOW - 3 * 60_000)]),
-      panel('r2', [task('run2', 'running', NOW - 60_000), task('queued', 'queued', NOW)]),
-      panel('r3', [task('run3', 'running', NOW - 2 * 60_000)]),
-      panel('f1', [task('done1', 'completed', NOW - 2 * 60_000)]),
-      panel('f2', [task('done2', 'completed', NOW - 60_000), task('fail', 'failed', NOW - 10)]),
-      ...(asking ? [panel('ask', [], { asking: true })] : []),
-    ];
-    const loud = (panels: FleetPanel[]) => {
-      const { cards, rows } = fleetLoudness(panels);
-      return { cards, rows: [...rows] };
-    };
-    expect(loud(page(true))).toEqual({ cards: { ask: 'needs' }, rows: ['task:run2'] });
-    expect(loud(page(false))).toEqual({ cards: { f2: 'done' }, rows: ['task:run2', 'task:done2'] });
-    // Every request stays loud; a selected card never is, so the next result cheers.
-    expect(loud([panel('a', [], { asking: true }), panel('b', [], { asking: true }), panel('c', [], { asking: true, selected: true })]).cards).toEqual({ a: 'needs', b: 'needs' });
-    expect(loud([...page(false).slice(0, 4), { ...page(false)[4]!, selected: true }]).cards).toEqual({ f1: 'done' });
-    // A failure is not a cheer, and a result stops cheering after FRESH_MS.
-    expect(loud([panel('x', [task('f', 'failed', NOW - 60_000)])]).cards).toEqual({});
-    expect(loud([panel('x', [task('t', 'completed', NOW - 60_000)], { now: NOW + FRESH_MS })])).toEqual({ cards: {}, rows: [] });
-  });
-
-  it('changes only with what happened: the same tasks fetched again give the same scene', () => {
-    const live = () => withTasks(task('t', 'completed', NOW - 10, { resultSummary: 'Done.' }), task('r', 'running', NOW));
-    expect(cardScene(emptyCard(WS), live(), NOW)).toEqual(cardScene(emptyCard(WS), live(), NOW));
   });
 });
 
@@ -416,41 +369,72 @@ describe('snapshot', () => {
     ...patch,
   });
 
-  it('keeps history, resolves what is no longer pending, and adds what is', () => {
+  it('takes the open requests of the snapshot, keeping the time of those already held', () => {
     let s = apply(EMPTY_FLEET, askEvent('stale', 2), askEvent('kept', 3));
     s = applyRequest(s, { kind: 'approval', request: approval('gone') }, 4);
     const pendingAsk = (pendingId: string) => ({ pendingId, workspaceId: WS, sessionId: MAIN, runId: 'r', question: '?', options: null, multiSelect: false, extraContext: null, requestedAt: 7n });
-    s = seedFleet(s, [snapshotOf({ pendingAsks: [pendingAsk('kept'), pendingAsk('new')], pendingPathGrants: [approval('g1')] })], 50);
+    s = seedFleet(s, [snapshotOf({ pendingAsks: [pendingAsk('kept'), pendingAsk('new')], pendingPathGrants: [approval('g1')] })]);
     const c = card(s);
     expect(c.title).toBe('Infra');
     expect(c.mainSessionId).toBe(MAIN);
-    expect(c.requests['ask:stale']!.resolvedAt).toBe(50);
-    expect(c.requests['ask:kept']).toMatchObject({ at: 3, resolvedAt: null });
-    expect(c.requests['ask:new']).toMatchObject({ kind: 'ask', ask: { pendingId: 'new', sessionId: MAIN }, text: '?', at: 7, resolvedAt: null });
-    expect(c.requests['approval:gone']).toBeUndefined();
+    expect(Object.keys(c.requests).sort()).toEqual(['ask:kept', 'ask:new', 'grant:g1']);
+    expect(c.requests['ask:kept']).toMatchObject({ at: 3 });
+    expect(c.requests['ask:new']).toMatchObject({ kind: 'ask', ask: { pendingId: 'new', sessionId: MAIN }, text: '?', at: 7 });
     // A request has no timestamp of its own: it takes the workspace's activity.
-    expect(c.requests['grant:g1']).toMatchObject({ at: 10, resolvedAt: null });
+    expect(c.requests['grant:g1']).toMatchObject({ at: 10 });
   });
 
   it('removes cards missing from the snapshot, e.g. deleted workspaces', () => {
     let s = apply(EMPTY_FLEET, askEvent('q', 1), env({ type: 'run_started', payload: { run: run('r') } }, 2, 's', 'deleted'));
-    s = seedFleet(s, [snapshotOf()], 50);
+    s = seedFleet(s, [snapshotOf()]);
     expect(Object.keys(s.cards)).toEqual([WS]);
   });
 
-  it('keeps the newer of the held and the snapshot last message', () => {
+  const highlight = (messageId: string, at: number, patch: Partial<FleetWorkspace['recentMessages'][number]> = {}): FleetWorkspace['recentMessages'][number] => ({
+    messageId,
+    sessionId: MAIN,
+    role: 'user',
+    origin: { kind: 'user' },
+    text: messageId,
+    truncated: false,
+    createdAt: BigInt(at),
+    runId: null,
+    ...patch,
+  });
+
+  it('seeds the feed from the recent messages and the last reply; an event a seed repeats keeps its own words', () => {
+    let s = apply(withMain(), created(message('u1', 'user', 'Live words'), NOW - 50));
+    s = seedFleet(s, [
+      snapshotOf({
+        recentMessages: [
+          highlight('u1', NOW - 50, { text: 'Seed words' }),
+          highlight('m2t', NOW - 40, { sessionId: 'task-session-t', origin: fromAgent() }),
+          highlight('rep', NOW - 30, { origin: report('t', 'failed'), text: 'It broke', truncated: true }),
+          highlight('a1', NOW - 20, { role: 'assistant', text: 'All done.' }),
+        ],
+        lastAssistantMessage: { messageId: 'a1', text: 'All done.', truncated: false, createdAt: BigInt(NOW - 20) },
+      }),
+    ]);
+    expect(lines(s, withTasks(task('t', 'failed', NOW - 100)))).toEqual([
+      'Main → Researcher: Task t',
+      'You → Main: Live words',
+      'Main → Researcher: m2t',
+      'Researcher → Main: It broke… [failed]',
+      'Main → You: All done.',
+    ]);
+    expect(card(s).said.filter((m) => m.id === 'a1')).toHaveLength(1);
+  });
+
+  it('seeds the last reply alone when the recent messages miss it', () => {
     const preview = { messageId: 'p', text: 'from snapshot', truncated: true, createdAt: 5n };
-    let s = seedFleet(EMPTY_FLEET, [snapshotOf({ lastAssistantMessage: preview })], 50);
-    expect(card(s).lastMessage?.text).toBe('from snapshot…');
-    s = apply(s, env({ type: 'assistant_message_completed', payload: { message: message('a', 'assistant', 'live') } }, 9));
-    s = seedFleet(s, [snapshotOf({ lastAssistantMessage: preview })], 60);
-    expect(card(s).lastMessage?.text).toBe('live');
+    const s = seedFleet(EMPTY_FLEET, [snapshotOf({ lastAssistantMessage: preview })]);
+    expect(lines(s)).toEqual(['Main → You: from snapshot…']);
   });
 
   it("takes the snapshot's main session over the held one, and keeps the held one when the snapshot has none", () => {
     const held = applyUserSent(EMPTY_FLEET, WS, 'cleared-into', null, 1);
-    expect(card(seedFleet(held, [snapshotOf()], 50)).mainSessionId).toBe(MAIN);
-    expect(card(seedFleet(held, [snapshotOf({ mainSessionId: null })], 50)).mainSessionId).toBe('cleared-into');
+    expect(card(seedFleet(held, [snapshotOf()])).mainSessionId).toBe(MAIN);
+    expect(card(seedFleet(held, [snapshotOf({ mainSessionId: null })])).mainSessionId).toBe('cleared-into');
   });
 });
 
@@ -470,73 +454,50 @@ describe('card picking', () => {
           text: '?',
           agentName: null,
           at: since,
-          resolvedAt: null,
         },
       },
     });
-  const pick = (cards: FleetCard[], cols: number, rows: number, selectedId: string | null = null, prevOrder: string[] = [], live = NO_LIVE) =>
-    pickCards(cards, { now: NOW, capacity: { cols, rows }, selectedId, prevOrder, live });
-
-  it('derives capacity from the screen size', () => {
-    expect(gridCapacity(300, 150)).toEqual({ cols: 1, rows: 1 });
-    expect(gridCapacity(1400, 700)).toEqual({ cols: 4, rows: 3 });
-    expect(gridCapacity(900, 450)).toEqual({ cols: 2, rows: 2 });
-  });
-
-  it('sizes the grid by the cards it holds, so a short Fleet still reaches the terminal', () => {
-    const fourByThree = { cols: 4, rows: 3 };
-    expect(gridShape(fourByThree, 1)).toEqual({ cols: 2, rows: 2 });
-    expect(gridShape(fourByThree, 2)).toEqual({ cols: 3, rows: 2 });
-    expect(gridShape(fourByThree, 3)).toEqual({ cols: 3, rows: 2 });
-    expect(gridShape(fourByThree, 5)).toEqual({ cols: 4, rows: 2 });
-    expect(gridShape(fourByThree, 6)).toEqual({ cols: 4, rows: 3 });
-    expect(gridShape(fourByThree, 9)).toEqual({ cols: 4, rows: 3 });
-    expect(gridShape({ cols: 2, rows: 3 }, 2)).toEqual({ cols: 2, rows: 3 });
-    expect(gridShape({ cols: 1, rows: 1 }, 1)).toEqual({ cols: 1, rows: 1 });
-  });
+  const pick = (cards: FleetCard[], selectedId: string | null = null, prevOrder: string[] = [], live = NO_LIVE) =>
+    pickCards(cards, { now: NOW, selectedId, prevOrder, live });
 
   it('never shows old idle workspaces, but always shows live and selected ones', () => {
     const old = NOW - RECENT_WINDOW_MS - 1;
     const cards = [mk('recent', NOW - 1000), mk('old', old), mk('old-but-running', old), waitingCard('old-waiting', old), mk('old-selected', old)];
-    const picked = pick(cards, 4, 3, 'old-selected', [], { runs: { 'old-but-running': ['r'] }, tasks: {} });
+    const picked = pick(cards, 'old-selected', [], { runs: { 'old-but-running': ['r'] }, tasks: {} });
     expect([...picked].sort()).toEqual(['old-but-running', 'old-selected', 'old-waiting', 'recent']);
   });
 
-  it('counts the stage as four cells and shows the most recent when more are active than fit, but the selected and waiting ones first', () => {
-    const many = Array.from({ length: 12 }, (_, i) => mk(`c${i}`, NOW - i));
-    expect(pick(many, 4, 3)).toHaveLength(9);
-    expect(pick(many, 2, 2)).toEqual(['c0']);
-    expect(pick([mk('a', NOW - 3), mk('b', NOW - 1), mk('c', NOW - 2)], 3, 1)).toEqual(['b', 'c']);
-    expect(pick([mk('a', NOW - 3), waitingCard('w', NOW - 9), mk('b', NOW - 1), mk('sel', NOW - 8)], 4, 1, 'sel')).toEqual(['sel', 'b', 'w']);
+  it('shows every eligible card: waiting ones first, oldest first, then the most recent', () => {
+    expect(pick(Array.from({ length: 12 }, (_, i) => mk(`c${i}`, NOW - i)))).toHaveLength(12);
+    expect(pick([mk('a', NOW - 3), waitingCard('w2', NOW - 1), mk('b', NOW - 1), waitingCard('w1', NOW - 9)])).toEqual(['w1', 'w2', 'b', 'a']);
   });
 
-  it('puts the most recent card on the stage at first, unselected, and the rest in rank order', () => {
-    expect(pick([waitingCard('w', NOW - 9), mk('a', NOW - 2), mk('b', NOW - 1)], 4, 3)).toEqual(['b', 'w', 'a']);
+  it('moves nothing on select or deselect; newcomers follow, and a leaving card leaves no gap', () => {
+    const cards = [mk('s', NOW - 1), mk('a', NOW - 2), mk('b', NOW - 3)];
+    const prev = ['s', 'a', 'b'];
+    expect(pick(cards, 'b', prev)).toEqual(prev);
+    expect(pick(cards, null, prev)).toEqual(prev);
+    expect(pick([mk('a', NOW - 1), mk('b', NOW - 3), mk('new', NOW)], null, prev)).toEqual(['a', 'b', 'new']);
   });
 
-  const cards = [mk('s', NOW - 1), mk('a', NOW - 2), mk('b', NOW - 3), mk('c', NOW - 4), mk('d', NOW - 5)];
-  const prev = ['s', 'a', 'b', 'c', 'd'];
-
-  it('swaps the selected card with the stage card, and every other card keeps its slot', () => {
-    expect(pick(cards, 4, 3, 'c', prev)).toEqual(['c', 'a', 'b', 's', 'd']);
-    // From there, selecting another swaps only those two again.
-    expect(pick(cards, 4, 3, 'a', ['c', 'a', 'b', 's', 'd'])).toEqual(['a', 'c', 'b', 's', 'd']);
-  });
-
-  it('moves nothing when the selected card is already on the stage, or on deselect', () => {
-    expect(pick(cards, 4, 3, 's', prev)).toEqual(prev);
-    const afterSwap = ['c', 'a', 'b', 's', 'd'];
-    expect(pick(cards, 4, 3, null, afterSwap)).toEqual(afterSwap);
-  });
-
-  it('gives the stage to the most recent remaining card when the stage card leaves; only that card moves', () => {
-    const rest = cards.filter((c) => c.workspaceId !== 's');
-    expect(pick(rest, 4, 3, null, prev)).toEqual(['a', 'b', 'c', 'd']);
-    expect(pick([mk('a', NOW - 3), mk('c', NOW - 4), mk('b', NOW)], 4, 3, null, ['s', 'a', 'c', 'b'])).toEqual(['b', 'a', 'c']);
-  });
-
-  it('gives newcomers the next slots, never the stage, and closes the gap a leaving card left', () => {
-    expect(pick([mk('a', NOW - 1), mk('c', NOW - 3), mk('new', NOW)], 4, 3, null, ['a', 'b', 'c'])).toEqual(['a', 'c', 'new']);
+  it('lays four miniatures 2 × 2 beside the stage and six 3 × 2 without one; fewer grow', () => {
+    expect([0, 1, 2, 3, 4, 9].map((n) => boardShape(n, true))).toEqual([
+      { cols: 1, rows: 1 },
+      { cols: 1, rows: 1 },
+      { cols: 1, rows: 2 },
+      { cols: 2, rows: 2 },
+      { cols: 2, rows: 2 },
+      { cols: 2, rows: 2 },
+    ]);
+    expect([1, 2, 3, 4, 5, 6, 10].map((n) => boardShape(n, false))).toEqual([
+      { cols: 1, rows: 1 },
+      { cols: 2, rows: 1 },
+      { cols: 3, rows: 1 },
+      { cols: 2, rows: 2 },
+      { cols: 3, rows: 2 },
+      { cols: 3, rows: 2 },
+      { cols: 3, rows: 2 },
+    ]);
   });
 });
 

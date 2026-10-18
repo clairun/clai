@@ -11,7 +11,7 @@ import InlineApprovalCard from '../InlineApprovalCard';
 import InlinePathGrantCard from '../InlinePathGrantCard';
 import type { FleetRequest, FleetRequestScene } from '../../fleet/fleetModel';
 import fx, { Sfx } from './FleetEffects';
-import { Caption, Tail, Who } from './FleetScene';
+import { Caption, Tail, Who } from './FleetFeed';
 import styles from './FleetPage.module.css';
 
 /** Clicks inside the request answer it; they never select the card. */
@@ -58,8 +58,6 @@ interface FleetRequestPanelProps {
   scene: FleetRequestScene;
   workspaceId: string;
   faces: Record<string, AgentIdentity>;
-  /** The stage: bigger, with every decision the workspace chat offers. */
-  stage?: boolean;
   /** Draw it loud: the amber burst, and "!?" or "!!". Never on the selected card. */
   loud?: boolean;
   /** The time of the last Fleet event. */
@@ -75,7 +73,6 @@ const FleetRequestPanel = ({
   scene,
   workspaceId,
   faces,
-  stage = false,
   loud = false,
   now,
 }: FleetRequestPanelProps) => {
@@ -88,7 +85,7 @@ const FleetRequestPanel = ({
       <Who
         identity={identity}
         name={name}
-        size={stage ? 64 : 44}
+        size={44}
         activity="running"
         expression="asking"
       />
@@ -100,11 +97,9 @@ const FleetRequestPanel = ({
   );
   return (
     <div className={`${styles.requestFrame} ${fx.burstFrame}`} data-loud-frame={loud || undefined}>
-      {loud && (
-        <span className={fx.burst} data-size={stage ? 'stage' : 'small'} aria-hidden="true" />
-      )}
+      {loud && <span className={fx.burst} aria-hidden="true" />}
       <section
-        className={`${styles.request} ${stage ? styles.requestStage : ''}`}
+        className={styles.request}
         style={{ '--agent-color': identityRingColor(identity, theme) } as CSSProperties}
         aria-label={`${name} needs you`}
         onClick={stop}
@@ -117,7 +112,7 @@ const FleetRequestPanel = ({
         <RequestAnswer
           request={request}
           workspaceId={workspaceId}
-          compact={!stage}
+          compact
           speaker={speaker}
         />
       </section>

@@ -76,8 +76,7 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
     get().dispatch((s) => applyRequest(s, pending, at));
   },
   resolveRequest: (kind, requestId) => {
-    const at = Date.now();
-    get().dispatch((s) => applyRequestResolved(s, kind, requestId, at));
+    get().dispatch((s) => applyRequestResolved(s, kind, requestId));
   },
   noteUserSent: (workspaceId, sessionId, message) => {
     const at = Date.now();
@@ -94,7 +93,6 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
     const keep = get().selectedId;
     try {
       const snapshot = await fleetSnapshot(SNAPSHOT_LIMIT, keep);
-      const now = Date.now();
       const { seedTasks } = useTaskStore.getState();
       const { setRuns, activeRunsByWorkspace: runsNow } = useFleetActivityStore.getState();
       for (const ws of snapshot) {
@@ -110,7 +108,7 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
           )
         );
       }
-      seeded = (s) => seedFleet(s, snapshot, now);
+      seeded = (s) => seedFleet(s, snapshot);
     } catch (err) {
       loadError = typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to load the Fleet.';
     }

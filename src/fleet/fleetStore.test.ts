@@ -55,8 +55,8 @@ describe('fleet store snapshot', () => {
     await loading;
     const card = useFleetStore.getState().fleet.cards.ws!;
     expect(card.title).toBe('Infra');
-    expect(card.requests['ask:q1']!.resolvedAt).toBe(10);
-    expect(card.lastMessage?.text).toBe('Done');
+    expect(card.requests['ask:q1']).toBeUndefined();
+    expect(card.said).toMatchObject([{ id: 'm', role: 'assistant', text: 'Done' }]);
     expect(useFleetStore.getState().buffer).toBeNull();
   });
 
