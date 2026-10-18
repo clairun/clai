@@ -248,79 +248,7 @@
   background: var(--color-bg-hover);
 }
 
-.userMessageLabel {
-  font-weight: 700;
-  color: var(--color-primary);
-}
-
-/*
- * Pinned to the bottom like a chat. Items come newest first and stack
- * upward (column-reverse); a row that doesn't fit whole wraps into a second,
- * hidden column instead of showing cut in half at the top.
- */
-.items {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex: 1;
-  flex-direction: column-reverse;
-  flex-wrap: wrap;
-  align-content: flex-start;
-  gap: 4px;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.items > li {
-  width: 100%;
-  margin: 0; /* the global li margin; rows are spaced by the gap */
-}
-
-/* The newest row alone taller than the feed: cut its end, not its start. */
-.items > li:first-child {
-  max-height: 100%;
-  overflow: hidden;
-}
-
-/* Just the last message and at most one other row: the message reads larger. */
-.feedShort .noteBody {
-  max-height: none;
-}
-
-.feedShort .noteBody > * {
-  font-size: 15px;
-  line-height: 1.55;
-}
-
-.item {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 8px;
-  min-height: 26px;
-  font-size: 13px;
-  color: var(--color-text-primary);
-}
-
-/* A running subtask: bigger than history, in its agent's colour. Static. */
-.liveItem {
-  display: flex;
-  flex-shrink: 0;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 8px;
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--agent-color) 10%, transparent);
-}
-
-.liveBody {
-  display: flex;
-  flex: 1;
-  flex-direction: column;
-  min-width: 0;
-}
-
+/* Shared with a small card's request head. */
 .liveAgent {
   font-size: 12px;
   font-weight: 700;
@@ -328,77 +256,6 @@
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-}
-
-.liveMore {
-  font-weight: 500;
-  color: var(--color-text-tertiary);
-}
-
-.liveText {
-  font-size: 14px;
-  color: var(--color-text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* A chat message: a few clamped lines of markdown, nothing wider than the card. */
-.note {
-  display: flex;
-  flex-shrink: 0;
-  align-items: flex-start;
-  gap: 8px;
-  font-size: 13px;
-}
-
-/* Six lines; past that, history rows give way before the message does. */
-.noteBody {
-  flex: 1;
-  min-width: 0;
-  max-height: 9em;
-  overflow: hidden;
-}
-
-.noteBody > * {
-  font-size: 14px;
-  line-height: 1.5;
-}
-
-.noteBody p {
-  margin-bottom: 0.4em;
-}
-
-.noteBody :is(h1, h2, h3, h4, h5, h6) {
-  margin: 0 0 0.2em;
-  font-size: 1em;
-}
-
-.noteBody pre,
-.noteBody img,
-.noteBody svg,
-.noteBody table {
-  max-width: 100%;
-}
-
-.noteBody pre {
-  overflow: hidden;
-}
-
-.noteBody img {
-  max-height: 4em;
-}
-
-.tone_done,
-.tone_failed {
-  opacity: 0.55;
-}
-
-.itemTime {
-  flex-shrink: 0;
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  font-variant-numeric: tabular-nums;
 }
 
 .faces {
@@ -410,12 +267,427 @@
   margin-left: -5px;
 }
 
-.itemText {
+/* ── A small card as a comic panel ───────────────────────────────────────
+ * Caption box (when), then the speaking rows, Main's word to the reader and
+ * the Earlier lines, in that priority. A row that doesn't fit whole wraps
+ * into a second, hidden column, so the lowest rows give way first and the
+ * card always keeps its first sentence. */
+.scene {
+  container-type: size;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  flex-wrap: wrap;
+  align-content: flex-start;
+  gap: 8px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.scene > * {
+  width: 100%;
+  flex-shrink: 0;
+}
+
+/* Narration box: square, like a manga caption. Its row is full width, so
+ * the column it sets is the panel's and a wrapped row is fully hidden. */
+.captionRow {
+  display: flex;
+  margin: 0;
+}
+
+.caption {
+  padding: 1px 8px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: 2px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.caption[data-mood='working'] {
+  border-color: var(--color-primary-alpha-40);
+  color: var(--color-primary);
+}
+
+.caption[data-mood='fresh'] {
+  border-color: var(--color-success);
+  color: var(--color-success);
+}
+
+/* ── Faces ── */
+.who {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+}
+
+.who figcaption {
+  max-width: 100%;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-past);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.zz {
+  position: absolute;
+  top: -8px;
+  right: -10px;
+  font-size: 13px;
+  font-weight: 800;
+  font-style: italic;
+  color: var(--color-text-past);
+}
+
+/* Static on purpose: an animation here would keep WebKitGTK repainting for
+ * as long as the task runs (see the note at the top of this file). */
+.think {
+  position: absolute;
+  top: -20px;
+  right: -4px;
+  display: block;
+}
+
+.thinkCloud {
+  fill: var(--color-bg-primary);
+  stroke: var(--color-text-past);
+  stroke-width: 1.6;
+}
+
+.thinkDot {
+  fill: var(--color-text-primary);
+}
+
+.thinkDot:nth-of-type(1) {
+  opacity: 0.4;
+}
+
+.thinkDot:nth-of-type(2) {
+  opacity: 0.7;
+}
+
+/* ── Bubbles ── */
+.say {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.bubble {
+  position: relative;
+  padding: 8px 12px;
+  border: 2px solid var(--bubble-border);
+  border-radius: 16px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.tail {
+  position: absolute;
+  top: calc(50% - 12px);
+  left: -22px;
+  z-index: 1;
+}
+
+.tailRight {
+  left: auto;
+  right: -22px;
+  transform: scaleX(-1);
+}
+
+.tailFill {
+  fill: var(--color-bg-primary);
+}
+
+.tailStroke {
+  fill: none;
+  stroke: var(--bubble-border);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.bubbleText {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow: hidden;
+}
+
+.meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--color-text-past);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.metaEnd {
+  justify-content: flex-end;
+}
+
+/* ── A running task: Main (left) hands it to the agent (right) ── */
+.talk {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr) 60px;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 10px 6px 8px;
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--agent-color) 9%, transparent);
+}
+
+.talk .bubble {
+  --bubble-border: color-mix(in srgb, var(--color-primary) 75%, transparent);
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1.35;
+}
+
+.talk .bubbleText {
+  -webkit-line-clamp: 2;
+}
+
+/* Two or more conversations share the panel. */
+.talkCompact {
+  grid-template-columns: 32px minmax(0, 1fr) 52px;
+  gap: 14px;
+  padding: 12px 8px 4px 6px;
+}
+
+.talkCompact .bubble {
+  padding: 4px 10px;
+  border-radius: 14px;
+  font-size: 14px;
+}
+
+.metaRun {
+  color: var(--color-primary);
+}
+
+/* ── Just finished: the bubble flips to the agent ── */
+.result {
+  grid-template-columns: 36px minmax(0, 1fr) 52px;
+  padding-top: 6px;
+  background: var(--color-success-alpha-06);
+}
+
+.result .bubble {
+  --bubble-border: var(--color-success);
+  font-size: 15px;
+  font-weight: 550;
+  line-height: 1.35;
+}
+
+.resultFailed {
+  background: color-mix(in srgb, var(--color-critical) 8%, transparent);
+}
+
+.resultFailed .bubble {
+  --bubble-border: var(--color-critical);
+}
+
+.result.talkCompact {
+  grid-template-columns: 28px minmax(0, 1fr) 44px;
+  padding-top: 4px;
+}
+
+.result > .who:first-child {
+  opacity: 0.6;
+}
+
+.asked {
+  margin: 0 0 2px;
+  font-size: 12px;
+  color: var(--color-text-past);
+  text-align: right;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.metaOk {
+  color: var(--color-success);
+}
+
+.metaBad {
+  color: var(--color-critical-light);
+}
+
+/* ── Main's word to the reader ── */
+.toYou {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr);
+  align-items: end;
+  gap: 18px;
+}
+
+.toYou .who {
+  margin-bottom: 18px;
+}
+
+.toYou .tail {
+  top: auto;
+  bottom: 8px;
+}
+
+.toYou .bubble {
+  --bubble-border: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
+  font-size: 14px;
+  line-height: 1.5;
+}
+
+/* Four lines of the message on the smallest panel, six where there is room. */
+.toYou .bubbleText {
+  -webkit-line-clamp: 4;
+}
+
+@container (min-height: 260px) {
+  .toYou .bubbleText {
+    -webkit-line-clamp: 6;
+  }
+}
+
+/* The shortest panels: every first row still fits whole. */
+@container (max-height: 180px) {
+  .toYou .bubbleText {
+    -webkit-line-clamp: 2;
+  }
+
+  .result .asked {
+    display: none;
+  }
+}
+
+/* On a working card it sits smaller and greyer beneath the action. */
+.toYouQuiet {
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 16px;
+}
+
+.toYouQuiet .who {
+  margin-bottom: 18px;
+}
+
+.toYouQuiet .bubble {
+  --bubble-border: var(--color-border-medium);
+  padding: 6px 10px;
+  border-width: 1.5px;
+  color: var(--color-text-secondary);
+  font-size: 13px;
+}
+
+.toYou.toYouQuiet .bubbleText {
+  -webkit-line-clamp: 2;
+}
+
+/* The user's own message, until the next event. */
+.fromYou {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+}
+
+.fromYou .bubble {
+  --bubble-border: var(--color-primary-alpha-40);
+  max-width: 85%;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.fromYou .bubbleText {
+  -webkit-line-clamp: 2;
+}
+
+.nothing {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-past);
+}
+
+/* Stale: fade the drawing, not the small text, so meta stays readable. */
+.scene[data-mood='stale'] :is(.face, .bubble) {
+  opacity: 0.62;
+  filter: grayscale(0.6);
+}
+
+/* ── Earlier: one grey line per item, pinned to the bottom ── */
+.earlier {
+  display: contents;
+}
+
+.earlierItem {
+  display: flex;
+  flex-shrink: 0;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-past);
+}
+
+.earlierItem:first-child {
+  margin-top: auto;
+  padding-top: 6px;
+  height: 29px;
+  border-top: 1px dashed var(--color-border-light);
+}
+
+.earlierFace {
+  flex-shrink: 0;
+  opacity: 0.6;
+  filter: grayscale(0.8);
+}
+
+.earlierText {
   flex: 1;
   min-width: 0;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.earlierText b {
+  font-weight: 650;
+  color: var(--color-text-secondary);
+}
+
+.earlierStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.earlierStatus svg {
+  color: var(--color-success);
+}
+
+.earlierFailed {
+  color: var(--color-critical-light);
+}
+
+.earlierFailed svg {
+  color: inherit;
 }
 
 /* A small card's open request, as tall as it is; a long one scrolls inside the card. */

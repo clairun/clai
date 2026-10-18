@@ -9,14 +9,20 @@ import type {
 } from '../generated/bindings';
 import {
   EMPTY_FLEET,
-  HISTORY_LIMIT,
+  EARLIER_LIMIT,
+  FRESH_MS,
+  STALE_MS,
+  TALK_LIMIT,
   RECENT_WINDOW_MS,
   applyAssistantEvent,
   applyRequest,
   applyRequestResolved,
   applyUserSent,
   cardAttention,
-  cardItems,
+  cardScene,
+  firstSentence,
+  plainText,
+  shortTime,
   openRequests,
   cardPhase,
   emptyCard,
@@ -33,6 +39,7 @@ import {
 const WS = 'ws-1';
 const MAIN = 'main-session';
 const NO_LIVE: FleetLive = { runs: {}, tasks: {} };
+const NOW = Date.UTC(2026, 9, 18, 12);
 
 const env = (event: AssistantUiEvent, at: number, sessionId = MAIN, workspaceId = WS): AssistantEventEnvelope =>
   ({ sessionId, runId: null, workspaceId, timestamp: BigInt(at), event }) as AssistantEventEnvelope;
@@ -162,21 +169,6 @@ describe('fleet reducer', () => {
     expect(applyRequestResolved(s, 'approval', 'a1', 9)).toBe(s);
   });
 
-  it('keeps finished subtasks and answered questions as history, oldest first, live work at the bottom; open requests are not items', () => {
-    const live = withTasks(task('done', 'completed', 1), task('live', 'running', 2));
-    let s = apply(EMPTY_FLEET, askEvent('q1', 3), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, 4));
-    s = applyRequest(s, { kind: 'approval', request: approval('a1') }, 5);
-    expect(cardItems(card(s), live).map((i) => [i.key, i.tone, i.status])).toEqual([
-      ['task:done', 'done', 'Completed'],
-      ['ask:q1', 'done', 'Answered'],
-      ['task:live', 'live', 'Waiting for subtasks'],
-    ]);
-    // An answered approval or grant leaves the card; an answered question stays.
-    s = applyRequestResolved(s, 'approval', 'a1', 6);
-    s = applyRequestResolved(applyRequest(s, { kind: 'grant', request: approval('g1') }, 7), 'grant', 'g1', 8);
-    expect(cardItems(card(s), live).map((i) => i.key)).toEqual(['task:done', 'ask:q1', 'task:live']);
-  });
-
   it('keeps what answering needs on each open request, oldest first', () => {
     const ask = env(
       {
@@ -197,30 +189,6 @@ describe('fleet reducer', () => {
     ]);
   });
 
-  it('folds subtasks into their top-level task and stays live while any descendant runs', () => {
-    const live = withTasks(
-      task('root', 'completed', 1),
-      task('child', 'running', 2, { parentTaskId: 'root', assignedAgentDefinitionId: 'def-w', assignedAgentDisplayName: 'Writer' }),
-    );
-    const items = cardItems(emptyCard(WS), live);
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ tone: 'live', status: 'Subtasks running' });
-    expect(items[0]!.agents.map((a) => a.name)).toEqual(['Researcher', 'Writer']);
-  });
-
-  it('labels tasks the way the rest of the app does', () => {
-    const live = withTasks(
-      task('done', 'completed', 3),
-      task('lost', 'failed', 2, { failureReason: 'restart' }),
-      task('stuck', 'failed', 1, { failureReason: 'blocked' }),
-    );
-    expect(cardItems(emptyCard(WS), live).map((i) => [i.status, i.statusKey])).toEqual([
-      ['Blocked', 'blocked'],
-      ['Failed · interrupted', 'failed'],
-      ['Completed', 'completed'],
-    ]);
-  });
-
   it('is working while any run of the workspace or any task is live, and waiting while anything is open', () => {
     const c = emptyCard(WS);
     expect(cardPhase(c, NO_LIVE)).toBe('stopped');
@@ -232,35 +200,112 @@ describe('fleet reducer', () => {
     expect(cardPhase(asking, { runs: { [WS]: ['r'] }, tasks: {} })).toBe('waiting');
   });
 
-  it('places the visible messages among the events by time, the newest last', () => {
-    const done = withTasks(task('t1', 'completed', 1), task('t2', 'completed', 4));
-    const reply = (at: number) =>
-      apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'All done.') } }, at));
-    expect(cardItems(card(reply(5)), done).map((i) => i.key)).toEqual(['task:t1', 'task:t2', 'assistant:a1']);
-    expect(cardItems(card(reply(2)), done).map((i) => i.key)).toEqual(['task:t1', 'assistant:a1', 'task:t2']);
-    expect(cardItems(card(reply(5)), done).at(-1)).toMatchObject({ note: 'assistant', text: 'All done.', at: 5 });
-    // Live work and open requests stay below; the user's message sits by time among the history.
-    const sent = applyUserSent(EMPTY_FLEET, WS, MAIN, message('u1', 'user', 'Deploy'), 3);
-    expect(cardItems(card(sent), withTasks(task('t1', 'completed', 1), task('t2', 'running', 2))).map((i) => i.key)).toEqual([
-      'task:t1',
-      'user:u1',
-      'task:t2',
+  it('turns finished tasks and answered questions into Earlier, newest first; answered approvals leave; open requests stay out', () => {
+    const live = withTasks(task('done', 'completed', 1), task('live', 'running', 2));
+    let s = apply(EMPTY_FLEET, askEvent('q1', 3), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, 4));
+    s = applyRequest(s, { kind: 'approval', request: approval('a1') }, 5);
+    s = applyRequestResolved(s, 'approval', 'a1', 6);
+    s = applyRequestResolved(applyRequest(s, { kind: 'grant', request: approval('g1') }, 7), 'grant', 'g1', 8);
+    const scene = cardScene(card(s), live, NOW);
+    expect(scene.earlier.map((e) => [e.key, e.outcome, e.agent?.name ?? null])).toEqual([
+      ['ask:q1', 'answered', null],
+      ['task:done', 'done', 'Researcher'],
+    ]);
+    expect(scene.running.map((r) => r.key)).toEqual(['task:live']);
+  });
+
+  it('draws a live task as one running talk, its subtasks as helpers', () => {
+    const live = withTasks(
+      task('root', 'completed', 1),
+      task('child', 'running', 2, { parentTaskId: 'root', assignedAgentDefinitionId: 'def-w', assignedAgentDisplayName: 'Writer' }),
+      task('next', 'queued', 3),
+    );
+    expect(cardScene(emptyCard(WS), live, NOW).running).toEqual([
+      { key: 'task:root', title: 'Task root', agent: { name: 'Researcher', seed: 'def-r' }, queued: false, helpers: 1 },
+      { key: 'task:next', title: 'Task next', agent: { name: 'Researcher', seed: 'def-r' }, queued: true, helpers: 0 },
     ]);
   });
 
-  it('keeps every live item but only the newest HISTORY_LIMIT resolved ones, plus the last message', () => {
-    const done = Array.from({ length: HISTORY_LIMIT + 2 }, (_, i) => task(`d${i}`, 'completed', i + 1));
-    const s = apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'All done.') } }, 50));
-    const keys = cardItems(card(s), withTasks(...done, task('r1', 'running', 60), task('r2', 'queued', 61))).map((i) => i.key);
-    const newest = done.slice(-HISTORY_LIMIT).map((t) => `task:${t.id}`);
-    expect(keys).toEqual([...newest, 'assistant:a1', 'task:r1', 'task:r2']);
+  it('flips a just-finished task to its result for FRESH_MS, then moves it to Earlier', () => {
+    const at = NOW - 60_000;
+    const live = withTasks(task('t', 'completed', at, { resultSummary: 'Shipped **v2** to `main`. Tests pass.' }));
+    expect(cardScene(emptyCard(WS), live, NOW)).toMatchObject({
+      mood: 'fresh',
+      caption: `Just now · ${shortTime(at, NOW)}`,
+      finished: [{ asked: 'Task t', result: 'Shipped v2 to main.', failed: false, at }],
+      earlier: [],
+    });
+    const later = cardScene(emptyCard(WS), live, at + FRESH_MS + 1);
+    expect(later.finished).toEqual([]);
+    expect(later.earlier).toMatchObject([{ key: 'task:t', title: 'Task t', outcome: 'done' }]);
   });
 
-  it('keeps showing the last completed assistant message while the workspace works', () => {
-    const s = apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'All done.') } }, 3));
-    const notes = (live: FleetLive) => cardItems(card(s), live).filter((i) => i.note).map((i) => i.text);
-    expect(notes({ runs: { [WS]: ['r'] }, tasks: {} })).toEqual(['All done.']);
-    expect(notes(withTasks(task('t1', 'running', 2)))).toEqual(['All done.']);
+  it('says why a task failed, falling back to its label, and the title when a result is empty', () => {
+    const live = withTasks(
+      task('a', 'failed', NOW - 3, { error: 'Cargo ran out of disk. Free 2 GB.' }),
+      task('b', 'failed', NOW - 2, { failureReason: 'restart' }),
+      task('c', 'completed', NOW - 1, { resultSummary: '   ' }),
+    );
+    expect(cardScene(emptyCard(WS), live, NOW).finished.map((f) => [f.result, f.failed])).toEqual([
+      ['Task c', false],
+      ['Failed · interrupted', true],
+      ['Cargo ran out of disk.', true],
+    ]);
+  });
+
+  it('draws at most TALK_LIMIT talks, running first; results without room go to Earlier, at most EARLIER_LIMIT', () => {
+    const many = Array.from({ length: TALK_LIMIT + 1 }, (_, i) => task(`r${i}`, 'running', NOW));
+    const running = cardScene(emptyCard(WS), withTasks(...many), NOW);
+    expect(running.running).toHaveLength(TALK_LIMIT);
+    expect(running.caption).toBe(`Now · ${TALK_LIMIT + 1} at once`);
+
+    const done = (id: string, ago: number) => task(id, 'completed', NOW - ago);
+    const mixed = cardScene(emptyCard(WS), withTasks(task('r', 'running', NOW), done('f1', 1), done('f2', 2), done('f3', 3), done('old', FRESH_MS + 5)), NOW);
+    expect(mixed.finished.map((f) => f.key)).toEqual(['task:f1', 'task:f2']);
+    expect(mixed.earlier.map((e) => e.key)).toEqual(['task:f3', 'task:old']);
+    expect(EARLIER_LIMIT).toBe(2);
+  });
+
+  it('keeps Main’s last word, with its first sentence, while the workspace works; a run of no task is Main’s', () => {
+    const s = apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', '## Done\nAll **green**. Next: deploy.') } }, NOW - 5));
+    const scene = cardScene(card(s), { runs: { [WS]: ['main-run'] }, tasks: {} }, NOW);
+    expect(scene).toMatchObject({ mood: 'working', caption: 'Now', mainBusy: true, toYou: { text: '## Done\nAll **green**. Next: deploy.', headline: 'Done' } });
+    expect(cardScene(card(s), withTasks(task('t', 'running', 1, { runId: 'task-run' } as never)), NOW).mainBusy).toBe(false);
+  });
+
+  it('captions an idle card with its last word, and a stale one in days', () => {
+    const at = (ago: number) => card(apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'Hi.') } }, NOW - ago)));
+    expect(cardScene(at(60_000), NO_LIVE, NOW)).toMatchObject({ mood: 'idle', caption: `Last word · ${shortTime(NOW - 60_000, NOW)}` });
+    expect(cardScene(at(STALE_MS), NO_LIVE, NOW)).toMatchObject({ mood: 'stale', caption: 'Yesterday' });
+    expect(cardScene(at(3 * STALE_MS + 5), NO_LIVE, NOW)).toMatchObject({ mood: 'stale', caption: '3 days ago' });
+    expect(cardScene(emptyCard(WS), NO_LIVE, NOW)).toMatchObject({ mood: 'idle', caption: 'Nothing yet', toYou: null });
+  });
+
+  it('changes only with what happened: the same tasks fetched again give the same scene', () => {
+    const live = () => withTasks(task('t', 'completed', NOW - 10, { resultSummary: 'Done.' }), task('r', 'running', NOW));
+    expect(cardScene(emptyCard(WS), live(), NOW)).toEqual(cardScene(emptyCard(WS), live(), NOW));
+  });
+});
+
+describe('firstSentence', () => {
+  it.each([
+    ['Shipped **v2**. Then more.', 'Shipped v2.'],
+    ['\n\n# Heading\nbody', 'Heading'],
+    ['- [the report](reports/x.md) is ready', 'the report is ready'],
+    ['Version 2.1 is out', 'Version 2.1 is out'],
+    ['keep snake_case names', 'keep snake_case names'],
+    ['Done!\nMore', 'Done!'],
+    [null, ''],
+  ])('%j → %j', (input, expected) => {
+    expect(firstSentence(input)).toBe(expected);
+  });
+
+  it('reads a whole message as one plain paragraph for a clamped bubble', () => {
+    expect(plainText('## Done\n\n- **one** [link](x)\n- `two`')).toBe('Done one link two');
+  });
+
+  it('cuts a sentence with no end at 200 characters', () => {
+    expect(firstSentence('a'.repeat(300))).toBe(`${'a'.repeat(199)}…`);
   });
 });
 

@@ -177,7 +177,7 @@ describe('FleetPage', () => {
     expect(selected.className).not.toMatch(/cardWaiting/);
   });
 
-  it('draws a running subtask larger than a finished one', async () => {
+  it('draws a running task as Main’s bubble to its agent, and an old finished one in Earlier', async () => {
     const task = (id: string, title: string, status: string) =>
       ({ id, title, status, parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never;
     fleetSnapshot.mockResolvedValue([
@@ -185,46 +185,36 @@ describe('FleetPage', () => {
       { ...workspace('live', 'Alpha', 1000), tasks: [task('t1', 'Old research', 'completed'), task('t2', 'New research', 'running')] },
     ]);
     renderFleet();
-    const live = (await screen.findByText('New research')).closest('li')!;
-    const done = screen.getByText('Old research').closest('li')!;
-    expect(live.className).toMatch(/liveItem/);
-    expect(done.className).not.toMatch(/liveItem/);
-    expect(within(live).getByText('Scout')).toBeInTheDocument();
+    const card = within((await screen.findByText('New research')).closest('article')!);
+    expect(card.getByText('Now')).toBeInTheDocument();
+    expect(card.getByTitle('Scout, on it')).toHaveTextContent('Scout');
+    expect(card.getByRole('img', { name: 'Scout is working' })).toBeInTheDocument();
+    expect(within(card.getByRole('list', { name: 'Earlier' })).getByText('Old research')).toBeInTheDocument();
   });
 
-  it('renders the last message as markdown, after the events it followed', async () => {
-    fleetSnapshot.mockResolvedValue([
-      workspace('staged', 'Staged'),
-      {
-        ...workspace('a', 'Alpha', 1000),
-        tasks: [{ id: 't1', title: 'Research', status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Main', assignedAgentDefinitionId: 'def-m' } as never],
-        lastAssistantMessage: { messageId: 'm1', text: 'Shipped **v2**', truncated: false, createdAt: 2n },
-      },
-    ]);
+  it('flips a task that just finished to its result, with Main’s question shrunk to one line', async () => {
+    const done = {
+      id: 't1', title: 'Fix the build', status: 'failed', error: 'Cargo ran out of disk. Free 2 GB.', parentTaskId: null,
+      updatedAt: BigInt(Date.now() - 60_000), completedAt: BigInt(Date.now() - 60_000), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s',
+    } as never;
+    fleetSnapshot.mockResolvedValue([workspace('staged', 'Staged'), { ...workspace('f', 'Alpha', 1000), tasks: [done] }]);
     renderFleet();
-    const bold = await screen.findByText('v2');
-    expect(bold.tagName).toBe('STRONG');
-    // Newest first in the DOM; the list stacks them upward.
-    const list = screen.getByRole('list', { name: 'Activity' });
-    const rows = within(list).getAllByRole('listitem');
-    expect(rows.map((row) => row.textContent)).toEqual([expect.stringContaining('Shipped v2'), expect.stringContaining('Research')]);
-    expect(list.className).toMatch(/feedShort/);
+    const card = within((await screen.findByText('Cargo ran out of disk.')).closest('article')!);
+    expect(card.getByText('Main asked: Fix the build')).toBeInTheDocument();
+    expect(card.getByText(/failed ·/)).toBeInTheDocument();
+    expect(card.queryByRole('list', { name: 'Earlier' })).not.toBeInTheDocument();
   });
 
-  it('keeps the regular size when the message shares the feed with more rows', async () => {
-    const task = (id: string) =>
-      ({ id, title: id, status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Main', assignedAgentDefinitionId: 'def-m' }) as never;
+  it('shows Main’s last message as plain text, addressed to the reader', async () => {
     fleetSnapshot.mockResolvedValue([
       workspace('staged', 'Staged'),
-      {
-        ...workspace('a', 'Alpha', 1000),
-        tasks: [task('t1'), task('t2')],
-        lastAssistantMessage: { messageId: 'm1', text: 'Done', truncated: false, createdAt: 2n },
-      },
+      { ...workspace('a', 'Alpha', 1000), lastAssistantMessage: { messageId: 'm1', text: 'Shipped **v2**', truncated: false, createdAt: BigInt(Date.now()) } },
     ]);
     renderFleet();
-    await screen.findByText('Done');
-    expect(screen.getByRole('list', { name: 'Activity' }).className).not.toMatch(/feedShort/);
+    const bubble = await screen.findByText('Shipped v2');
+    const card = within(bubble.closest('article')!);
+    expect(card.getByText(/^to you ·/)).toBeInTheDocument();
+    expect(card.getByText(/^Last word ·/)).toBeInTheDocument();
   });
 
   it('deselects on Escape, from the terminal too, and on a click on the empty grid, leaving the card on the stage', async () => {
@@ -316,7 +306,7 @@ describe('FleetPage', () => {
     it('takes the body with the full question, answers it, and never selects the card from inside', async () => {
       const tasks = [{ id: 't1', title: 'Old task', status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never];
       const card = await setup({ tasks, pendingAsks: [ask('q1', 'Ship it?', 5n, [{ label: 'Yes', description: null }, { label: 'No', description: null }])] });
-      expect(card().queryByRole('list', { name: 'Activity' })).not.toBeInTheDocument();
+      expect(card().queryByRole('list', { name: 'Earlier' })).not.toBeInTheDocument();
       const row = card().getByRole('region', { name: 'Needs you' });
       const before = stageText();
 
@@ -334,7 +324,7 @@ describe('FleetPage', () => {
         useFleetStore.getState().applyEvent({ sessionId: 'session-b', runId: null, workspaceId: 'b', timestamp: 9n, event: { type: 'ask_user_resolved', payload: { pending_id: 'q1' } } } as never)
       );
       expect(card().queryByRole('region', { name: 'Needs you' })).not.toBeInTheDocument();
-      expect(card().getByRole('list', { name: 'Activity' })).toBeInTheDocument();
+      expect(within(card().getByRole('list', { name: 'Earlier' })).getByText('Ship it?')).toBeInTheDocument();
 
       fireEvent.click(card().getByRole('button', { name: 'Select Beta' }));
       expect(useFleetStore.getState().selectedId).toBe('b');

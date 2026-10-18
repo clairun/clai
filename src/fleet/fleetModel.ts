@@ -28,8 +28,6 @@ import { buildTaskTree, type TaskNode } from '../utils/taskTree';
 
 /** A workspace with no event in this window and nothing live gets no card. */
 export const RECENT_WINDOW_MS = 12 * 60 * 60 * 1000;
-/** Resolved items a card keeps on display: a glance of history, so the last message gets the room. */
-export const HISTORY_LIMIT = 3;
 const NOTE_CHARS = 600;
 
 export type FleetRequestKind = 'approval' | 'grant';
@@ -362,81 +360,203 @@ export const cardPhase = (card: FleetCard, live: FleetLive): FleetPhase => {
   return workspaceTasks(card, live).some((t) => isTaskLive(t.status)) ? 'working' : 'stopped';
 };
 
-export type FleetItemTone = 'live' | 'done' | 'failed' | 'note';
-
-export interface FleetItem {
-  key: string;
-  text: string;
-  status: string;
-  /** `taskStatus` pill key, for tasks. */
-  statusKey?: string;
-  tone: FleetItemTone;
-  agents: { name: string; seed: string }[];
-  at: number;
-  /** Set on a chat message; its `text` is markdown. */
-  note?: 'user' | 'assistant';
-}
-
-const TONE_RANK: Record<FleetItemTone, number> = { live: 1, failed: 2, done: 2, note: 2 };
-
-export const agentOf = (task: WorkspaceTaskResponse) => ({
+export const agentOf = (task: WorkspaceTaskResponse): FleetAgentRef => ({
   name: task.assignedAgentDisplayName,
   seed: task.assignedAgentDefinitionId || task.assignedToWorkspaceAgentId,
 });
 
 const subtree = (node: TaskNode): WorkspaceTaskResponse[] => [node.task, ...node.children.flatMap(subtree)];
 
-/** One item per top-level task, live while anything in its subtree is. */
-const taskItems = (tasks: WorkspaceTaskResponse[]): FleetItem[] =>
-  buildTaskTree(tasks).map((node) => {
-    const root = node.task;
-    const group = subtree(node);
-    const live = group.some((t) => isTaskLive(t.status));
-    const agents: FleetItem['agents'] = [];
-    for (const t of group) {
-      const agent = agentOf(t);
-      if (!agents.some((a) => a.seed === agent.seed)) agents.push(agent);
-    }
-    const display =
-      live && !isTaskLive(root.status) ? { key: 'running', label: 'Subtasks running' } : taskDisplayStatus(root);
-    return {
-      key: `task:${root.id}`,
-      text: root.title,
-      status: display.label,
-      statusKey: display.key,
-      tone: live ? 'live' : root.status === 'failed' ? 'failed' : 'done',
-      agents,
-      at: Math.max(...group.map((t) => Number(t.updatedAt))),
-    } satisfies FleetItem;
-  });
+/** Every distinct agent with a task on the card, live ones first, then the most recent. */
+export const cardAgents = (card: FleetCard, live: FleetLive): FleetAgentRef[] => {
+  const tasks = workspaceTasks(card, live).sort(
+    (a, b) => Number(isTaskLive(b.status)) - Number(isTaskLive(a.status)) || Number(b.updatedAt) - Number(a.updatedAt)
+  );
+  return [...new Map(tasks.map((t) => [agentOf(t).seed, agentOf(t)])).values()];
+};
+
+// ── The comic page: what a small card says ────────────────────────────────
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/** A finished task keeps the speech bubble this long, then moves to Earlier. */
+export const FRESH_MS = 10 * 60 * 1000;
+/** A card whose last word is older than this is stale: its drawing fades. */
+export const STALE_MS = DAY_MS;
+/** Speaking rows a card draws: running tasks first, then just-finished ones. */
+export const TALK_LIMIT = 3;
+export const EARLIER_LIMIT = 2;
+const SENTENCE_CHARS = 200;
+
+export interface FleetAgentRef {
+  name: string;
+  seed: string;
+}
+
+/** A top-level task in flight: Main hands it over, the agent thinks. */
+export interface FleetRunningTalk {
+  key: string;
+  title: string;
+  agent: FleetAgentRef;
+  queued: boolean;
+  /** Other agents working on its subtasks. */
+  helpers: number;
+}
+
+/** A task that just ended: the agent answers, and Main's question shrinks. */
+export interface FleetResultTalk {
+  key: string;
+  asked: string;
+  result: string;
+  failed: boolean;
+  agent: FleetAgentRef;
+  at: number;
+}
+
+export type FleetOutcome = 'done' | 'failed' | 'stopped' | 'answered';
+
+export interface FleetEarlierItem {
+  key: string;
+  title: string;
+  /** `null` for a question the user answered. */
+  agent: FleetAgentRef | null;
+  outcome: FleetOutcome;
+  at: number;
+}
+
+export type FleetMood = 'working' | 'fresh' | 'idle' | 'stale';
+
+export interface FleetSpeech extends FleetNote {
+  /** The message as plain text, for a bubble that clamps its lines. */
+  plain: string;
+  /** The first sentence, where the card has room for little more. */
+  headline: string;
+}
 
 /**
- * Every live item plus the `HISTORY_LIMIT` newest resolved ones, in reading
- * order like a chat: history and the visible messages oldest first, then work
- * in progress, so the bottom of the card is always the most current. Open
- * requests are not items: the card shows them below, with their answers.
+ * What a small card says, in comic form: the caption says when, the bubbles
+ * say what. Everything comes from events (tasks, messages, answers) and the
+ * time of the last one, so polling that changes nothing changes nothing here.
  */
-export const cardItems = (card: FleetCard, live: FleetLive): FleetItem[] => {
-  const items: FleetItem[] = taskItems(workspaceTasks(card, live));
+export interface FleetScene {
+  mood: FleetMood;
+  caption: string;
+  running: FleetRunningTalk[];
+  finished: FleetResultTalk[];
+  /** Main's own run is in flight. */
+  mainBusy: boolean;
+  /** Main's last message, to the reader. */
+  toYou: FleetSpeech | null;
+  userMessage: FleetNote | null;
+  /** Newest first. */
+  earlier: FleetEarlierItem[];
+}
+
+/** One markdown line as plain text: no block markers, emphasis or link targets. */
+const plainLine = (line: string): string =>
+  line
+    .replace(/^\s*(?:#{1,6}\s+|>\s?|[-*+]\s+|\d+\.\s+)/, '')
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
+    .replace(/\*\*|__|`|\*/g, '')
+    .trim();
+
+/** A markdown text as one plain paragraph, for a bubble that clamps its lines. */
+export const plainText = (markdown: string | null | undefined): string =>
+  (markdown ?? '').split('\n').map(plainLine).filter(Boolean).join(' ');
+
+/**
+ * The first sentence of a markdown text, as plain text: the headline of a
+ * message or a result. Cut at the first sentence end, or at the first line.
+ */
+export const firstSentence = (markdown: string | null | undefined): string => {
+  const plain = (markdown ?? '').split('\n').map(plainLine).find(Boolean) ?? '';
+  const end = plain.search(/[.!?…](?=\s|$)/);
+  const sentence = end >= 0 ? plain.slice(0, end + 1) : plain;
+  return sentence.length > SENTENCE_CHARS ? `${sentence.slice(0, SENTENCE_CHARS - 1)}…` : sentence;
+};
+
+/** `14:05` on `now`'s day, `Oct 16` before. */
+export const shortTime = (at: number, now: number): string => {
+  const date = new Date(at);
+  return date.toDateString() === new Date(now).toDateString()
+    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+    : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+};
+
+/** A run of the workspace that belongs to no task is its Main's. */
+const mainRunning = (card: FleetCard, live: FleetLive): boolean => {
+  const taskRuns = new Set(workspaceTasks(card, live).map((t) => t.runId));
+  return (live.runs[card.workspaceId] ?? []).some((id) => !taskRuns.has(id));
+};
+
+const resultOf = (task: WorkspaceTaskResponse): string =>
+  task.status === 'failed'
+    ? firstSentence(task.error) || taskDisplayStatus(task).label
+    : firstSentence(task.resultSummary) || task.title;
+
+export const cardScene = (card: FleetCard, live: FleetLive, now: number): FleetScene => {
+  const running: FleetRunningTalk[] = [];
+  const finished: FleetResultTalk[] = [];
+  const earlier: FleetEarlierItem[] = [];
+  for (const node of buildTaskTree(workspaceTasks(card, live))) {
+    const root = node.task;
+    const group = subtree(node);
+    const agent = agentOf(root);
+    if (group.some((t) => isTaskLive(t.status))) {
+      const helpers = new Set(group.map((t) => agentOf(t).seed).filter((seed) => seed !== agent.seed)).size;
+      running.push({ key: `task:${root.id}`, title: root.title, agent, queued: root.status === 'queued', helpers });
+      continue;
+    }
+    const at = Math.max(...group.map((t) => Number(t.completedAt ?? t.updatedAt)));
+    const failed = root.status === 'failed';
+    if (root.status !== 'stopped' && at >= now - FRESH_MS) {
+      finished.push({ key: `task:${root.id}`, asked: root.title, result: resultOf(root), failed, agent, at });
+    } else {
+      earlier.push({ key: `task:${root.id}`, title: root.title, agent, outcome: failed ? 'failed' : root.status === 'stopped' ? 'stopped' : 'done', at });
+    }
+  }
   for (const [key, request] of Object.entries(card.requests)) {
-    if (request.resolvedAt == null) continue;
-    items.push({
-      key,
-      text: request.text,
-      status: 'Answered',
-      tone: 'done',
-      agents: request.agentName ? [{ name: request.agentName, seed: request.agentName }] : [],
-      at: request.resolvedAt,
-    });
+    if (request.resolvedAt != null) earlier.push({ key, title: request.text, agent: null, outcome: 'answered', at: request.resolvedAt });
   }
-  items.sort((a, b) => TONE_RANK[a.tone] - TONE_RANK[b.tone] || b.at - a.at);
-  const liveCount = items.filter((i) => TONE_RANK[i.tone] < 2).length;
-  const shown = items.slice(0, liveCount + HISTORY_LIMIT);
-  const notes = [['user', card.userMessage], ['assistant', card.lastMessage]] as const;
-  for (const [note, message] of notes) {
-    if (message) shown.push({ key: `${note}:${message.id}`, text: message.text, status: '', tone: 'note', agents: [], at: message.at, note });
+
+  finished.sort((a, b) => b.at - a.at);
+  const shownRunning = running.slice(0, TALK_LIMIT);
+  const shownFinished = finished.slice(0, TALK_LIMIT - shownRunning.length);
+  // Results with no room to speak are already history.
+  for (const f of finished.slice(shownFinished.length)) {
+    earlier.push({ key: f.key, title: f.asked, agent: f.agent, outcome: f.failed ? 'failed' : 'done', at: f.at });
   }
-  return shown.sort((a, b) => TONE_RANK[b.tone] - TONE_RANK[a.tone] || a.at - b.at);
+  earlier.sort((a, b) => b.at - a.at);
+
+  const mainBusy = mainRunning(card, live);
+  const lastWord = card.lastMessage?.at ?? card.lastActivityAt;
+  const mood: FleetMood =
+    running.length > 0 || mainBusy
+      ? 'working'
+      : shownFinished.length > 0
+        ? 'fresh'
+        : lastWord > 0 && now - lastWord >= STALE_MS
+          ? 'stale'
+          : 'idle';
+  const days = Math.floor((now - lastWord) / DAY_MS);
+  const caption = {
+    working: running.length > 1 ? `Now · ${running.length} at once` : 'Now',
+    fresh: `Just now · ${shortTime(shownFinished[0]?.at ?? now, now)}`,
+    idle: lastWord > 0 ? `Last word · ${shortTime(lastWord, now)}` : 'Nothing yet',
+    stale: days === 1 ? 'Yesterday' : `${days} days ago`,
+  }[mood];
+
+  return {
+    mood,
+    caption,
+    running: shownRunning,
+    finished: shownFinished,
+    mainBusy,
+    toYou: card.lastMessage
+      ? { ...card.lastMessage, plain: plainText(card.lastMessage.text), headline: firstSentence(card.lastMessage.text) }
+      : null,
+    userMessage: card.userMessage,
+    earlier: earlier.slice(0, EARLIER_LIMIT),
+  };
 };
 
 /** An agent with work in flight: its tasks, or `main` for the workspace's own session. */
@@ -466,8 +586,6 @@ export const liveAgents = (card: FleetCard, live: FleetLive): LiveAgent[] => {
     (task.status === 'queued' ? entry.queued : entry.running).push(task);
     byAgent.set(seed, entry);
   }
-  const taskRuns = new Set(tasks.map((t) => t.runId));
-  const mainRunning = (live.runs[card.workspaceId] ?? []).some((id) => !taskRuns.has(id));
   const agents: LiveAgent[] = [...byAgent].map(([seed, { name, running, queued }]) => ({
     seed,
     name,
@@ -476,7 +594,7 @@ export const liveAgents = (card: FleetCard, live: FleetLive): LiveAgent[] => {
       .filter(Boolean)
       .join(', '),
   }));
-  if (mainRunning) agents.unshift({ seed: 'main', name: 'Main', main: true, running: true, doing: 'running the workspace chat' });
+  if (mainRunning(card, live)) agents.unshift({ seed: 'main', name: 'Main', main: true, running: true, doing: 'running the workspace chat' });
   return agents.sort((a, b) => Number(b.running) - Number(a.running));
 };
 

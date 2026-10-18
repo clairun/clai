@@ -3,7 +3,7 @@ import AgentAvatar from '../Agents/AgentAvatar';
 import { GENERATOR_VERSION, type AgentIdentity } from '../Agents/agentIdentity';
 import {
   cardAttention,
-  cardItems,
+  cardAgents,
   cardPhase,
   cycleCard,
   type FleetCard,
@@ -69,13 +69,7 @@ const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: Flee
         {order.map((id) => {
           const card = cards[id];
           if (!card) return null;
-          const agents = [
-            ...new Map(
-              cardItems(card, live)
-                .flatMap((i) => i.agents)
-                .map((a) => [a.seed, a])
-            ).values(),
-          ];
+          const agents = cardAgents(card, live);
           const phase = cardPhase(card, live);
           return (
             <li

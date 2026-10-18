@@ -148,6 +148,7 @@ const FleetPage = () => {
             selectedId={selectedId}
             live={live}
             faces={faces}
+            now={now}
             onSelect={handleSelect}
           />
         ) : (

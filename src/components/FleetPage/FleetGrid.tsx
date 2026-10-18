@@ -24,6 +24,8 @@ interface FleetGridProps {
   selectedId: string | null;
   live: FleetLive;
   faces: Record<string, AgentIdentity>;
+  /** The time of the last Fleet event. */
+  now: number;
   onSelect: (workspaceId: string | null) => void;
 }
 
@@ -32,7 +34,7 @@ interface FleetGridProps {
  * 2 × 2; the rest flow into the 1 × 1 slots around it. Nothing animates: on
  * WebKitGTK even a short transition blinks.
  */
-const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, onSelect }: FleetGridProps) => {
+const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, now, onSelect }: FleetGridProps) => {
   const handleSelect = useCallback((id: string) => onSelect(id), [onSelect]);
 
   return (
@@ -62,7 +64,7 @@ const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, onSelect
             {stage ? (
               <FleetSelectedCard card={card} live={live} selected={selected} faces={faces} onSelect={onSelect} />
             ) : (
-              <FleetCard card={card} live={live} faces={faces} onSelect={handleSelect} />
+              <FleetCard card={card} live={live} faces={faces} now={now} onSelect={handleSelect} />
             )}
           </article>
         );

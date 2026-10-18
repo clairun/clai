@@ -198,6 +198,8 @@
   --color-text-primary: rgba(45, 42, 38, 0.92);
   --color-text-secondary: rgba(45, 42, 38, 0.68);
   --color-text-tertiary: rgba(45, 42, 38, 0.50);
+  /* Small past-tense text read all day (Fleet history): 4.8:1 on a card, where tertiary is 3.0:1. */
+  --color-text-past: rgba(45, 42, 38, 0.66);
   --color-text-disabled: rgba(45, 42, 38, 0.32);
   --color-text-placeholder: rgba(45, 42, 38, 0.40);
 
