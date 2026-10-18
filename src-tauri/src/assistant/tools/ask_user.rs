@@ -91,16 +91,37 @@ pub struct AskUserAnswer {
     pub selected_option_indexes: Option<Vec<usize>>,
 }
 
-// Keyed by pending id; the value carries the owning session id so callers
-// (mid-run input delivery) can check whether a session is currently blocked
-// on a human answer without threading new state through the tool router.
 #[derive(Debug)]
 pub(crate) enum AskUserOutcome {
     Answer(AskUserAnswer),
     Superseded,
 }
 
-type PendingMap = HashMap<String, (String, oneshot::Sender<AskUserOutcome>)>;
+/// A question awaiting the human: the `AskUserRequested` payload plus where
+/// it was asked. Kept so a reloaded webview can re-render the answer panel.
+#[derive(Debug, Clone, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct PendingAsk {
+    pub pending_id: String,
+    pub workspace_id: String,
+    pub session_id: String,
+    pub run_id: String,
+    pub question: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub options: Option<Vec<AskUserOption>>,
+    pub multi_select: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_context: Option<String>,
+    pub requested_at: i64,
+}
+
+struct PendingEntry {
+    ask: PendingAsk,
+    tx: oneshot::Sender<AskUserOutcome>,
+}
+
+type PendingMap = HashMap<String, PendingEntry>;
 static PENDING: OnceLock<Mutex<PendingMap>> = OnceLock::new();
 
 fn pending_map() -> &'static Mutex<PendingMap> {
@@ -113,8 +134,56 @@ fn pending_map() -> &'static Mutex<PendingMap> {
 pub fn session_has_pending_ask(session_id: &str) -> bool {
     pending_map()
         .lock()
-        .map(|map| map.values().any(|(owner, _)| owner == session_id))
+        .map(|map| map.values().any(|entry| entry.ask.session_id == session_id))
         .unwrap_or(false)
+}
+
+/// The workspace's unanswered questions, oldest first.
+pub fn pending_for_workspace(workspace_id: &str) -> Vec<PendingAsk> {
+    let Ok(map) = pending_map().lock() else {
+        return Vec::new();
+    };
+    let mut asks: Vec<PendingAsk> = map
+        .values()
+        .filter(|entry| entry.ask.workspace_id == workspace_id)
+        .map(|entry| entry.ask.clone())
+        .collect();
+    asks.sort_by_key(|ask| ask.requested_at);
+    asks
+}
+
+fn forget(pending_id: &str) {
+    if let Ok(mut map) = pending_map().lock() {
+        map.remove(pending_id);
+    }
+}
+
+/// A `PENDING` entry that is removed when this is dropped, however the
+/// waiting tool future ends.
+struct PendingRegistration(String);
+
+impl PendingRegistration {
+    fn insert(entry: PendingEntry) -> Result<Self, String> {
+        let id = entry.ask.pending_id.clone();
+        pending_map()
+            .lock()
+            .map_err(|e| format!("ask_user pending map poisoned: {}", e))?
+            .insert(id.clone(), entry);
+        Ok(Self(id))
+    }
+}
+
+impl Drop for PendingRegistration {
+    fn drop(&mut self) {
+        forget(&self.0);
+    }
+}
+
+/// Keeps `ask` pending until the returned guard is dropped.
+#[cfg(test)]
+pub(crate) fn register_for_test(ask: PendingAsk) -> impl Drop {
+    let (tx, _rx) = oneshot::channel();
+    PendingRegistration::insert(PendingEntry { ask, tx }).expect("register ask")
 }
 
 /// Deliver an answer to a waiting `ask_user` invocation. Called from the
@@ -124,10 +193,12 @@ pub fn submit_answer(pending_id: &str, answer: AskUserAnswer) -> Result<(), Stri
     let mut map = pending_map()
         .lock()
         .map_err(|e| format!("ask_user pending map poisoned: {}", e))?;
-    let (_, tx) = map
+    let entry = map
         .remove(pending_id)
         .ok_or_else(|| format!("No pending ask_user with id `{}`", pending_id))?;
-    tx.send(AskUserOutcome::Answer(answer))
+    entry
+        .tx
+        .send(AskUserOutcome::Answer(answer))
         .map_err(|_| "ask_user receiver was dropped (run already ended)".to_string())
 }
 
@@ -144,12 +215,12 @@ pub fn take_for_session(session_id: &str) -> Vec<String> {
     };
     let ids: Vec<String> = map
         .iter()
-        .filter(|(_, (owner, _))| owner == session_id)
+        .filter(|(_, entry)| entry.ask.session_id == session_id)
         .map(|(id, _)| id.clone())
         .collect();
     for id in &ids {
-        if let Some((_, tx)) = map.remove(id) {
-            let _ = tx.send(AskUserOutcome::Superseded);
+        if let Some(entry) = map.remove(id) {
+            let _ = entry.tx.send(AskUserOutcome::Superseded);
         }
     }
     ids
@@ -163,7 +234,7 @@ pub fn take_for_session(session_id: &str) -> Vec<String> {
 /// run rather than letting the model continue without the requested
 /// human answer (a no-op when the run already ended).
 struct PendingGuard {
-    id: String,
+    registration: PendingRegistration,
     app: tauri::AppHandle,
     workspace_id: String,
     session: crate::assistant::types::AssistantSession,
@@ -178,16 +249,14 @@ impl PendingGuard {
     }
 
     async fn abandon_and_stop<T>(&mut self) -> T {
-        if let Ok(mut map) = pending_map().lock() {
-            map.remove(&self.id);
-        }
+        forget(&self.registration.0);
         let _ = emit_event(
             &self.app,
             &self.workspace_id,
             &self.session,
             Some(self.run_id.as_str()),
             AssistantUiEvent::AskUserResolved {
-                pending_id: self.id.clone(),
+                pending_id: self.registration.0.clone(),
             },
         );
         self.armed = false;
@@ -201,14 +270,13 @@ impl Drop for PendingGuard {
             return;
         }
         self.cancel_token.cancel();
-        if let Ok(mut map) = pending_map().lock() {
-            map.remove(&self.id);
-        }
+        // Removed before `AskUserResolved` is emitted, not after the fields drop.
+        forget(&self.registration.0);
         let app = self.app.clone();
         let workspace_id = self.workspace_id.clone();
         let session = self.session.clone();
         let run_id = self.run_id.clone();
-        let pending_id = self.id.clone();
+        let pending_id = self.registration.0.clone();
         tauri::async_runtime::spawn(async move {
             let _ = emit_event(
                 &app,
@@ -258,15 +326,27 @@ pub async fn execute(
     }
 
     let pending_id = Uuid::new_v4().to_string();
+    let ask = PendingAsk {
+        pending_id: pending_id.clone(),
+        workspace_id: deps.workspace_id.clone(),
+        session_id: session.id.clone(),
+        run_id: context.run_id.clone(),
+        question,
+        options: sanitize_options(params.options),
+        multi_select: params.multi_select.unwrap_or(false),
+        extra_context: params.context,
+        requested_at: repository::now_ms(),
+    };
+    let requested = AssistantUiEvent::AskUserRequested {
+        pending_id: pending_id.clone(),
+        question: ask.question.clone(),
+        options: ask.options.clone(),
+        multi_select: ask.multi_select,
+        extra_context: ask.extra_context.clone(),
+    };
     let (tx, rx) = oneshot::channel::<AskUserOutcome>();
-    {
-        let mut map = pending_map()
-            .lock()
-            .map_err(|e| format!("ask_user pending map poisoned: {}", e))?;
-        map.insert(pending_id.clone(), (session.id.clone(), tx));
-    }
     let mut guard = PendingGuard {
-        id: pending_id.clone(),
+        registration: PendingRegistration::insert(PendingEntry { ask, tx })?,
         app: deps.app.clone(),
         workspace_id: deps.workspace_id.clone(),
         session: session.clone(),
@@ -275,17 +355,7 @@ pub async fn execute(
         armed: true,
     };
 
-    let _ = deps.emit(
-        &session,
-        Some(context.run_id.as_str()),
-        AssistantUiEvent::AskUserRequested {
-            pending_id: pending_id.clone(),
-            question: question.clone(),
-            options: sanitize_options(params.options.clone()),
-            multi_select: params.multi_select.unwrap_or(false),
-            extra_context: params.context.clone(),
-        },
-    );
+    let _ = deps.emit(&session, Some(context.run_id.as_str()), requested);
 
     let answer = match rx.await {
         Ok(AskUserOutcome::Answer(answer)) => answer,
@@ -397,23 +467,91 @@ mod tests {
     }
 
     // PENDING is a process-wide static shared across parallel tests, so
-    // each test uses unique session ids to stay isolated.
+    // each test uses unique workspace and session ids to stay isolated.
+
+    fn register(
+        pending_id: &str,
+        workspace_id: &str,
+        session_id: &str,
+        requested_at: i64,
+    ) -> oneshot::Receiver<AskUserOutcome> {
+        let (entry, rx) = pending_entry(pending_id, workspace_id, session_id, requested_at);
+        pending_map()
+            .lock()
+            .unwrap()
+            .insert(pending_id.to_string(), entry);
+        rx
+    }
+
+    fn pending_entry(
+        pending_id: &str,
+        workspace_id: &str,
+        session_id: &str,
+        requested_at: i64,
+    ) -> (PendingEntry, oneshot::Receiver<AskUserOutcome>) {
+        let (tx, rx) = oneshot::channel::<AskUserOutcome>();
+        let ask = PendingAsk {
+            pending_id: pending_id.to_string(),
+            workspace_id: workspace_id.to_string(),
+            session_id: session_id.to_string(),
+            run_id: "run".to_string(),
+            question: format!("question {pending_id}"),
+            options: Some(vec![opt("Yes")]),
+            multi_select: false,
+            extra_context: None,
+            requested_at,
+        };
+        (PendingEntry { ask, tx }, rx)
+    }
+
+    fn answer(text: &str) -> AskUserAnswer {
+        AskUserAnswer {
+            text: text.to_string(),
+            selected_option_index: None,
+            selected_option_indexes: None,
+        }
+    }
+
+    fn pending_ids(workspace_id: &str) -> Vec<String> {
+        pending_for_workspace(workspace_id)
+            .into_iter()
+            .map(|ask| ask.pending_id)
+            .collect()
+    }
+
+    #[test]
+    fn pending_asks_are_readable_until_answered_superseded_or_cancelled() {
+        let _rx_answered = register("pfw-answered", "pfw-ws", "pfw-s1", 3);
+        let _rx_superseded = register("pfw-superseded", "pfw-ws", "pfw-s2", 1);
+        let (cancelled, _rx_cancelled) = pending_entry("pfw-cancelled", "pfw-ws", "pfw-s3", 2);
+        let cancelled = PendingRegistration::insert(cancelled).unwrap();
+        let _rx_other = register("pfw-other", "pfw-other-ws", "pfw-s4", 0);
+
+        let asks = pending_for_workspace("pfw-ws");
+        assert_eq!(
+            asks.iter()
+                .map(|a| a.pending_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["pfw-superseded", "pfw-cancelled", "pfw-answered"],
+            "only this workspace's asks, oldest first"
+        );
+        assert_eq!(asks[2].question, "question pfw-answered");
+        assert_eq!(asks[2].session_id, "pfw-s1");
+
+        submit_answer("pfw-answered", answer("yes")).unwrap();
+        take_for_session("pfw-s2");
+        // A cancelled run drops the waiting future and with it the registration.
+        drop(cancelled);
+
+        assert!(pending_ids("pfw-ws").is_empty());
+        assert_eq!(pending_ids("pfw-other-ws"), vec!["pfw-other".to_string()]);
+        forget("pfw-other");
+    }
 
     #[test]
     fn take_for_session_removes_only_that_sessions_asks_and_closes_channels() {
-        let (tx_a, rx_a) = oneshot::channel::<AskUserOutcome>();
-        let (tx_b, mut rx_b) = oneshot::channel::<AskUserOutcome>();
-        {
-            let mut map = pending_map().lock().unwrap();
-            map.insert(
-                "tfs-pending-a".to_string(),
-                ("tfs-session-a".to_string(), tx_a),
-            );
-            map.insert(
-                "tfs-pending-b".to_string(),
-                ("tfs-session-b".to_string(), tx_b),
-            );
-        }
+        let rx_a = register("tfs-pending-a", "tfs-ws", "tfs-session-a", 0);
+        let mut rx_b = register("tfs-pending-b", "tfs-ws", "tfs-session-b", 0);
 
         let removed = take_for_session("tfs-session-a");
         assert_eq!(removed, vec!["tfs-pending-a".to_string()]);
@@ -437,21 +575,10 @@ mod tests {
 
     #[test]
     fn submit_answer_fails_for_superseded_pending_id() {
-        let (tx, _rx) = oneshot::channel::<AskUserOutcome>();
-        pending_map()
-            .lock()
-            .unwrap()
-            .insert("sup-pending".to_string(), ("sup-session".to_string(), tx));
+        let _rx = register("sup-pending", "sup-ws", "sup-session", 0);
         take_for_session("sup-session");
 
-        let result = submit_answer(
-            "sup-pending",
-            AskUserAnswer {
-                text: "late".to_string(),
-                selected_option_index: None,
-                selected_option_indexes: None,
-            },
-        );
+        let result = submit_answer("sup-pending", answer("late"));
         assert!(result.is_err(), "superseded ask must not accept answers");
     }
 }

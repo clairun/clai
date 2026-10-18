@@ -6,6 +6,8 @@ import { MemoryRouter, Route, Routes } from 'react-router';
 
 import FleetLayout from './FleetLayout';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
+import { useFleetStore } from '../fleet/fleetStore';
+import { EMPTY_FLEET, emptyCard, type FleetAsk } from '../fleet/fleetModel';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 
 vi.mock('../workspace/client', () => ({
@@ -90,7 +92,7 @@ const renderFleet = (initialPath = '/workspace/a') =>
     <MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route element={<FleetLayout />}>
-          <Route path="/fleet" element={<div data-testid="fleet-index" />} />
+          <Route path="/workspace" element={<div data-testid="fleet-index" />} />
           <Route path="/workspace/:workspaceId" element={<div data-testid="workspace" />} />
         </Route>
       </Routes>
@@ -122,9 +124,30 @@ describe('FleetLayout attention', () => {
     try {
       renderFleet();
       await screen.findByText('Alpha');
-      expect(screen.getByRole('status', { name: 'Fleet summary' })).toHaveTextContent('1 need attention');
+      expect(screen.getByRole('status', { name: 'Summary' })).toHaveTextContent('1 need attention');
     } finally {
       permissionAttention.counts = {};
+    }
+  });
+
+  it('counts an open question as needing attention, like the Fleet does', async () => {
+    permissionAttention.counts = { a: 1 };
+    const ask = { pendingId: 'q', question: 'Ship it?', sessionId: 'main' } as FleetAsk;
+    const request = { kind: 'ask' as const, ask, text: ask.question, agentName: null, at: 1, resolvedAt: null };
+    useFleetStore.setState({ fleet: { cards: { a: { ...emptyCard('a'), requests: { 'ask:q': request } }, b: { ...emptyCard('b'), requests: { 'ask:q': request } } } } });
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta'), entry('c', 'Gamma')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    try {
+      renderFleet();
+      await screen.findByText('Alpha');
+      expect(screen.getByRole('status', { name: 'Summary' })).toHaveTextContent('2 need attention');
+      const badges = (title: string) =>
+        within(screen.getByRole('button', { name: new RegExp(title) })).getAllByTitle('Needs attention').map((el) => el.textContent);
+      expect(badges('Alpha')).toContain('2');
+      expect(badges('Beta')).toContain('1');
+    } finally {
+      permissionAttention.counts = {};
+      useFleetStore.setState({ fleet: EMPTY_FLEET });
     }
   });
 });
@@ -151,7 +174,7 @@ describe('FleetLayout workspace deletion', () => {
 
     await waitFor(() => expect(deleteWorkspace).toHaveBeenCalledWith('a'));
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
-    // Deleting the open workspace redirects to the fleet index, and that too
+    // Deleting the open workspace redirects to the workspace index, and that too
     // must not wait on the refresh.
     expect(await screen.findByTestId('fleet-index')).toBeInTheDocument();
 

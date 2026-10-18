@@ -38,6 +38,10 @@ vi.mock('./pages/FleetIndex', () => ({
   default: () => <div data-testid="fleet-index" />,
 }));
 
+vi.mock('./pages/FleetPage', () => ({
+  default: () => <div data-testid="fleet-page" />,
+}));
+
 vi.mock('./pages/Workspace', () => ({
   default: function WorkspaceStub() {
     const { workspaceId } = useParams();
@@ -75,32 +79,22 @@ const renderEntries = (entries: string[]) =>
 const renderAt = (path: string) => renderEntries([path]);
 
 describe('AppRoutes', () => {
-  it('sends the root path to the fleet view', () => {
+  it('opens on the fleet page', () => {
     renderAt('/');
-    expect(screen.getByTestId('fleet-index')).toBeInTheDocument();
+    expect(screen.getByTestId('fleet-page')).toBeInTheDocument();
   });
 
-  it('renders the fleet index nested inside MainLayout > FleetLayout', () => {
+  it('renders the fleet page without the workspace rail', () => {
     renderAt('/fleet');
-    // Nesting, not just presence: FleetLayout owns the persistent workspace
-    // rail and must sit inside MainLayout's chrome, not beside it.
-    expect(screen.getByTestId('main-layout')).toContainElement(
-      screen.getByTestId('fleet-layout')
-    );
+    expect(screen.getByTestId('main-layout')).toContainElement(screen.getByTestId('fleet-page'));
+    expect(screen.queryByTestId('fleet-layout')).not.toBeInTheDocument();
+  });
+
+  it('renders the workspace index inside the workspaces shell', () => {
+    renderAt('/workspace');
     expect(screen.getByTestId('fleet-layout')).toContainElement(
       screen.getByTestId('fleet-index')
     );
-  });
-
-  it('redirects a bare /workspace with no id back to the fleet, replacing the entry', () => {
-    renderEntries(['/somewhere', '/workspace']);
-    expect(screen.getByTestId('fleet-index')).toBeInTheDocument();
-    expect(screen.queryByTestId('workspace')).not.toBeInTheDocument();
-
-    // Same redirect-loop hazard as the root redirect: without `replace`, Back
-    // returns to /workspace and is bounced straight forward again.
-    fireEvent.click(screen.getByText('back'));
-    expect(screen.getByTestId('pathname')).toHaveTextContent('/somewhere');
   });
 
   it('renders a workspace by id inside the fleet shell, so the rail stays mounted', () => {

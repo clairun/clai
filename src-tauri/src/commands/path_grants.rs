@@ -40,12 +40,10 @@ use crate::AppState;
 
 pub const PATH_GRANT_REQUEST_EVENT: &str = "path-grants://request";
 pub const PATH_GRANT_ATTENTION_EVENT: &str = "path-grants://attention";
-/// Emitted when a pending path-grant request is cleared *without* a user
-/// decision — the run was cancelled or ended (reaping a wait orphaned by
-/// a CLI transport drop), or a re-asked grant superseded the stale request.
-/// The inline path-grant card removes the now-useless card on this. Normal
-/// submissions clear the card optimistically on the frontend, so they don't
-/// emit this.
+/// Emitted whenever a pending path-grant request leaves the queue: a user
+/// decision, a cancelled or ended run (reaping a wait orphaned by a CLI
+/// transport drop), or a re-asked grant superseding the stale request.
+/// Every view showing the request drops it on this.
 pub const PATH_GRANT_RESOLVED_EVENT: &str = "path-grants://resolved";
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -232,6 +230,14 @@ impl PendingPathGrants {
         run_ids
     }
 
+    pub async fn request(&self, request_id: &str) -> Option<PathGrantRequest> {
+        let inner = self.inner.lock().await;
+        inner
+            .entries
+            .get(request_id)
+            .map(|entry| entry.request.clone())
+    }
+
     pub async fn take(&self, request_id: &str) -> Option<(PendingEntry, u32)> {
         let mut inner = self.inner.lock().await;
         let entry = inner.entries.remove(request_id)?;
@@ -340,14 +346,18 @@ pub async fn submit_path_grant_decision(
     request_id: String,
     decision: PathGrantDecision,
 ) -> Result<(), String> {
-    let Some((entry, remaining)) = state.pending_path_grants.take(&request_id).await else {
-        return Err(format!(
-            "No pending path-grant with request_id `{}` (already resolved or cleared)",
-            request_id
-        ));
+    // Validate before `take` so a rejected decision leaves the request
+    // pending for the user to answer again.
+    let Some(request) = state.pending_path_grants.request(&request_id).await else {
+        return Err(no_pending_path_grant(&request_id));
     };
-
-    let validated = validate_decision_against_request(&entry.request, decision)?;
+    let validated = validate_decision_against_request(&request, decision)?;
+    let Some((entry, remaining)) = state.pending_path_grants.take(&request_id).await else {
+        return Err(no_pending_path_grant(&request_id));
+    };
+    // The request has left the queue, so say so even if persisting fails.
+    emit_path_grant_resolved(&app, &request_id);
+    emit_attention(&app, entry.workspace_id.clone(), remaining);
 
     // Persist *before* delivering. If the process dies between persist and
     // deliver, the next session reads the grant from extra_paths and the
@@ -378,8 +388,14 @@ pub async fn submit_path_grant_decision(
     let _ = entry
         .sender
         .send(PendingPathGrantOutcome::Decision(validated));
-    emit_attention(&app, entry.workspace_id, remaining);
     Ok(())
+}
+
+fn no_pending_path_grant(request_id: &str) -> String {
+    format!(
+        "No pending path-grant with request_id `{}` (already resolved or cleared)",
+        request_id
+    )
 }
 
 fn validate_decision_against_request(
@@ -510,8 +526,7 @@ pub fn emit_attention(app: &tauri::AppHandle, workspace_id: Option<String>, pend
     }
 }
 
-/// Tell the frontend to drop the inline path-grant card for `request_id`
-/// because the request was cleared backend-side without a user decision.
+/// Tell the frontend to drop the path-grant card for `request_id`.
 pub fn emit_path_grant_resolved(app: &tauri::AppHandle, request_id: &str) {
     if let Err(e) = app.emit(
         PATH_GRANT_RESOLVED_EVENT,

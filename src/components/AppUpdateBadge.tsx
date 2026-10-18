@@ -1,11 +1,11 @@
 /**
  * AppUpdateBadge Component
  *
- * The app's only update surface: a persistent pill in the fleet top bar,
- * visible from every route (FleetLayout wraps both `/fleet` and
- * `/workspace/:id`). It stays up until the update is applied — deliberately
- * not dismissible, and deliberately not a toast: an update is worth knowing
- * about, never worth interrupting for.
+ * The app's only update surface: a persistent pill in the top bar of every
+ * page (`AppTopBar`, on the Fleet and the workspaces page). It stays
+ * up until the update is applied — deliberately not dismissible, and
+ * deliberately not a toast: an update is worth knowing about, never worth
+ * interrupting for.
  *
  * Clicking the pill opens Settings > About, which hosts the release notes,
  * the manual check and the notify-only (Linux package manager) copy.

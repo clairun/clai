@@ -3,11 +3,14 @@ import { Outlet } from 'react-router';
 import TerminalEmulatorWrapper from '../components/TerminalEmulator/TerminalEmulatorWrapper';
 import PermissionAttentionNotifications from '../components/PermissionAttentionNotifications';
 import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
+import GlobalSettingsHost from '../components/Settings/GlobalSettingsHost';
 import { useAssistantEvents } from '../assistant';
+import { useFleetAttentionFeed } from '../fleet/useFleetAttentionFeed';
 import styles from './MainLayout.module.css';
 
 const AssistantEventListener = ({ children }: { children: React.ReactNode }) => {
   useAssistantEvents();
+  useFleetAttentionFeed();
   return <>{children}</>;
 };
 
@@ -25,6 +28,7 @@ const MainLayout = () => {
         <WorkspaceTaskNotifications />
         <PermissionAttentionNotifications />
         <TerminalEmulatorWrapper />
+        <GlobalSettingsHost />
         <div className={styles.contentArea}>
           <Outlet />
         </div>

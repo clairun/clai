@@ -16,9 +16,13 @@
   background: var(--color-bg-secondary);
 }
 
-/* Content Area - takes remaining flex space after TerminalEmulator */
+/* Content Area - takes remaining flex space after TerminalEmulator. A flex
+   column itself, so a page can fill it by flexing rather than by a percentage
+   height, which an engine may treat as indefinite inside a flex item. */
 .contentArea {
   flex: 1;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   min-height: 0;
   /* The floating composer/terminal card is horizontally scoped to the

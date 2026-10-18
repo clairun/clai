@@ -5,13 +5,13 @@ import { errText, num } from '../fleet/workspaceStatus';
 import styles from './FleetIndex.module.css';
 
 /**
- * Index content for `/fleet`. The user chose "auto-select most-recent
+ * Index content for `/workspace`. The user chose "auto-select most-recent
  * workspace", so on mount we resolve the most-recently-updated workspace
  * and redirect to it. When there are no workspaces yet, we render an
  * empty state with a create affordance instead.
  *
  * The redirect uses `replace` so the back button doesn't bounce between
- * `/fleet` and the workspace.
+ * `/workspace` and the workspace.
  */
 const FleetIndex = () => {
   const navigate = useNavigate();

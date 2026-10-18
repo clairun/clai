@@ -1,0 +1,147 @@
+import { useCallback, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router';
+import { useAssistantStore } from '../../assistant';
+import { useSessionChatActions } from '../../assistant/sessionChat';
+import ChatMessageList from '../AssistantChat/ChatMessageList';
+import { resolveSessionOwner } from '../AssistantChat/messageSender';
+import AskUserPanel from '../AskUserPanel/AskUserPanel';
+import InlineApprovalCard from '../InlineApprovalCard';
+import InlinePathGrantCard from '../InlinePathGrantCard';
+import { mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
+import { markWorkspaceOpened } from '../../workspace/client';
+import { cardAttention, cardPhase, openRequests, type FleetCard, type FleetLive } from '../../fleet/fleetModel';
+import type { AssistantMessage, AssistantRun, ToolInvocation } from '../../generated/bindings';
+import { LiveFaces, phaseLabel } from './FleetCard';
+import { useFleetChat } from './useFleetChat';
+import styles from './FleetPage.module.css';
+
+const MAIN_IDENTITY = mainIdentity();
+const EMPTY_MESSAGES: AssistantMessage[] = [];
+const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
+const EMPTY_IDS: string[] = [];
+const EMPTY_STREAMING: Record<string, string> = {};
+const EMPTY_RUNS: AssistantRun[] = [];
+
+interface FleetSelectedCardProps {
+  card: FleetCard;
+  live: FleetLive;
+  selected: boolean;
+  /** Picked agent faces, by agent definition id. */
+  faces: Record<string, AgentIdentity>;
+  onSelect: (workspaceId: string | null) => void;
+}
+
+/** The stage card: the workspace's chat, in full, with its pending requests. */
+const FleetSelectedCard = ({ card, live, selected, faces, onSelect }: FleetSelectedCardProps) => {
+  const navigate = useNavigate();
+  const { workspaceId, mainSessionId: sessionId } = card;
+  const { roster, error, loading } = useFleetChat(workspaceId, sessionId);
+  const owner = useMemo(() => resolveSessionOwner(roster), [roster]);
+  const session = useAssistantStore((s) => (sessionId ? s.sessions[sessionId] : undefined));
+  const streamingText = useAssistantStore(
+    (s) => (sessionId && s.streamingText[sessionId]) || EMPTY_STREAMING
+  );
+  const messages = session?.messages ?? EMPTY_MESSAGES;
+  const runs = session?.runs ?? EMPTY_RUNS;
+  const lastRun = runs.reduce<AssistantRun | null>(
+    (latest, run) => (!latest || run.startedAt > latest.startedAt ? run : latest),
+    null
+  );
+  const runError =
+    lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
+
+  const actions = useSessionChatActions(workspaceId, sessionId);
+  const isStreaming = !!session?.isStreaming;
+
+  // Selected is seen: the rail's unread dot clears, as on the Workspace page
+  // (see the same stamp there), and again on leaving while a run is in flight.
+  useEffect(() => {
+    if (!selected) return undefined;
+    markWorkspaceOpened(workspaceId).catch(() => {});
+    return () => {
+      markWorkspaceOpened(workspaceId).catch(() => {});
+    };
+  }, [selected, workspaceId, isStreaming]);
+  const openTask = useCallback(
+    (taskId: string) => navigate(`/workspace/${encodeURIComponent(workspaceId)}`, { state: { openTaskId: taskId } }),
+    [navigate, workspaceId]
+  );
+
+  const title = card.title || 'Workspace';
+
+  return (
+    <div className={styles.cardInner} onClick={selected ? undefined : () => onSelect(workspaceId)}>
+      <header className={styles.cardHeader}>
+        <h2 className={styles.selectedTitle}>
+          {selected ? (
+            title
+          ) : (
+            <button
+              type="button"
+              className={styles.cardTitle}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect(workspaceId);
+              }}
+              aria-label={`Select ${title}`}
+            >
+              {title}
+            </button>
+          )}
+        </h2>
+        <LiveFaces card={card} live={live} faces={faces} />
+        <span className={styles.phase} data-phase={cardPhase(card, live)}>
+          {phaseLabel(cardPhase(card, live), cardAttention(card))}
+        </span>
+        <button
+          type="button"
+          className={styles.headerButton}
+          onClick={() => navigate(`/workspace/${encodeURIComponent(workspaceId)}`)}
+        >
+          Open workspace
+        </button>
+        {selected && (
+          <button type="button" className={styles.closeButton} onClick={() => onSelect(null)} aria-label="Deselect workspace" title="Deselect">
+            ×
+          </button>
+        )}
+      </header>
+      <div className={styles.chat}>
+        {messages.length > 0 ? (
+          <ChatMessageList
+            key={workspaceId}
+            workspaceId={workspaceId}
+            messages={messages}
+            toolCalls={session?.toolCalls ?? EMPTY_TOOL_CALLS}
+            streamingText={streamingText}
+            isStreaming={isStreaming}
+            runError={runError}
+            runStartedAt={session?.runStartedAt ?? null}
+            runningIdentity={MAIN_IDENTITY}
+            queuedMessageIds={session?.queuedMessageIds ?? EMPTY_IDS}
+            onDeleteQueuedMessage={actions.onDeleteQueuedMessage}
+            onEditQueuedMessage={actions.onEditQueuedMessage}
+            hasOlderMessages={!!session?.hasOlderMessages}
+            isLoadingOlderMessages={!!session?.isLoadingOlderMessages}
+            onLoadOlderMessages={actions.onLoadOlderMessages}
+            taskRoster={roster}
+            owner={owner}
+            onOpenTask={openTask}
+          />
+        ) : (
+          <p className={styles.chatEmpty}>
+            {error ?? (loading ? 'Loading conversation…' : 'No messages yet. Type below to talk to this workspace.')}
+          </p>
+        )}
+        <AskUserPanel sessionId={sessionId} />
+        {openRequests(card).map(
+          (r) => r.kind === 'ask' && r.ask.sessionId !== sessionId && <AskUserPanel key={r.ask.pendingId} ask={r.ask} />
+        )}
+        <InlineApprovalCard workspaceId={workspaceId} />
+        <InlinePathGrantCard workspaceId={workspaceId} />
+      </div>
+    </div>
+  );
+};
+
+export default FleetSelectedCard;

@@ -1,6 +1,10 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
+  allowAlways,
+  allowOnce,
+  denyAlways,
+  denyOnce,
   listPendingPermissionRequests,
   submitPermissionDecision,
 } from '../permissions/client';
@@ -8,9 +12,9 @@ import type { PermissionRequest, SegmentDecision } from '../generated/bindings';
 import styles from './InlineApprovalCard.module.css';
 
 const PERMISSION_REQUEST_EVENT = 'permissions://request';
-// Backend cleared a pending request without a user decision (the run was
-// cancelled or ended, or a re-asked command superseded it). Drop the
-// now-useless card. Payload: { requestId }.
+// A pending request left the queue: a decision (here or in another view), a
+// cancelled or ended run, or a re-asked command superseded it. Drop the
+// card. Payload: { requestId }.
 const PERMISSION_RESOLVED_EVENT = 'permissions://resolved';
 
 // Local UI alias matching the discriminator on SegmentDecision. Kept
@@ -26,21 +30,20 @@ interface SegmentCellState {
 
 type CardState = Record<number, SegmentCellState>;
 
-const allowOnce = (): SegmentDecision => ({ kind: 'allowOnce' });
-const denyOnce = (): SegmentDecision => ({ kind: 'denyOnce' });
-const allowAlways = (prefix: string): SegmentDecision => ({
-  kind: 'allowAlways',
-  scope: 'agent',
-  prefix,
-});
-const denyAlways = (prefix: string): SegmentDecision => ({
-  kind: 'denyAlways',
-  scope: 'agent',
-  prefix,
-});
-
 interface InlineApprovalCardProps {
   workspaceId: string | null;
+  /**
+   * Show only this request, held by the caller: no seeding, no listening,
+   * no scrolling into view. The caller drops it on its `resolved` event.
+   */
+  request?: PermissionRequest;
+  /**
+   * For a small Fleet card: no badge or collapse, the command and each part
+   * on one line, with short decision chips (full labels in the tooltips). No
+   * prefix editing, so no "always" decisions: the rule they save would be
+   * hidden. The full card keeps them.
+   */
+  compact?: boolean;
 }
 
 /**
@@ -56,7 +59,7 @@ interface InlineApprovalCardProps {
  * chip near the input bar surfaces the count whenever there are
  * pending requests, with click-to-scroll into view.
  */
-const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
+const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApprovalCardProps) => {
   const [requests, setRequests] = useState<PermissionRequest[]>([]);
   const [perCardState, setPerCardState] = useState<Record<string, CardState>>({});
   const [submittingId, setSubmittingId] = useState<string | null>(null);
@@ -89,6 +92,10 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
     setSubmittingId(null);
     previousCountRef.current = 0;
 
+    if (request) {
+      setRequests([request]);
+      return undefined;
+    }
     if (!workspaceId) return undefined;
 
     let cancelled = false;
@@ -125,7 +132,7 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
       });
     });
 
-    // Remove a card the backend cleared without a user decision. requestId
+    // Remove the card once its request leaves the queue. requestId
     // is globally unique, so no workspace filter is needed — if it isn't in
     // this card's list, the filter is a no-op.
     const unlistenResolvedPromise = listen<{ requestId?: string }>(
@@ -143,7 +150,7 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
       unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
       unlistenResolvedPromise.then((unlisten) => unlisten()).catch(() => {});
     };
-  }, [workspaceId]);
+  }, [workspaceId, request]);
 
   // Initialize per-segment editable state for each new card.
   useEffect(() => {
@@ -180,10 +187,10 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
     const prev = previousCountRef.current;
     const next = requests.length;
     previousCountRef.current = next;
-    if (prev === 0 && next > 0 && firstCardRef.current) {
+    if (!request && prev === 0 && next > 0 && firstCardRef.current) {
       firstCardRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [requests.length]);
+  }, [requests.length, request]);
 
   const toggleCollapsed = useCallback((requestId: string) => {
     setCollapsedIds((current) => {
@@ -298,61 +305,79 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
   }
 
   return (
-    <div className={styles.stack} aria-live="polite">
+    <div className={compact ? `${styles.stack} ${styles.stackCompact}` : styles.stack} aria-live="polite">
         {requests.map((req, cardIndex) => {
           const cardState = perCardState[req.requestId] || {};
           const isSubmitting = submittingId === req.requestId;
-          const isCollapsed = collapsedIds.has(req.requestId);
+          const isCollapsed = !compact && collapsedIds.has(req.requestId);
           // A shared teammate keeps its command decisions on its library
           // definition, so "always" applies wherever that agent works — here,
           // in the workspaces listed, and in any that add it later.
           const isSharedAgent = req.persistsToSharedAgent;
           const sharedReach = req.alsoAffectsWorkspaces || [];
+          // Compact chips carry the short label; the tooltip the full one.
+          const chipText = (full: string, short: string, why?: string) =>
+            compact ? { title: why ? `${full}. ${why}` : full, children: short } : { title: why, children: full };
+          const savedOn = isSharedAgent
+            ? 'Saved on the shared agent, so it applies wherever this agent works'
+            : 'Saved on this workspace\'s own agent';
           return (
             <article
               key={req.requestId}
               ref={cardIndex === 0 ? firstCardRef : null}
-              className={styles.card}
+              className={compact ? `${styles.card} ${styles.compact}` : styles.card}
               aria-label="Permission requested"
             >
               <header className={styles.cardHeader}>
                 <div className={styles.cardHeaderLeft}>
                   <span className={styles.tag}>Permission requested</span>
-                  <span className={styles.cardSubtitle}>
-                    {req.agentName
-                      ? `Agent "${req.agentName}" wants to run:`
-                      : 'An agent wants to run:'}
-                  </span>
+                  {!compact && (
+                    <span className={styles.cardSubtitle}>
+                      {req.agentName
+                        ? `Agent "${req.agentName}" wants to run:`
+                        : 'An agent wants to run:'}
+                    </span>
+                  )}
                 </div>
-                <button
-                  type="button"
-                  className={styles.collapseBtn}
-                  onClick={() => toggleCollapsed(req.requestId)}
-                  aria-expanded={!isCollapsed}
-                  aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
-                  title={isCollapsed ? 'Expand' : 'Collapse'}
-                >
-                  {isCollapsed ? '▸' : '▾'}
-                </button>
+                {!compact && (
+                  <button
+                    type="button"
+                    className={styles.collapseBtn}
+                    onClick={() => toggleCollapsed(req.requestId)}
+                    aria-expanded={!isCollapsed}
+                    aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
+                    title={isCollapsed ? 'Expand' : 'Collapse'}
+                  >
+                    {isCollapsed ? '▸' : '▾'}
+                  </button>
+                )}
               </header>
               {isCollapsed ? (
                 <pre className={`${styles.command} ${styles.collapsedSummary}`}>{req.command}</pre>
               ) : (
                 <div className={styles.cardBody}>
-              <pre className={styles.command}>{req.command}</pre>
+              {/* Compact too: the parts leave out separators and parts that need no decision. */}
+              <pre
+                className={styles.command}
+                title={compact ? req.command : undefined}
+              >
+                {req.command}
+              </pre>
               <section className={styles.segments}>
-                {isSharedAgent && (
+                {isSharedAgent && !compact && (
                   <p className={styles.segmentsLabel}>
                     {sharedReach.length > 0
                       ? `An "always" decision is saved on this shared agent, so it also applies to it in: ${sharedReach.join(', ')}.`
                       : 'An "always" decision is saved on this shared agent, so it applies wherever this agent is added.'}
                   </p>
                 )}
+                {!compact && (
                 <p className={styles.segmentsLabel}>
                   {req.segments.length === 1
                     ? 'Choose how to handle this command:'
                     : `${req.segments.length} parts need a decision (submits as soon as every part is decided):`}
                 </p>
+                )}
                 {req.segments.map((seg, idx) => {
                   const cell: SegmentCellState = cardState[idx] || { prefix: '', decision: null };
                   const isOpaque = seg.kind === 'opaque';
@@ -366,20 +391,20 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
                   const canPersist = Boolean(seg.suggestedPrefix);
                   return (
                     <div key={idx} className={styles.segmentRow}>
-                      {req.segments.length > 1 && (
+                      {(req.segments.length > 1 || isOpaque) && (
                         <div className={styles.segmentText}>
-                          <code>{seg.text}</code>
+                          {req.segments.length > 1 && <code title={compact ? seg.text : undefined}>{seg.text}</code>}
                           {isOpaque && (
                             <span
                               className={styles.opaqueTag}
-                              title="Contains substitution, executor, redirect, or control-flow — review carefully before allowing."
+                              title="Uses a substitution, redirect, pipe-to-shell or control flow, so what it does isn't just the command it starts. Read it carefully before allowing."
                             >
-                              opaque
+                              complex
                             </span>
                           )}
                         </div>
                       )}
-                      {canPersist && (
+                      {canPersist && !compact && (
                         <label className={styles.prefixField}>
                           Save as prefix:
                           <input
@@ -398,43 +423,39 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
                           className={`${styles.btn} ${styles.btnAllowOnce} ${cell.decision === 'allowOnce' ? styles.btnSelected : ''}`}
                           onClick={() => handleSegmentDecision(req, idx, 'allowOnce')}
                           disabled={isSubmitting}
-                        >
-                          Allow once
-                        </button>
-                        {canPersist && (
+                          {...chipText('Allow once', 'Once')}
+                        />
+                        {canPersist && !compact && (
                           <button
                             type="button"
                             className={`${styles.btn} ${styles.btnAllow} ${cell.decision === 'allowAlways' ? styles.btnSelected : ''}`}
                             onClick={() => handleSegmentDecision(req, idx, 'allowAlways')}
                             disabled={isSubmitting}
-                            title={isSharedAgent
-                              ? 'Saved on the shared agent, so it applies wherever this agent works'
-                              : 'Saved on this workspace\'s own agent'}
+                            title={savedOn}
                           >
                             {isSharedAgent
                               ? 'Always allow (every workspace)'
                               : 'Always allow (this agent)'}
                           </button>
                         )}
-                        <button
-                          type="button"
-                          className={`${styles.btn} ${styles.btnDeny} ${cell.decision === 'denyAlways' ? styles.btnSelected : ''}`}
-                          onClick={() => handleSegmentDecision(req, idx, 'denyAlways')}
-                          disabled={isSubmitting}
-                          title={isSharedAgent
-                            ? 'Saved on the shared agent, so it applies wherever this agent works'
-                            : 'Saved on this workspace\'s own agent'}
-                        >
-                          {isSharedAgent ? 'Always deny (every workspace)' : 'Always deny (this agent)'}
-                        </button>
+                        {!compact && (
+                          <button
+                            type="button"
+                            className={`${styles.btn} ${styles.btnDeny} ${cell.decision === 'denyAlways' ? styles.btnSelected : ''}`}
+                            onClick={() => handleSegmentDecision(req, idx, 'denyAlways')}
+                            disabled={isSubmitting}
+                            title={savedOn}
+                          >
+                            {isSharedAgent ? 'Always deny (every workspace)' : 'Always deny (this agent)'}
+                          </button>
+                        )}
                         <button
                           type="button"
                           className={`${styles.btn} ${styles.btnDenyOnce} ${cell.decision === 'denyOnce' ? styles.btnSelected : ''}`}
                           onClick={() => handleSegmentDecision(req, idx, 'denyOnce')}
                           disabled={isSubmitting}
-                        >
-                          Deny once
-                        </button>
+                          {...chipText('Deny once', 'Deny')}
+                        />
                       </div>
                     </div>
                   );
@@ -445,24 +466,24 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
               )}
               {req.segments.length > 1 && (
                 <footer className={styles.cardFooter}>
-                  <button
-                    type="button"
-                    className={`${styles.btn} ${styles.btnAllow}`}
-                    onClick={() => allowAllAlways(req)}
-                    disabled={isSubmitting}
-                    title="Persist every persistable prefix and run. Segments without a stable prefix fall back to allow-once."
-                  >
-                    Allow all (always)
-                  </button>
+                  {!compact && (
+                    <button
+                      type="button"
+                      className={`${styles.btn} ${styles.btnAllow}`}
+                      onClick={() => allowAllAlways(req)}
+                      disabled={isSubmitting}
+                      title="Persist every persistable prefix and run. Segments without a stable prefix fall back to allow-once."
+                    >
+                      Allow all (always)
+                    </button>
+                  )}
                   <button
                     type="button"
                     className={`${styles.btn} ${styles.btnDenyAll}`}
                     onClick={() => denyAll(req)}
                     disabled={isSubmitting}
-                    title="Deny every part of this pipeline in one click"
-                  >
-                    Deny entire command
-                  </button>
+                    {...chipText('Deny entire command', 'Deny all', 'Deny every part of this pipeline in one click')}
+                  />
                 </footer>
               )}
                 </div>

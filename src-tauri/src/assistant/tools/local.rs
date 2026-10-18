@@ -683,8 +683,8 @@ async fn await_user_permission(
 
     let decisions = match rx.await {
         Ok(PendingApprovalOutcome::Decision(d)) => {
-            // The submit command already removed the registry entry and the
-            // frontend cleared the card optimistically.
+            // The submit command already removed the registry entry and
+            // emitted `permissions://resolved`.
             abandon_guard.disarm();
             d
         }

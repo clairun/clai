@@ -1,9 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { invoke } from '@tauri-apps/api/core';
-import useAssistantStore from '../../assistant/sessionStore';
+import React, { useEffect, useRef, useState } from 'react';
+import useAssistantStore, { type PendingAskUser } from '../../assistant/sessionStore';
+import { OTHER_INDEX, useAskAnswer } from './useAskAnswer';
 import styles from './AskUserPanel.module.css';
-
-const OTHER_INDEX = -1;
 
 /**
  * Inline answer block for the `ask_user` tool.
@@ -13,123 +11,87 @@ const OTHER_INDEX = -1;
  * AskUserQuestion UX in Claude Code itself: question text, optional
  * structured choices as radio buttons with an auto-added "Other"
  * free-text fallback, or a plain textarea when no options are provided.
- *
- * Submission round-trips via the `assistant_submit_user_input` Tauri
- * command, which delivers the answer back to the awaiting tool through
- * a oneshot channel keyed by pendingId. The run resumes in the same
- * MCP turn — no separate session, no follow-up run spawning.
+ * The draft and its submission live in `useAskAnswer`.
  */
 interface AskUserPanelProps {
-  sessionId: string | null;
+  sessionId?: string | null;
+  /** Answer this question, held by the caller, instead of the session's; the panel doesn't take focus. */
+  ask?: PendingAskUser;
+  /**
+   * For a small Fleet card: no badge or collapse (the card header says it),
+   * the context on one line, options as chips (a single-select chip answers).
+   */
+  compact?: boolean;
 }
 
-const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
-  const pending = useAssistantStore((state) =>
+const AskUserPanel = ({ sessionId = null, ask, compact = false }: AskUserPanelProps) => {
+  const sessionPending = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId]?.pendingAskUser || null : null
   );
-
-  const [selectedIndex, setSelectedIndex] = useState<number | null>(null);
-  // Multi-select questions: the set of checked option indexes, plus
-  // whether the "Other" free-text checkbox is on.
-  const [selectedIndexes, setSelectedIndexes] = useState<Set<number>>(new Set());
-  const [otherChecked, setOtherChecked] = useState(false);
-  const [otherText, setOtherText] = useState('');
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState('');
+  const pending = ask ?? sessionPending;
+  const {
+    options,
+    hasOptions,
+    isMultiSelect,
+    selectedIndex,
+    setSelectedIndex,
+    selectedIndexes,
+    setSelectedIndexes,
+    otherChecked,
+    setOtherChecked,
+    otherText,
+    setOtherText,
+    submitting,
+    error,
+    canSubmit,
+    submit,
+    submitOption,
+  } = useAskAnswer(pending);
   // Collapse the body to a one-line summary so a long question can't swallow
   // the conversation; the user expands to answer. Resets per new request.
   const [collapsed, setCollapsed] = useState(false);
   const containerRef = useRef<HTMLElement | null>(null);
   const previousPendingIdRef = useRef<string | null>(null);
 
-  // Reset editable state when a new request arrives so a stale draft
-  // from a previously-answered (or cancelled) question doesn't carry
-  // over into the new prompt.
   useEffect(() => {
     if (pending?.pendingId === previousPendingIdRef.current) return;
     previousPendingIdRef.current = pending?.pendingId || null;
-    setSelectedIndex(null);
-    setSelectedIndexes(new Set());
-    setOtherChecked(false);
-    setOtherText('');
-    setError('');
-    setSubmitting(false);
     setCollapsed(false);
   }, [pending?.pendingId]);
 
   // Focus the panel when a request appears so keyboard users land
   // directly on the prompt without having to tab through the chat.
   useEffect(() => {
-    if (pending && containerRef.current) {
+    if (pending && !ask && containerRef.current) {
       containerRef.current.focus({ preventScroll: false });
     }
-  }, [pending]);
-
-  const options = useMemo(() => pending?.options || [], [pending?.options]);
-  const hasOptions = options.length > 0;
-  // multiSelect only applies to option-bearing questions; a free-text
-  // question is single-answer by nature.
-  const isMultiSelect = hasOptions && !!pending?.multiSelect;
-
-  const canSubmit = useMemo(() => {
-    if (!pending || submitting) return false;
-    if (!hasOptions) return otherText.trim().length > 0;
-    if (isMultiSelect) {
-      if (selectedIndexes.size > 0) return true;
-      return otherChecked && otherText.trim().length > 0;
-    }
-    if (selectedIndex === null) return false;
-    if (selectedIndex === OTHER_INDEX) return otherText.trim().length > 0;
-    return true;
-  }, [pending, submitting, hasOptions, isMultiSelect, selectedIndexes, otherChecked, selectedIndex, otherText]);
+  }, [pending, ask]);
 
   if (!pending) return null;
 
-  const submit = async () => {
-    if (!canSubmit) return;
-    setError('');
-    setSubmitting(true);
-    try {
-      let answer: string;
-      let selectedOptionIndex: number | null = null;
-      let selectedOptionIndexes: number[] | null = null;
-      if (isMultiSelect) {
-        const indexes = [...selectedIndexes].sort((a, b) => a - b);
-        const parts = indexes.map((idx) => options[idx]!.label);
-        if (otherChecked && otherText.trim()) {
-          parts.push(otherText.trim());
-        }
-        answer = parts.join(', ');
-        selectedOptionIndexes = indexes;
-      } else if (!hasOptions || selectedIndex === OTHER_INDEX || selectedIndex === null) {
-        answer = otherText.trim();
-      } else {
-        answer = options[selectedIndex]!.label;
-        selectedOptionIndex = selectedIndex;
-      }
-      await invoke('assistant_submit_user_input', {
-        request: {
-          pendingId: pending.pendingId,
-          answer,
-          selectedOptionIndex,
-          selectedOptionIndexes,
-        },
-      });
-      // The backend will emit `ask_user_resolved` which clears the
-      // panel via the store; we don't optimistically clear here so the
-      // panel stays visible if the backend rejects (e.g. the run was
-      // already cancelled and the channel is gone).
-    } catch (err) {
-      const message =
-        typeof err === 'string'
-          ? err
-          : err instanceof Error
-            ? err.message
-            : 'Failed to submit answer.';
-      setError(message);
-      setSubmitting(false);
-    }
+  const toggleIndex = (index: number) =>
+    setSelectedIndexes((current) => {
+      const next = new Set(current);
+      if (next.has(index)) next.delete(index);
+      else next.add(index);
+      return next;
+    });
+  const otherOn = isMultiSelect ? otherChecked : selectedIndex === OTHER_INDEX;
+  const toggleOther = () => {
+    if (isMultiSelect) setOtherChecked((current) => !current);
+    else setSelectedIndex(otherOn ? null : OTHER_INDEX);
   };
+  const otherTextarea = (rows: number) => (
+    <textarea
+      className={styles.textarea}
+      value={otherText}
+      onChange={(event) => setOtherText(event.target.value)}
+      onKeyDown={handleTextareaKeyDown}
+      placeholder="Type your answer… (Enter sends, Ctrl+Enter for a new line)"
+      rows={rows}
+      disabled={submitting}
+    />
+  );
 
   // Enter answers; Ctrl/Cmd+Enter (and Shift+Enter) insert a newline.
   // The browser doesn't insert a newline while a modifier is held, so
@@ -165,7 +127,7 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
   return (
     <section
       ref={containerRef}
-      className={styles.panel}
+      className={compact ? `${styles.panel} ${styles.compact}` : styles.panel}
       role="dialog"
       aria-label="Agent question"
       tabIndex={-1}
@@ -173,29 +135,63 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
     >
       <header className={styles.header}>
         <span className={styles.chip}>AGENT IS ASKING</span>
-        <button
-          type="button"
-          className={styles.collapseBtn}
-          onClick={() => setCollapsed((c) => !c)}
-          aria-expanded={!collapsed}
-          aria-label={collapsed ? 'Expand question' : 'Collapse question'}
-          title={collapsed ? 'Expand' : 'Collapse'}
-        >
-          {collapsed ? '▸' : '▾'}
-        </button>
+        {!compact && (
+          <button
+            type="button"
+            className={styles.collapseBtn}
+            onClick={() => setCollapsed((c) => !c)}
+            aria-expanded={!collapsed}
+            aria-label={collapsed ? 'Expand question' : 'Collapse question'}
+            title={collapsed ? 'Expand' : 'Collapse'}
+          >
+            {collapsed ? '▸' : '▾'}
+          </button>
+        )}
       </header>
 
-      {collapsed ? (
+      {collapsed && !compact ? (
         <div className={styles.collapsedSummary}>{pending.question}</div>
       ) : (
         <div className={styles.body}>
       <div className={styles.question}>{pending.question}</div>
 
       {pending.extraContext && (
-        <div className={styles.context}>{pending.extraContext}</div>
+        <div
+          className={compact ? styles.contextLine : styles.context}
+          title={compact ? pending.extraContext : undefined}
+        >
+          {pending.extraContext}
+        </div>
       )}
 
-      {hasOptions ? (
+      {hasOptions && compact ? (
+        <div className={styles.chips}>
+          {options.map((option, index) => (
+            <button
+              key={`opt-${index}`}
+              type="button"
+              className={styles.optionChip}
+              aria-pressed={isMultiSelect ? selectedIndexes.has(index) : undefined}
+              title={option.description || undefined}
+              disabled={submitting}
+              onClick={() => (isMultiSelect ? toggleIndex(index) : void submitOption(index))}
+            >
+              {option.label}
+            </button>
+          ))}
+          <button
+            type="button"
+            className={styles.optionChip}
+            aria-pressed={otherOn}
+            title={isMultiSelect ? 'Add a free-text answer.' : 'Type a free-text answer.'}
+            disabled={submitting}
+            onClick={toggleOther}
+          >
+            Other…
+          </button>
+          {otherOn && otherTextarea(1)}
+        </div>
+      ) : hasOptions ? (
         <div className={styles.options}>
           {isMultiSelect && (
             <span className={styles.multiHint}>Select all that apply.</span>
@@ -207,18 +203,7 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
                 name={`ask-user-${pending.pendingId}`}
                 value={index}
                 checked={isMultiSelect ? selectedIndexes.has(index) : selectedIndex === index}
-                onChange={() => {
-                  if (isMultiSelect) {
-                    setSelectedIndexes((current) => {
-                      const next = new Set(current);
-                      if (next.has(index)) next.delete(index);
-                      else next.add(index);
-                      return next;
-                    });
-                  } else {
-                    setSelectedIndex(index);
-                  }
-                }}
+                onChange={() => (isMultiSelect ? toggleIndex(index) : setSelectedIndex(index))}
                 disabled={submitting}
               />
               <span className={styles.optionBody}>
@@ -235,13 +220,7 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
               name={`ask-user-${pending.pendingId}`}
               value={OTHER_INDEX}
               checked={isMultiSelect ? otherChecked : selectedIndex === OTHER_INDEX}
-              onChange={() => {
-                if (isMultiSelect) {
-                  setOtherChecked((current) => !current);
-                } else {
-                  setSelectedIndex(OTHER_INDEX);
-                }
-              }}
+              onChange={() => (isMultiSelect ? setOtherChecked((current) => !current) : setSelectedIndex(OTHER_INDEX))}
               disabled={submitting}
             />
             <span className={styles.optionBody}>
@@ -251,32 +230,16 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
               </span>
             </span>
           </label>
-          {(isMultiSelect ? otherChecked : selectedIndex === OTHER_INDEX) && (
-            <textarea
-              className={styles.textarea}
-              value={otherText}
-              onChange={(event) => setOtherText(event.target.value)}
-              onKeyDown={handleTextareaKeyDown}
-              placeholder="Type your answer… (Enter sends, Ctrl+Enter for a new line)"
-              rows={3}
-              disabled={submitting}
-            />
-          )}
+          {otherOn && otherTextarea(3)}
         </div>
       ) : (
-        <textarea
-          className={styles.textarea}
-          value={otherText}
-          onChange={(event) => setOtherText(event.target.value)}
-          onKeyDown={handleTextareaKeyDown}
-          placeholder="Type your answer… (Enter sends, Ctrl+Enter for a new line)"
-          rows={4}
-          disabled={submitting}
-        />
+        otherTextarea(compact ? 2 : 4)
       )}
 
       {error && <div className={styles.error}>{error}</div>}
 
+      {/* A compact single-select chip answers by itself. */}
+      {!(compact && hasOptions && !isMultiSelect && !otherOn) && (
       <div className={styles.actions}>
         <button
           type="button"
@@ -287,6 +250,7 @@ const AskUserPanel = ({ sessionId }: AskUserPanelProps) => {
           {submitting ? 'Sending…' : 'Send answer'}
         </button>
       </div>
+      )}
         </div>
       )}
     </section>

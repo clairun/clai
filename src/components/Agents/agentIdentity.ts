@@ -52,6 +52,10 @@ export const mainIdentity = (): AgentIdentity => ({
   generatorVersion: GENERATOR_VERSION,
 });
 
+/** A face by seed: the picked one when known, else the one the seed maps to. */
+export const faceOf = (faces: Record<string, AgentIdentity>, seed: string): AgentIdentity =>
+  faces[seed] ?? { seed, generatorVersion: GENERATOR_VERSION };
+
 /** Resolve an agent's face: Main → fixed; else picked face → definition id → local id. */
 export const identityFor = (agent: AgentLike): AgentIdentity => {
   if (agent.isDefault) return mainIdentity();
