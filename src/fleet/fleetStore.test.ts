@@ -28,6 +28,7 @@ const snapshot: FleetWorkspace = {
   title: 'Infra',
   starred: false,
   lastActivityAt: 5n,
+  lastOpenedAt: 0n,
   mainSessionId: 'main',
   activeRunIds: ['r1', 'task-run'],
   tasks: [task],

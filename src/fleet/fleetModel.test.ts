@@ -400,6 +400,7 @@ describe('snapshot', () => {
     title: 'Infra',
     starred: false,
     lastActivityAt: 10n,
+    lastOpenedAt: 0n,
     mainSessionId: MAIN,
     activeRunIds: [],
     tasks: [],

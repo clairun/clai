@@ -169,6 +169,10 @@ export type FleetWorkspace = { workspaceId: string, title: string, starred: bool
  */
 lastActivityAt: bigint, 
 /**
+ * When the user last opened the workspace; 0 when never opened.
+ */
+lastOpenedAt: bigint, 
+/**
  * The manager's conversation; `None` until someone talks to it.
  */
 mainSessionId: string | null, 

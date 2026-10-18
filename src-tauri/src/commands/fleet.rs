@@ -38,6 +38,8 @@ pub struct FleetWorkspace {
     /// When any session (main, task or other) was last touched; 0 when the
     /// workspace has no session yet.
     pub last_activity_at: i64,
+    /// When the user last opened the workspace; 0 when never opened.
+    pub last_opened_at: i64,
     /// The manager's conversation; `None` until someone talks to it.
     pub main_session_id: Option<String>,
     /// Non-terminal runs (queued, running or waiting for a tool) in any
@@ -213,6 +215,7 @@ async fn workspace_snapshot(
         title: locator.title,
         starred: locator.starred_at > 0,
         last_activity_at,
+        last_opened_at: locator.last_opened_at,
         main_session_id: main_session.map(|session| session.id),
         active_run_ids: repository::workspace_active_run_ids(pool).await?,
         tasks,
@@ -267,12 +270,15 @@ mod tests {
             let root = parent.join(id);
             // Config edits aren't activity: IDLE's are the newest of all.
             let edited_at = if *id == IDLE { i64::MAX / 2 } else { 1 };
-            let config = WorkspaceConfig::new(
+            let mut config = WorkspaceConfig::new(
                 id.to_string(),
                 format!("ws {n}"),
                 edited_at,
                 MANAGER.to_string(),
             );
+            if *id == BUSY {
+                config.last_opened_at = 42;
+            }
             workspace_config::save(&root, &config).expect("seed workspace");
             index.insert_config(root, &config);
         }
@@ -402,6 +408,7 @@ mod tests {
         expected.sort();
         assert_eq!(run_ids, expected, "runs in every session count");
         assert!(busy.last_activity_at >= session.created_at);
+        assert_eq!(busy.last_opened_at, 42);
 
         let open = busy
             .tasks
@@ -425,7 +432,7 @@ mod tests {
         assert!(preview.text.starts_with('é'));
 
         let idle = &snapshot[1];
-        assert_eq!(idle.last_activity_at, 0);
+        assert_eq!((idle.last_activity_at, idle.last_opened_at), (0, 0));
         assert!(idle.main_session_id.is_none() && idle.active_run_ids.is_empty());
         assert!(idle.tasks.is_empty() && idle.last_assistant_message.is_none());
 
