@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { act, render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useNavigate } from 'react-router';
+import { dispatchFocusTerminal } from '../../utils/workspaceUiEvents';
 
 // jsdom lacks ResizeObserver, which the composer observes on mount.
 beforeAll(() => {
@@ -543,6 +544,14 @@ describe('TerminalEmulator help button', () => {
 
     await user.type(input, '/help{Enter}');
     expect(screen.getByRole('dialog', { name: 'Available commands' }).innerHTML).toBe(fromButton);
+  });
+
+  it('takes the keyboard when the Fleet switcher picks a workspace', () => {
+    renderAt('/fleet');
+    const input = screen.getByRole('textbox');
+    input.blur();
+    act(() => dispatchFocusTerminal());
+    expect(input).toHaveFocus();
   });
 
   it('is on pages without a target too, and opens from the keyboard', async () => {

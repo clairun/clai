@@ -1,10 +1,9 @@
 import { memo, useMemo } from 'react';
-import AgentAvatar from '../Agents/AgentAvatar';
-import { faceOf, mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
+import type { AgentIdentity } from '../Agents/agentIdentity';
 import {
   cardAttention,
+  cardCrew,
   cardPhase,
-  liveAgents,
   requestScene,
   type FleetAttention,
   type FleetCard as FleetCardModel,
@@ -14,6 +13,9 @@ import {
   type FleetRequestScene,
   type FleetFeed as Feed,
 } from '../../fleet/fleetModel';
+import type { WorkspaceLook } from '../../fleet/workspaceLook';
+import { castFor } from './FleetFace';
+import FleetCrew from './FleetCrew';
 import FleetRequestPanel from './FleetRequestPanel';
 import FleetFeed from './FleetFeed';
 import fx from './FleetEffects';
@@ -66,38 +68,6 @@ export const PhaseLabel = ({ phase, attention, sticker }: { phase: FleetPhase; a
 export const stickerFor = (loud: FleetLoudness, request: FleetRequestScene | null): string | null =>
   loud === 'needs' && request ? (request.request.kind === 'approval' ? 'Approve?' : 'Needs you') : null;
 
-const MAX_HEADER_FACES = 4;
-
-/** The faces of the agents with live work, for the card header: running first, queued muted. */
-export const LiveFaces = ({ card, live, faces }: { card: FleetCardModel; live: FleetLive; faces: Record<string, AgentIdentity> }) => {
-  const agents = useMemo(() => liveAgents(card, live), [card, live]);
-  if (agents.length === 0) return null;
-  const extra = agents.length - MAX_HEADER_FACES;
-  return (
-    <span className={styles.headerFaces}>
-      {agents.slice(0, MAX_HEADER_FACES).map((agent) => (
-        <span
-          key={agent.seed}
-          className={agent.running ? undefined : styles.queuedFace}
-          title={`${agent.name}: ${agent.doing}`}
-        >
-          <AgentAvatar
-            identity={agent.main ? mainIdentity() : faceOf(faces, agent.seed)}
-            size={18}
-            ring={false}
-            label={`${agent.name}: ${agent.doing}`}
-          />
-        </span>
-      ))}
-      {extra > 0 && (
-        <span className={styles.headerFacesMore} title={agents.slice(MAX_HEADER_FACES).map((a) => `${a.name}: ${a.doing}`).join('\n')}>
-          +{extra}
-        </span>
-      )}
-    </span>
-  );
-};
-
 interface FleetCardProps {
   card: FleetCardModel;
   /** What the miniature says (`cardFeed`); `null` while it shows an open request. */
@@ -107,6 +77,8 @@ interface FleetCardProps {
   live: FleetLive;
   /** Picked agent faces, by agent definition id. */
   faces: Record<string, AgentIdentity>;
+  /** What tells this workspace's card from the others (`workspaceLook`). */
+  look: WorkspaceLook;
   /** The page's clock: the last Fleet event or the minute tick, whichever is later. */
   now: number;
   /** Drawn loud: it needs you, or a task on it just finished. */
@@ -115,7 +87,9 @@ interface FleetCardProps {
 }
 
 /** A miniature: the workspace's conversation as highlights, or its open request, answerable in place. */
-const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect }: FleetCardProps) => {
+const FleetCard = ({ card, feed, shouts, live, faces, look, now, loud = null, onSelect }: FleetCardProps) => {
+  const cast = useMemo(() => castFor(faces, look), [faces, look]);
+  const crew = useMemo(() => cardCrew(card, live, now), [card, live, now]);
   const phase = cardPhase(card, live);
   const attention = cardAttention(card);
   const request = useMemo(() => requestScene(card, live), [card, live]);
@@ -137,8 +111,9 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect
         </button>
         <PhaseLabel phase={phase} attention={attention} sticker={stickerFor(loud, request)} />
       </header>
-      {feed && <FleetFeed workspaceId={card.workspaceId} feed={feed} shouts={shouts} now={now} faces={faces} />}
-      {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={faces} loud={loud === 'needs'} now={now} />}
+      <FleetCrew crew={crew} cast={cast} />
+      {feed && <FleetFeed workspaceId={card.workspaceId} feed={feed} shouts={shouts} now={now} faces={cast} />}
+      {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={cast} loud={loud === 'needs'} now={now} />}
     </div>
   );
 };

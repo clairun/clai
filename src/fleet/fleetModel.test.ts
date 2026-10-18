@@ -34,7 +34,9 @@ import {
   splitFeed,
   cardPhase,
   emptyCard,
-  liveAgents,
+  MAX_CREW,
+  cardCrew,
+  firstWords,
   pickCards,
   recentlyOpened,
   seedFleet,
@@ -423,25 +425,25 @@ describe('firstSentence', () => {
   });
 });
 
-describe('snapshot', () => {
-  const snapshotOf = (patch: Partial<FleetWorkspace> = {}): FleetWorkspace => ({
-    workspaceId: WS,
-    title: 'Infra',
-    starred: false,
-    lastActivityAt: 10n,
-    lastOpenedAt: 0n,
-    agents: [],
-    mainSessionId: MAIN,
-    activeRunIds: [],
-    tasks: [],
-    pendingPermissions: [],
-    pendingPathGrants: [],
-    pendingAsks: [],
-    lastAssistantMessage: null,
-    recentMessages: [],
-    ...patch,
-  });
+const snapshotOf = (patch: Partial<FleetWorkspace> = {}): FleetWorkspace => ({
+  workspaceId: WS,
+  title: 'Infra',
+  starred: false,
+  lastActivityAt: 10n,
+  lastOpenedAt: 0n,
+  agents: [],
+  mainSessionId: MAIN,
+  activeRunIds: [],
+  tasks: [],
+  pendingPermissions: [],
+  pendingPathGrants: [],
+  pendingAsks: [],
+  lastAssistantMessage: null,
+  recentMessages: [],
+  ...patch,
+});
 
+describe('snapshot', () => {
   it('takes the open requests of the snapshot, keeping the time of those already held', () => {
     let s = apply(EMPTY_FLEET, askEvent('stale', 2), askEvent('kept', 3));
     s = applyRequest(s, { kind: 'approval', request: approval('gone') }, 4);
@@ -596,45 +598,62 @@ describe('card picking', () => {
   });
 });
 
-describe('live agents', () => {
-  const card = emptyCard(WS, 'W');
-  const agent = (n: string) => ({
-    assignedAgentDisplayName: `Agent ${n}`,
-    assignedAgentDefinitionId: `def-${n}`,
-  });
-  const liveWith = (tasks: WorkspaceTaskResponse[], runs: string[] = []): FleetLive => ({
+describe('the crew strip', () => {
+  const crewCard = (agents = [WRITER, RESEARCHER]) =>
+    card(seedFleet(EMPTY_FLEET, [{ ...snapshotOf(), agents: [MANAGER, ...agents] }]));
+  const live = (tasks: WorkspaceTaskResponse[], runs: string[] = []): FleetLive => ({
     runs: { [WS]: runs },
     tasks: { [WS]: Object.fromEntries(tasks.map((t) => [t.id, t])) },
   });
+  const strip = (c: FleetCard, l: FleetLive = NO_LIVE, now = NOW) =>
+    cardCrew(c, l, now).shown.map((m) => `${m.name}:${m.status}${m.words ? ` ${m.words}` : ''}${m.level ? ` ${m.level}` : ''}`);
 
-  it('lists each agent once, running before queued', () => {
-    const agents = liveAgents(
-      card,
-      liveWith([
-        task('q1', 'queued', 1, agent('a')),
-        task('q2', 'queued', 2, agent('a')),
-        task('r1', 'running', 3, agent('b')),
-        task('r2', 'running', 4, { ...agent('b'), title: 'Second' }),
-        task('d1', 'completed', 5, agent('c')),
-      ])
-    );
-    expect(agents.map((a) => [a.seed, a.running, a.doing])).toEqual([
-      ['def-b', true, 'running: 2 tasks'],
-      ['def-a', false, 'queued: 2 tasks'],
-    ]);
+  it('draws Main first, then the roster, idle', () => {
+    expect(crewCard().agents.map((a) => a.seed)).toEqual(['def-w', 'def-r']);
+    expect(strip(crewCard())).toEqual(['Main:idle', 'Writer:idle', 'Researcher:idle']);
+    expect(strip(crewCard([]))).toEqual(['Main:idle']);
   });
 
-  it("adds Main when a run belongs to no task, but not for a task's own run", () => {
-    const tasks = [task('r1', 'running', 1, { ...agent('b'), runId: 'run-task' })];
-    expect(liveAgents(card, liveWith(tasks, ['run-task'])).map((a) => a.seed)).toEqual(['def-b']);
-    expect(liveAgents(card, liveWith(tasks, ['run-task', 'run-main'])).map((a) => a.name)).toEqual([
-      'Main',
-      'Agent b',
-    ]);
+  it('gives a running member the first words of its task, the whole title for the zoom', () => {
+    const t = task('r1', 'running', NOW, { title: 'Crawl the October feeds and drop duplicates' });
+    expect(strip(crewCard(), live([t]))).toEqual(['Main:idle', 'Writer:idle', 'Researcher:running Crawl the October…']);
+    expect(cardCrew(crewCard(), live([t]), NOW).shown[2]!.doing).toBe('Crawl the October feeds and drop duplicates');
+    expect(firstWords('Short title')).toBe('Short title');
   });
 
-  it('is empty when nothing is live', () => {
-    expect(liveAgents(card, liveWith([task('d1', 'completed', 1)]))).toEqual([]);
-    expect(liveAgents(card, NO_LIVE)).toEqual([]);
+  it('says Main answers when a run belongs to no task', () => {
+    const c = card(apply(seedFleet(EMPTY_FLEET, [{ ...snapshotOf(), agents: [MANAGER] }]), created(message('u1', 'user', 'Ship the notes. Then rest.'), NOW)));
+    const crew = cardCrew(c, live([], ['run-main']), NOW).shown;
+    expect(crew.map((m) => [m.status, m.doing])).toEqual([['running', 'Answering: Ship the notes.']]);
+  });
+
+  it('marks who needs you: a task asking, an approval by name, Main for the rest', () => {
+    const t = task('r1', 'running', NOW, { sessionId: 'task-r' });
+    let s = seedFleet(EMPTY_FLEET, [{ ...snapshotOf(), agents: [MANAGER, WRITER, RESEARCHER] }]);
+    s = apply(s, env({ type: 'ask_user_requested', payload: { pending_id: 'p1', question: 'Which feeds?', options: null, multi_select: false } } as AssistantUiEvent, NOW, 'task-r'));
+    s = applyRequest(s, { kind: 'approval', request: { ...(approval('a1') as object), agentName: 'Writer' } as never }, NOW);
+    s = applyRequest(s, { kind: 'approval', request: approval('a2') }, NOW);
+    expect(strip(card(s), live([t]))).toEqual(['Main:needs', 'Writer:needs', 'Researcher:needs']);
+  });
+
+  it('ticks a finish, fading with the clock like the other beats', () => {
+    const done = task('d1', 'completed', NOW, { completedAt: BigInt(NOW) } as Partial<WorkspaceTaskResponse>);
+    expect(strip(crewCard(), live([done]), NOW + 1000)).toContain('Researcher:done full');
+    expect(strip(crewCard(), live([done]), NOW + FRESH_MS * 0.75)).toContain('Researcher:done half');
+    expect(strip(crewCard(), live([done]), NOW + FRESH_MS)).toContain('Researcher:idle');
+  });
+
+  it('keeps an agent the roster lost while it works', () => {
+    const t = task('r1', 'running', NOW, { assignedAgentDisplayName: 'Ghost', assignedAgentDefinitionId: 'def-g' });
+    expect(strip(crewCard([]), live([t]))).toEqual(['Main:idle', 'Ghost:running Task r1']);
+  });
+
+  it(`past ${MAX_CREW}, draws Main and the busy ones and counts the rest`, () => {
+    const team = Array.from({ length: 7 }, (_, i) => ({ ...WRITER, workspaceAgentId: `wa-${i}`, agentDefinitionId: `def-${i}`, displayName: `A${i}` }));
+    const busy = [task('r1', 'running', NOW, { assignedAgentDisplayName: 'A2', assignedAgentDefinitionId: 'def-2' }), task('q1', 'queued', NOW, { assignedAgentDisplayName: 'A5', assignedAgentDefinitionId: 'def-5' })];
+    const crew = cardCrew(crewCard(team), live(busy), NOW);
+    expect(crew.shown.map((m) => `${m.name}:${m.status}`)).toEqual(['Main:idle', 'A2:running', 'A5:queued']);
+    expect(crew.more).toHaveLength(5);
+    expect(cardCrew(crewCard(team.slice(0, 5)), NO_LIVE, NOW).more).toEqual([]);
   });
 });

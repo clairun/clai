@@ -82,6 +82,8 @@ export interface FleetCard {
   requests: Record<string, FleetRequest>;
   /** Oldest first, at most `SAID_LIMIT`. */
   said: FleetSaid[];
+  /** The workspace's enabled members, Main excluded, in roster order (from the snapshot). */
+  agents: FleetAgentRef[];
 }
 
 export interface FleetState {
@@ -104,6 +106,7 @@ export const emptyCard = (workspaceId: string, title = ''): FleetCard => ({
   lastOpenedAt: 0,
   requests: {},
   said: [],
+  agents: [],
 });
 
 const updateCard = (
@@ -345,6 +348,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
         lastActivityAt: Math.max(card.lastActivityAt, activity),
         lastOpenedAt: Math.max(card.lastOpenedAt, Number(ws.lastOpenedAt)),
         requests,
+        agents: ws.agents.filter((a) => !a.isDefault).map(agentRef),
       },
       seed,
       false
@@ -777,43 +781,92 @@ export const requestScene = (card: FleetCard, live: FleetLive): FleetRequestScen
   return { request, count: open.length, caption: { kind: 'waiting', at: request.at }, asker };
 };
 
-/** An agent with work in flight: its tasks, or `main` for the workspace's own session. */
-export interface LiveAgent {
+/** Who a crew member is and what it is up to, as the strip under a card's title draws it. */
+export type FleetCrewStatus = 'needs' | 'running' | 'queued' | 'done' | 'idle';
+
+export interface FleetCrewMember {
   seed: string;
   name: string;
-  main?: true;
-  running: boolean;
-  /** What it is doing, for a tooltip. */
-  doing: string;
+  main: boolean;
+  status: FleetCrewStatus;
+  /** What it asks, works on, waits to start or just finished, in full; `null` when idle. */
+  doing: string | null;
+  /** The first words of `doing`, drawn beside a running face. */
+  words: string | null;
+  /** How loud a finish still is; only `done` has one. */
+  level: FleetShout;
 }
 
-const quoted = (tasks: WorkspaceTaskResponse[], verb: string): string =>
-  tasks.length === 1 ? `${verb} '${tasks[0]!.title}'` : `${verb}: ${tasks.length} tasks`;
+export interface FleetCrew {
+  shown: FleetCrewMember[];
+  /** Members a long strip leaves out: its "+N". */
+  more: FleetCrewMember[];
+}
+
+/** Faces a strip draws before it keeps only Main and the busy ones and counts the rest. */
+export const MAX_CREW = 6;
+const WORDS_CHARS = 22;
+export const MAIN_SEED = 'main';
+
+/** The first words of a text, cut at a word boundary. */
+export const firstWords = (text: string, max = WORDS_CHARS): string => {
+  const plain = plainText(text);
+  if (plain.length <= max) return plain;
+  const cut = plain.slice(0, max);
+  const space = cut.lastIndexOf(' ');
+  return `${(space > max / 2 ? cut.slice(0, space) : cut).replace(/[\s,.;:]+$/, '')}…`;
+};
 
 /**
- * One entry per distinct agent with a live task, running agents first. A run
- * that belongs to no task is the workspace's own session, run by its Main.
+ * Every member of the workspace, Main first, then the roster, then any agent
+ * busy on the card that the roster doesn't know (an agent removed mid-task).
+ * Each says one thing, the most urgent: it needs you (an open request it
+ * asked), it runs a task (or, Main, a reply), it waits to start one, it just
+ * finished one (fading like the other beats, `shoutLevel`), or it is idle.
+ * Past `MAX_CREW`, only Main and the busy ones are drawn.
  */
-export const liveAgents = (card: FleetCard, live: FleetLive): LiveAgent[] => {
-  const tasks = workspaceTasks(card, live);
-  const byAgent = new Map<string, { name: string; running: WorkspaceTaskResponse[]; queued: WorkspaceTaskResponse[] }>();
-  for (const task of tasks) {
-    if (!isTaskLive(task.status)) continue;
-    const { name, seed } = agentOf(task);
-    const entry = byAgent.get(seed) ?? { name, running: [], queued: [] };
-    (task.status === 'queued' ? entry.queued : entry.running).push(task);
-    byAgent.set(seed, entry);
+export const cardCrew = (card: FleetCard, live: FleetLive, now: number): FleetCrew => {
+  const tasks = workspaceTasks(card, live).sort((a, b) => Number(b.updatedAt) - Number(a.updatedAt));
+  const members = new Map<string, FleetAgentRef & { main: boolean }>([[MAIN_SEED, { seed: MAIN_SEED, name: 'Main', main: true }]]);
+  for (const agent of card.agents) if (!members.has(agent.seed)) members.set(agent.seed, { ...agent, main: false });
+  const join = (agent: FleetAgentRef) => {
+    if (!members.has(agent.seed)) members.set(agent.seed, { ...agent, main: false });
+    return agent.seed;
+  };
+
+  const says = new Map<string, { status: FleetCrewStatus; doing: string; level: FleetShout }>();
+  const say = (seed: string, status: FleetCrewStatus, doing: string, level: FleetShout = null) => {
+    if (!says.has(seed)) says.set(seed, { status, doing, level });
+  };
+  for (const request of openRequests(card)) {
+    const task = request.kind === 'ask' ? tasks.find((t) => t.sessionId === request.ask.sessionId) : undefined;
+    const named = request.kind === 'ask' ? undefined : [...members.values()].find((m) => !m.main && m.name === request.agentName);
+    say(task ? join(agentOf(task)) : (named?.seed ?? MAIN_SEED), 'needs', request.text);
   }
-  const agents: LiveAgent[] = [...byAgent].map(([seed, { name, running, queued }]) => ({
-    seed,
-    name,
-    running: running.length > 0,
-    doing: [running.length ? quoted(running, 'running') : '', queued.length ? quoted(queued, 'queued') : '']
-      .filter(Boolean)
-      .join(', '),
-  }));
-  if (mainRunning(card, live)) agents.unshift({ seed: 'main', name: 'Main', main: true, running: true, doing: 'running the workspace chat' });
-  return agents.sort((a, b) => Number(b.running) - Number(a.running));
+  if (mainRunning(card, live)) {
+    const asked = [...card.said].reverse().find((s) => s.sessionId === card.mainSessionId && s.origin?.kind === 'user');
+    say(MAIN_SEED, 'running', asked ? `Answering: ${firstSentence(asked.text)}` : 'Answering in the chat');
+  }
+  for (const task of tasks) if (task.status === 'running' || task.status === 'stopping') say(join(agentOf(task)), 'running', task.title);
+  for (const task of tasks) if (task.status === 'queued') say(join(agentOf(task)), 'queued', task.title);
+  for (const task of tasks) {
+    const level = task.status === 'completed' ? shoutLevel(Number(task.completedAt ?? task.updatedAt), now) : null;
+    if (level) say(join(agentOf(task)), 'done', task.title, level);
+  }
+
+  const all: FleetCrewMember[] = [...members.values()].map((m) => {
+    const what = says.get(m.seed);
+    return {
+      ...m,
+      status: what?.status ?? 'idle',
+      doing: what?.doing ?? null,
+      words: what?.status === 'running' ? firstWords(what.doing) : null,
+      level: what?.level ?? null,
+    };
+  });
+  if (all.length <= MAX_CREW) return { shown: all, more: [] };
+  const shown = all.filter((m) => m.main || m.status !== 'idle').slice(0, MAX_CREW - 1);
+  return { shown, more: all.filter((m) => !shown.includes(m)) };
 };
 
 

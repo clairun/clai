@@ -8,6 +8,7 @@ import CommandHelpModal from './CommandHelpModal';
 import WorkspaceTerminal from './WorkspaceTerminal';
 import {
   dispatchScrollChatToBottom,
+  FOCUS_TERMINAL_EVENT,
   dispatchWorkspaceUiCommand,
 } from '../../utils/workspaceUiEvents';
 import type { ContentPart } from '../../generated/bindings';
@@ -626,10 +627,13 @@ const TerminalEmulator = ({
 
     // Add global event listener
     document.addEventListener('keydown', handleGlobalKeyDown);
+    const focusInput = () => inputRef.current?.focus();
+    window.addEventListener(FOCUS_TERMINAL_EVENT, focusInput);
 
     // Cleanup on unmount
     return () => {
       document.removeEventListener('keydown', handleGlobalKeyDown);
+      window.removeEventListener(FOCUS_TERMINAL_EVENT, focusInput);
     };
   }, []);
 

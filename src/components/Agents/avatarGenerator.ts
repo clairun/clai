@@ -126,7 +126,7 @@ export const hueIndexFor = (seed: string): number => rngFor(seed).hueIndex;
 
 // ---- colour -------------------------------------------------------------------
 
-const oklchToHex = (L: number, C: number, hueDeg: number): string => {
+export const oklchToHex = (L: number, C: number, hueDeg: number): string => {
   const h = (hueDeg * Math.PI) / 180;
   const a = C * Math.cos(h);
   const b = C * Math.sin(h);

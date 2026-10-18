@@ -13,7 +13,6 @@ import { flushSync } from 'react-dom';
 import { getMessage } from '../../assistant/client';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import { useAppTheme } from '../../hooks/useAppTheme';
-import AgentAvatar from '../Agents/AgentAvatar';
 import {
   faceOf,
   identityRingColor,
@@ -33,24 +32,17 @@ import {
   type FleetSpeaker,
 } from '../../fleet/fleetModel';
 import fx, { FaceExpression, Sfx, SpeedLines, type Expression } from './FleetEffects';
-import FleetZoom from './FleetZoom';
+import FleetFace, { MAIN_FACE, type Cast, type CastIdentity } from './FleetFace';
+import FleetZoom, { Tail, zoomStart, type ZoomStart } from './FleetZoom';
 import styles from './FleetPage.module.css';
 
-type Faces = Record<string, AgentIdentity>;
+type Faces = Cast;
 
 /** The caption box: when, worded against the page's clock. */
 export const Caption = ({ caption, mood, now }: { caption: FleetCaption; mood: string; now: number }) => (
   <span className={styles.caption} data-mood={mood}>
     {captionText(caption, now)}
   </span>
-);
-
-/** A hand-drawn speech-bubble tail; `right` points at the face on the right. */
-export const Tail = ({ right = false }: { right?: boolean }) => (
-  <svg className={`${styles.tail} ${right ? styles.tailRight : ''}`} width="24" height="22" viewBox="0 0 28 24" aria-hidden="true">
-    <path className={styles.tailFill} d="M28 3 C20 6 10 12 1 21 C11 17 19 15.5 28 15.5 Z" />
-    <path className={styles.tailStroke} d="M25 3.6 C18 6.6 10 12 1 21 C11 17 18 15.6 25 15.5" />
-  </svg>
 );
 
 /** A scalloped ellipse: eight arcs around the cloud's centre. */
@@ -90,7 +82,7 @@ export const Who = ({
   ghosts = false,
   children,
 }: {
-  identity: AgentIdentity;
+  identity: CastIdentity;
   name: string;
   size: number;
   activity?: AgentActivity;
@@ -107,10 +99,10 @@ export const Who = ({
       {ghosts &&
         [0, 1].map((i) => (
           <span key={i} className={fx.ghost} aria-hidden="true">
-            <AgentAvatar identity={identity} size={size} activity={activity} ring={false} />
+            <FleetFace identity={identity} size={size} activity={activity} ring={false} />
           </span>
         ))}
-      <AgentAvatar identity={identity} size={size} activity={activity} ring={false} />
+      <FleetFace identity={identity} size={size} activity={activity} ring={false} />
       {expression && <FaceExpression kind={expression} size={size} />}
     </span>
     {children}
@@ -118,9 +110,10 @@ export const Who = ({
   </figure>
 );
 
-const useAgentColor = (identity: AgentIdentity) => {
+/** A bubble is its author's colour; the user's, with no face, keeps the one "you" colour of the CSS. */
+const useAuthorColor = (author: AgentIdentity | null) => {
   const theme = useAppTheme();
-  return { '--agent-color': identityRingColor(identity, theme) } as CSSProperties;
+  return author ? ({ '--agent-color': identityRingColor(author, theme) } as CSSProperties) : undefined;
 };
 
 /** A tick; with a `label` it is the only word for the outcome, so it says it. */
@@ -146,8 +139,8 @@ const Cross = () => (
 
 
 const nameOf = (s: FleetSpeaker): string => (s.kind === 'you' ? 'You' : s.kind === 'main' ? 'Main' : s.agent.name);
-const faceFor = (s: FleetSpeaker, faces: Faces): AgentIdentity | null =>
-  s.kind === 'agent' ? faceOf(faces, s.agent.seed) : s.kind === 'main' ? mainIdentity() : null;
+const faceFor = (s: FleetSpeaker, faces: Faces): CastIdentity | null =>
+  s.kind === 'agent' ? faceOf(faces, s.agent.seed) : s.kind === 'main' ? (faces[MAIN_FACE] ?? mainIdentity()) : null;
 
 /**
  * `Main → Researcher`, with how a task ended or that it waits its turn. Main's
@@ -227,11 +220,10 @@ const Outcome = ({ line, time }: { line: FleetLine; time: string }) => (
   </span>
 );
 
-/** An older highlight, collapsed to one line; a task still in flight keeps its thinking face. */
+/** An older highlight, collapsed to one line. A task in flight is in the crew strip, thinking. */
 const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: Faces; open: Open }) => {
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
-  const thinking = line.live === 'running';
   return (
     <li className={styles.row} data-row>
       <button
@@ -246,12 +238,12 @@ const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: 
         <span className={styles.rowFaces} aria-hidden="true">
           {from && (
             <span className={styles.rowFace} data-anchor>
-              <AgentAvatar identity={from} size={16} ring={false} />
+              <FleetFace identity={from} size={16} ring={false} />
             </span>
           )}
           {to && (
-            <span className={`${styles.rowFace} ${thinking ? styles.rowThinking : ''}`} data-anchor>
-              <AgentAvatar identity={to} size={16} ring={false} activity={thinking ? 'running' : 'none'} />
+            <span className={styles.rowFace} data-anchor>
+              <FleetFace identity={to} size={16} ring={false} />
             </span>
           )}
         </span>
@@ -286,14 +278,13 @@ const Said = ({
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
   const thinking = line.live === 'running';
-  const style = useAgentColor((to && line.to.kind === 'agent' ? to : from) ?? mainIdentity());
-  const tone = line.outcome ?? (line.live ? 'task' : line.to.kind === 'you' ? 'you' : 'say');
+  const style = useAuthorColor(from);
   const time = shortTime(line.at, now);
   if (!from) {
     // No faces: a word to Main goes without saying, one to a task names it.
     return (
       <div className={styles.fromYou} data-row {...zoomable(line, open)}>
-        <div className={styles.bubble}>
+        <div className={styles.bubble} data-bubble>
           <Tail right />
           <span className={styles.bubbleText} title={line.text}>
             <Stamp line={line} time={time} route={line.to.kind === 'agent'} />
@@ -307,7 +298,7 @@ const Said = ({
   return (
     <div
       className={`${styles.said} ${thinking ? fx.tilt : ''}`}
-      data-tone={tone}
+      data-thinking={thinking || undefined}
       data-row
       style={style}
       {...zoomable(line, open)}
@@ -316,7 +307,7 @@ const Said = ({
       {shout && <Sfx word={thinking ? 'GO!' : 'DONE!'} tone={thinking ? 'go' : 'done'} level={shoutLevel(line.at, now)} />}
       <Who identity={from} name={nameOf(line.from)} size={36} expression={fromExpression} />
       <div className={styles.say}>
-        <div className={styles.bubble}>
+        <div className={styles.bubble} data-bubble>
           <Tail />
           <span className={styles.bubbleText} title={line.text}>
             <Stamp line={line} time={time} />
@@ -413,40 +404,24 @@ const useFullText = (workspaceId: string, line: FleetLine): string => {
   return full || line.markdown;
 };
 
-/** The zoomed highlight: the whole message as markdown, after who said it to whom and when. */
-const Zoomed = ({ workspaceId, line, faces }: { workspaceId: string; line: FleetLine; faces: Faces }) => {
-  const from = faceFor(line.from, faces);
-  const to = faceFor(line.to, faces);
+/** The zoomed highlight: who said it to whom and when, then the whole message as markdown. */
+const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine }) => {
   const text = useFullText(workspaceId, line);
-  const style = useAgentColor((to && line.to.kind === 'agent' ? to : from) ?? mainIdentity());
   return (
-    <>
-      <div className={`${styles.bubble} ${styles.zoomBubble}`} style={style}>
-        <Tail />
-        <div className={styles.zoomText}>
-          <p className={styles.zoomStamp}>
-            <Route line={line} /> · <Outcome line={line} time={fullTime(line.at)} />
-          </p>
-          <MarkdownMessage content={text} />
-        </div>
-      </div>
-    </>
+    <div className={styles.zoomText}>
+      <p className={styles.zoomStamp}>
+        <Route line={line} /> · <Outcome line={line} time={fullTime(line.at)} />
+      </p>
+      <MarkdownMessage content={text} />
+    </div>
   );
 };
 
 interface Zoom {
   line: FleetLine;
   origin: HTMLElement;
-  at: DOMRect;
-  side: 'left' | 'right';
+  start: ZoomStart;
 }
-
-/** The zoom grows from the speaker's face; your words, with no face, from their tail. */
-const zoomFrom = (line: FleetLine, origin: HTMLElement): Zoom => {
-  const face = origin.querySelector<HTMLElement>('[data-anchor]');
-  const tail = origin.querySelector<HTMLElement>(`.${styles.tail}`);
-  return { line, origin, at: (face ?? tail ?? origin).getBoundingClientRect(), side: face ? 'right' : 'left' };
-};
 
 /**
  * A miniature: the workspace's conversation as highlights, in the order it
@@ -469,8 +444,20 @@ const FleetFeed = ({
   faces: Faces;
 }) => {
   const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines);
+  const theme = useAppTheme();
   const [zoom, setZoom] = useState<Zoom | null>(null);
-  const open = useCallback<Open>((line, origin) => setZoom((z) => z ?? zoomFrom(line, origin)), []);
+  const open = useCallback<Open>(
+    (line, origin) =>
+      setZoom((z) => {
+        if (z) return z;
+        // A row has no bubble to copy: its zoom still takes its author's colour.
+        const author = faceFor(line.from, faces);
+        const start = zoomStart(origin);
+        const color = author ? { '--agent-color': identityRingColor(author, theme) } : {};
+        return { line, origin, start: { ...start, look: { ...color, ...start.look } as CSSProperties } };
+      }),
+    [faces, theme]
+  );
   const closed = useCallback(() => setZoom(null), []);
   const split = feed.lines.length - count;
   const rows = feed.lines.slice(Math.max(0, split - rowCount), split);
@@ -495,13 +482,12 @@ const FleetFeed = ({
       {zoom && (
         <FleetZoom
           origin={zoom.origin}
-          at={zoom.at}
-          side={zoom.side}
-          face={zoomFace && <AgentAvatar identity={zoomFace} size={Math.round(zoom.at.width)} ring={false} />}
+          start={zoom.start}
+          face={zoomFace && zoom.start.face && <FleetFace identity={zoomFace} size={Math.round(zoom.start.face.width)} ring={false} />}
           label={`Message from ${nameOf(zoom.line.from)}`}
           onClosed={closed}
         >
-          <Zoomed workspaceId={workspaceId} line={zoom.line} faces={faces} />
+          <Zoomed workspaceId={workspaceId} line={zoom.line} />
         </FleetZoom>
       )}
     </div>

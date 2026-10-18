@@ -1,9 +1,9 @@
 import {
+  useState,
   useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
-  useState,
   type CSSProperties,
   type KeyboardEvent,
   type ReactNode,
@@ -11,90 +11,201 @@ import {
 import { createPortal } from 'react-dom';
 import styles from './FleetPage.module.css';
 
-const CLOSE_MS = 250;
+const CLOSE_MS = 220;
 
 const moves = () =>
   typeof window.matchMedia === 'function' && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-/** Face to bubble, as on the card; viewport margin; bubble edge to the face's middle; the tail's reach and middle. */
-const GAP = 16;
+/** Viewport margin; widest zoom; face to bubble, as on the card; a made-up bubble for a row or a face. */
 const MARGIN = 16;
-const LEAD = 28;
-const TAIL_REACH = 22;
-const TAIL_MID = 11;
+const WIDEST = 560;
+const GAP = 16;
+const SMALL = { width: 64, height: 36 };
+/** The tail's box (`Tail`). */
+const TAIL_HEIGHT = 22;
+
+/** A hand-drawn speech-bubble tail; `right` points at the face on the right. */
+export const Tail = ({ right = false }: { right?: boolean }) => (
+  <svg className={`${styles.tail} ${right ? styles.tailRight : ''}`} width="24" height="22" viewBox="0 0 28 24" aria-hidden="true" data-tail>
+    <path className={styles.tailFill} d="M28 3 C20 6 10 12 1 21 C11 17 19 15.5 28 15.5 Z" />
+    <path className={styles.tailStroke} d="M25 3.6 C18 6.6 10 12 1 21 C11 17 18 15.6 25 15.5" />
+  </svg>
+);
+
+export interface Box {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+/** Where a zoom starts: the card bubble as it is, and where its tail meets the face. */
+export interface ZoomStart {
+  rect: Box;
+  /** The tail's top, in the viewport; it never moves. */
+  tailY: number;
+  /** The bubble's side the tail is on, towards the face. */
+  side: 'left' | 'right';
+  /** The card bubble, hidden while its zoom is open; `null` for a row or a face. */
+  source: HTMLElement | null;
+  /** The bubble's own look, copied, so the zoom starts as its pixel copy. */
+  look: CSSProperties;
+  /** The speaker's face, drawn over the scrim where it is on the card. */
+  face: DOMRect | null;
+}
+
+const box = (r: DOMRect): Box => ({ left: r.left, top: r.top, width: r.width, height: r.height });
 
 /**
- * Where the bubble grows from the face at `at`: on its own side (`side`) when
- * the viewport has room for a readable width, else on the roomier side; down
- * from a face in the top half, up from one in the bottom half. The tail stays
- * on the face; its tip is the transform origin.
+ * A zoom's start, read off what was clicked: its bubble (`data-bubble`) and
+ * tail, or, for a row or a face with no bubble, a small one just right of
+ * the face.
  */
-const growFrom = (at: DOMRect, side: 'left' | 'right', vw: number, vh: number) => {
-  const want = Math.min(560, vw * 0.6);
-  const room = { right: vw - at.right - GAP - MARGIN, left: at.left - GAP - MARGIN };
-  const other = side === 'right' ? 'left' : 'right';
-  const x = room[side] >= want || room[side] >= room[other] ? side : other;
+export const zoomStart = (origin: HTMLElement): ZoomStart => {
+  const anchor = origin.querySelector<HTMLElement>('[data-anchor]');
+  const face = anchor?.getBoundingClientRect() ?? null;
+  const bubble = origin.querySelector<HTMLElement>('[data-bubble]');
+  if (bubble) {
+    const rect = box(bubble.getBoundingClientRect());
+    const tail = bubble.querySelector('[data-tail]')?.getBoundingClientRect();
+    const css = getComputedStyle(bubble);
+    return {
+      rect,
+      tailY: tail ? tail.top : rect.top + rect.height / 2 - TAIL_HEIGHT / 2,
+      side: tail && tail.left > rect.left + rect.width / 2 ? 'right' : 'left',
+      source: bubble,
+      face,
+      look: {
+        '--agent-color': origin.style.getPropertyValue('--agent-color') || undefined,
+        '--bubble-border': css.borderTopColor || undefined,
+        padding: css.padding || undefined,
+        fontSize: css.fontSize || undefined,
+        lineHeight: css.lineHeight || undefined,
+        borderWidth: css.borderTopWidth || undefined,
+        borderRadius: css.borderTopLeftRadius || undefined,
+        background: css.backgroundColor || undefined,
+      } as CSSProperties,
+    };
+  }
+  const at = face ?? origin.getBoundingClientRect();
   const mid = at.top + at.height / 2;
-  const y = mid < vh / 2 ? 'down' : 'up';
-  // The distance from the viewport edge the bubble grows away from, and the tail's from the bubble's.
-  const edge = Math.max(MARGIN, (y === 'down' ? mid : vh - mid) - LEAD);
-  const tail = Math.max(4, (y === 'down' ? mid : vh - mid) - edge - TAIL_MID);
-  const style = {
-    [x === 'right' ? 'left' : 'right']: x === 'right' ? at.right + GAP : vw - at.left + GAP,
-    [y === 'down' ? 'top' : 'bottom']: edge,
-    width: Math.min(want, room[x]),
-    maxHeight: vh - edge - MARGIN,
-    transformOrigin: `${x === 'right' ? `${-TAIL_REACH}px` : `calc(100% + ${TAIL_REACH}px)`} ${
-      y === 'down' ? `${tail + TAIL_MID}px` : `calc(100% - ${tail + TAIL_MID}px)`
-    }`,
-    '--tail-at': `${tail}px`,
-  } as CSSProperties;
-  return { x, y, style };
+  return {
+    rect: { left: at.right + GAP, top: mid - SMALL.height / 2, ...SMALL },
+    tailY: mid - TAIL_HEIGHT / 2,
+    side: 'left',
+    source: null,
+    face,
+    look: { '--agent-color': origin.style.getPropertyValue('--agent-color') || undefined } as CSSProperties,
+  };
+};
+
+/** A zoom narrower than this on the bubble's own side opens on the face's other side. */
+const NARROWEST = 360;
+
+/**
+ * Where the zoom ends, given its content's height at the width it gets. It
+ * widens away from the face, on the bubble's side when there is room, else
+ * on the face's other side (a card in the right column grows left); its
+ * tail stays at the same height on the face. It grows down from a bubble in
+ * the top half and up from one in the bottom half, never past the window:
+ * a long message scrolls inside.
+ */
+export const zoomGeometry = (
+  start: ZoomStart,
+  natural: number,
+  vw: number,
+  vh: number
+): Box & { tailAt: number; side: 'left' | 'right' } => {
+  const { rect, tailY, face } = start;
+  const want = Math.min(WIDEST, vw * 0.6);
+  // The edge the tail is on, and across the face, the edge it would be on.
+  const near = start.side === 'left' ? rect.left : rect.left + rect.width;
+  const far = face ? (start.side === 'left' ? face.left - GAP : face.right + GAP) : near;
+  const roomOf = (edge: number, side: 'left' | 'right') => (side === 'left' ? vw - MARGIN - edge : edge - MARGIN);
+  const flipped: 'left' | 'right' = start.side === 'left' ? 'right' : 'left';
+  const stay = !face || roomOf(near, start.side) >= Math.min(want, NARROWEST) || roomOf(near, start.side) >= roomOf(far, flipped);
+  const side = stay ? start.side : flipped;
+  const edge = stay ? near : far;
+  const width = Math.min(Math.max(want, rect.width), roomOf(edge, side));
+  const left = side === 'left' ? edge : edge - width;
+  const height = Math.max(rect.height, Math.min(natural, vh - 2 * MARGIN));
+  const down = rect.top + rect.height / 2 < vh / 2;
+  const top = Math.min(Math.max(down ? rect.top : rect.top + rect.height - height, MARGIN), Math.max(MARGIN, vh - MARGIN - height));
+  return { left, top, width, height, tailAt: tailY - top, side };
+};
+
+/** `tailAt` is from the bubble's outer edge; the tail is placed inside its border. */
+const place = (el: HTMLElement, tail: HTMLElement | null, at: Box, tailAt: number) => {
+  el.style.left = `${at.left}px`;
+  el.style.top = `${at.top}px`;
+  el.style.width = `${at.width}px`;
+  el.style.height = `${at.height}px`;
+  if (tail) tail.style.top = `${tailAt - (parseFloat(getComputedStyle(el).borderTopWidth) || 0)}px`;
 };
 
 const FOCUSABLE = 'a[href], button, input, textarea, select, [tabindex]:not([tabindex="-1"])';
 
 /**
- * A highlight zoomed out of its card: in a page-level layer over the dimmed
- * Fleet, the speaker's face stays where it is on the card (`face`, drawn over
- * it at `at`) and the bubble grows out of it (`growFrom`), then shrinks back
- * into it. Esc, a click outside or on the panel closes it; focus returns to
- * `origin`.
+ * A highlight zoomed out of its card, in a page-level layer over the dimmed
+ * Fleet. It starts as the card bubble and grows (`zoomGeometry`) with its
+ * tail on the speaker's face, which is drawn over the scrim where it is on
+ * the card (`face`). The card bubble hides from opening until the zoom has
+ * shrunk back, so only one bubble ever shows. Esc, a click outside or on the
+ * bubble shrinks it back; focus returns to `origin`.
  */
 const FleetZoom = ({
   origin,
-  at,
-  side,
+  start,
   face,
   label,
   onClosed,
   children,
 }: {
   origin: HTMLElement;
-  /** The face's rectangle, or the tail's for words with no face. */
-  at: DOMRect;
-  /** The side of `at` the bubble is on in the card. */
-  side: 'left' | 'right';
+  start: ZoomStart;
   face?: ReactNode;
   label: string;
   onClosed: () => void;
   children: ReactNode;
 }) => {
-  const [grow] = useState(() => growFrom(at, side, window.innerWidth, window.innerHeight));
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // Which side the tail ends on does not depend on the content's height.
+  const [side] = useState(() => zoomGeometry(start, 0, window.innerWidth, window.innerHeight).side);
   const scrimRef = useRef<HTMLDivElement | null>(null);
   const closing = useRef(false);
+  const tailOf = (panel: HTMLElement) => panel.querySelector<HTMLElement>(':scope > [data-tail]');
+
+  useLayoutEffect(() => {
+    const source = start.source;
+    // Hidden, not removed: the card keeps its layout, and only one bubble shows.
+    source?.style.setProperty('visibility', 'hidden');
+    return () => {
+      source?.style.removeProperty('visibility');
+    };
+  }, [start.source]);
 
   useLayoutEffect(() => {
     const panel = panelRef.current!;
-    panel.focus({ preventScroll: true });
-    if (!moves()) return;
+    const tail = tailOf(panel);
+    // Measure the content at its final width, before anything is painted.
+    const { width } = zoomGeometry(start, 0, window.innerWidth, window.innerHeight);
+    panel.style.width = `${width}px`;
+    panel.style.height = 'auto';
+    const end = zoomGeometry(start, panel.offsetHeight, window.innerWidth, window.innerHeight);
+    // Start as the card bubble, with no transition; then grow.
     const scrim = scrimRef.current!;
     panel.dataset.phase = scrim.dataset.phase = 'from';
+    place(panel, tail, start.rect, start.tailY - start.rect.top);
     void panel.offsetWidth;
+    if (moves()) {
+      delete panel.dataset.phase;
+      delete scrim.dataset.phase;
+    }
+    place(panel, tail, end, end.tailAt);
     delete panel.dataset.phase;
     delete scrim.dataset.phase;
-  }, []);
+    panel.focus({ preventScroll: true });
+  }, [start]);
 
   const close = useCallback(() => {
     const panel = panelRef.current;
@@ -107,8 +218,9 @@ const FleetZoom = ({
     if (!moves()) return done();
     panel.dataset.phase = 'closing';
     scrimRef.current!.dataset.phase = 'closing';
+    place(panel, tailOf(panel), start.rect, start.tailY - start.rect.top);
     window.setTimeout(done, CLOSE_MS);
-  }, [origin, onClosed]);
+  }, [origin, onClosed, start]);
 
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
@@ -140,17 +252,20 @@ const FleetZoom = ({
   return createPortal(
     <div className={styles.zoomLayer}>
       <div ref={scrimRef} className={styles.zoomScrim} onClick={close} aria-hidden="true" />
-      {face && (
-        <span className={styles.zoomFace} style={{ left: at.left, top: at.top, width: at.width, height: at.height }} aria-hidden="true">
+      {face && start.face && (
+        <span
+          className={styles.zoomFace}
+          style={{ left: start.face.left, top: start.face.top, width: start.face.width, height: start.face.height }}
+          aria-hidden="true"
+        >
           {face}
         </span>
       )}
       <div
         ref={panelRef}
-        className={styles.zoomPanel}
-        data-x={grow.x}
-        data-y={grow.y}
-        style={grow.style}
+        className={`${styles.bubble} ${styles.zoomPanel}`}
+        data-tail-side={side}
+        style={start.look}
         role="dialog"
         aria-modal="true"
         aria-label={label}
@@ -162,6 +277,7 @@ const FleetZoom = ({
           close();
         }}
       >
+        <Tail right={side === 'right'} />
         {children}
       </div>
     </div>,

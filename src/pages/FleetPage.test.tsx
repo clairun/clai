@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { useEffect, useRef } from 'react';
 import { MemoryRouter } from 'react-router';
+import { FOCUS_TERMINAL_EVENT } from '../utils/workspaceUiEvents';
 
 import FleetPage from './FleetPage';
 import WorkspacePicker from '../components/TerminalEmulator/WorkspacePicker';
@@ -37,11 +39,22 @@ const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspac
 const said = (messageId: string, text: string, ago: number, patch = {}) =>
   ({ messageId, sessionId: 'main-a', role: 'user', origin: { kind: 'user' }, text, truncated: false, createdAt: BigInt(Date.now() - ago), runId: null, ...patch }) as FleetWorkspace['recentMessages'][number];
 
+/** The shared terminal's input, as far as the page sees it: it takes the keyboard when asked (`TerminalEmulator`). */
+const FakeTerminal = () => {
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const focus = () => ref.current?.focus();
+    window.addEventListener(FOCUS_TERMINAL_EVENT, focus);
+    return () => window.removeEventListener(FOCUS_TERMINAL_EVENT, focus);
+  }, []);
+  return <textarea ref={ref} aria-label="Terminal" />;
+};
+
 const renderFleet = () =>
   render(
     <MemoryRouter>
       <FleetPage />
-      <textarea aria-label="Terminal" />
+      <FakeTerminal />
     </MemoryRouter>
   );
 
@@ -123,8 +136,11 @@ describe('FleetPage', () => {
     expect(highlighted()).toContain('Alpha');
     expect(useFleetStore.getState().selectedId).toBeNull();
 
+    terminal.blur();
     fireEvent.keyUp(terminal, { key: 'Control' });
     expect(useFleetStore.getState().selectedId).toBe('a');
+    // Typing goes to the chosen workspace at once.
+    expect(terminal).toHaveFocus();
     expect(mockInvoke).toHaveBeenCalledWith('workspace_mark_opened', { workspaceId: 'a' });
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
     // The same as a click: the card is highlighted, nothing moves.
@@ -146,6 +162,24 @@ describe('FleetPage', () => {
     expect(highlighted()).toBe('New workspace');
     fireEvent.keyUp(terminal, { key: 'Control' });
     expect(useFleetStore.getState().selectedId).toBeNull();
+  });
+
+  it('goes backwards on Ctrl+Shift+Tab, wrapping from the first entry to the last; Enter chooses and readies the terminal', async () => {
+    fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha'), workspace('b', 'Beta')]);
+    renderFleet();
+    await screen.findByRole('button', { name: 'Select Alpha' });
+    const terminal = screen.getByRole('textbox', { name: 'Terminal' });
+    const press = (shiftKey = false) => fireEvent.keyDown(terminal, { key: 'Tab', ctrlKey: true, shiftKey });
+    const highlighted = () => screen.getByRole('option', { selected: true }).textContent;
+    press();
+    expect(highlighted()).toContain(screen.getAllByRole('option')[0]!.textContent!);
+    press(true);
+    expect(highlighted()).toBe('New workspace');
+    terminal.blur();
+    fireEvent.keyDown(terminal, { key: 'Enter', ctrlKey: true });
+    expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
+    expect(useFleetStore.getState().selectedId).toBeNull();
+    expect(terminal).toHaveFocus();
   });
 
   it('colours the border of a working card, but the selected one wins', async () => {
@@ -296,8 +330,9 @@ describe('FleetPage', () => {
       expect.stringMatching(/^Main → Scout Old research\s*working ·/),
     ]);
     expect(card.queryByText(/Look into the leaks/)).not.toBeInTheDocument();
-    // The running task's row keeps its agent's face awake.
-    expect(rows.getAllByRole('listitem')[1]!.querySelector('[class*=rowThinking]')).not.toBeNull();
+    // The running task is in the crew strip, whichever rows fit: one rule.
+    expect(card.getByRole('button', { name: 'Scout working on: Old research' })).toBeInTheDocument();
+    expect(rows.getAllByRole('listitem')[1]!.querySelector('[class*=rowThinking]')).toBeNull();
     // Each bubble starts with its time; no line under it. Main is named once,
     // under its face; your word to Main needs no label at all.
     const now = Date.now();
@@ -353,38 +388,58 @@ describe('FleetPage', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
 
-    const faceAt = (left: number, top: number, size = 36) =>
+    /** The card's bubbles and tails at fixed places: a bubble at `bubble`, its tail 20px down its side. */
+    const layout = (bubble: { left: number; top: number; width: number; height: number }) =>
       vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
-        const at = this.hasAttribute('data-anchor') ? { left, top, width: size, height: size } : { left: 0, top: 0, width: 0, height: 0 };
+        const at = this.hasAttribute('data-bubble')
+          ? bubble
+          : this.hasAttribute('data-tail') && this.closest('[data-bubble]')
+            ? { left: this.getAttribute('class')!.includes('tailRight') ? bubble.left + bubble.width - 2 : bubble.left - 22, top: bubble.top + 20, width: 24, height: 22 }
+            : this.hasAttribute('data-anchor')
+              ? { left: bubble.left - 52, top: bubble.top + 14, width: 36, height: 36 }
+              : { left: 0, top: 0, width: 0, height: 0 };
         return { ...at, x: at.left, y: at.top, right: at.left + at.width, bottom: at.top + at.height, toJSON: () => at } as DOMRect;
       });
-    const faceCopy = (dialog: HTMLElement) => dialog.parentElement!.querySelector<HTMLElement>('[class*=zoomFace]')!;
 
-    it("grows the bubble out of the speaker's face, which stays where it is on the card", async () => {
-      faceAt(100, 200);
+    it('starts as the card bubble, covers it as it grows, keeps the tail on the face, and hides the original while open', async () => {
+      layout({ left: 152, top: 190, width: 300, height: 60 });
       seed();
       renderFleet();
-      fireEvent.click(await bubble(/^Shipped v2/));
+      const origin = await bubble(/^Shipped v2/);
+      const source = origin.querySelector<HTMLElement>('[data-bubble]')!;
+      fireEvent.click(origin);
       const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
-      // A face high on the left: right and down from it, the tail's tip on the face.
-      expect(dialog).toHaveAttribute('data-x', 'right');
-      expect(dialog).toHaveAttribute('data-y', 'down');
-      expect(dialog.style).toMatchObject({ left: '152px', top: '190px', width: '560px', maxHeight: '562px', transformOrigin: '-22px 28px' });
-      expect(faceCopy(dialog).style).toMatchObject({ left: '100px', top: '200px', width: '36px', height: '36px' });
+      // jsdom measures no content, so the zoom ends no taller than the bubble: same edges but the far one.
+      expect(dialog.style).toMatchObject({ left: '152px', top: '190px', height: '60px', width: `${Math.min(560, 1024 * 0.6)}px` });
+      expect(dialog.querySelector<HTMLElement>('[data-tail]')!.style.top).toBe('20px');
+      expect(dialog).toHaveAttribute('data-tail-side', 'left');
+      // One bubble at a time: the card's hides, keeping its place, and comes back.
+      expect(source.style.visibility).toBe('hidden');
+      // Its author's colour, the same as on the card.
+      expect(dialog.style.getPropertyValue('--agent-color')).toBe(origin.style.getPropertyValue('--agent-color'));
+      expect(origin.style.getPropertyValue('--agent-color')).not.toBe('');
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(source.style.visibility).toBe('');
     });
 
-    it('opens leftward and upward from a face low by the right edge, inside the viewport', async () => {
-      faceAt(950, 600);
+    it("takes your bubble's one colour, not an agent's", async () => {
+      layout({ left: 600, top: 500, width: 200, height: 40 });
+      // Room for both bubbles.
+      vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.hasAttribute('data-row') ? 60 : 0;
+      });
+      vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('scene') ? 400 : 0;
+      });
       seed();
       renderFleet();
-      fireEvent.click(await bubble(/^Shipped v2/));
-      const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
-      expect(dialog).toHaveAttribute('data-x', 'left');
-      expect(dialog).toHaveAttribute('data-y', 'up');
-      // jsdom's viewport is 1024×768: the panel ends 16px left of the face and 28px under its middle.
-      expect(dialog.style).toMatchObject({ right: '90px', bottom: '122px', width: '560px', maxHeight: '630px' });
-      expect(dialog.style.transformOrigin).toBe('calc(100% + 22px) calc(100% - 28px)');
-      expect(faceCopy(dialog).style).toMatchObject({ left: '950px', top: '600px' });
+      const origin = await bubble(/^Ship it\./);
+      fireEvent.click(origin);
+      const dialog = screen.getByRole('dialog', { name: 'Message from You' });
+      expect(origin.style.getPropertyValue('--agent-color')).toBe('');
+      expect(dialog.style.getPropertyValue('--agent-color')).toBe('');
+      expect(dialog).toHaveAttribute('data-tail-side', 'right');
+      expect(document.querySelector('[data-tone]')).toBeNull();
     });
 
     it('zooms a collapsed row too', async () => {

@@ -4,14 +4,15 @@ import {
   faceOf,
   identityRingColor,
   mainIdentity,
-  type AgentIdentity,
 } from '../Agents/agentIdentity';
 import AskUserPanel from '../AskUserPanel/AskUserPanel';
 import InlineApprovalCard from '../InlineApprovalCard';
 import InlinePathGrantCard from '../InlinePathGrantCard';
 import type { FleetRequest, FleetRequestScene } from '../../fleet/fleetModel';
 import fx, { Sfx } from './FleetEffects';
-import { Caption, Tail, Who } from './FleetFeed';
+import { MAIN_FACE, type Cast } from './FleetFace';
+import { Caption, Who } from './FleetFeed';
+import { Tail } from './FleetZoom';
 import styles from './FleetPage.module.css';
 
 /** Clicks inside the request answer it; they never select the card. */
@@ -57,7 +58,7 @@ const RequestAnswer = ({
 interface FleetRequestPanelProps {
   scene: FleetRequestScene;
   workspaceId: string;
-  faces: Record<string, AgentIdentity>;
+  faces: Cast;
   /** Draw it loud: the amber burst, and "!?" or "!!". Never on the selected card. */
   loud?: boolean;
   /** The time of the last Fleet event. */
@@ -78,7 +79,7 @@ const FleetRequestPanel = ({
 }: FleetRequestPanelProps) => {
   const theme = useAppTheme();
   const { request, asker, count, caption } = scene;
-  const identity = asker ? faceOf(faces, asker.seed) : mainIdentity();
+  const identity = asker ? faceOf(faces, asker.seed) : (faces[MAIN_FACE] ?? mainIdentity());
   const name = asker?.name ?? 'Main';
   const speaker = (prompt: ReactNode) => (
     <div className={styles.asks}>

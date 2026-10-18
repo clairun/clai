@@ -10,7 +10,10 @@ import {
   type FleetLive,
   type FleetPhase,
 } from '../../fleet/fleetModel';
+import { useAppTheme } from '../../hooks/useAppTheme';
+import { workspaceLook } from '../../fleet/workspaceLook';
 import FleetCard from './FleetCard';
+import { accentStyle } from './FleetFace';
 import fx, { FLEET_FX } from './FleetEffects';
 import { useThoughtBeat } from './useThoughtBeat';
 import styles from './FleetPage.module.css';
@@ -38,6 +41,7 @@ interface FleetGridProps {
 const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect }: FleetGridProps) => {
   const handleSelect = useCallback((id: string) => onSelect(id), [onSelect]);
   const gridRef = useRef<HTMLDivElement | null>(null);
+  const theme = useAppTheme();
   useThoughtBeat(gridRef, order.some((id) => cards[id] && cardPhase(cards[id], live) === 'working'));
   // Each card's feed, once. A card with an open request shows that instead.
   const panels = useMemo(
@@ -46,7 +50,7 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect }: Fle
         const card = cards[id];
         if (!card) return [];
         const feed = openRequests(card).length > 0 ? null : cardFeed(card, live, now);
-        return [{ card, feed, selected: id === selectedId }];
+        return [{ card, feed, selected: id === selectedId, look: workspaceLook(id) }];
       }),
     [order, cards, live, now, selectedId]
   );
@@ -59,7 +63,7 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect }: Fle
   return (
     <div ref={gridRef} className={`${styles.board} ${fx.fx}`} data-fx={FLEET_FX} onClick={deselect}>
       <div className={styles.cards} style={{ '--cols': shape.cols, '--rows': shape.rows } as CSSProperties} onClick={deselect}>
-        {panels.map(({ card, feed, selected }) => {
+        {panels.map(({ card, feed, selected, look }) => {
           const cardLoud = loud.cards[card.workspaceId] ?? null;
           return (
             <article
@@ -67,8 +71,10 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect }: Fle
               className={`${styles.card} ${selected ? styles.cardSelected : (PHASE_BORDER[cardPhase(card, live)] ?? '')}`}
               aria-current={selected || undefined}
               data-loud={cardLoud ?? undefined}
+              data-screentone={look.screentone}
+              style={accentStyle(look.hue, theme)}
             >
-              <FleetCard card={card} feed={feed} shouts={loud.rows} live={live} faces={faces} now={now} loud={cardLoud} onSelect={handleSelect} />
+              <FleetCard card={card} feed={feed} shouts={loud.rows} live={live} faces={faces} look={look} now={now} loud={cardLoud} onSelect={handleSelect} />
             </article>
           );
         })}

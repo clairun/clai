@@ -13,6 +13,8 @@
   --fleet-warn-text: var(--color-warning);
   --fleet-bad-text: var(--color-critical-light);
   --fleet-stale-fade: 0.62;
+  /* The one colour of the user's own bubbles; agents' are their faces'. */
+  --fleet-you-color: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
 }
 
 :global([data-theme='light']) .page {
@@ -163,30 +165,6 @@
   flex-shrink: 0;
 }
 
-/* Sits just before the status label, which keeps `margin-left: auto`. */
-.headerFaces {
-  display: inline-flex;
-  align-items: center;
-  gap: 2px;
-  margin-left: auto;
-  flex-shrink: 0;
-}
-
-.headerFaces + .phase {
-  margin-left: 0;
-}
-
-.queuedFace {
-  display: inline-flex;
-  opacity: 0.45;
-}
-
-.headerFacesMore {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-text-tertiary);
-}
-
 .cardTitle {
   min-width: 0;
   margin: 0;
@@ -238,6 +216,146 @@
   margin-left: -5px;
 }
 
+/* ── The crew strip: every member under the title, one sticker each ──
+ * A fixed height, so the scene below always knows its room; busy faces
+ * come with their task's first words, which shrink before any face does. */
+.crew {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 26px;
+  margin: -2px 0 0;
+  padding: 0;
+  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+  list-style: none;
+}
+
+.crewMember {
+  display: flex;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.crewMember[data-status='running'] {
+  flex-shrink: 1;
+}
+
+.crewButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0 2px 0 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text-secondary);
+  font: inherit;
+  cursor: inherit;
+}
+
+button.crewButton {
+  cursor: zoom-in;
+}
+
+.crewButton:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 1px;
+}
+
+.crewFace {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 2px 6px 0 0;
+}
+
+.crewMember[data-status='queued'] .crewFace > :first-child {
+  opacity: 0.5;
+}
+
+.crewSticker {
+  position: absolute;
+  top: -1px;
+  right: 0;
+  display: grid;
+  place-items: center;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 2px;
+  border: 1px solid var(--color-bg-elevated);
+  border-radius: 7px;
+  background: var(--color-bg-tertiary, var(--color-bg-primary));
+  color: var(--color-text-secondary);
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.crewMember[data-status='running'] .crewSticker {
+  background: var(--ws-sticker, var(--color-primary));
+  color: var(--ws-sticker-ink, #0a0e14);
+}
+
+.crewMember[data-status='needs'] .crewSticker {
+  background: var(--color-warning);
+  /* Ink on amber: 6:1 in both themes. */
+  color: var(--fx-ink, #0a0e14);
+  font-size: 10px;
+}
+
+.crewMember[data-status='done'] .crewSticker {
+  background: var(--color-success);
+  color: var(--fx-ink, #0a0e14);
+}
+
+.crewSticker[data-level='half'] {
+  opacity: 0.55;
+}
+
+.crewMember[data-status='idle'] .crewSticker {
+  color: var(--color-text-secondary);
+}
+
+.crewWords {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crewMore {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.crewZoomText {
+  margin: 0;
+}
+
+/* A workspace's Main wears its accessory over the face (`FleetFace`). */
+.castFace {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.accessory {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+}
+
 /* ── A small card as a comic panel ───────────────────────────────────────
  * Read top to bottom in the order things happened: caption box (when), the
  * older highlights as one-line rows, then the newest as bubbles, as many as
@@ -275,8 +393,8 @@
 }
 
 .caption[data-mood='working'] {
-  border-color: var(--color-primary-alpha-40);
-  color: var(--fleet-run-text);
+  border-color: var(--ws-accent, var(--color-primary-alpha-40));
+  color: var(--ws-accent-text, var(--fleet-run-text));
 }
 
 .caption[data-mood='fresh'] {
@@ -351,6 +469,8 @@
 }
 
 .bubble {
+  /* A bubble is its author's colour, on the card and zoomed alike. */
+  --bubble-border: var(--agent-color, var(--fleet-you-color));
   position: relative;
   padding: 8px 12px;
   border: 2px solid var(--bubble-border);
@@ -367,8 +487,7 @@
   z-index: 1;
 }
 
-.tailRight,
-.zoomPanel[data-x='left'] .tail {
+.tailRight {
   left: auto;
   right: -22px;
   transform: scaleX(-1);
@@ -421,40 +540,13 @@
 }
 
 .said .bubble {
-  --bubble-border: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
   font-size: 14px;
   line-height: 1.45;
 }
 
-.said[data-tone='task'] {
+/* Room above the face for the thought cloud of the agent a task went to. */
+.said[data-thinking] {
   padding-top: 16px;
-  background: color-mix(in srgb, var(--agent-color) 9%, transparent);
-}
-
-.said[data-tone='task'] .bubble {
-  --bubble-border: color-mix(in srgb, var(--color-primary) 75%, transparent);
-  font-weight: 600;
-}
-
-.said[data-tone='done'] {
-  background: var(--color-success-alpha-06);
-}
-
-.said[data-tone='done'] .bubble {
-  --bubble-border: var(--color-success);
-}
-
-.said[data-tone='failed'] {
-  background: color-mix(in srgb, var(--color-critical) 5%, transparent);
-}
-
-.said[data-tone='failed'] .bubble {
-  --bubble-border: var(--color-critical);
-}
-
-.said[data-tone='say'] .bubble,
-.said[data-tone='stopped'] .bubble {
-  --bubble-border: var(--color-border-medium);
 }
 
 .said .bubbleText {
@@ -483,7 +575,7 @@
     padding: 2px 2px 0;
   }
 
-  .said[data-tone='task'] {
+  .said[data-thinking] {
     padding-top: 12px;
   }
 
@@ -509,7 +601,6 @@
 }
 
 .fromYou .bubble {
-  --bubble-border: var(--color-primary-alpha-40);
   max-width: 85%;
   font-size: 14px;
   line-height: 1.45;
@@ -592,12 +683,6 @@
 
 .rowFace {
   display: inline-flex;
-}
-
-/* A task still in flight keeps its agent's face awake. */
-.rowThinking {
-  border-radius: 50%;
-  box-shadow: 0 0 0 1.5px var(--color-primary);
 }
 
 .rowText {
@@ -776,6 +861,8 @@
  * the bubble grows out of it (`FleetZoom` places it and sets its origin at
  * the tail's tip) with a slight overshoot, then shrinks back into it. */
 .zoomLayer {
+  /* Outside the page: the user's bubble colour again (`.page`). */
+  --fleet-you-color: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
   position: fixed;
   inset: 0;
   z-index: 1000;
@@ -802,59 +889,35 @@
   position: absolute;
   display: flex;
   flex-direction: column;
+  box-sizing: border-box;
+  margin: 0;
+  box-shadow: 0 8px 28px color-mix(in srgb, #000 22%, transparent);
   transition:
-    transform 220ms cubic-bezier(0.34, 1.35, 0.64, 1),
-    opacity 220ms ease-out;
+    left 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    top 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    width 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    height 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
   cursor: zoom-out;
 }
 
-/* Growing up from a face low on the screen, the bubble's foot stays by it. */
-.zoomPanel[data-y='up'] {
-  flex-direction: column-reverse;
+/* The tail moves inside the bubble as the bubble grows past it, so it stays on the face. */
+.zoomPanel > .tail {
+  transition: top 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .zoomPanel:focus {
   outline: none;
 }
 
-.zoomPanel[data-phase] {
-  transform: scale(0.08);
-  opacity: 0.3;
-}
-
-.zoomPanel[data-phase='from'] {
+.zoomPanel[data-phase='from'],
+.zoomPanel[data-phase='from'] > .tail {
   transition: none;
-}
-
-.zoomPanel[data-phase='closing'] {
-  opacity: 0;
-  transition:
-    transform 180ms ease-in,
-    opacity 180ms ease-in;
-}
-
-.zoomBubble {
-  --bubble-border: color-mix(in srgb, var(--agent-color, var(--color-text-primary)) 70%, transparent);
-  display: flex;
-  min-height: 0;
-  padding: 12px 18px;
-  font-size: 15px;
-  line-height: 1.5;
-  box-shadow: 0 8px 28px color-mix(in srgb, #000 22%, transparent);
-}
-
-.zoomBubble .tail {
-  top: var(--tail-at);
-}
-
-.zoomPanel[data-y='up'] .tail {
-  top: auto;
-  bottom: var(--tail-at);
 }
 
 .zoomText {
   flex: 1;
   min-height: 0;
+  min-width: 0;
   overflow-y: auto;
   cursor: auto;
 }

@@ -9,6 +9,7 @@ import {
   type FleetCard,
   type FleetLive,
 } from '../../fleet/fleetModel';
+import { dispatchFocusTerminal } from '../../utils/workspaceUiEvents';
 import { phaseLabel } from './FleetCard';
 import styles from './FleetPage.module.css';
 
@@ -30,7 +31,9 @@ const NEW_WORKSPACE = 'fleet:new-workspace';
  * The OS-style switcher, from anywhere on the page, the terminal included
  * (capture beats the terminal's keydown). Ctrl+Tab opens it; while Ctrl is
  * held, Tab / Shift+Tab move only its highlight. Releasing Ctrl selects the
- * highlighted card once ("New workspace", the last entry, deselects); Escape or leaving the window closes it unchanged.
+ * highlighted card once, as Enter does ("New workspace", the last entry,
+ * deselects), and puts the keyboard in the terminal; Escape or leaving the
+ * window closes it unchanged.
  * Static: no animation, no blur.
  */
 const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: FleetSwitcherProps) => {
@@ -38,11 +41,23 @@ const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: Flee
   const entries = useMemo(() => [...order, NEW_WORKSPACE], [order]);
 
   useEffect(() => {
+    // The choice, then the keyboard in the terminal, which talks to it.
+    const choose = (id: string) => {
+      onSelect(id === NEW_WORKSPACE ? null : id);
+      setHighlightId(null);
+      dispatchFocusTerminal();
+    };
     const onKeyDown = (e: KeyboardEvent) => {
       if (highlightId && e.key === 'Escape') {
         e.preventDefault();
         e.stopPropagation();
         setHighlightId(null);
+        return;
+      }
+      if (highlightId && e.key === 'Enter') {
+        e.preventDefault();
+        e.stopPropagation();
+        choose(highlightId);
         return;
       }
       if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey || order.length === 0) return;
@@ -51,10 +66,7 @@ const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: Flee
       setHighlightId(cycleCard(entries, highlightId ?? selectedId ?? NEW_WORKSPACE, e.shiftKey ? -1 : 1));
     };
     const onKeyUp = (e: KeyboardEvent) => {
-      if (highlightId && e.key === 'Control') {
-        onSelect(highlightId === NEW_WORKSPACE ? null : highlightId);
-        setHighlightId(null);
-      }
+      if (highlightId && e.key === 'Control') choose(highlightId);
     };
     const onBlur = () => setHighlightId(null);
     window.addEventListener('keydown', onKeyDown, true);
