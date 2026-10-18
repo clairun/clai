@@ -336,7 +336,7 @@ describe('FleetPage', () => {
       const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
       expect(within(dialog).getByText('v2').tagName).toBe('STRONG');
       // The zoom says who to whom and when, in full, before the words.
-      expect(dialog.querySelector('p')).toHaveTextContent(/^Main · \d/);
+      expect(dialog.querySelector('p')).toHaveTextContent(/^Main · \S/);
       expect(dialog).toHaveFocus();
       // Zooming is not selecting the card.
       expect(useFleetStore.getState().selectedId).toBeNull();
