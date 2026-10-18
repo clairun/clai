@@ -248,16 +248,6 @@
   background: var(--color-bg-hover);
 }
 
-/* Shared with a small card's request head. */
-.liveAgent {
-  font-size: 12px;
-  font-weight: 700;
-  color: var(--agent-color);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
 .faces {
   display: inline-flex;
   flex-shrink: 0;
@@ -690,52 +680,201 @@
   color: inherit;
 }
 
-/* A small card's open request, as tall as it is; a long one scrolls inside the card. */
+/* ── A card that needs you: the agent asking, the answer below ──
+ * The request takes the whole card and scrolls inside it when taller. */
 .request {
   display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   min-height: 0;
   overflow-y: auto;
-  padding: 6px 8px;
-  border-radius: var(--radius-md);
-  background: color-mix(in srgb, var(--agent-color) 10%, transparent);
   cursor: default;
 }
 
-.requestHead {
-  display: flex;
-  flex-shrink: 0;
+.request .captionRow {
   align-items: center;
-  gap: 10px;
-  min-width: 0;
+  gap: 8px;
 }
 
-.requestHead .liveAgent {
-  flex: 1;
-  min-width: 0;
+.caption[data-mood='waiting'] {
+  border-color: var(--color-warning);
+  color: var(--color-warning);
 }
 
 .requestCount {
-  flex-shrink: 0;
+  margin-left: auto;
   font-size: 11px;
   font-weight: 600;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-past);
 }
 
-.chat {
-  position: relative;
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-  overflow: auto;
+/* The asker's face, the question in its bubble. */
+.asks {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: start;
+  gap: 18px;
+  flex-shrink: 0;
 }
 
-.chatEmpty {
-  margin: auto;
-  font-size: 13px;
-  color: var(--color-text-tertiary);
+.asks .who {
+  margin-top: 4px;
+}
+
+/* The asker's name wraps under its face rather than being cut. */
+.asks figcaption {
+  width: 64px;
+  white-space: normal;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.asks .tail {
+  top: 14px;
+}
+
+.asks .bubble {
+  --bubble-border: var(--color-warning);
+  min-width: 0;
+  padding: 6px 12px;
+}
+
+.requestStage .asks .bubble {
+  padding: 10px 14px;
+}
+
+/* Lines of a command before it scrolls inside the bubble (read by the approval card). */
+.asks {
+  --command-lines: 3;
+}
+
+.askText {
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+.requestStage .asks {
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 22px;
+  --command-lines: 14;
+}
+
+.requestStage .askText {
+  font-size: 17px;
+  line-height: 1.45;
+}
+
+/* ── The stage: the same panel, nothing left out; it scrolls ── */
+.scene[data-size='stage'] {
+  container-type: normal;
+  flex-wrap: nowrap;
+  gap: 14px;
+  overflow-y: auto;
+}
+
+.scene[data-size='stage'] .bubbleText {
+  display: block;
+  -webkit-line-clamp: none;
+  overflow: visible;
+}
+
+.scene[data-size='stage'] .asked {
+  white-space: normal;
+}
+
+.scene[data-size='stage'] .talk {
+  grid-template-columns: 56px minmax(0, 1fr) 76px;
+  gap: 20px;
+  padding: 20px 12px 10px;
+}
+
+.scene[data-size='stage'] .talkCompact {
+  grid-template-columns: 44px minmax(0, 1fr) 64px;
+  gap: 18px;
+}
+
+.scene[data-size='stage'] .talk .bubble {
+  font-size: 18px;
+}
+
+.scene[data-size='stage'] .talkCompact .bubble {
+  padding: 8px 13px;
+  font-size: 16px;
+}
+
+.scene[data-size='stage'] .result .bubble {
+  font-size: 15px;
+  font-weight: 400;
+}
+
+.scene[data-size='stage'] .toYou {
+  grid-template-columns: 56px minmax(0, 1fr);
+}
+
+.scene[data-size='stage'] .toYou .bubble,
+.scene[data-size='stage'] .fromYou .bubble {
+  font-size: 15px;
+}
+
+.scene[data-size='stage'] .earlierItem {
+  flex-wrap: wrap;
+  height: auto;
+  min-height: 22px;
+  row-gap: 2px;
+}
+
+.scene[data-size='stage'] .earlierItem:first-child {
+  margin-top: 8px;
+  height: auto;
+}
+
+/* Markdown inside a bubble: the chat's renderer, without its outer margins. */
+.markdown {
+  min-width: 0;
+  font-weight: 400;
+}
+
+.markdown > div > :first-child > :first-child {
+  margin-top: 0;
+}
+
+.markdown > div > :first-child > :last-child {
+  margin-bottom: 0;
+}
+
+.earlierResult {
+  flex-basis: 100%;
+  padding-left: 24px;
+  color: var(--color-text-past);
+  line-height: 1.45;
+}
+
+/* A task title that opens the task: plain text that underlines on hover. */
+.taskLink {
+  display: inline;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.taskLink:hover,
+.taskLink:focus-visible {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.runError {
+  margin: 0;
+  flex-shrink: 0;
+  font-size: 12px;
+  color: var(--color-critical-light);
 }
 
 /* ── Ctrl+Tab switcher: static, no blur ──────────────────────────────── */

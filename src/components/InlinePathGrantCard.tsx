@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   allowAlwaysDecision,
@@ -39,6 +39,11 @@ interface InlinePathGrantCardProps {
    * narrowing the path is left to the full card.
    */
   compact?: boolean;
+  /**
+   * Draw the request as the agent saying it (the Fleet's asking face and
+   * bubble): no tag or collapse, and the decision fills the space below.
+   */
+  speaker?: (prompt: ReactNode) => ReactNode;
 }
 
 // Paths that historically hold credentials or secrets. Surfacing this in
@@ -96,7 +101,7 @@ const accessLabel = (access: PathAccess): string =>
  *   - enforces the narrowing invariants client-side (no widening, no
  *     upgrading RO→RW) so the user never gets a confusing backend rejection.
  */
-const InlinePathGrantCard = ({ workspaceId, request, compact = false }: InlinePathGrantCardProps) => {
+const InlinePathGrantCard = ({ workspaceId, request, compact = false, speaker }: InlinePathGrantCardProps) => {
   const [requests, setRequests] = useState<PathGrantRequest[]>([]);
   const [perCardState, setPerCardState] = useState<Record<string, PathGrantCardState>>({});
   const [submittingId, setSubmittingId] = useState<string | null>(null);
@@ -264,7 +269,10 @@ const InlinePathGrantCard = ({ workspaceId, request, compact = false }: InlinePa
   }
 
   return (
-    <div className={compact ? `${styles.stack} ${styles.stackCompact}` : styles.stack} aria-live="polite">
+    <div
+      className={[styles.stack, compact ? styles.stackCompact : '', speaker ? styles.stackSpoken : ''].filter(Boolean).join(' ')}
+      aria-live="polite"
+    >
       {requests.map((req, cardIndex) => {
         const card = perCardState[req.requestId] || {
           path: req.requestedPath,
@@ -297,9 +305,10 @@ const InlinePathGrantCard = ({ workspaceId, request, compact = false }: InlinePa
           <article
             key={req.requestId}
             ref={cardIndex === 0 ? firstCardRef : null}
-            className={compact ? `${styles.card} ${styles.compact}` : styles.card}
+            className={[styles.card, compact ? styles.compact : '', speaker ? styles.spoken : ''].filter(Boolean).join(' ')}
             aria-label="Path grant requested"
           >
+            {!speaker && (
             <header className={styles.cardHeader}>
               <div className={styles.cardHeaderLeft}>
                 <span className={styles.tag}>Path access requested</span>
@@ -324,12 +333,21 @@ const InlinePathGrantCard = ({ workspaceId, request, compact = false }: InlinePa
                 </button>
               )}
             </header>
+            )}
 
             {isCollapsed ? (
               <div className={styles.collapsedSummary}>{card.path}</div>
             ) : (
               <div className={styles.cardBody}>
-            {compact ? (
+            {speaker &&
+              speaker(
+                <>
+                  May I {req.requestedAccess === 'read_write' ? 'read and write' : 'read'}{' '}
+                  <code className={styles.spokenPath}>{req.requestedPath}</code>?
+                  <span className={styles.spokenReason}>{req.reason || '(no reason given)'}</span>
+                </>
+              )}
+            {speaker && compact ? null : compact ? (
               <>
                 <div className={styles.compactTarget} title={`${card.path} (${accessLabel(card.access)})`}>
                   <code>{card.path}</code>
@@ -341,10 +359,12 @@ const InlinePathGrantCard = ({ workspaceId, request, compact = false }: InlinePa
               </>
             ) : (
               <>
+            {!speaker && (
             <div className={styles.reasonBlock}>
               <span className={styles.reasonLabel}>Reason from agent:</span>
               <div className={styles.reasonText}>{req.reason || '(no reason given)'}</div>
             </div>
+            )}
 
             <section className={styles.fields}>
               <label className={styles.fieldLabel}>

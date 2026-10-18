@@ -6,13 +6,13 @@ import {
   cardPhase,
   cardScene,
   liveAgents,
-  openRequests,
+  requestScene,
   type FleetAttention,
   type FleetCard as FleetCardModel,
   type FleetLive,
   type FleetPhase,
 } from '../../fleet/fleetModel';
-import FleetRequestRow from './FleetRequestRow';
+import FleetRequestPanel from './FleetRequestPanel';
 import FleetScene from './FleetScene';
 import styles from './FleetPage.module.css';
 
@@ -76,8 +76,8 @@ interface FleetCardProps {
 const FleetCard = ({ card, live, faces, now, onSelect }: FleetCardProps) => {
   const phase = cardPhase(card, live);
   const attention = cardAttention(card);
-  const requests = useMemo(() => openRequests(card), [card]);
-  const scene = useMemo(() => (requests.length ? null : cardScene(card, live, now)), [requests, card, live, now]);
+  const request = useMemo(() => requestScene(card, live, now), [card, live, now]);
+  const scene = useMemo(() => (request ? null : cardScene(card, live, now)), [request, card, live, now]);
   const title = card.title || 'Workspace';
 
   return (
@@ -104,9 +104,7 @@ const FleetCard = ({ card, live, faces, now, onSelect }: FleetCardProps) => {
         </span>
       </header>
       {scene && <FleetScene scene={scene} now={now} faces={faces} />}
-      {requests.length > 0 && (
-        <FleetRequestRow requests={requests} workspaceId={card.workspaceId} live={live} faces={faces} />
-      )}
+      {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={faces} />}
     </div>
   );
 };

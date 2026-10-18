@@ -11,8 +11,8 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(()
 import AskUserPanel from '../AskUserPanel/AskUserPanel';
 import InlineApprovalCard from '../InlineApprovalCard';
 import InlinePathGrantCard from '../InlinePathGrantCard';
-import FleetRequestRow from './FleetRequestRow';
-import type { FleetRequest } from '../../fleet/fleetModel';
+import FleetRequestPanel from './FleetRequestPanel';
+import { emptyCard, requestScene, type FleetRequest } from '../../fleet/fleetModel';
 
 const ask: PendingAskUser = {
   pendingId: 'ask-1',
@@ -146,25 +146,44 @@ describe('compact requests (small Fleet cards)', () => {
     });
   });
 
-  it("shows who asks only for a subtask, not for the workspace's own session", () => {
-    const request = { kind: 'ask', ask: { ...ask, sessionId: 'main' } } as unknown as FleetRequest;
+  it('draws the request as the asking agent: Main for the workspace, the task\'s agent for a subtask', () => {
     const live = { runs: {}, tasks: { 'ws-1': { t1: { sessionId: 'sub', assignedAgentDefinitionId: 'd1', assignedToWorkspaceAgentId: 'a1', assignedAgentDisplayName: 'Researcher' } } } } as never;
-    const { unmount } = render(<FleetRequestRow requests={[request]} workspaceId="ws-1" live={live} faces={{}} />);
-    const section = screen.getByRole('region', { name: 'Needs you' });
-    expect(within(section).queryByText('Main')).not.toBeInTheDocument();
+    const panel = (...requests: FleetRequest[]) => {
+      const card = { ...emptyCard('ws-1'), requests: Object.fromEntries(requests.map((r, i) => [`ask:${i}`, { ...r, at: i, resolvedAt: null }])) };
+      return <FleetRequestPanel scene={requestScene(card, live, 10)!} workspaceId="ws-1" faces={{}} />;
+    };
+    const fromMain = { kind: 'ask', ask: { ...ask, sessionId: 'main' } } as unknown as FleetRequest;
+    const { unmount } = render(panel(fromMain));
+    const section = screen.getByRole('region', { name: 'Main needs you' });
+    // The question is Main's bubble, and the answer is still the chat's own.
+    expect(within(section).getByText('Main')).toBeInTheDocument();
+    expect(within(section).getByText('Where should I deploy?')).toBeInTheDocument();
+    expect(within(section).getByRole('dialog', { name: 'Agent question' })).toBeInTheDocument();
+    expect(within(section).queryByText('AGENT IS ASKING')).not.toBeInTheDocument();
+    expect(section).toHaveTextContent(/^Waiting on you/);
     unmount();
 
-    // Several open: the count stays, still without the band.
-    const { unmount: unmountTwo } = render(
-      <FleetRequestRow requests={[request, request]} workspaceId="ws-1" live={live} faces={{}} />
-    );
-    const two = screen.getByRole('region', { name: 'Needs you' });
-    expect(within(two).getByText('1 of 2')).toBeInTheDocument();
-    expect(within(two).queryByText('Main')).not.toBeInTheDocument();
+    const { unmount: unmountTwo } = render(panel(fromMain, fromMain));
+    expect(within(screen.getByRole('region', { name: 'Main needs you' })).getByText('1 of 2')).toBeInTheDocument();
     unmountTwo();
 
     const fromTask = { kind: 'ask', ask: { ...ask, sessionId: 'sub' } } as unknown as FleetRequest;
-    render(<FleetRequestRow requests={[fromTask]} workspaceId="ws-1" live={live} faces={{}} />);
-    expect(within(screen.getByRole('region', { name: 'Needs you' })).getByText('Researcher')).toBeInTheDocument();
+    render(panel(fromTask));
+    expect(within(screen.getByRole('region', { name: 'Researcher needs you' })).getByText('Researcher')).toBeInTheDocument();
+  });
+
+  it('says a command in monospace in the bubble, without the approval card\'s tag, and still decides it', async () => {
+    const request = { kind: 'approval', request: { ...approval, agentName: 'Committer' }, agentName: 'Committer', text: approval.command } as unknown as FleetRequest;
+    const card = { ...emptyCard('ws-1'), requests: { 'approval:perm-1': { ...request, at: 1, resolvedAt: null } } };
+    render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} }, 10)!} workspaceId="ws-1" faces={{}} stage />);
+    const section = screen.getByRole('region', { name: 'Committer needs you' });
+    expect(within(section).getByLabelText('Command').tagName).toBe('PRE');
+    expect(within(section).getByLabelText('Command')).toHaveTextContent('cd /srv/app && cargo test');
+    expect(within(section).queryByText('Permission requested')).not.toBeInTheDocument();
+    // The stage keeps the full card's "always" decisions.
+    expect(within(section).getAllByRole('button', { name: /Always allow/ }).length).toBeGreaterThan(0);
+    mockInvoke.mockResolvedValue(undefined);
+    await userEvent.click(within(section).getByRole('button', { name: 'Deny entire command' }));
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', { requestId: 'perm-1', decisions: [{ kind: 'denyOnce' }, { kind: 'denyOnce' }] });
   });
 });

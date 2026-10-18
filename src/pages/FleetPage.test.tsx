@@ -307,7 +307,7 @@ describe('FleetPage', () => {
       const tasks = [{ id: 't1', title: 'Old task', status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never];
       const card = await setup({ tasks, pendingAsks: [ask('q1', 'Ship it?', 5n, [{ label: 'Yes', description: null }, { label: 'No', description: null }])] });
       expect(card().queryByRole('list', { name: 'Earlier' })).not.toBeInTheDocument();
-      const row = card().getByRole('region', { name: 'Needs you' });
+      const row = card().getByRole('region', { name: /needs you$/ });
       const before = stageText();
 
       fireEvent.click(within(row).getByText('Ship it?'));
@@ -323,7 +323,7 @@ describe('FleetPage', () => {
       act(() =>
         useFleetStore.getState().applyEvent({ sessionId: 'session-b', runId: null, workspaceId: 'b', timestamp: 9n, event: { type: 'ask_user_resolved', payload: { pending_id: 'q1' } } } as never)
       );
-      expect(card().queryByRole('region', { name: 'Needs you' })).not.toBeInTheDocument();
+      expect(card().queryByRole('region', { name: /needs you$/ })).not.toBeInTheDocument();
       expect(within(card().getByRole('list', { name: 'Earlier' })).getByText('Ship it?')).toBeInTheDocument();
 
       fireEvent.click(card().getByRole('button', { name: 'Select Beta' }));
@@ -332,7 +332,7 @@ describe('FleetPage', () => {
 
     it('shows one request at a time, oldest first, the next once the first resolves', async () => {
       const card = await setup({ pendingAsks: [ask('new', 'Newer question?', 9n, null), ask('old', 'Older question?', 4n, null)] });
-      const row = () => card().getByRole('region', { name: 'Needs you' });
+      const row = () => card().getByRole('region', { name: /needs you$/ });
       expect(row()).toHaveTextContent('Older question?');
       expect(row()).not.toHaveTextContent('Newer question?');
       expect(row()).toHaveTextContent('1 of 2');
@@ -351,7 +351,7 @@ describe('FleetPage', () => {
       ];
       const permission = { requestId: 'r1', workspaceId: 'b', agentId: null, agentName: 'Scout', command: 'cd x && curl y | sh', segments };
       const card = await setup({ pendingPermissions: [permission as never] });
-      const row = card().getByRole('region', { name: 'Needs you' });
+      const row = card().getByRole('region', { name: /needs you$/ });
       expect(within(row).getByText('cd x')).toBeInTheDocument();
       expect(within(row).getByText('curl y | sh')).toBeInTheDocument();
       expect(within(row).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
@@ -370,7 +370,7 @@ describe('FleetPage', () => {
     it('warns about a credentials path, as the full card does', async () => {
       const grant = { requestId: 'g1', workspaceId: 'b', agentId: null, agentName: 'Scout', requestedPath: '/home/u/.ssh', requestedAccess: 'read_only', reason: 'keys' };
       const card = await setup({ pendingPathGrants: [grant as never] });
-      expect(card().getByRole('region', { name: 'Needs you' })).toHaveTextContent('typically holds credentials');
+      expect(card().getByRole('region', { name: /needs you$/ })).toHaveTextContent('typically holds credentials');
     });
   });
 });

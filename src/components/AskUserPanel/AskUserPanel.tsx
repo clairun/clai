@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, type ReactNode } from 'react';
 import useAssistantStore, { type PendingAskUser } from '../../assistant/sessionStore';
 import { OTHER_INDEX, useAskAnswer } from './useAskAnswer';
 import styles from './AskUserPanel.module.css';
@@ -22,9 +22,14 @@ interface AskUserPanelProps {
    * the context on one line, options as chips (a single-select chip answers).
    */
   compact?: boolean;
+  /**
+   * Draw the question as someone saying it (the Fleet's asking face and
+   * bubble): no chip or collapse, and the answer fills the space below.
+   */
+  speaker?: (prompt: ReactNode) => ReactNode;
 }
 
-const AskUserPanel = ({ sessionId = null, ask, compact = false }: AskUserPanelProps) => {
+const AskUserPanel = ({ sessionId = null, ask, compact = false, speaker }: AskUserPanelProps) => {
   const sessionPending = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId]?.pendingAskUser || null : null
   );
@@ -127,12 +132,13 @@ const AskUserPanel = ({ sessionId = null, ask, compact = false }: AskUserPanelPr
   return (
     <section
       ref={containerRef}
-      className={compact ? `${styles.panel} ${styles.compact}` : styles.panel}
+      className={[styles.panel, compact ? styles.compact : '', speaker ? styles.spoken : ''].filter(Boolean).join(' ')}
       role="dialog"
       aria-label="Agent question"
       tabIndex={-1}
       onKeyDown={handlePanelKeyDown}
     >
+      {!speaker && (
       <header className={styles.header}>
         <span className={styles.chip}>AGENT IS ASKING</span>
         {!compact && (
@@ -148,11 +154,21 @@ const AskUserPanel = ({ sessionId = null, ask, compact = false }: AskUserPanelPr
           </button>
         )}
       </header>
+      )}
 
-      {collapsed && !compact ? (
+      {collapsed && !compact && !speaker ? (
         <div className={styles.collapsedSummary}>{pending.question}</div>
       ) : (
         <div className={styles.body}>
+      {speaker ? (
+        speaker(
+          <>
+            {pending.question}
+            {pending.extraContext && <span className={styles.spokenContext}>{pending.extraContext}</span>}
+          </>
+        )
+      ) : (
+        <>
       <div className={styles.question}>{pending.question}</div>
 
       {pending.extraContext && (
@@ -162,6 +178,8 @@ const AskUserPanel = ({ sessionId = null, ask, compact = false }: AskUserPanelPr
         >
           {pending.extraContext}
         </div>
+      )}
+        </>
       )}
 
       {hasOptions && compact ? (

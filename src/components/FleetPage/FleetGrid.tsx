@@ -62,7 +62,7 @@ const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, now, onS
             style={stage ? { gridColumn: `1 / span ${stage.cols}`, gridRow: `1 / span ${stage.rows}` } : undefined}
           >
             {stage ? (
-              <FleetSelectedCard card={card} live={live} selected={selected} faces={faces} onSelect={onSelect} />
+              <FleetSelectedCard card={card} live={live} selected={selected} faces={faces} now={now} onSelect={onSelect} />
             ) : (
               <FleetCard card={card} live={live} faces={faces} now={now} onSelect={handleSelect} />
             )}

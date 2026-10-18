@@ -290,3 +290,41 @@
   padding: 2px 12px;
   font-size: 12px;
 }
+
+/* ── Spoken (the Fleet): the question is someone's bubble, drawn by the
+ * caller; the panel is bare and fills its parent, the answer at the bottom. ── */
+.spoken {
+  flex: 1;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.spoken .body {
+  flex: 1;
+  max-height: none;
+  overflow: visible;
+  gap: 10px;
+}
+
+.spoken .body > :nth-child(2) {
+  margin-top: auto;
+}
+
+.spokenContext {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.85em;
+  font-weight: 400;
+  color: var(--color-text-secondary);
+  white-space: pre-wrap;
+}
+
+.spoken .optionChip {
+  padding: 4px 12px;
+  font-size: 13px;
+  line-height: 20px;
+}

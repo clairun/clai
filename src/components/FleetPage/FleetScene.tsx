@@ -1,6 +1,7 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import AgentAvatar from '../Agents/AgentAvatar';
+import MarkdownMessage from '../Chat/MarkdownMessage';
 import {
   faceOf,
   identityRingColor,
@@ -20,8 +21,27 @@ import styles from './FleetPage.module.css';
 
 type Faces = Record<string, AgentIdentity>;
 
+/** What only the stage has: everything in full, and tasks that open. */
+export interface StageExtras {
+  onOpenTask: (taskId: string) => void;
+  /** Main's last message in full, as markdown (the card holds a clipped copy). */
+  message: string | null;
+  /** What Main is writing right now. */
+  streaming: string | null;
+}
+
+/** A task title that opens the task's log on the stage, and is plain text on a small card. */
+const TaskLink = ({ taskId, stage, children }: { taskId: string; stage?: StageExtras; children: ReactNode }) =>
+  stage ? (
+    <button type="button" className={styles.taskLink} onClick={() => stage.onOpenTask(taskId)} title="Open the task's log">
+      {children}
+    </button>
+  ) : (
+    <>{children}</>
+  );
+
 /** A hand-drawn speech-bubble tail; `right` points at the face on the right. */
-const Tail = ({ right = false }: { right?: boolean }) => (
+export const Tail = ({ right = false }: { right?: boolean }) => (
   <svg className={`${styles.tail} ${right ? styles.tailRight : ''}`} width="24" height="22" viewBox="0 0 28 24" aria-hidden="true">
     <path className={styles.tailFill} d="M28 3 C20 6 10 12 1 21 C11 17 19 15.5 28 15.5 Z" />
     <path className={styles.tailStroke} d="M25 3.6 C18 6.6 10 12 1 21 C11 17 18 15.6 25 15.5" />
@@ -55,7 +75,7 @@ const ThoughtCloud = ({ name }: { name: string }) => (
   </svg>
 );
 
-const Who = ({
+export const Who = ({
   identity,
   name,
   size,
@@ -99,17 +119,19 @@ const who = (t: FleetRunningTalk) => `${t.agent.name}${t.helpers ? ` +${t.helper
 const onIt = (t: FleetRunningTalk) => `${who(t)}${t.queued ? '' : ', on it'}`;
 
 /** Main hands a task over (left); the agent thinks it through (right). */
-const RunningTalk = ({ talk, compact, faces }: { talk: FleetRunningTalk; compact: boolean; faces: Faces }) => {
+const RunningTalk = ({ talk, compact, faces, stage }: { talk: FleetRunningTalk; compact: boolean; faces: Faces; stage?: StageExtras }) => {
   const identity = faceOf(faces, talk.agent.seed);
-  const size = compact ? 32 : 44;
+  const size = stage ? (compact ? 44 : 56) : compact ? 32 : 44;
   return (
     <div className={`${styles.talk} ${compact ? styles.talkCompact : ''}`} style={useAgentColor(identity)}>
       <Who identity={mainIdentity()} name="Main" size={size} />
       <div className={styles.say}>
         <div className={styles.bubble}>
           <Tail />
-          <span className={styles.bubbleText} title={talk.title}>
-            {talk.title}
+          <span className={styles.bubbleText} title={stage ? undefined : talk.title}>
+            <TaskLink taskId={talk.taskId} stage={stage}>
+              {talk.title}
+            </TaskLink>
           </span>
         </div>
       </div>
@@ -121,7 +143,19 @@ const RunningTalk = ({ talk, compact, faces }: { talk: FleetRunningTalk; compact
 };
 
 /** The task ended: the agent answers, and Main's question shrinks to one grey line. */
-const ResultTalk = ({ talk, compact, now, faces }: { talk: FleetResultTalk; compact: boolean; now: number; faces: Faces }) => {
+const ResultTalk = ({
+  talk,
+  compact,
+  now,
+  faces,
+  stage,
+}: {
+  talk: FleetResultTalk;
+  compact: boolean;
+  now: number;
+  faces: Faces;
+  stage?: StageExtras;
+}) => {
   const identity = faceOf(faces, talk.agent.seed);
   return (
     <div
@@ -131,13 +165,22 @@ const ResultTalk = ({ talk, compact, now, faces }: { talk: FleetResultTalk; comp
       <Who identity={mainIdentity()} name="Main" size={compact ? 28 : 36} />
       <div className={styles.say}>
         <p className={styles.asked} title={talk.asked}>
-          Main asked: {talk.asked}
+          Main asked:{' '}
+          <TaskLink taskId={talk.taskId} stage={stage}>
+            {talk.asked}
+          </TaskLink>
         </p>
         <div className={styles.bubble}>
           <Tail right />
-          <span className={styles.bubbleText} title={talk.result}>
-            {talk.result}
-          </span>
+          {stage ? (
+            <div className={styles.markdown}>
+              <MarkdownMessage content={talk.result} />
+            </div>
+          ) : (
+            <span className={styles.bubbleText} title={talk.result}>
+              {talk.result}
+            </span>
+          )}
         </div>
         <span className={`${styles.meta} ${styles.metaEnd} ${talk.failed ? styles.metaBad : styles.metaOk}`}>
           {talk.failed ? <Cross /> : <Check />} {talk.failed ? 'failed' : 'done'} · {shortTime(talk.at, now)}
@@ -149,12 +192,13 @@ const ResultTalk = ({ talk, compact, now, faces }: { talk: FleetResultTalk; comp
 };
 
 /** Main's last word, addressed to the reader; smaller and greyer under live work. */
-const ToYou = ({ scene, quiet, now }: { scene: Scene; quiet: boolean; now: number }) => {
+const ToYou = ({ scene, quiet, now, stage }: { scene: Scene; quiet: boolean; now: number; stage?: StageExtras }) => {
   const asleep = scene.mood === 'idle' || scene.mood === 'stale';
   const note = scene.toYou;
+  const full = stage?.streaming || stage?.message || note?.text;
   return (
     <div className={`${styles.toYou} ${quiet ? styles.toYouQuiet : ''}`}>
-      <Who identity={mainIdentity()} name="Main" size={quiet ? 32 : 48} activity={asleep ? 'idle' : 'none'}>
+      <Who identity={mainIdentity()} name="Main" size={stage ? 56 : quiet ? 32 : 48} activity={asleep ? 'idle' : 'none'}>
         {asleep && (
           <span className={styles.zz} aria-hidden="true">
             zz
@@ -162,7 +206,19 @@ const ToYou = ({ scene, quiet, now }: { scene: Scene; quiet: boolean; now: numbe
         )}
         {scene.mainBusy && !quiet && <ThoughtCloud name="Main" />}
       </Who>
-      {note ? (
+      {stage && full ? (
+        <div className={styles.say}>
+          <div className={styles.bubble}>
+            <Tail />
+            <div className={styles.markdown}>
+              <MarkdownMessage content={full} isStreaming={!!stage.streaming} />
+            </div>
+          </div>
+          <span className={styles.meta}>
+            {stage.streaming ? 'to you · writing…' : note ? `to you · ${shortTime(note.at, now)}` : 'to you'}
+          </span>
+        </div>
+      ) : note ? (
         <div className={styles.say}>
           <div className={styles.bubble}>
             <Tail />
@@ -186,7 +242,7 @@ const OUTCOME_LABEL: Record<FleetEarlierItem['outcome'], string> = {
   failed: 'failed',
 };
 
-const EarlierItem = ({ item, now, faces }: { item: FleetEarlierItem; now: number; faces: Faces }) => {
+const EarlierItem = ({ item, now, faces, stage }: { item: FleetEarlierItem; now: number; faces: Faces; stage?: StageExtras }) => {
   const agent: FleetAgentRef = item.agent ?? { name: 'You', seed: '' };
   const label = OUTCOME_LABEL[item.outcome];
   return (
@@ -194,40 +250,49 @@ const EarlierItem = ({ item, now, faces }: { item: FleetEarlierItem; now: number
       {item.agent && (
         <AgentAvatar identity={faceOf(faces, agent.seed)} size={16} ring={false} className={styles.earlierFace} />
       )}
-      <span className={styles.earlierText} title={item.title}>
-        <b>{agent.name}</b> {item.title}
+      <span className={styles.earlierText} title={stage ? undefined : item.title}>
+        <b>{agent.name}</b>{' '}
+        {item.taskId ? (
+          <TaskLink taskId={item.taskId} stage={stage}>
+            {item.title}
+          </TaskLink>
+        ) : (
+          item.title
+        )}
       </span>
       <span className={`${styles.earlierStatus} ${item.outcome === 'failed' ? styles.earlierFailed : ''}`}>
         {item.outcome === 'failed' ? <Cross /> : item.outcome === 'stopped' ? null : <Check />}
         {label ? `${label} · ` : ''}
         {shortTime(item.at, now)}
       </span>
+      {item.result && <span className={styles.earlierResult}>{item.result}</span>}
     </li>
   );
 };
 
 /**
- * A small card as a comic panel: the caption says when, the bubbles say
- * what. Rows are in priority order; the ones that don't fit drop whole.
+ * A card as a comic panel: the caption says when, the bubbles say what. On
+ * a small card the rows are in priority order and the ones that don't fit
+ * drop whole; the stage draws them all, in full, and scrolls.
  */
-const FleetScene = ({ scene, now, faces }: { scene: Scene; now: number; faces: Faces }) => {
+const FleetScene = ({ scene, now, faces, stage }: { scene: Scene; now: number; faces: Faces; stage?: StageExtras }) => {
   const talks = scene.running.length + scene.finished.length;
   const compact = talks > 1;
-  const showMain = scene.toYou || (scene.mainBusy && talks === 0);
+  const showMain = scene.toYou || (scene.mainBusy && (talks === 0 || !!stage?.streaming));
   return (
-    <div className={styles.scene} data-mood={scene.mood}>
+    <div className={styles.scene} data-mood={scene.mood} data-size={stage ? 'stage' : 'small'}>
       <p className={styles.captionRow}>
         <span className={styles.caption} data-mood={scene.mood}>
           {scene.caption}
         </span>
       </p>
       {scene.running.map((talk) => (
-        <RunningTalk key={talk.key} talk={talk} compact={compact} faces={faces} />
+        <RunningTalk key={talk.key} talk={talk} compact={compact} faces={faces} stage={stage} />
       ))}
       {scene.finished.map((talk) => (
-        <ResultTalk key={talk.key} talk={talk} compact={compact} now={now} faces={faces} />
+        <ResultTalk key={talk.key} talk={talk} compact={compact} now={now} faces={faces} stage={stage} />
       ))}
-      {showMain && <ToYou scene={scene} quiet={talks > 0} now={now} />}
+      {showMain && <ToYou scene={scene} quiet={talks > 0 && !stage} now={now} stage={stage} />}
       {scene.userMessage && (
         <div className={styles.fromYou}>
           <div className={styles.bubble}>
@@ -243,7 +308,7 @@ const FleetScene = ({ scene, now, faces }: { scene: Scene; now: number; faces: F
       {scene.earlier.length > 0 && (
         <ul className={styles.earlier} aria-label="Earlier">
           {scene.earlier.map((item) => (
-            <EarlierItem key={item.key} item={item} now={now} faces={faces} />
+            <EarlierItem key={item.key} item={item} now={now} faces={faces} stage={stage} />
           ))}
         </ul>
       )}

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   allowAlways,
@@ -44,6 +44,11 @@ interface InlineApprovalCardProps {
    * hidden. The full card keeps them.
    */
   compact?: boolean;
+  /**
+   * Draw the command as the agent saying it (the Fleet's asking face and
+   * bubble): no tag or collapse, and the decisions fill the space below.
+   */
+  speaker?: (prompt: ReactNode) => ReactNode;
 }
 
 /**
@@ -59,7 +64,7 @@ interface InlineApprovalCardProps {
  * chip near the input bar surfaces the count whenever there are
  * pending requests, with click-to-scroll into view.
  */
-const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApprovalCardProps) => {
+const InlineApprovalCard = ({ workspaceId, request, compact = false, speaker }: InlineApprovalCardProps) => {
   const [requests, setRequests] = useState<PermissionRequest[]>([]);
   const [perCardState, setPerCardState] = useState<Record<string, CardState>>({});
   const [submittingId, setSubmittingId] = useState<string | null>(null);
@@ -305,7 +310,10 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApp
   }
 
   return (
-    <div className={compact ? `${styles.stack} ${styles.stackCompact}` : styles.stack} aria-live="polite">
+    <div
+      className={[styles.stack, compact ? styles.stackCompact : '', speaker ? styles.stackSpoken : ''].filter(Boolean).join(' ')}
+      aria-live="polite"
+    >
         {requests.map((req, cardIndex) => {
           const cardState = perCardState[req.requestId] || {};
           const isSubmitting = submittingId === req.requestId;
@@ -325,9 +333,10 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApp
             <article
               key={req.requestId}
               ref={cardIndex === 0 ? firstCardRef : null}
-              className={compact ? `${styles.card} ${styles.compact}` : styles.card}
+              className={[styles.card, compact ? styles.compact : '', speaker ? styles.spoken : ''].filter(Boolean).join(' ')}
               aria-label="Permission requested"
             >
+              {!speaker && (
               <header className={styles.cardHeader}>
                 <div className={styles.cardHeaderLeft}>
                   <span className={styles.tag}>Permission requested</span>
@@ -352,17 +361,29 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false }: InlineApp
                   </button>
                 )}
               </header>
+              )}
               {isCollapsed ? (
                 <pre className={`${styles.command} ${styles.collapsedSummary}`}>{req.command}</pre>
               ) : (
                 <div className={styles.cardBody}>
               {/* Compact too: the parts leave out separators and parts that need no decision. */}
+              {speaker ? (
+                speaker(
+                  <>
+                    May I run this?
+                    <pre className={`${styles.command} ${styles.spokenCommand}`} tabIndex={0} aria-label="Command">
+                      {req.command}
+                    </pre>
+                  </>
+                )
+              ) : (
               <pre
                 className={styles.command}
                 title={compact ? req.command : undefined}
               >
                 {req.command}
               </pre>
+              )}
               <section className={styles.segments}>
                 {isSharedAgent && !compact && (
                   <p className={styles.segmentsLabel}>

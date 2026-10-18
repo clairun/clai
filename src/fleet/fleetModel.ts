@@ -114,13 +114,15 @@ const clip = (text: string): string => {
   return trimmed.length > NOTE_CHARS ? `${trimmed.slice(0, NOTE_CHARS - 1)}…` : trimmed;
 };
 
-export const messageText = (message: AssistantMessage): string =>
-  clip(
-    message.content
-      .map((part) => (part.type === 'text' ? part.text : ''))
-      .filter(Boolean)
-      .join('\n')
-  );
+/** A message's text parts, in full. */
+export const fullMessageText = (message: AssistantMessage): string =>
+  message.content
+    .map((part) => (part.type === 'text' ? part.text : ''))
+    .filter(Boolean)
+    .join('\n')
+    .trim();
+
+export const messageText = (message: AssistantMessage): string => clip(fullMessageText(message));
 
 export const isTaskLive = (status: TaskStatus): boolean =>
   status === 'queued' || status === 'running' || status === 'stopping';
@@ -395,6 +397,7 @@ export interface FleetAgentRef {
 /** A top-level task in flight: Main hands it over, the agent thinks. */
 export interface FleetRunningTalk {
   key: string;
+  taskId: string;
   title: string;
   agent: FleetAgentRef;
   queued: boolean;
@@ -405,6 +408,7 @@ export interface FleetRunningTalk {
 /** A task that just ended: the agent answers, and Main's question shrinks. */
 export interface FleetResultTalk {
   key: string;
+  taskId: string;
   asked: string;
   result: string;
   failed: boolean;
@@ -416,7 +420,11 @@ export type FleetOutcome = 'done' | 'failed' | 'stopped' | 'answered';
 
 export interface FleetEarlierItem {
   key: string;
+  /** `null` for an answered question. */
+  taskId: string | null;
   title: string;
+  /** The stage's full result; empty on a small card. */
+  result: string;
   /** `null` for a question the user answered. */
   agent: FleetAgentRef | null;
   outcome: FleetOutcome;
@@ -488,12 +496,20 @@ const mainRunning = (card: FleetCard, live: FleetLive): boolean => {
   return (live.runs[card.workspaceId] ?? []).some((id) => !taskRuns.has(id));
 };
 
-const resultOf = (task: WorkspaceTaskResponse): string =>
-  task.status === 'failed'
-    ? firstSentence(task.error) || taskDisplayStatus(task).label
-    : firstSentence(task.resultSummary) || task.title;
+/** The headline of how a task ended, or (`full`) everything it said. */
+const resultOf = (task: WorkspaceTaskResponse, full: boolean): string => {
+  const said = task.status === 'failed' ? task.error : task.resultSummary;
+  const text = full ? (said ?? '').trim() : firstSentence(said);
+  return text || (task.status === 'failed' ? taskDisplayStatus(task).label : task.title);
+};
 
-export const cardScene = (card: FleetCard, live: FleetLive, now: number): FleetScene => {
+/**
+ * What a card says. A small card draws `TALK_LIMIT` speaking rows and
+ * `EARLIER_LIMIT` history lines, each result cut to its first sentence; the
+ * stage (`stage: true`) draws everything, in full, and scrolls.
+ */
+export const cardScene = (card: FleetCard, live: FleetLive, now: number, { stage = false } = {}): FleetScene => {
+  const talkLimit = stage ? Infinity : TALK_LIMIT;
   const running: FleetRunningTalk[] = [];
   const finished: FleetResultTalk[] = [];
   const earlier: FleetEarlierItem[] = [];
@@ -503,27 +519,29 @@ export const cardScene = (card: FleetCard, live: FleetLive, now: number): FleetS
     const agent = agentOf(root);
     if (group.some((t) => isTaskLive(t.status))) {
       const helpers = new Set(group.map((t) => agentOf(t).seed).filter((seed) => seed !== agent.seed)).size;
-      running.push({ key: `task:${root.id}`, title: root.title, agent, queued: root.status === 'queued', helpers });
+      running.push({ key: `task:${root.id}`, taskId: root.id, title: root.title, agent, queued: root.status === 'queued', helpers });
       continue;
     }
     const at = Math.max(...group.map((t) => Number(t.completedAt ?? t.updatedAt)));
     const failed = root.status === 'failed';
     if (root.status !== 'stopped' && at >= now - FRESH_MS) {
-      finished.push({ key: `task:${root.id}`, asked: root.title, result: resultOf(root), failed, agent, at });
+      finished.push({ key: `task:${root.id}`, taskId: root.id, asked: root.title, result: resultOf(root, stage), failed, agent, at });
     } else {
-      earlier.push({ key: `task:${root.id}`, title: root.title, agent, outcome: failed ? 'failed' : root.status === 'stopped' ? 'stopped' : 'done', at });
+      const outcome = failed ? 'failed' : root.status === 'stopped' ? 'stopped' : 'done';
+      const result = stage && root.status !== 'stopped' ? plainText(resultOf(root, true)) : '';
+      earlier.push({ key: `task:${root.id}`, taskId: root.id, title: root.title, result, agent, outcome, at });
     }
   }
   for (const [key, request] of Object.entries(card.requests)) {
-    if (request.resolvedAt != null) earlier.push({ key, title: request.text, agent: null, outcome: 'answered', at: request.resolvedAt });
+    if (request.resolvedAt != null) earlier.push({ key, taskId: null, title: request.text, result: '', agent: null, outcome: 'answered', at: request.resolvedAt });
   }
 
   finished.sort((a, b) => b.at - a.at);
-  const shownRunning = running.slice(0, TALK_LIMIT);
-  const shownFinished = finished.slice(0, TALK_LIMIT - shownRunning.length);
+  const shownRunning = running.slice(0, talkLimit);
+  const shownFinished = finished.slice(0, talkLimit - shownRunning.length);
   // Results with no room to speak are already history.
   for (const f of finished.slice(shownFinished.length)) {
-    earlier.push({ key: f.key, title: f.asked, agent: f.agent, outcome: f.failed ? 'failed' : 'done', at: f.at });
+    earlier.push({ key: f.key, taskId: f.taskId, title: f.asked, result: '', agent: f.agent, outcome: f.failed ? 'failed' : 'done', at: f.at });
   }
   earlier.sort((a, b) => b.at - a.at);
 
@@ -555,8 +573,37 @@ export const cardScene = (card: FleetCard, live: FleetLive, now: number): FleetS
       ? { ...card.lastMessage, plain: plainText(card.lastMessage.text), headline: firstSentence(card.lastMessage.text) }
       : null,
     userMessage: card.userMessage,
-    earlier: earlier.slice(0, EARLIER_LIMIT),
+    earlier: stage ? earlier : earlier.slice(0, EARLIER_LIMIT),
   };
+};
+
+/** A card that needs the user, as the comic draws it. */
+export interface FleetRequestScene {
+  request: FleetRequest;
+  /** Open requests, this one included: they are answered one at a time, oldest first. */
+  count: number;
+  caption: string;
+  /** The asking agent, or `null` for Main. */
+  asker: FleetAgentRef | null;
+}
+
+/**
+ * A card that needs the user: its oldest open request, said by the agent that
+ * asked it. A question names its session, which is a task's or the Main's; an
+ * approval or a grant names its agent, and Main's name is no agent's.
+ */
+export const requestScene = (card: FleetCard, live: FleetLive, now: number): FleetRequestScene | null => {
+  const open = openRequests(card);
+  const request = open[0];
+  if (!request) return null;
+  let asker: FleetAgentRef | null = null;
+  if (request.kind === 'ask') {
+    const task = workspaceTasks(card, live).find((t) => t.sessionId === request.ask.sessionId);
+    asker = task ? agentOf(task) : null;
+  } else if (request.agentName) {
+    asker = { name: request.agentName, seed: request.agentName };
+  }
+  return { request, count: open.length, caption: `Waiting on you · ${shortTime(request.at, now)}`, asker };
 };
 
 /** An agent with work in flight: its tasks, or `main` for the workspace's own session. */

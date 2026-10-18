@@ -20,6 +20,7 @@ import {
   applyUserSent,
   cardAttention,
   cardScene,
+  requestScene,
   firstSentence,
   plainText,
   shortTime,
@@ -221,8 +222,8 @@ describe('fleet reducer', () => {
       task('next', 'queued', 3),
     );
     expect(cardScene(emptyCard(WS), live, NOW).running).toEqual([
-      { key: 'task:root', title: 'Task root', agent: { name: 'Researcher', seed: 'def-r' }, queued: false, helpers: 1 },
-      { key: 'task:next', title: 'Task next', agent: { name: 'Researcher', seed: 'def-r' }, queued: true, helpers: 0 },
+      { key: 'task:root', taskId: 'root', title: 'Task root', agent: { name: 'Researcher', seed: 'def-r' }, queued: false, helpers: 1 },
+      { key: 'task:next', taskId: 'next', title: 'Task next', agent: { name: 'Researcher', seed: 'def-r' }, queued: true, helpers: 0 },
     ]);
   });
 
@@ -279,6 +280,34 @@ describe('fleet reducer', () => {
     expect(cardScene(at(STALE_MS), NO_LIVE, NOW)).toMatchObject({ mood: 'stale', caption: 'Yesterday' });
     expect(cardScene(at(3 * STALE_MS + 5), NO_LIVE, NOW)).toMatchObject({ mood: 'stale', caption: '3 days ago' });
     expect(cardScene(emptyCard(WS), NO_LIVE, NOW)).toMatchObject({ mood: 'idle', caption: 'Nothing yet', toYou: null });
+  });
+
+  it('draws everything on the stage: every talk, every result in full, the whole history with its results', () => {
+    const many = Array.from({ length: TALK_LIMIT + 2 }, (_, i) => task(`r${i}`, 'running', NOW));
+    const old = Array.from({ length: EARLIER_LIMIT + 3 }, (_, i) =>
+      task(`old${i}`, 'completed', NOW - FRESH_MS - 10 - i, { resultSummary: `Old **${i}**. More.` })
+    );
+    const live = withTasks(...many, ...old, task('f', 'completed', NOW - 1, { resultSummary: 'One. Two.' }), task('s', 'stopped', NOW - FRESH_MS - 99));
+    const stage = cardScene(emptyCard(WS), live, NOW, { stage: true });
+    expect(stage.running).toHaveLength(TALK_LIMIT + 2);
+    expect(stage.finished).toMatchObject([{ taskId: 'f', result: 'One. Two.' }]);
+    expect(stage.earlier).toHaveLength(EARLIER_LIMIT + 4);
+    expect(stage.earlier[0]).toMatchObject({ taskId: 'old0', result: 'Old 0. More.' });
+    expect(stage.earlier.find((e) => e.key === 'task:s')).toMatchObject({ outcome: 'stopped', result: '' });
+    // A small card of the same workspace keeps its limits and headlines.
+    const small = cardScene(emptyCard(WS), live, NOW);
+    expect([small.running.length, small.earlier.length, small.earlier[0]?.result]).toEqual([TALK_LIMIT, EARLIER_LIMIT, '']);
+  });
+
+  it('says a request through whoever asked: a subtask\'s agent, a named agent, or Main', () => {
+    expect(requestScene(emptyCard(WS), NO_LIVE, NOW)).toBeNull();
+    const live = withTasks(task('sub', 'running', NOW, { sessionId: 'sub-session', assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w' }));
+    let s = apply(EMPTY_FLEET, askEvent('q1', NOW - 120_000));
+    expect(requestScene(card(s), live, NOW)).toMatchObject({ count: 1, asker: null, caption: `Waiting on you · ${shortTime(NOW - 120_000, NOW)}` });
+    s = apply(s, env({ type: 'ask_user_requested', payload: { pending_id: 'q2', question: 'Which?', options: null, multi_select: false } } as AssistantUiEvent, NOW - 200_000, 'sub-session'));
+    expect(requestScene(card(s), live, NOW)).toMatchObject({ count: 2, asker: { name: 'Writer', seed: 'def-w' }, request: { text: 'Which?' } });
+    const named = applyRequest(EMPTY_FLEET, { kind: 'approval', request: { ...(approval('a1') as object), agentName: 'Committer' } as never }, 5);
+    expect(requestScene(card(named), NO_LIVE, NOW)?.asker).toEqual({ name: 'Committer', seed: 'Committer' });
   });
 
   it('changes only with what happened: the same tasks fetched again give the same scene', () => {
