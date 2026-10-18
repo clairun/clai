@@ -67,6 +67,19 @@ async fn session_in_workspace(
     Ok((pool, session))
 }
 
+/// A message from `session_id` only, so a caller can't read another session's
+/// messages by guessing ids. A foreign message reads as not found.
+async fn message_in_session(
+    pool: &DbPool,
+    session_id: &str,
+    message_id: &str,
+) -> Result<AssistantMessage, String> {
+    repository::get_message(pool, message_id)
+        .await?
+        .filter(|message| message.session_id == session_id)
+        .ok_or_else(|| format!("Assistant message not found: {}", message_id))
+}
+
 async fn run_in_workspace(
     state: &AppState,
     workspace_id: &str,
@@ -189,6 +202,19 @@ pub async fn assistant_load_session_messages_page(
         has_more,
         total_count,
     }))
+}
+
+#[tauri::command]
+pub async fn assistant_get_message(
+    workspace_id: String,
+    session_id: String,
+    message_id: String,
+    state: State<'_, AppState>,
+) -> Result<AssistantMessage, String> {
+    let pool = state.workspace_db(&workspace_id).await?;
+    message_in_session(&pool, &session_id, &message_id)
+        .await
+        .map(display::message)
 }
 
 /// Turns `limit + 1` newest-first rows into an ascending page: the extra row
@@ -704,6 +730,45 @@ mod tests {
             .await
             .expect("workspace B owns the run");
         assert_eq!(found.id, run.id);
+    }
+
+    #[tokio::test]
+    async fn message_in_session_rejects_another_sessions_message() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        let owner = repository::create_session(&pool, Default::default())
+            .await
+            .expect("owner session");
+        let other = repository::create_session(&pool, Default::default())
+            .await
+            .expect("other session");
+        let stored = repository::create_message(
+            &pool,
+            repository::CreateMessageParams {
+                run_id: None,
+                session_id: owner.id.clone(),
+                role: crate::assistant::types::MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "full text".into(),
+                }],
+                provider_metadata: None,
+            },
+        )
+        .await
+        .expect("message");
+
+        let found = message_in_session(&pool, &owner.id, &stored.id)
+            .await
+            .expect("owner session reads its message");
+        assert_eq!(found.id, stored.id);
+        assert_eq!(json!(found.content), json!(stored.content));
+
+        let foreign = message_in_session(&pool, &other.id, &stored.id).await;
+        assert!(
+            foreign.is_err(),
+            "another session must not read the message"
+        );
+        let missing = message_in_session(&pool, &owner.id, "no-such-id").await;
+        assert!(missing.is_err());
     }
 
     fn image() -> ContentPart {

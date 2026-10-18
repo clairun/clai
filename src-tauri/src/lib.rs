@@ -440,6 +440,7 @@ pub fn run() {
             commands::assistant::assistant_get_session,
             commands::assistant::assistant_delete_session,
             commands::assistant::assistant_load_session_messages_page,
+            commands::assistant::assistant_get_message,
             commands::assistant::assistant_list_runs,
             commands::assistant::assistant_get_tool_call_result,
             commands::assistant::assistant_get_tool_call_input,

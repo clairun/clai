@@ -56,6 +56,11 @@ export async function loadSessionMessagesPage(params: {
   });
 }
 
+/** One stored message of `sessionId`, e.g. the full text behind a truncated preview. */
+export async function getMessage(workspaceId: string, sessionId: string, messageId: string): Promise<AssistantMessage> {
+  return invoke('assistant_get_message', { workspaceId, sessionId, messageId });
+}
+
 export async function sendMessage(
   workspaceId: string,
   sessionId: string,
