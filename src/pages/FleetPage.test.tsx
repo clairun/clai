@@ -43,6 +43,9 @@ const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspac
   recentMessages: [],
 });
 
+const said = (messageId: string, text: string, ago: number, patch = {}) =>
+  ({ messageId, sessionId: 'main-a', role: 'user', origin: { kind: 'user' }, text, truncated: false, createdAt: BigInt(Date.now() - ago), runId: null, ...patch }) as FleetWorkspace['recentMessages'][number];
+
 const renderFleet = () =>
   render(
     <MemoryRouter>
@@ -69,6 +72,8 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  mockInvoke.mockImplementation(async () => undefined);
   fleetSnapshot.mockReset();
   mockInvoke.mockClear();
 });
@@ -248,17 +253,23 @@ describe('FleetPage', () => {
     }
   });
 
-  it('draws the newest two highlights as bubbles and collapses the older ones to rows; a running task keeps thinking', async () => {
+  it('fills the card with bubbles from the newest; two older ones collapse to rows; Main speaks to you unlabelled', async () => {
+    // A scene 300 high with a 20-high caption; every bubble 62 high (70 with its gap).
+    const height = (el: HTMLElement) => (el.hasAttribute('data-row') ? 62 : el.tagName === 'P' ? 20 : 0);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return height(this);
+    });
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.className.includes('scene') ? 300 : 0;
+    });
     const at = (ago: number) => BigInt(Date.now() - ago);
     const task = (id: string, title: string, status: string, ago: number, extra = {}) =>
       ({ id, title, status, parentTaskId: null, createdAt: at(ago), updatedAt: at(ago), completedAt: status === 'running' ? null : at(ago - 1000), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s', ...extra }) as never;
-    const said = (messageId: string, text: string, ago: number, patch = {}) =>
-      ({ messageId, sessionId: 'main-a', role: 'user', origin: { kind: 'user' }, text, truncated: false, createdAt: at(ago), runId: null, ...patch }) as FleetWorkspace['recentMessages'][number];
     fleetSnapshot.mockResolvedValue([
       {
         ...workspace('a', 'Alpha'),
         mainSessionId: 'main-a',
-        tasks: [task('t1', 'Old research', 'running', 50 * 60_000), task('t2', 'Fix the build', 'failed', 40 * 60_000, { error: 'Cargo ran out of disk. Free 2 GB.' })],
+        tasks: [task('t1', 'Old research', 'running', 35 * 60_000), task('t2', 'Fix the build', 'failed', 40 * 60_000, { error: 'Cargo ran out of disk. Free 2 GB.' })],
         recentMessages: [
           said('u1', 'Look into the leaks. All of them.', 60 * 60_000),
           said('u2', 'Then fix the build', 45 * 60_000),
@@ -270,20 +281,91 @@ describe('FleetPage', () => {
     ]);
     renderFleet();
     const card = within((await screen.findByText('Shipped v2')).closest('article')!);
+    // Three bubbles fit, newest last: Main's, yours, Main's.
+    const bubbles = card.getAllByRole('button', { name: /On it|Thanks|Shipped/ });
+    expect(bubbles.map((b) => b.querySelector('[title]')?.textContent)).toEqual(['On it. Two tasks out.', 'Thanks!', 'Shipped v2']);
+    // Two rows of what came before; older ones hide.
     const rows = within(card.getByRole('list', { name: 'Earlier' }));
     expect(rows.getAllByRole('listitem').map((row) => row.textContent)).toEqual([
-      expect.stringMatching(/^You → Main Look into the leaks\.\d/),
-      expect.stringMatching(/^Main → Scout Old research\s*working ·/),
-      expect.stringMatching(/^You → Main Then fix the build/),
-      expect.stringMatching(/^Main → Scout Fix the build\d/),
       expect.stringMatching(/^Scout → Main Cargo ran out of disk\.failed ·/),
-      expect.stringMatching(/^Main → You On it\./),
+      expect.stringMatching(/^Main → Scout Old research\s*working ·/),
     ]);
+    expect(card.queryByText(/Look into the leaks/)).not.toBeInTheDocument();
     // The running task's row keeps its agent's face awake.
     expect(rows.getAllByRole('listitem')[1]!.querySelector('[class*=rowThinking]')).not.toBeNull();
-    // The newest two are bubbles, in order: yours, then Main's.
-    expect(card.getByText('Thanks!').closest('[data-row]')!.compareDocumentPosition(card.getByText('Shipped v2')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // Main's word to you: no "you" mark, and its route names only Main.
+    expect(card.queryByText('you')).not.toBeInTheDocument();
+    expect(bubbles[0]!.querySelector('[class*=meta]')!.textContent).toMatch(/^Main · /);
+    expect(bubbles[1]!.querySelector('[class*=meta]')!.textContent).toMatch(/^You → Main · /);
     expect(card.getByText(/^Now/)).toBeInTheDocument();
+  });
+
+  describe('zoom', () => {
+    const seed = (patch: Partial<FleetWorkspace['recentMessages'][number]> = {}) =>
+      fleetSnapshot.mockResolvedValue([
+        workspace('s', 'Staged'),
+        { ...workspace('a', 'Alpha', 1000), mainSessionId: 'main-a', recentMessages: [said('u1', 'Ship it.', 20 * 60_000), said('a2', 'Shipped **v2** to staging', 10 * 60_000, { role: 'assistant', ...patch })] },
+      ]);
+    const bubble = async (text: RegExp) => (await screen.findByText(text)).closest<HTMLElement>('[role=button]')!;
+
+    it('zooms a bubble out to the whole message as markdown; Esc zooms back and focus returns to it', async () => {
+      seed();
+      renderFleet();
+      const origin = await bubble(/^Shipped v2/);
+      fireEvent.click(origin);
+      const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
+      expect(within(dialog).getByText('v2').tagName).toBe('STRONG');
+      expect(dialog).toHaveFocus();
+      // Zooming is not selecting the card.
+      expect(screen.queryByRole('heading', { name: 'Selected Alpha' })).not.toBeInTheDocument();
+      expect(mockInvoke).not.toHaveBeenCalledWith('assistant_get_message', expect.anything());
+
+      fireEvent.keyDown(window, { key: 'Escape' });
+      expect(screen.queryByRole('dialog', { name: 'Message from Main' })).not.toBeInTheDocument();
+      expect(origin).toHaveFocus();
+
+      // From the keyboard too; a click on the panel zooms back.
+      fireEvent.keyDown(origin, { key: 'Enter' });
+      fireEvent.click(screen.getByRole('dialog', { name: 'Message from Main' }));
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    });
+
+    it('zooms a collapsed row too', async () => {
+      vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.hasAttribute('data-row') ? 100 : 0;
+      });
+      vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('scene') ? 160 : 0;
+      });
+      seed();
+      renderFleet();
+      const row = within(await screen.findByRole('list', { name: 'Earlier' })).getByRole('button');
+      fireEvent.click(row);
+      expect(within(screen.getByRole('dialog', { name: 'Message from You' })).getByText('Ship it.')).toBeInTheDocument();
+    });
+
+    it('shows a cut message at once and swaps in the whole one when it arrives', async () => {
+      seed({ text: 'Shipped **v2** to', truncated: true });
+      let resolve: (m: unknown) => void = () => {};
+      mockInvoke.mockImplementation(((cmd: string) => (cmd === 'assistant_get_message' ? new Promise((r) => (resolve = r)) : Promise.resolve(undefined))) as never);
+      renderFleet();
+      fireEvent.click(await bubble(/^Shipped v2 to…/));
+      const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
+      expect(dialog).toHaveTextContent('Shipped v2 to…');
+      expect(mockInvoke).toHaveBeenCalledWith('assistant_get_message', { workspaceId: 'a', sessionId: 'main-a', messageId: 'a2' });
+      await act(async () => resolve({ id: 'a2', sessionId: 'main-a', role: 'assistant', content: [{ type: 'text', text: 'Shipped **v2** to staging and prod.' }] }));
+      expect(dialog).toHaveTextContent('Shipped v2 to staging and prod.');
+    });
+
+    it('keeps the cut message when the whole one cannot be fetched', async () => {
+      seed({ text: 'Shipped **v2** to', truncated: true });
+      mockInvoke.mockImplementation(((cmd: string) => (cmd === 'assistant_get_message' ? Promise.reject(new Error('Assistant message not found: a2')) : Promise.resolve(undefined))) as never);
+      renderFleet();
+      fireEvent.click(await bubble(/^Shipped v2 to…/));
+      await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('assistant_get_message', expect.anything()));
+      await act(async () => {});
+      expect(screen.getByRole('dialog', { name: 'Message from Main' })).toHaveTextContent('Shipped v2 to…');
+    });
   });
 
   it('deselects on Escape, from the terminal too, and on a click on the empty board; nothing moves', async () => {

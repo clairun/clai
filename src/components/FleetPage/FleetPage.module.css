@@ -302,8 +302,8 @@
 
 /* ── A small card as a comic panel ───────────────────────────────────────
  * Read top to bottom in the order things happened: caption box (when), the
- * older highlights as one-line rows, then the newest as bubbles. Rows that
- * don't fit are hidden whole from the top, oldest first (`useNewestInView`). */
+ * older highlights as one-line rows, then the newest as bubbles, as many as
+ * fit (`splitFeed`, measured in `FleetFeed`). */
 .scene {
   container-type: size;
   display: flex;
@@ -312,10 +312,6 @@
   gap: 8px;
   min-height: 0;
   overflow: hidden;
-}
-
-.scene [data-row][hidden] {
-  display: none;
 }
 
 .scene > * {
@@ -518,14 +514,6 @@
   --bubble-border: var(--color-border-medium);
 }
 
-/* Main's word to the reader: the reader is "you", not a face. */
-.toYouMark {
-  justify-self: center;
-  font-size: 11px;
-  font-weight: 700;
-  color: var(--color-text-past);
-}
-
 .said .bubbleText {
   -webkit-line-clamp: 2;
 }
@@ -541,8 +529,18 @@
   }
 }
 
-/* A short miniature keeps both bubbles and a row or two: tighter bubbles. */
+/* A short miniature keeps three bubbles and a row or two: tighter bubbles, the older ones on one line. */
 @container (max-height: 260px) {
+  .said .bubbleText,
+  .fromYou .bubbleText {
+    -webkit-line-clamp: 1;
+  }
+
+  /* The meta line under the bubble already names who speaks to whom. */
+  .said .who figcaption {
+    display: none;
+  }
+
   .said {
     padding: 2px 2px 0;
   }
@@ -558,7 +556,8 @@
     line-height: 1.4;
   }
 
-  .said:last-child .bubbleText {
+  .said:last-child .bubbleText,
+  .fromYou:last-child .bubbleText {
     -webkit-line-clamp: 2;
   }
 
@@ -622,9 +621,37 @@
 }
 
 .row:last-child {
-  padding-bottom: 6px;
-  height: 29px;
+  padding-bottom: 2px;
+  height: 25px;
   border-bottom: 1px dashed var(--color-border-light);
+}
+
+.rowButton {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: zoom-in;
+}
+
+/* A bubble or a row zooms out to the whole message. */
+.scene [role='button'] {
+  cursor: zoom-in;
+}
+
+.scene [role='button']:focus-visible,
+.rowButton:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
 }
 
 .rowFaces {
@@ -822,4 +849,106 @@
 
 .switcherRow .phase {
   margin-left: 0;
+}
+
+/* ── A highlight zoomed out of its card ──────────────────────────────────
+ * A copy in a page-level layer: it grows from the bubble to a centred panel
+ * with a slight overshoot, and shrinks back along the same path. */
+.zoomLayer {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
+.zoomScrim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, #000 22%, transparent);
+  transition: opacity 200ms ease-out;
+}
+
+.zoomScrim[data-phase] {
+  opacity: 0;
+}
+
+.zoomPanel {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  width: min(640px, calc(100vw - 64px));
+  height: fit-content;
+  max-height: 80vh;
+  margin: auto;
+  transform-origin: center;
+  transition:
+    transform 220ms cubic-bezier(0.34, 1.35, 0.64, 1),
+    opacity 220ms ease-out;
+  cursor: zoom-out;
+}
+
+.zoomPanel:focus {
+  outline: none;
+}
+
+.zoomPanel[data-phase='from'] {
+  opacity: 0.3;
+  transition: none;
+}
+
+.zoomPanel[data-phase='closing'] {
+  opacity: 0;
+  transition:
+    transform 180ms ease-in,
+    opacity 180ms ease-in;
+}
+
+.zoomSaid {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  align-items: center;
+  gap: 20px;
+  min-height: 0;
+}
+
+.zoomSaid[data-from='you'] {
+  grid-template-columns: minmax(0, 1fr);
+  padding-right: 22px;
+}
+
+.zoomSay {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  max-height: 80vh;
+}
+
+.zoomBubble {
+  --bubble-border: color-mix(in srgb, var(--agent-color, var(--color-text-primary)) 70%, transparent);
+  display: flex;
+  min-height: 0;
+  padding: 12px 18px;
+  font-size: 15px;
+  line-height: 1.5;
+  box-shadow: 0 8px 28px color-mix(in srgb, #000 22%, transparent);
+}
+
+.zoomText {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  cursor: auto;
+}
+
+.zoomSay .meta {
+  margin-top: 6px;
+  color: var(--color-text-secondary);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zoomPanel,
+  .zoomScrim {
+    transition: none;
+  }
 }

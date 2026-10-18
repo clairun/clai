@@ -137,7 +137,7 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect
         </button>
         <PhaseLabel phase={phase} attention={attention} sticker={stickerFor(loud, request)} />
       </header>
-      {feed && <FleetFeed feed={feed} shouts={shouts} now={now} faces={faces} />}
+      {feed && <FleetFeed workspaceId={card.workspaceId} feed={feed} shouts={shouts} now={now} faces={faces} />}
       {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={faces} loud={loud === 'needs'} now={now} />}
     </div>
   );

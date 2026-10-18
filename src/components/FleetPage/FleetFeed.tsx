@@ -1,4 +1,17 @@
-import { useLayoutEffect, useRef, type CSSProperties, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type MouseEvent,
+  type ReactNode,
+} from 'react';
+import { flushSync } from 'react-dom';
+import { getMessage } from '../../assistant/client';
+import MarkdownMessage from '../Chat/MarkdownMessage';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import AgentAvatar from '../Agents/AgentAvatar';
 import {
@@ -9,8 +22,9 @@ import {
   type AgentIdentity,
 } from '../Agents/agentIdentity';
 import {
-  BUBBLES,
   captionText,
+  fullMessageText,
+  splitFeed,
   shortTime,
   shoutLevel,
   type FleetCaption,
@@ -19,6 +33,7 @@ import {
   type FleetSpeaker,
 } from '../../fleet/fleetModel';
 import fx, { FaceExpression, Sfx, SpeedLines, type Expression } from './FleetEffects';
+import FleetZoom from './FleetZoom';
 import styles from './FleetPage.module.css';
 
 type Faces = Record<string, AgentIdentity>;
@@ -134,13 +149,41 @@ const nameOf = (s: FleetSpeaker): string => (s.kind === 'you' ? 'You' : s.kind =
 const faceFor = (s: FleetSpeaker, faces: Faces): AgentIdentity | null =>
   s.kind === 'agent' ? faceOf(faces, s.agent.seed) : s.kind === 'main' ? mainIdentity() : null;
 
-/** `Main → Researcher`, with how a task ended or that it waits its turn. */
+/**
+ * `Main → Researcher`, with how a task ended or that it waits its turn. Main's
+ * word to you names only Main: the face and the tail already say it's yours.
+ */
 const Route = ({ line }: { line: FleetLine }) => (
   <>
-    <b>{nameOf(line.from)}</b> → <b>{nameOf(line.to)}</b>
+    <b>{nameOf(line.from)}</b>
+    {line.to.kind !== 'you' && (
+      <>
+        {' → '}
+        <b>{nameOf(line.to)}</b>
+      </>
+    )}
     {line.live === 'queued' && ' · next'}
   </>
 );
+
+type Open = (line: FleetLine, origin: HTMLElement) => void;
+
+/** A bubble zooms on a click, Enter or Space; the card under it is not selected. */
+const zoomable = (line: FleetLine, open: Open) => ({
+  role: 'button',
+  tabIndex: 0,
+  'aria-haspopup': 'dialog' as const,
+  onClick: (e: MouseEvent<HTMLElement>) => {
+    e.stopPropagation();
+    open(line, e.currentTarget);
+  },
+  onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    e.preventDefault();
+    e.stopPropagation();
+    open(line, e.currentTarget);
+  },
+});
 
 const Outcome = ({ line, now }: { line: FleetLine; now: number }) => (
   <span className={styles.lineStatus} data-outcome={line.outcome ?? undefined} data-live={line.live ?? undefined}>
@@ -151,24 +194,34 @@ const Outcome = ({ line, now }: { line: FleetLine; now: number }) => (
 );
 
 /** An older highlight, collapsed to one line; a task still in flight keeps its thinking face. */
-const Row = ({ line, now, faces }: { line: FleetLine; now: number; faces: Faces }) => {
+const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: Faces; open: Open }) => {
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
   const thinking = line.live === 'running';
   return (
     <li className={styles.row} data-row>
-      <span className={styles.rowFaces} aria-hidden="true">
-        {from && <AgentAvatar identity={from} size={16} ring={false} />}
-        {to && (
-          <span className={thinking ? styles.rowThinking : undefined}>
-            <AgentAvatar identity={to} size={16} ring={false} activity={thinking ? 'running' : 'none'} />
-          </span>
-        )}
-      </span>
-      <span className={styles.rowText} title={line.text}>
-        <Route line={line} /> {line.headline}
-      </span>
-      <Outcome line={line} now={now} />
+      <button
+        type="button"
+        className={styles.rowButton}
+        aria-haspopup="dialog"
+        onClick={(e) => {
+          e.stopPropagation();
+          open(line, e.currentTarget);
+        }}
+      >
+        <span className={styles.rowFaces} aria-hidden="true">
+          {from && <AgentAvatar identity={from} size={16} ring={false} />}
+          {to && (
+            <span className={thinking ? styles.rowThinking : undefined}>
+              <AgentAvatar identity={to} size={16} ring={false} activity={thinking ? 'running' : 'none'} />
+            </span>
+          )}
+        </span>
+        <span className={styles.rowText} title={line.text}>
+          <Route line={line} /> {line.headline}
+        </span>
+        <Outcome line={line} now={now} />
+      </button>
     </li>
   );
 };
@@ -179,7 +232,19 @@ const Row = ({ line, now, faces }: { line: FleetLine; now: number; faces: Faces 
  * page's newest one rushes in with a "GO!", and the loud card's newest
  * result cheers "DONE!".
  */
-const Said = ({ line, shout, now, faces }: { line: FleetLine; shout: boolean; now: number; faces: Faces }) => {
+const Said = ({
+  line,
+  shout,
+  now,
+  faces,
+  open,
+}: {
+  line: FleetLine;
+  shout: boolean;
+  now: number;
+  faces: Faces;
+  open: Open;
+}) => {
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
   const thinking = line.live === 'running';
@@ -192,7 +257,7 @@ const Said = ({ line, shout, now, faces }: { line: FleetLine; shout: boolean; no
   );
   if (!from) {
     return (
-      <div className={styles.fromYou} data-row>
+      <div className={styles.fromYou} data-row {...zoomable(line, open)}>
         <div className={styles.bubble}>
           <Tail right />
           <span className={styles.bubbleText} title={line.text}>
@@ -205,7 +270,13 @@ const Said = ({ line, shout, now, faces }: { line: FleetLine; shout: boolean; no
   }
   const fromExpression: Expression | undefined = line.outcome === 'done' ? 'done' : undefined;
   return (
-    <div className={`${styles.said} ${thinking ? fx.tilt : ''}`} data-tone={tone} data-row style={style}>
+    <div
+      className={`${styles.said} ${thinking ? fx.tilt : ''}`}
+      data-tone={tone}
+      data-row
+      style={style}
+      {...zoomable(line, open)}
+    >
       {shout && thinking && <SpeedLines />}
       {shout && <Sfx word={thinking ? 'GO!' : 'DONE!'} tone={thinking ? 'go' : 'done'} level={shoutLevel(line.at, now)} />}
       <Who identity={from} name={nameOf(line.from)} size={36} expression={fromExpression} />
@@ -218,7 +289,7 @@ const Said = ({ line, shout, now, faces }: { line: FleetLine; shout: boolean; no
         </div>
         {meta}
       </div>
-      {to ? (
+      {to && (
         <Who
           identity={to}
           name={nameOf(line.to)}
@@ -230,59 +301,133 @@ const Said = ({ line, shout, now, faces }: { line: FleetLine; shout: boolean; no
         >
           {thinking && <ThoughtCloud name={nameOf(line.to)} />}
         </Who>
-      ) : (
-        <span className={styles.toYouMark}>you</span>
       )}
     </div>
   );
 };
 
+/** A row's height with the scene's gap, and the rule under the last row (`.row` in the CSS). */
+const ROW_PX = 22 + 8;
+const ROWS_EDGE_PX = 3;
+const GAP_PX = 8;
+
+interface Fit {
+  signature: string;
+  width: number;
+  height: number;
+  bubbles: number;
+  rows: number;
+}
+
 /**
- * Keeps the newest highlights in view: whole rows hide from the top, oldest
- * first, until the rest fit under the caption.
+ * How many highlights fit as bubbles (`splitFeed`). A new set of lines, or a
+ * new card size, is first laid out all as bubbles and measured; the split is
+ * set in the same layout pass, so the measuring layout is never painted.
  */
-const useNewestInView = (feed: Feed) => {
+const useFit = (lines: readonly FleetLine[]) => {
   const ref = useRef<HTMLDivElement | null>(null);
+  const signature = lines.map((l) => `${l.key}|${l.live}|${l.outcome}|${l.text}`).join('\n');
+  const [fit, setFit] = useState<Fit | null>(null);
+  const fitRef = useRef(fit);
+  const measuring = fit?.signature !== signature;
+
+  useLayoutEffect(() => {
+    fitRef.current = fit;
+    const node = ref.current;
+    if (!node) return;
+    if (measuring) {
+      const caption = node.firstElementChild as HTMLElement | null;
+      const heights = [...node.querySelectorAll<HTMLElement>(':scope > [data-row]')].map((b) => b.offsetHeight + GAP_PX);
+      const available = node.clientHeight - (caption?.offsetHeight ?? 0);
+      setFit({ signature, width: node.clientWidth, height: node.clientHeight, ...splitFeed(heights, available, ROW_PX, ROWS_EDGE_PX) });
+    } else if (fit.rows > 0 && node.scrollHeight > node.clientHeight + 1) {
+      // A row taller than reckoned: drop the oldest rather than clip the newest bubble.
+      setFit({ ...fit, rows: fit.rows - 1 });
+    }
+  }, [measuring, fit, signature]);
+
   useLayoutEffect(() => {
     const node = ref.current;
-    if (!node) return undefined;
-    const fit = () => {
-      const rows = [...node.querySelectorAll<HTMLElement>('[data-row]')];
-      rows.forEach((row) => (row.hidden = false));
-      for (const row of rows) {
-        if (node.scrollHeight <= node.clientHeight) break;
-        row.hidden = true;
-      }
-    };
-    fit();
-    if (typeof ResizeObserver === 'undefined') return undefined;
-    const observer = new ResizeObserver(fit);
+    if (!node || typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(() => {
+      const current = fitRef.current;
+      if (!current || (current.width === node.clientWidth && current.height === node.clientHeight)) return;
+      flushSync(() => setFit(null));
+    });
     observer.observe(node);
     return () => observer.disconnect();
-  }, [feed]);
-  return ref;
+  }, []);
+
+  return { ref, bubbles: measuring ? lines.length : fit.bubbles, rows: measuring ? 0 : fit.rows };
+};
+
+/** A truncated message's full text, once fetched; the preview until then, or if it can't be. */
+const useFullText = (workspaceId: string, line: FleetLine): string => {
+  const [full, setFull] = useState<string | null>(null);
+  useEffect(() => {
+    const message = line.message;
+    if (!message?.truncated) return undefined;
+    let current = true;
+    getMessage(workspaceId, message.sessionId, message.id)
+      .then((m) => current && setFull(fullMessageText(m)))
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [workspaceId, line]);
+  return full || line.markdown;
+};
+
+/** The zoomed highlight: the speaker's face, the whole message as markdown, and the route. */
+const Zoomed = ({ workspaceId, line, now, faces }: { workspaceId: string; line: FleetLine; now: number; faces: Faces }) => {
+  const from = faceFor(line.from, faces);
+  const to = faceFor(line.to, faces);
+  const text = useFullText(workspaceId, line);
+  const style = useAgentColor((to && line.to.kind === 'agent' ? to : from) ?? mainIdentity());
+  return (
+    <div className={styles.zoomSaid} data-from={from ? undefined : 'you'} style={style}>
+      {from && <Who identity={from} name={nameOf(line.from)} size={44} />}
+      <div className={styles.zoomSay}>
+        <div className={`${styles.bubble} ${styles.zoomBubble}`}>
+          <Tail right={!from} />
+          <div className={styles.zoomText}>
+            <MarkdownMessage content={text} />
+          </div>
+        </div>
+        <span className={styles.meta}>
+          <Route line={line} /> · <Outcome line={line} now={now} />
+        </span>
+      </div>
+    </div>
+  );
 };
 
 /**
  * A miniature: the workspace's conversation as highlights, in the order it
- * happened. The newest `BUBBLES` are bubbles; everything older is a one-line
- * row above them, the newest row nearest the bubbles.
+ * happened. The newest are bubbles, as many as fit; up to `ROWS` older ones
+ * collapse to one-line rows above them, the newest row nearest the bubbles.
+ * A bubble or a row zooms out to the whole message.
  */
 const FleetFeed = ({
+  workspaceId,
   feed,
   shouts,
   now,
   faces,
 }: {
+  workspaceId: string;
   feed: Feed;
   /** Keys of the lines that shout (`fleetLoudness`). */
   shouts: ReadonlySet<string>;
   now: number;
   faces: Faces;
 }) => {
-  const ref = useNewestInView(feed);
-  const split = Math.max(0, feed.lines.length - BUBBLES);
-  const rows = feed.lines.slice(0, split);
+  const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines);
+  const [zoom, setZoom] = useState<{ line: FleetLine; origin: HTMLElement } | null>(null);
+  const open = useCallback<Open>((line, origin) => setZoom((z) => z ?? { line, origin }), []);
+  const closed = useCallback(() => setZoom(null), []);
+  const split = feed.lines.length - count;
+  const rows = feed.lines.slice(Math.max(0, split - rowCount), split);
   const bubbles = feed.lines.slice(split);
   return (
     <div ref={ref} className={styles.scene} data-mood={feed.mood}>
@@ -292,14 +437,19 @@ const FleetFeed = ({
       {rows.length > 0 && (
         <ul className={styles.rows} aria-label="Earlier">
           {rows.map((line) => (
-            <Row key={line.key} line={line} now={now} faces={faces} />
+            <Row key={line.key} line={line} now={now} faces={faces} open={open} />
           ))}
         </ul>
       )}
       {bubbles.map((line) => (
-        <Said key={line.key} line={line} shout={shouts.has(line.key)} now={now} faces={faces} />
+        <Said key={line.key} line={line} shout={shouts.has(line.key)} now={now} faces={faces} open={open} />
       ))}
       {feed.lines.length === 0 && <p className={styles.nothing}>No messages yet.</p>}
+      {zoom && (
+        <FleetZoom origin={zoom.origin} label={`Message from ${nameOf(zoom.line.from)}`} onClosed={closed}>
+          <Zoomed workspaceId={workspaceId} line={zoom.line} now={now} faces={faces} />
+        </FleetZoom>
+      )}
     </div>
   );
 };

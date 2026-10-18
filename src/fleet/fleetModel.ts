@@ -62,8 +62,10 @@ export interface FleetSaid {
   role: 'user' | 'assistant';
   /** Who sent a user message; `null` for an assistant message. */
   origin: MessageOrigin | null;
-  /** Clipped to `NOTE_CHARS`. */
+  /** Clipped to `NOTE_CHARS`, ending in `…` when cut. */
   text: string;
+  /** Cut short: the full message has to be fetched. */
+  truncated: boolean;
   at: number;
 }
 
@@ -114,9 +116,11 @@ const updateCard = (
 const bump = (card: FleetCard, at: number): FleetCard =>
   at > card.lastActivityAt ? { ...card, lastActivityAt: at } : card;
 
-const clip = (text: string): string => {
+const clip = (text: string): { text: string; truncated: boolean } => {
   const trimmed = text.trim();
-  return trimmed.length > NOTE_CHARS ? `${trimmed.slice(0, NOTE_CHARS - 1)}…` : trimmed;
+  return trimmed.length > NOTE_CHARS
+    ? { text: `${trimmed.slice(0, NOTE_CHARS - 1)}…`, truncated: true }
+    : { text: trimmed, truncated: false };
 };
 
 /** A message's text parts, in full. */
@@ -127,8 +131,6 @@ export const fullMessageText = (message: AssistantMessage): string =>
     .join('\n')
     .trim();
 
-export const messageText = (message: AssistantMessage): string => clip(fullMessageText(message));
-
 export const isTaskLive = (status: TaskStatus): boolean =>
   status === 'queued' || status === 'running' || status === 'stopping';
 
@@ -137,7 +139,7 @@ const saidOf = (message: AssistantMessage, at: number): FleetSaid => ({
   sessionId: message.sessionId,
   role: message.role === 'assistant' ? 'assistant' : 'user',
   origin: message.role === 'assistant' ? null : message.origin,
-  text: messageText(message),
+  ...clip(fullMessageText(message)),
   at,
 });
 
@@ -300,6 +302,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
       role: m.role === 'assistant' ? 'assistant' : 'user',
       origin: m.role === 'assistant' ? null : m.origin,
       text: m.truncated ? `${m.text}…` : m.text,
+      truncated: m.truncated,
       at: Number(m.createdAt),
     }));
     const preview = ws.lastAssistantMessage;
@@ -310,6 +313,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
         role: 'assistant',
         origin: null,
         text: preview.truncated ? `${preview.text}…` : preview.text,
+        truncated: preview.truncated,
         at: Number(preview.createdAt),
       });
     }
@@ -401,8 +405,8 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 export const FRESH_MS = 10 * 60 * 1000;
 /** A card whose last word is older than this is stale: its drawing fades. */
 export const STALE_MS = DAY_MS;
-/** The newest highlights drawn as bubbles; older ones collapse to one-line rows. */
-export const BUBBLES = 2;
+/** Older highlights collapsed to one-line rows above the bubbles; older ones hide. */
+export const ROWS = 2;
 /** Highlights a miniature has; rows that don't fit hide from the top. */
 export const FEED_LIMIT = 16;
 const SENTENCE_CHARS = 200;
@@ -429,6 +433,10 @@ export interface FleetLine {
   to: FleetSpeaker;
   /** As plain text, for a bubble that clamps its lines. */
   text: string;
+  /** As said, in markdown, for the zoomed bubble. */
+  markdown: string;
+  /** The message said, to fetch in full when `truncated`; `null` for a task's own line. */
+  message: { sessionId: string; id: string; truncated: boolean } | null;
   /** The first sentence, for a one-line row. */
   headline: string;
   /** A task's result. */
@@ -558,8 +566,12 @@ const line = (
   to: FleetSpeaker,
   text: string,
   outcome: FleetOutcome | null = null,
-  live: FleetLine['live'] = null
-): FleetLine => ({ key, at, from, to, text: plainText(text), headline: firstSentence(text), outcome, live });
+  live: FleetLine['live'] = null,
+  message: FleetLine['message'] = null
+): FleetLine => ({ key, at, from, to, text: plainText(text), markdown: text, message, headline: firstSentence(text), outcome, live });
+
+const fromSaid = (said: FleetSaid, from: FleetSpeaker, to: FleetSpeaker, outcome: FleetOutcome | null = null) =>
+  line(said.id, said.at, from, to, said.text, outcome, null, { sessionId: said.sessionId, id: said.id, truncated: said.truncated });
 
 /**
  * A miniature's highlights, oldest first: the user's messages and Main's
@@ -586,16 +598,16 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
     const origin = said.origin;
     if (!to) continue;
     if (!origin) {
-      lines.push(line(said.id, said.at, MAIN, to, said.text));
+      lines.push(fromSaid(said, MAIN, to));
     } else if (origin.kind === 'user') {
-      lines.push(line(said.id, said.at, YOU, to, said.text));
+      lines.push(fromSaid(said, YOU, to));
     } else if (origin.kind === 'agent') {
       if (said.text.startsWith(ASSIGNMENT_PREFIX)) continue;
       const from = origin.agent.isDefault ? MAIN : agentSpeaker(agentRef(origin.agent));
-      lines.push(line(said.id, said.at, from, to, said.text));
+      lines.push(fromSaid(said, from, to));
     } else {
       reported.add(`${origin.taskId}:${origin.cycleNo}`);
-      lines.push(line(said.id, said.at, agentSpeaker(agentRef(origin.agent)), to, said.text, OUTCOMES[origin.status] ?? null));
+      lines.push(fromSaid(said, agentSpeaker(agentRef(origin.agent)), to, OUTCOMES[origin.status] ?? null));
     }
   }
   for (const task of tasks) {
@@ -632,6 +644,40 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
           ? { kind: mood, at: lastWord }
           : { kind: 'empty' };
   return { mood, caption, lines: shown };
+};
+
+/** Bubbles a miniature draws before it keeps room for a row of what came before. */
+export const MIN_BUBBLES = 3;
+
+/**
+ * How many of a miniature's highlights are bubbles and how many rows, given
+ * each highlight's height as a bubble (oldest first, with its gap) and the
+ * height the card has for them. Bubbles fill from the newest as long as they
+ * fit; the newest is a bubble even when it doesn't. Past `MIN_BUBBLES`, a
+ * bubble also leaves room for one row when older highlights remain. Up to
+ * `ROWS` older ones collapse to rows of `rowHeight` above the bubbles, as
+ * many as fit in what is left; `rowsEdge` is the rule under the last row.
+ * Older ones hide.
+ */
+export const splitFeed = (
+  heights: readonly number[],
+  available: number,
+  rowHeight: number,
+  rowsEdge = 0
+): { bubbles: number; rows: number } => {
+  const n = heights.length;
+  let used = 0;
+  let bubbles = 0;
+  while (bubbles < n) {
+    const next = heights[n - 1 - bubbles]!;
+    const reserve = bubbles >= MIN_BUBBLES && n - bubbles > 1 ? rowHeight + rowsEdge : 0;
+    if (bubbles > 0 && used + next + reserve > available) break;
+    used += next;
+    bubbles += 1;
+  }
+  let rows = Math.min(ROWS, n - bubbles);
+  while (rows > 0 && used + rows * rowHeight + rowsEdge > available) rows -= 1;
+  return { bubbles, rows };
 };
 
 /**

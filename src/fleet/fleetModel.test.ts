@@ -12,6 +12,8 @@ import {
   FEED_LIMIT,
   FRESH_MS,
   SAID_LIMIT,
+  MIN_BUBBLES,
+  ROWS,
   STALE_MS,
   RECENT_WINDOW_MS,
   applyAssistantEvent,
@@ -28,6 +30,7 @@ import {
   firstSentence,
   plainText,
   openRequests,
+  splitFeed,
   cardPhase,
   emptyCard,
   liveAgents,
@@ -224,6 +227,15 @@ describe('the highlight feed', () => {
     ]);
   });
 
+  it('marks a live message cut to fit the card, so the zoom fetches it whole', () => {
+    const long = `${'word '.repeat(200)}end`;
+    const s = apply(withMain(), created(message('u1', 'user', 'Short.'), NOW - 2), completed(message('a1', 'assistant', long), NOW - 1));
+    const [short, cut] = feedOf(s).lines;
+    expect(short!.message).toEqual({ sessionId: MAIN, id: 'u1', truncated: false });
+    expect(cut!.message).toEqual({ sessionId: MAIN, id: 'a1', truncated: true });
+    expect(cut!.markdown.endsWith('…')).toBe(true);
+  });
+
   it("says how a task ended from its status when no report came, and a subtask answers its parent's agent", () => {
     const tasks = withTasks(
       task('p', 'running', NOW - 9_000),
@@ -330,6 +342,36 @@ describe('the highlight feed', () => {
   });
 });
 
+describe('splitFeed', () => {
+  // Heights oldest first, each with its gap; rows 30 high, 3 for the rule under the last.
+  it('draws every highlight as a bubble when they all fit', () => {
+    expect(splitFeed([60, 60, 60], 200, 30, 3)).toEqual({ bubbles: 3, rows: 0 });
+  });
+
+  it('fills from the newest; up to two older ones collapse to rows and the oldest hide', () => {
+    expect(splitFeed([60, 60, 60, 60, 60, 60, 60], 3 * 60 + 2 * 30 + 3, 30, 3)).toEqual({ bubbles: MIN_BUBBLES, rows: ROWS });
+    // Room for a row and a half: one row.
+    expect(splitFeed([60, 60, 60, 60, 60], 3 * 60 + 45, 30, 3)).toEqual({ bubbles: 3, rows: 1 });
+  });
+
+  it('keeps the newest a bubble on a tiny card, and nothing else', () => {
+    expect(splitFeed([60, 60, 60, 60], 40, 30, 3)).toEqual({ bubbles: 1, rows: 0 });
+    expect(splitFeed([], 40, 30, 3)).toEqual({ bubbles: 0, rows: 0 });
+  });
+
+  it('measures each bubble: a tall one leaves room for fewer', () => {
+    expect(splitFeed([40, 40, 150, 40], 200, 30, 3)).toEqual({ bubbles: 2, rows: 0 });
+    expect(splitFeed([40, 40, 40, 40, 150], 290, 30, 3)).toEqual({ bubbles: 3, rows: 1 });
+  });
+
+  it('past three bubbles, keeps room for a row of what came before', () => {
+    // A fourth bubble would fit only by leaving no room for a row.
+    expect(splitFeed([60, 60, 60, 60, 60], 4 * 60 + 10, 30, 3)).toEqual({ bubbles: 3, rows: 2 });
+    // With nothing older, the fourth is a bubble.
+    expect(splitFeed([60, 60, 60, 60], 4 * 60, 30, 3)).toEqual({ bubbles: 4, rows: 0 });
+  });
+});
+
 describe('firstSentence', () => {
   it.each([
     ['Shipped **v2**. Then more.', 'Shipped v2.'],
@@ -423,6 +465,21 @@ describe('snapshot', () => {
       'Main → You: All done.',
     ]);
     expect(card(s).said.filter((m) => m.id === 'a1')).toHaveLength(1);
+  });
+
+  it('keeps which message a line says and whether it was cut, so the zoom can fetch it whole', () => {
+    const s = seedFleet(EMPTY_FLEET, [
+      snapshotOf({
+        recentMessages: [highlight('rep', NOW - 30, { origin: report('t', 'failed'), text: 'It **broke**', truncated: true })],
+        lastAssistantMessage: { messageId: 'a1', text: 'All done.', truncated: false, createdAt: BigInt(NOW - 20) },
+      }),
+    ]);
+    const feed = feedOf(s, withTasks(task('t', 'failed', NOW - 100)));
+    expect(feed.lines.map((l) => [l.key, l.markdown, l.message])).toEqual([
+      ['task:t', 'Task t', null],
+      ['rep', 'It **broke**…', { sessionId: MAIN, id: 'rep', truncated: true }],
+      ['a1', 'All done.', { sessionId: MAIN, id: 'a1', truncated: false }],
+    ]);
   });
 
   it('seeds the last reply alone when the recent messages miss it', () => {
