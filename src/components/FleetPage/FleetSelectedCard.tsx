@@ -6,12 +6,12 @@ import { markWorkspaceOpened } from '../../workspace/client';
 import {
   cardAttention,
   cardPhase,
-  cardScene,
   fullMessageText,
   requestScene,
   type FleetCard,
   type FleetLive,
   type FleetLoudness,
+  type FleetScene as Scene,
 } from '../../fleet/fleetModel';
 import type { AssistantMessage, AssistantRun } from '../../generated/bindings';
 import { LiveFaces, PhaseLabel, stickerFor } from './FleetCard';
@@ -35,11 +35,15 @@ const lastAssistantText = (messages: readonly AssistantMessage[]): { id: string;
 
 interface FleetSelectedCardProps {
   card: FleetCard;
+  /** What the panel says, in full (`cardScene` with `stage`); `null` while it shows an open request. */
+  scene: Scene | null;
+  /** Keys of the rows that shout (`fleetLoudness`). */
+  shouts: ReadonlySet<string>;
   live: FleetLive;
   selected: boolean;
   /** Picked agent faces, by agent definition id. */
   faces: Record<string, AgentIdentity>;
-  /** The time of the last Fleet event. */
+  /** The page's clock: the last Fleet event or the minute tick, whichever is later. */
   now: number;
   /** Drawn loud: never while selected. */
   loud?: FleetLoudness;
@@ -49,10 +53,12 @@ interface FleetSelectedCardProps {
 /**
  * The stage card: the same comic panel as a small card, with nothing left
  * out. Every running task, every result in full, Main's last message as
- * markdown and the whole history, newest first; it scrolls. An open request
+ * markdown and, in Earlier, the workspace's 50 most recent tasks (what
+ * `list_recent_tasks` loads; older ones are not paged in), in the order they
+ * happened; it scrolls, kept at the newest. An open request
  * takes the panel, as on a small card, with every decision the chat offers.
  */
-const FleetSelectedCard = ({ card, live, selected, faces, now, loud = null, onSelect }: FleetSelectedCardProps) => {
+const FleetSelectedCard = ({ card, scene, shouts, live, selected, faces, now, loud = null, onSelect }: FleetSelectedCardProps) => {
   const navigate = useNavigate();
   const { workspaceId, mainSessionId: sessionId } = card;
   const { error, loading } = useFleetChat(workspaceId, sessionId);
@@ -81,7 +87,6 @@ const FleetSelectedCard = ({ card, live, selected, faces, now, loud = null, onSe
   );
 
   const request = useMemo(() => requestScene(card, live), [card, live]);
-  const scene = useMemo(() => (request ? null : cardScene(card, live, now, { stage: true })), [request, card, live, now]);
   const last = useMemo(() => lastAssistantText(messages), [messages]);
   const streamed = streaming ? Object.values(streaming).join('').trim() : '';
   // The session's copy is the card's message in full, unless an event brought a newer one.
@@ -129,7 +134,7 @@ const FleetSelectedCard = ({ card, live, selected, faces, now, loud = null, onSe
       {request ? (
         <FleetRequestPanel scene={request} workspaceId={workspaceId} faces={faces} loud={loud === 'needs'} now={now} stage />
       ) : (
-        scene && <FleetScene scene={scene} now={now} faces={faces} stage={stage} />
+        scene && <FleetScene scene={scene} shouts={shouts} now={now} faces={faces} stage={stage} />
       )}
       {runError && <p className={styles.runError}>Main's last run failed: {runError}</p>}
       {error && <p className={styles.nothing}>{error}</p>}

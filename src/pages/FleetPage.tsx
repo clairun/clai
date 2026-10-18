@@ -14,6 +14,7 @@ import {
   type FleetLive,
 } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
+import { useMinute } from '../fleet/useMinute';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
 
@@ -49,6 +50,9 @@ function useBoxSize(ref: React.RefObject<HTMLElement | null>) {
 const FleetPage = () => {
   const cards = useFleetStore((s) => s.fleet.cards);
   const now = useFleetStore((s) => s.now);
+  // Panels are judged against this: freshness, shouts and captions age on the
+  // minute tick, while what a panel says changes with events.
+  const clock = Math.max(now, useMinute());
   const selectedId = useFleetStore((s) => s.selectedId);
   const select = useFleetStore((s) => s.select);
   const loadedAt = useFleetStore((s) => s.loadedAt);
@@ -148,7 +152,7 @@ const FleetPage = () => {
             selectedId={selectedId}
             live={live}
             faces={faces}
-            now={now}
+            now={clock}
             onSelect={handleSelect}
           />
         ) : (

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router';
 import { useAssistantStore } from '../../assistant';
-import { applyAssistantEvent, emptyCard, type FleetLive } from '../../fleet/fleetModel';
+import { applyAssistantEvent, cardScene, emptyCard, openRequests, type FleetCard, type FleetLive } from '../../fleet/fleetModel';
 import type { AssistantEventEnvelope, AssistantMessage } from '../../generated/bindings';
 import FleetSelectedCard from './FleetSelectedCard';
 
@@ -20,6 +20,13 @@ const task = (id: string, title: string, status: string, ago: number, extra: obj
     assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s', assignedToWorkspaceAgentId: 'wa',
     updatedAt: BigInt(NOW - ago), completedAt: status === 'running' ? null : BigInt(NOW - ago), resultSummary: null, error: null, ...extra,
   }) as never;
+/** What the grid hands the stage: its full scene, and no row shouting. */
+const stageOf = (card: FleetCard, live: FleetLive) => ({
+  card,
+  live,
+  scene: openRequests(card).length > 0 ? null : cardScene(card, live, NOW, { stage: true }),
+  shouts: new Set<string>(),
+});
 const liveWith = (...tasks: { id: string }[]): FleetLive => ({ runs: {}, tasks: { ws: Object.fromEntries(tasks.map((t) => [t.id, t])) } }) as never;
 
 const askOn = (sessionId: string, pendingId: string, question: string): AssistantEventEnvelope =>
@@ -36,7 +43,7 @@ describe('FleetSelectedCard', () => {
     const state = applyAssistantEvent({ cards: { ws: { ...emptyCard('ws', 'Infra'), mainSessionId: 'main' } } }, askOn('task-session', 'q1', 'Which region?'));
     render(
       <MemoryRouter>
-        <FleetSelectedCard card={state.cards.ws!} live={NO_LIVE} selected faces={{}} now={NOW} onSelect={() => {}} />
+        <FleetSelectedCard {...stageOf(state.cards.ws!, NO_LIVE)} selected faces={{}} now={NOW} onSelect={() => {}} />
       </MemoryRouter>
     );
     const panel = screen.getByRole('dialog', { name: 'Agent question' });
@@ -54,7 +61,7 @@ describe('FleetSelectedCard', () => {
     const card = { ...emptyCard('ws', 'Infra'), mainSessionId: 'main' };
     const stage = (selected: boolean) => (
       <MemoryRouter>
-        <FleetSelectedCard card={card} live={NO_LIVE} selected={selected} faces={{}} now={NOW} onSelect={() => {}} />
+        <FleetSelectedCard {...stageOf(card, NO_LIVE)} selected={selected} faces={{}} now={NOW} onSelect={() => {}} />
       </MemoryRouter>
     );
     const stamps = () => (mockInvoke.mock.calls as unknown[][]).filter(([cmd]) => cmd === 'workspace_mark_opened');
@@ -75,7 +82,7 @@ describe('FleetSelectedCard', () => {
     render(
       <MemoryRouter>
         <Routes>
-          <Route path="/" element={<FleetSelectedCard card={{ ...emptyCard('ws', 'Infra'), mainSessionId: 'main' }} live={liveWith(task('task-9', 'Round 3 review', 'running', MIN))} selected faces={{}} now={NOW} onSelect={() => {}} />} />
+          <Route path="/" element={<FleetSelectedCard {...stageOf({ ...emptyCard('ws', 'Infra'), mainSessionId: 'main' }, liveWith(task('task-9', 'Round 3 review', 'running', MIN)))} selected faces={{}} now={NOW} onSelect={() => {}} />} />
           <Route path="/workspace/:id" element={<Opened />} />
         </Routes>
       </MemoryRouter>
@@ -84,7 +91,7 @@ describe('FleetSelectedCard', () => {
     expect(screen.getByText('/workspace/ws task-9')).toBeInTheDocument();
   });
 
-  it('shows everything: every running task, results in full, the whole history, and Main\'s message as markdown', () => {
+  it('shows everything, in the order it happened: the recent history, results in full, Main\'s message as markdown, then every running task', () => {
     const live = liveWith(
       ...['A', 'B', 'C', 'D'].map((n) => task(`r${n}`, `Running ${n}`, 'running', MIN)),
       task('f1', 'Fresh one', 'completed', MIN, { resultSummary: 'First sentence. Second sentence with **detail**.' }),
@@ -95,7 +102,7 @@ describe('FleetSelectedCard', () => {
     const card = { ...emptyCard('ws', 'Infra'), mainSessionId: 'main', lastMessage: { id: 'm1', text: 'Done. (clipped)', at: NOW - MIN } };
     const { container } = render(
       <MemoryRouter>
-        <FleetSelectedCard card={card} live={live} selected faces={{}} now={NOW} onSelect={() => {}} />
+        <FleetSelectedCard {...stageOf(card, live)} selected faces={{}} now={NOW} onSelect={() => {}} />
       </MemoryRouter>
     );
     for (const n of ['A', 'B', 'C', 'D']) expect(screen.getByRole('button', { name: `Running ${n}` })).toBeInTheDocument();
@@ -105,5 +112,12 @@ describe('FleetSelectedCard', () => {
     // Results and the session's full message render as markdown, not the card's clipped copy.
     expect([...container.querySelectorAll('strong')].map((b) => b.textContent)).toEqual(['detail', 'bold']);
     expect(screen.queryByText(/clipped/)).not.toBeInTheDocument();
+    // Read top to bottom, oldest first, as the chat is.
+    const order = ['Old task 5', 'Old task 0', 'Fresh one', 'Long words', 'Running A'].map(
+      (text) => screen.getAllByText(new RegExp(text))[0]!
+    );
+    for (let i = 1; i < order.length; i++) {
+      expect(order[i - 1]!.compareDocumentPosition(order[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
   });
 });

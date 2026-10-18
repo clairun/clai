@@ -205,6 +205,48 @@ describe('FleetPage', () => {
     expect(screen.getByRole('heading', { name: 'Selected Alpha' }).closest('article')).not.toHaveAttribute('data-loud');
   });
 
+  it('draws loud every card that needs you and nothing else; only the newest running task rushes in with "GO!"', async () => {
+    const ask = { pendingId: 'q', workspaceId: 'a', sessionId: 'main', runId: 'r', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
+    const task = (id: string, status: string, ago: number) =>
+      ({ id, title: `Task ${id}`, status, resultSummary: `Result ${id}.`, parentTaskId: null, createdAt: BigInt(Date.now() - ago), updatedAt: BigInt(Date.now() - ago), completedAt: status === 'running' ? null : BigInt(Date.now() - ago), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never;
+    fleetSnapshot.mockResolvedValue([
+      workspace('s', 'Staged'),
+      { ...workspace('r1', 'Run one', 10), tasks: [task('r1', 'running', 3 * 60_000)] },
+      { ...workspace('r2', 'Run two', 20), tasks: [task('r2', 'running', 60_000)] },
+      { ...workspace('r3', 'Run three', 30), tasks: [task('r3', 'running', 2 * 60_000)] },
+      { ...workspace('f1', 'Done one', 40), tasks: [task('f1', 'completed', 60_000)] },
+      { ...workspace('f2', 'Done two', 50), tasks: [task('f2', 'completed', 2 * 60_000)] },
+      { ...workspace('a', 'Asking', 60), pendingAsks: [ask] },
+    ]);
+    renderFleet();
+    await screen.findByText('Result f2.');
+    const card = (name: string) => screen.getByRole('button', { name: `Select ${name}` }).closest('article')!;
+    expect([...document.querySelectorAll('[data-loud]')]).toEqual([card('Asking')]);
+    expect(screen.getAllByText(/^GO/).map((go) => go.closest('article'))).toEqual([card('Run two')]);
+    expect(screen.queryByText('DONE!')).not.toBeInTheDocument();
+    // Every running card still thinks.
+    for (const name of ['Run one', 'Run two', 'Run three']) expect(within(card(name)).getByRole('img', { name: 'Scout is working' })).toBeInTheDocument();
+  });
+
+  it('lets a finished task stop cheering on the clock, with no further events', async () => {
+    vi.useFakeTimers({ now: Date.now(), toFake: ['Date', 'setInterval', 'clearInterval'] });
+    try {
+      const done = { id: 't-clock', title: 'Fix it', status: 'completed', resultSummary: 'Fixed it.', parentTaskId: null, updatedAt: BigInt(Date.now()), completedAt: BigInt(Date.now()), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never;
+      fleetSnapshot.mockResolvedValue([workspace('staged', 'Staged'), { ...workspace('clock', 'Alpha', 1000), tasks: [done] }]);
+      renderFleet();
+      const card = (await screen.findByText('Fixed it.')).closest('article')!;
+      expect(card).toHaveAttribute('data-loud', 'done');
+      expect(within(card).getByText('DONE!')).toBeInTheDocument();
+      expect(within(card).getByText('Just now')).toBeInTheDocument();
+      act(() => vi.advanceTimersByTime(15 * 60_000));
+      expect(card).not.toHaveAttribute('data-loud');
+      expect(within(card).queryByText('DONE!')).not.toBeInTheDocument();
+      expect(within(card).getByText('Last word · 15 min ago')).toBeInTheDocument();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('draws a running task as Main’s bubble to its agent, and an old finished one in Earlier', async () => {
     const task = (id: string, title: string, status: string) =>
       ({ id, title, status, parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never;
@@ -218,6 +260,8 @@ describe('FleetPage', () => {
     expect(card.getByTitle('Scout, on it')).toHaveTextContent('Scout');
     expect(card.getByRole('img', { name: 'Scout is working' })).toBeInTheDocument();
     expect(within(card.getByRole('list', { name: 'Earlier' })).getByText('Old research')).toBeInTheDocument();
+    // Its outcome is a tick, said in words to a screen reader.
+    expect(within(card.getByRole('list', { name: 'Earlier' })).getByRole('img', { name: 'done' })).toBeInTheDocument();
   });
 
   it('flips a task that just finished to its result, with Main’s question shrunk to one line', async () => {

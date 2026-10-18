@@ -1,8 +1,7 @@
 /**
- * One clock for every caption on the Fleet, ticking once a minute while the
- * window is visible (and once on becoming visible again). Only the caption
- * boxes read it, so a tick repaints a few words and nothing else: the panels
- * themselves change on events.
+ * The Fleet's clock, ticking once a minute while the window is visible (and
+ * once on becoming visible again), so captions age and a finished task's
+ * cheer fades without waiting for the next event.
  */
 import { useSyncExternalStore } from 'react';
 

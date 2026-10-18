@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactNode } from 'react';
+import { useLayoutEffect, useRef, type CSSProperties, type ReactNode } from 'react';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import AgentAvatar from '../Agents/AgentAvatar';
 import MarkdownMessage from '../Chat/MarkdownMessage';
@@ -9,7 +9,6 @@ import {
   type AgentActivity,
   type AgentIdentity,
 } from '../Agents/agentIdentity';
-import { useMinute } from '../../fleet/useMinute';
 import {
   captionText,
   shortTime,
@@ -45,20 +44,14 @@ const TaskLink = ({ taskId, stage, children }: { taskId: string; stage?: StageEx
     <>{children}</>
   );
 
-/** A hand-drawn speech-bubble tail; `right` points at the face on the right. */
-/**
- * The caption box: when. Worded against the minute clock, never older than
- * the event that drew the panel; the only part of a panel that ticks.
- */
-export const Caption = ({ caption, mood, now }: { caption: FleetCaption; mood: string; now: number }) => {
-  const clock = useMinute();
-  return (
-    <span className={styles.caption} data-mood={mood}>
-      {captionText(caption, Math.max(clock, now))}
-    </span>
-  );
-};
+/** The caption box: when, worded against the page's clock. */
+export const Caption = ({ caption, mood, now }: { caption: FleetCaption; mood: string; now: number }) => (
+  <span className={styles.caption} data-mood={mood}>
+    {captionText(caption, now)}
+  </span>
+);
 
+/** A hand-drawn speech-bubble tail; `right` points at the face on the right. */
 export const Tail = ({ right = false }: { right?: boolean }) => (
   <svg className={`${styles.tail} ${right ? styles.tailRight : ''}`} width="24" height="22" viewBox="0 0 28 24" aria-hidden="true">
     <path className={styles.tailFill} d="M28 3 C20 6 10 12 1 21 C11 17 19 15.5 28 15.5 Z" />
@@ -136,8 +129,17 @@ const useAgentColor = (identity: AgentIdentity) => {
   return { '--agent-color': identityRingColor(identity, theme) } as CSSProperties;
 };
 
-const Check = () => (
-  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden="true">
+/** A tick; with a `label` it is the only word for the outcome, so it says it. */
+const Check = ({ label }: { label?: string }) => (
+  <svg
+    width="11"
+    height="11"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="3"
+    {...(label ? { role: 'img', 'aria-label': label } : { 'aria-hidden': true })}
+  >
     <path d="M5 12.5l4.5 4.5L19 7" />
   </svg>
 );
@@ -152,13 +154,15 @@ const who = (t: FleetRunningTalk) => `${t.agent.name}${t.helpers ? ` +${t.helper
 const onIt = (t: FleetRunningTalk) => `${who(t)}${t.queued ? '' : ', on it'}`;
 
 /**
- * Main hands a task over (left); the agent rushes in and thinks it through
- * (right). Its panel tilts, alternating with the one above it.
+ * Main hands a task over (left); the agent thinks it through (right). Its
+ * panel tilts, alternating with the one above it; the newest task on the
+ * page (`rush`) also rushes in: speed lines, afterimages and a "GO!".
  */
 const RunningTalk = ({
   talk,
   index,
   compact,
+  rush,
   now,
   faces,
   stage,
@@ -166,6 +170,7 @@ const RunningTalk = ({
   talk: FleetRunningTalk;
   index: number;
   compact: boolean;
+  rush: boolean;
   now: number;
   faces: Faces;
   stage?: StageExtras;
@@ -175,12 +180,13 @@ const RunningTalk = ({
   const live = !talk.queued;
   return (
     <div
+      data-row
       className={`${styles.talk} ${compact ? styles.talkCompact : ''} ${live ? fx.tilt : ''}`}
       data-tilt={index % 2 ? 'right' : 'left'}
       style={useAgentColor(identity)}
     >
-      {live && <SpeedLines />}
-      {live && <Sfx word={index % 2 ? 'GO GO!' : 'GO!'} tone="go" level={shoutLevel(talk.at, now)} />}
+      {rush && <SpeedLines />}
+      {rush && <Sfx word={index % 2 ? 'GO GO!' : 'GO!'} tone="go" level={shoutLevel(talk.at, now)} />}
       <Who identity={mainIdentity()} name="Main" size={size} />
       <div className={styles.say}>
         <div className={styles.bubble}>
@@ -192,7 +198,7 @@ const RunningTalk = ({
           </span>
         </div>
       </div>
-      <Who identity={identity} name={who(talk)} size={size} activity="running" label={onIt(talk)} expression={live ? 'working' : undefined} ghosts={live}>
+      <Who identity={identity} name={who(talk)} size={size} activity="running" label={onIt(talk)} expression={live ? 'working' : undefined} ghosts={rush}>
         {!talk.queued && <ThoughtCloud name={talk.agent.name} />}
       </Who>
     </div>
@@ -203,12 +209,15 @@ const RunningTalk = ({
 const ResultTalk = ({
   talk,
   compact,
+  shout,
   now,
   faces,
   stage,
 }: {
   talk: FleetResultTalk;
   compact: boolean;
+  /** The page's one cheer: "DONE!". */
+  shout: boolean;
   now: number;
   faces: Faces;
   stage?: StageExtras;
@@ -216,10 +225,11 @@ const ResultTalk = ({
   const identity = faceOf(faces, talk.agent.seed);
   return (
     <div
+      data-row
       className={`${styles.talk} ${styles.result} ${talk.failed ? styles.resultFailed : ''} ${compact ? styles.talkCompact : ''}`}
       style={useAgentColor(identity)}
     >
-      {!talk.failed && <Sfx word="DONE!" tone="done" level={shoutLevel(talk.at, now)} />}
+      {shout && <Sfx word="DONE!" tone="done" level={shoutLevel(talk.at, now)} />}
       <Who identity={mainIdentity()} name="Main" size={compact ? 28 : 36} />
       <div className={styles.say}>
         <p className={styles.asked} title={talk.asked}>
@@ -255,7 +265,7 @@ const ToYou = ({ scene, quiet, now, stage }: { scene: Scene; quiet: boolean; now
   const note = scene.toYou;
   const full = stage?.streaming || stage?.message || note?.text;
   return (
-    <div className={`${styles.toYou} ${quiet ? styles.toYouQuiet : ''}`}>
+    <div className={`${styles.toYou} ${quiet ? styles.toYouQuiet : ''}`} data-row>
       <Who identity={mainIdentity()} name="Main" size={stage ? 56 : quiet ? 32 : 48} activity={asleep ? 'idle' : 'none'} expression={asleep ? 'asleep' : undefined}>
         {scene.mainBusy && !quiet && <ThoughtCloud name="Main" />}
       </Who>
@@ -299,7 +309,7 @@ const EarlierItem = ({ item, now, faces, stage }: { item: FleetEarlierItem; now:
   const agent: FleetAgentRef = item.agent ?? { name: 'You', seed: '' };
   const label = OUTCOME_LABEL[item.outcome];
   return (
-    <li className={styles.earlierItem}>
+    <li className={styles.earlierItem} data-row>
       {item.agent && (
         <AgentAvatar identity={faceOf(faces, agent.seed)} size={16} ring={false} className={styles.earlierFace} />
       )}
@@ -314,7 +324,7 @@ const EarlierItem = ({ item, now, faces, stage }: { item: FleetEarlierItem; now:
         )}
       </span>
       <span className={`${styles.earlierStatus} ${item.outcome === 'failed' ? styles.earlierFailed : ''}`}>
-        {item.outcome === 'failed' ? <Cross /> : item.outcome === 'stopped' ? null : <Check />}
+        {item.outcome === 'failed' ? <Cross /> : item.outcome === 'stopped' ? null : <Check label={label ? undefined : 'done'} />}
         {label ? `${label} · ` : ''}
         {shortTime(item.at, now)}
       </span>
@@ -323,46 +333,100 @@ const EarlierItem = ({ item, now, faces, stage }: { item: FleetEarlierItem; now:
   );
 };
 
+const nearBottom = (node: HTMLElement) => node.scrollHeight - node.scrollTop - node.clientHeight < 40;
+
 /**
- * A card as a comic panel: the caption says when, the bubbles say what. On
- * a small card the rows are in priority order and the ones that don't fit
- * drop whole; the stage draws them all, in full, and scrolls.
+ * Keeps the newest row in view. A small card hides whole rows from the top,
+ * oldest first, until the rest fit under the caption; the stage scrolls and,
+ * like the chat, follows new content (`grown`) while the reader is at the bottom.
  */
-const FleetScene = ({ scene, now, faces, stage }: { scene: Scene; now: number; faces: Faces; stage?: StageExtras }) => {
+const useNewestInView = (stage: boolean, scene: Scene, grown: string | null | undefined) => {
+  const ref = useRef<HTMLDivElement | null>(null);
+  const pinned = useRef(true);
+  useLayoutEffect(() => {
+    const node = ref.current;
+    if (!node) return undefined;
+    if (stage) {
+      if (pinned.current) node.scrollTop = node.scrollHeight;
+      return undefined;
+    }
+    const fit = () => {
+      const rows = [...node.querySelectorAll<HTMLElement>('[data-row]')];
+      rows.forEach((row) => (row.hidden = false));
+      for (const row of rows) {
+        if (node.scrollHeight <= node.clientHeight) break;
+        row.hidden = true;
+      }
+    };
+    fit();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(fit);
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [stage, scene, grown]);
+  const onScroll = stage ? () => (pinned.current = !!ref.current && nearBottom(ref.current)) : undefined;
+  return { ref, onScroll };
+};
+
+/**
+ * A card as a comic panel, read top to bottom in the order things happened,
+ * as the chat is: the caption says when, then Earlier, the results, Main's
+ * word to you and, last, what runs now. Which rows a card has room for is
+ * `cardScene`'s call; this only orders them, oldest first.
+ */
+const FleetScene = ({
+  scene,
+  shouts,
+  now,
+  faces,
+  stage,
+}: {
+  scene: Scene;
+  /** Keys of the rows that shout (`fleetLoudness`). */
+  shouts: ReadonlySet<string>;
+  now: number;
+  faces: Faces;
+  stage?: StageExtras;
+}) => {
+  const { ref, onScroll } = useNewestInView(!!stage, scene, stage?.streaming ?? stage?.message);
   const talks = scene.running.length + scene.finished.length;
   const compact = talks > 1;
   const showMain = scene.toYou || (scene.mainBusy && (talks === 0 || !!stage?.streaming));
+  const running = [...scene.running].sort((a, b) => a.at - b.at);
+  const toYou = showMain && <ToYou key="to-you" scene={scene} quiet={talks > 0 && !stage} now={now} stage={stage} />;
+  const fromYou = scene.userMessage && (
+    <div key="from-you" className={styles.fromYou} data-row>
+      <div className={styles.bubble}>
+        <Tail right />
+        <span className={styles.bubbleText} title={scene.userMessage.text}>
+          {scene.userMessage.text}
+        </span>
+      </div>
+      <span className={styles.meta}>you · {shortTime(scene.userMessage.at, now)}</span>
+    </div>
+  );
+  // Main's word and yours, in the order they were said.
+  const words = (scene.toYou?.at ?? Infinity) < (scene.userMessage?.at ?? -Infinity) ? [toYou, fromYou] : [fromYou, toYou];
   return (
-    <div className={styles.scene} data-mood={scene.mood} data-size={stage ? 'stage' : 'small'}>
+    <div ref={ref} className={styles.scene} data-mood={scene.mood} data-size={stage ? 'stage' : 'small'} onScroll={onScroll}>
       <p className={styles.captionRow}>
         <Caption caption={scene.caption} mood={scene.mood} now={now} />
       </p>
-      {scene.running.map((talk, index) => (
-        <RunningTalk key={talk.key} talk={talk} index={index} compact={compact} now={now} faces={faces} stage={stage} />
-      ))}
-      {scene.finished.map((talk) => (
-        <ResultTalk key={talk.key} talk={talk} compact={compact} now={now} faces={faces} stage={stage} />
-      ))}
-      {showMain && <ToYou scene={scene} quiet={talks > 0 && !stage} now={now} stage={stage} />}
-      {scene.userMessage && (
-        <div className={styles.fromYou}>
-          <div className={styles.bubble}>
-            <Tail right />
-            <span className={styles.bubbleText} title={scene.userMessage.text}>
-              {scene.userMessage.text}
-            </span>
-          </div>
-          <span className={styles.meta}>you · {shortTime(scene.userMessage.at, now)}</span>
-        </div>
-      )}
-      {!showMain && talks === 0 && !scene.userMessage && <p className={styles.nothing}>No messages yet.</p>}
       {scene.earlier.length > 0 && (
         <ul className={styles.earlier} aria-label="Earlier">
-          {scene.earlier.map((item) => (
+          {[...scene.earlier].reverse().map((item) => (
             <EarlierItem key={item.key} item={item} now={now} faces={faces} stage={stage} />
           ))}
         </ul>
       )}
+      {[...scene.finished].reverse().map((talk) => (
+        <ResultTalk key={talk.key} talk={talk} compact={compact} shout={shouts.has(talk.key)} now={now} faces={faces} stage={stage} />
+      ))}
+      {words}
+      {!showMain && talks === 0 && !scene.userMessage && <p className={styles.nothing}>No messages yet.</p>}
+      {running.map((talk, index) => (
+        <RunningTalk key={talk.key} talk={talk} index={index} compact={compact} rush={shouts.has(talk.key)} now={now} faces={faces} stage={stage} />
+      ))}
     </div>
   );
 };

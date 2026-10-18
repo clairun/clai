@@ -21,7 +21,7 @@ import {
   cardAttention,
   cardScene,
   captionText,
-  cardLoudness,
+  fleetLoudness,
   shoutLevel,
   requestScene,
   firstSentence,
@@ -36,6 +36,7 @@ import {
   seedFleet,
   type FleetCard,
   type FleetLive,
+  type FleetPanel,
   type FleetState,
 } from './fleetModel';
 
@@ -242,6 +243,10 @@ describe('fleet reducer', () => {
     const later = cardScene(emptyCard(WS), live, at + FRESH_MS + 1);
     expect(later.finished).toEqual([]);
     expect(later.earlier).toMatchObject([{ key: 'task:t', title: 'Task t', outcome: 'done' }]);
+    // A stopped task is no result to show, however recent.
+    const stopped = cardScene(emptyCard(WS), withTasks(task('s', 'stopped', NOW - 5)), NOW);
+    expect(stopped.finished).toEqual([]);
+    expect(stopped.earlier).toMatchObject([{ key: 'task:s', outcome: 'stopped' }]);
   });
 
   it('says why a task failed, falling back to its label, and the title when a result is empty', () => {
@@ -338,15 +343,32 @@ describe('fleet reducer', () => {
     expect([0, FRESH_MS / 2 - 1, FRESH_MS / 2, FRESH_MS - 1, FRESH_MS].map((age) => shoutLevel(NOW - age, NOW))).toEqual(['full', 'full', 'half', 'half', null]);
   });
 
-  it('draws loud only the unselected card that needs the user or just finished', () => {
-    const asking = card(apply(EMPTY_FLEET, askEvent('q', 1)));
-    expect(cardLoudness(asking, NO_LIVE, NOW, false)).toBe('needs');
-    expect(cardLoudness(asking, NO_LIVE, NOW, true)).toBeNull();
-    const fresh = withTasks(task('t', 'completed', NOW - 60_000));
-    expect(cardLoudness(emptyCard(WS), fresh, NOW, false)).toBe('done');
-    expect(cardLoudness(emptyCard(WS), fresh, NOW + FRESH_MS, false)).toBeNull();
-    expect(cardLoudness(emptyCard(WS), withTasks(task('r', 'running', NOW)), NOW, false)).toBeNull();
-    expect(cardLoudness(emptyCard(WS), withTasks(task('f', 'failed', NOW - 60_000)), NOW, false)).toBeNull();
+  it('draws loud every unselected card that needs the user, else only the newest good result; only the newest running task rushes in', () => {
+    const panel = (id: string, tasks: WorkspaceTaskResponse[], { asking = false, selected = false, now = NOW } = {}): FleetPanel => {
+      const c = asking ? { ...card(apply(EMPTY_FLEET, askEvent(`q-${id}`, 1))), workspaceId: id } : emptyCard(id);
+      const live = { runs: {}, tasks: { [id]: Object.fromEntries(tasks.map((t) => [t.id, { ...t, workspaceId: id }])) } };
+      return { card: c, scene: asking ? null : cardScene(c, live, now), selected };
+    };
+    const page = (asking: boolean) => [
+      panel('r1', [task('run1', 'running', NOW - 3 * 60_000)]),
+      panel('r2', [task('run2', 'running', NOW - 60_000), task('queued', 'queued', NOW)]),
+      panel('r3', [task('run3', 'running', NOW - 2 * 60_000)]),
+      panel('f1', [task('done1', 'completed', NOW - 2 * 60_000)]),
+      panel('f2', [task('done2', 'completed', NOW - 60_000), task('fail', 'failed', NOW - 10)]),
+      ...(asking ? [panel('ask', [], { asking: true })] : []),
+    ];
+    const loud = (panels: FleetPanel[]) => {
+      const { cards, rows } = fleetLoudness(panels);
+      return { cards, rows: [...rows] };
+    };
+    expect(loud(page(true))).toEqual({ cards: { ask: 'needs' }, rows: ['task:run2'] });
+    expect(loud(page(false))).toEqual({ cards: { f2: 'done' }, rows: ['task:run2', 'task:done2'] });
+    // Every request stays loud; a selected card never is, so the next result cheers.
+    expect(loud([panel('a', [], { asking: true }), panel('b', [], { asking: true }), panel('c', [], { asking: true, selected: true })]).cards).toEqual({ a: 'needs', b: 'needs' });
+    expect(loud([...page(false).slice(0, 4), { ...page(false)[4]!, selected: true }]).cards).toEqual({ f1: 'done' });
+    // A failure is not a cheer, and a result stops cheering after FRESH_MS.
+    expect(loud([panel('x', [task('f', 'failed', NOW - 60_000)])]).cards).toEqual({});
+    expect(loud([panel('x', [task('t', 'completed', NOW - 60_000)], { now: NOW + FRESH_MS })])).toEqual({ cards: {}, rows: [] });
   });
 
   it('changes only with what happened: the same tasks fetched again give the same scene', () => {

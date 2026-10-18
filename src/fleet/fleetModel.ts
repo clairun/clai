@@ -643,17 +643,48 @@ export const shoutLevel = (at: number, now: number): FleetShout =>
   now - at < FRESH_MS / 2 ? 'full' : now - at < FRESH_MS ? 'half' : null;
 
 /**
- * The one panel the page draws loud: it needs the user, or a task on it just
- * finished well. A selected card never is: the user is already looking at it.
+ * How loud a panel is drawn: it needs the user, or a task on it just
+ * finished well.
  */
 export type FleetLoudness = 'needs' | 'done' | null;
 
-export const cardLoudness = (card: FleetCard, live: FleetLive, now: number, selected: boolean): FleetLoudness => {
-  if (selected) return null;
-  if (openRequests(card).length > 0) return 'needs';
-  const scene = cardScene(card, live, now);
-  // A failure is news too, but not a cheer: no green shadow.
-  return scene.mood === 'fresh' && scene.finished.some((f) => !f.failed) ? 'done' : null;
+export interface FleetPanel {
+  card: FleetCard;
+  /** `null` while the card shows an open request. */
+  scene: FleetScene | null;
+  selected: boolean;
+}
+
+export interface FleetLoud {
+  /** Loudness by workspace id; a card missing here is quiet. */
+  cards: Record<string, FleetLoudness>;
+  /** Keys of the rows that shout: the newest running task, the loud card's newest result. */
+  rows: ReadonlySet<string>;
+}
+
+/**
+ * What the page draws loud. Every card that needs the user; otherwise at
+ * most one, the card with the newest good result. A selected card never is:
+ * the user is already looking at it. Of the running tasks, only the newest
+ * rushes in; the rest just think.
+ */
+export const fleetLoudness = (panels: FleetPanel[]): FleetLoud => {
+  const cards: Record<string, FleetLoudness> = {};
+  let go: FleetRunningTalk | undefined;
+  let done: { id: string; talk: FleetResultTalk } | undefined;
+  for (const { card, scene, selected } of panels) {
+    if (!selected && openRequests(card).length > 0) cards[card.workspaceId] = 'needs';
+    for (const talk of scene?.running ?? []) if (!talk.queued && (!go || talk.at > go.at)) go = talk;
+    if (selected || scene?.mood !== 'fresh') continue;
+    // A failure is news too, but not a cheer.
+    for (const talk of scene.finished) if (!talk.failed && (!done || talk.at > done.talk.at)) done = { id: card.workspaceId, talk };
+  }
+  const rows = new Set(go ? [go.key] : []);
+  if (done && Object.keys(cards).length === 0) {
+    cards[done.id] = 'done';
+    rows.add(done.talk.key);
+  }
+  return { cards, rows };
 };
 
 /** A card that needs the user, as the comic draws it. */

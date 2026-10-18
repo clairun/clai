@@ -277,20 +277,22 @@
 }
 
 /* ── A small card as a comic panel ───────────────────────────────────────
- * Caption box (when), then the speaking rows, Main's word to the reader and
- * the Earlier lines, in that priority. A row that doesn't fit whole wraps
- * into a second, hidden column, so the lowest rows give way first and the
- * card always keeps its first sentence. */
+ * Read top to bottom in the order things happened: caption box (when), the
+ * Earlier lines, results, Main's word to the reader, then what runs now.
+ * Rows that don't fit are hidden whole from the top, oldest first
+ * (`useNewestInView`), so the live row always shows. */
 .scene {
   container-type: size;
   display: flex;
   flex: 1;
   flex-direction: column;
-  flex-wrap: wrap;
-  align-content: flex-start;
   gap: 8px;
   min-height: 0;
   overflow: hidden;
+}
+
+.scene [data-row][hidden] {
+  display: none;
 }
 
 .scene > * {
@@ -298,8 +300,7 @@
   flex-shrink: 0;
 }
 
-/* Narration box: square, like a manga caption. Its row is full width, so
- * the column it sets is the panel's and a wrapped row is fully hidden. */
+/* Narration box: square, like a manga caption. */
 .captionRow {
   display: flex;
   margin: 0;
@@ -636,7 +637,7 @@
   filter: grayscale(0.6);
 }
 
-/* ── Earlier: one grey line per item, pinned to the bottom ── */
+/* ── Earlier: one grey line per item, the oldest rows of the panel ── */
 .earlier {
   display: contents;
 }
@@ -654,11 +655,10 @@
   color: var(--color-text-past);
 }
 
-.earlierItem:first-child {
-  margin-top: auto;
-  padding-top: 6px;
+.earlierItem:last-child {
+  padding-bottom: 6px;
   height: 29px;
-  border-top: 1px dashed var(--color-border-light);
+  border-bottom: 1px dashed var(--color-border-light);
 }
 
 .earlierFace {
@@ -799,7 +799,6 @@
 /* ── The stage: the same panel, nothing left out; it scrolls ── */
 .scene[data-size='stage'] {
   container-type: normal;
-  flex-wrap: nowrap;
   gap: 14px;
   overflow-y: auto;
 }
@@ -855,8 +854,8 @@
   row-gap: 2px;
 }
 
-.scene[data-size='stage'] .earlierItem:first-child {
-  margin-top: 8px;
+.scene[data-size='stage'] .earlierItem:last-child {
+  margin-bottom: 8px;
   height: auto;
 }
 

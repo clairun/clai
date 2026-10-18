@@ -371,7 +371,7 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false, speaker }: 
                 speaker(
                   <>
                     May I run this?
-                    <pre className={`${styles.command} ${styles.spokenCommand}`} tabIndex={0} aria-label="Command">
+                    <pre className={`${styles.command} ${styles.spokenCommand}`} tabIndex={0} role="region" aria-label="Command">
                       {req.command}
                     </pre>
                   </>

@@ -13,6 +13,8 @@ export const FLEET_FX: 'on' | 'off' = 'on';
 export type Expression = 'working' | 'asking' | 'done' | 'asleep';
 
 const INK = 'var(--fx-ink)';
+const SWEAT = 'var(--color-info-light)';
+const SPARKLE = 'var(--color-warning-light)';
 
 /** Drawn over a face in its own 100 × 100 box; marks may leave the box. */
 const EXPRESSIONS: Record<Expression, ReactElement> = {
@@ -22,12 +24,12 @@ const EXPRESSIONS: Record<Expression, ReactElement> = {
       <path d="M90 14l12-10M96 26l14-4M84 6l4-14" stroke="currentColor" strokeWidth="4" strokeLinecap="round" />
     </>
   ),
-  asking: <path d="M92 20c6 9 9 14 9 18a9 9 0 0 1-18 0c0-4 3-9 9-18z" fill="#9CCBF0" stroke={INK} strokeWidth="3" />,
+  asking: <path d="M92 20c6 9 9 14 9 18a9 9 0 0 1-18 0c0-4 3-9 9-18z" fill={SWEAT} stroke={INK} strokeWidth="3" />,
   done: (
     <>
-      <path d="M92 0l3 9 9 3-9 3-3 9-3-9-9-3 9-3z" fill="#FDE68A" stroke={INK} strokeWidth="2" />
-      <path d="M4 22l2 6 6 2-6 2-2 6-2-6-6-2 6-2z" fill="#FDE68A" stroke={INK} strokeWidth="1.5" />
-      <path d="M100 52l1.6 5 5 1.6-5 1.6-1.6 5-1.6-5-5-1.6 5-1.6z" fill="#FDE68A" stroke={INK} strokeWidth="1.2" />
+      <path d="M92 0l3 9 9 3-9 3-3 9-3-9-9-3 9-3z" fill={SPARKLE} stroke={INK} strokeWidth="2" />
+      <path d="M4 22l2 6 6 2-6 2-2 6-2-6-6-2 6-2z" fill={SPARKLE} stroke={INK} strokeWidth="1.5" />
+      <path d="M100 52l1.6 5 5 1.6-5 1.6-1.6 5-1.6-5-5-1.6 5-1.6z" fill={SPARKLE} stroke={INK} strokeWidth="1.2" />
     </>
   ),
   asleep: (

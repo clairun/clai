@@ -1,9 +1,11 @@
-import { memo, useCallback, useRef } from 'react';
+import { memo, useCallback, useMemo, useRef } from 'react';
 import type { AgentIdentity } from '../Agents/agentIdentity';
 import {
   GRID_GAP,
-  cardLoudness,
   cardPhase,
+  cardScene,
+  fleetLoudness,
+  openRequests,
   stageSpan,
   type FleetCard as FleetCardModel,
   type FleetLive,
@@ -27,7 +29,7 @@ interface FleetGridProps {
   selectedId: string | null;
   live: FleetLive;
   faces: Record<string, AgentIdentity>;
-  /** The time of the last Fleet event. */
+  /** The clock the panels are judged against: freshness, shouts and captions. */
   now: number;
   onSelect: (workspaceId: string | null) => void;
 }
@@ -41,6 +43,18 @@ const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, now, onS
   const handleSelect = useCallback((id: string) => onSelect(id), [onSelect]);
   const gridRef = useRef<HTMLDivElement | null>(null);
   useThoughtBeat(gridRef, order.some((id) => cards[id] && cardPhase(cards[id], live) === 'working'));
+  // Each panel's scene, once: the stage's in full. A card with an open request shows that instead.
+  const panels = useMemo(
+    () =>
+      order.flatMap((id, slot) => {
+        const card = cards[id];
+        if (!card) return [];
+        const scene = openRequests(card).length > 0 ? null : cardScene(card, live, now, { stage: slot === 0 });
+        return [{ card, scene, selected: id === selectedId }];
+      }),
+    [order, cards, live, now, selectedId]
+  );
+  const loud = useMemo(() => fleetLoudness(panels), [panels]);
 
   return (
     <div
@@ -56,24 +70,22 @@ const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, now, onS
         if (e.target === e.currentTarget) onSelect(null);
       }}
     >
-      {order.map((id, slot) => {
-        const card = cards[id];
-        if (!card) return null;
-        const selected = id === selectedId;
+      {panels.map(({ card, scene, selected }, slot) => {
+        const id = card.workspaceId;
         const stage = slot === 0 ? stageSpan({ cols, rows }) : null;
-        const loud = cardLoudness(card, live, now, selected);
+        const cardLoud = loud.cards[id] ?? null;
         return (
           <article
             key={id}
             className={`${styles.card} ${selected ? styles.cardSelected : (PHASE_BORDER[cardPhase(card, live)] ?? '')}`}
             aria-current={selected || undefined}
-            data-loud={loud ?? undefined}
+            data-loud={cardLoud ?? undefined}
             style={stage ? { gridColumn: `1 / span ${stage.cols}`, gridRow: `1 / span ${stage.rows}` } : undefined}
           >
             {stage ? (
-              <FleetSelectedCard card={card} live={live} selected={selected} faces={faces} now={now} loud={loud} onSelect={onSelect} />
+              <FleetSelectedCard card={card} scene={scene} shouts={loud.rows} live={live} selected={selected} faces={faces} now={now} loud={cardLoud} onSelect={onSelect} />
             ) : (
-              <FleetCard card={card} live={live} faces={faces} now={now} loud={loud} onSelect={handleSelect} />
+              <FleetCard card={card} scene={scene} shouts={loud.rows} live={live} faces={faces} now={now} loud={cardLoud} onSelect={handleSelect} />
             )}
           </article>
         );

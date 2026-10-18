@@ -4,7 +4,6 @@ import { faceOf, mainIdentity, type AgentIdentity } from '../Agents/agentIdentit
 import {
   cardAttention,
   cardPhase,
-  cardScene,
   liveAgents,
   requestScene,
   type FleetAttention,
@@ -13,6 +12,7 @@ import {
   type FleetLoudness,
   type FleetPhase,
   type FleetRequestScene,
+  type FleetScene as Scene,
 } from '../../fleet/fleetModel';
 import FleetRequestPanel from './FleetRequestPanel';
 import FleetScene from './FleetScene';
@@ -100,10 +100,14 @@ export const LiveFaces = ({ card, live, faces }: { card: FleetCardModel; live: F
 
 interface FleetCardProps {
   card: FleetCardModel;
+  /** What the panel says (`cardScene`); `null` while it shows an open request. */
+  scene: Scene | null;
+  /** Keys of the rows that shout (`fleetLoudness`). */
+  shouts: ReadonlySet<string>;
   live: FleetLive;
   /** Picked agent faces, by agent definition id. */
   faces: Record<string, AgentIdentity>;
-  /** The time of the last Fleet event: the card changes on events, not on a timer. */
+  /** The page's clock: the last Fleet event or the minute tick, whichever is later. */
   now: number;
   /** Drawn loud: it needs you, or a task on it just finished. */
   loud?: FleetLoudness;
@@ -111,11 +115,10 @@ interface FleetCardProps {
 }
 
 /** An unselected card: a comic panel of what happened, or its open request, answerable in place. */
-const FleetCard = ({ card, live, faces, now, loud = null, onSelect }: FleetCardProps) => {
+const FleetCard = ({ card, scene, shouts, live, faces, now, loud = null, onSelect }: FleetCardProps) => {
   const phase = cardPhase(card, live);
   const attention = cardAttention(card);
   const request = useMemo(() => requestScene(card, live), [card, live]);
-  const scene = useMemo(() => (request ? null : cardScene(card, live, now)), [request, card, live, now]);
   const title = card.title || 'Workspace';
 
   return (
@@ -134,7 +137,7 @@ const FleetCard = ({ card, live, faces, now, loud = null, onSelect }: FleetCardP
         </button>
         <PhaseLabel phase={phase} attention={attention} sticker={stickerFor(loud, request)} />
       </header>
-      {scene && <FleetScene scene={scene} now={now} faces={faces} />}
+      {scene && <FleetScene scene={scene} shouts={shouts} now={now} faces={faces} />}
       {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={faces} loud={loud === 'needs'} now={now} />}
     </div>
   );
