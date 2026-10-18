@@ -177,6 +177,34 @@ describe('FleetPage', () => {
     expect(selected.className).not.toMatch(/cardWaiting/);
   });
 
+  it('draws loud only the card that needs you, never the selected one: burst, sticker and "!?"', async () => {
+    const ask = (workspaceId: string) => ({
+      pendingId: `q-${workspaceId}`, workspaceId, sessionId: 'main', runId: 'r', question: 'Ship it?',
+      options: null, multiSelect: false, extraContext: null, requestedAt: 4n,
+    });
+    const running = { id: 't', title: 'Crawl', status: 'running', parentTaskId: null, createdAt: BigInt(Date.now()), updatedAt: BigInt(Date.now()), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never;
+    fleetSnapshot.mockResolvedValue([
+      workspace('s', 'Staged'),
+      { ...workspace('a', 'Alpha', 10), pendingAsks: [ask('a')] },
+      { ...workspace('w', 'Worker', 20), tasks: [running] },
+    ]);
+    renderFleet();
+    await screen.findByRole('button', { name: 'Select Alpha' });
+    const card = (name: string) => screen.getByRole('button', { name: `Select ${name}` }).closest('article')!;
+    await waitFor(() => expect(card('Alpha')).toHaveAttribute('data-loud', 'needs'));
+    expect(within(card('Alpha')).getByText('!?')).toHaveAttribute('aria-hidden', 'true');
+    // The sticker is decoration; the phase still reads in full.
+    expect(within(card('Alpha')).getByText('Needs you')).toHaveAttribute('aria-hidden', 'true');
+    expect(within(card('Alpha')).getByText('Needs you · 1 question')).toBeInTheDocument();
+    // A running card tilts and shouts "GO!", but is not the loud one.
+    expect(card('Worker')).not.toHaveAttribute('data-loud');
+    expect(within(card('Worker')).getByText('GO!')).toBeInTheDocument();
+    expect(document.querySelectorAll('[data-loud]')).toHaveLength(1);
+
+    act(() => useFleetStore.getState().select('a'));
+    expect(screen.getByRole('heading', { name: 'Selected Alpha' }).closest('article')).not.toHaveAttribute('data-loud');
+  });
+
   it('draws a running task as Main’s bubble to its agent, and an old finished one in Earlier', async () => {
     const task = (id: string, title: string, status: string) =>
       ({ id, title, status, parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never;

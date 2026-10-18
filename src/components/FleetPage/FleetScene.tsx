@@ -11,12 +11,14 @@ import {
 } from '../Agents/agentIdentity';
 import {
   shortTime,
+  shoutLevel,
   type FleetAgentRef,
   type FleetEarlierItem,
   type FleetResultTalk,
   type FleetRunningTalk,
   type FleetScene as Scene,
 } from '../../fleet/fleetModel';
+import fx, { FaceExpression, Sfx, SpeedLines, type Expression } from './FleetEffects';
 import styles from './FleetPage.module.css';
 
 type Faces = Record<string, AgentIdentity>;
@@ -81,6 +83,8 @@ export const Who = ({
   size,
   activity = 'none',
   label,
+  expression,
+  ghosts = false,
   children,
 }: {
   identity: AgentIdentity;
@@ -89,10 +93,23 @@ export const Who = ({
   activity?: AgentActivity;
   /** What the face is doing, for a tooltip. */
   label?: string;
+  /** A reaction drawn over the face. */
+  expression?: Expression;
+  /** Afterimages: the face rushing in. */
+  ghosts?: boolean;
   children?: ReactNode;
 }) => (
   <figure className={styles.who} title={label}>
-    <AgentAvatar identity={identity} size={size} activity={activity} ring={false} className={styles.face} />
+    <span className={`${fx.actor} ${styles.face}`} style={{ width: size, height: size }}>
+      {ghosts &&
+        [0, 1].map((i) => (
+          <span key={i} className={fx.ghost} aria-hidden="true">
+            <AgentAvatar identity={identity} size={size} activity={activity} ring={false} />
+          </span>
+        ))}
+      <AgentAvatar identity={identity} size={size} activity={activity} ring={false} />
+      {expression && <FaceExpression kind={expression} size={size} />}
+    </span>
     {children}
     <figcaption>{name}</figcaption>
   </figure>
@@ -118,12 +135,36 @@ const Cross = () => (
 const who = (t: FleetRunningTalk) => `${t.agent.name}${t.helpers ? ` +${t.helpers}` : ''}${t.queued ? ' · next' : ''}`;
 const onIt = (t: FleetRunningTalk) => `${who(t)}${t.queued ? '' : ', on it'}`;
 
-/** Main hands a task over (left); the agent thinks it through (right). */
-const RunningTalk = ({ talk, compact, faces, stage }: { talk: FleetRunningTalk; compact: boolean; faces: Faces; stage?: StageExtras }) => {
+/**
+ * Main hands a task over (left); the agent rushes in and thinks it through
+ * (right). Its panel tilts, alternating with the one above it.
+ */
+const RunningTalk = ({
+  talk,
+  index,
+  compact,
+  now,
+  faces,
+  stage,
+}: {
+  talk: FleetRunningTalk;
+  index: number;
+  compact: boolean;
+  now: number;
+  faces: Faces;
+  stage?: StageExtras;
+}) => {
   const identity = faceOf(faces, talk.agent.seed);
   const size = stage ? (compact ? 44 : 56) : compact ? 32 : 44;
+  const live = !talk.queued;
   return (
-    <div className={`${styles.talk} ${compact ? styles.talkCompact : ''}`} style={useAgentColor(identity)}>
+    <div
+      className={`${styles.talk} ${compact ? styles.talkCompact : ''} ${live ? fx.tilt : ''}`}
+      data-tilt={index % 2 ? 'right' : 'left'}
+      style={useAgentColor(identity)}
+    >
+      {live && <SpeedLines />}
+      {live && <Sfx word={index % 2 ? 'GO GO!' : 'GO!'} tone="go" level={shoutLevel(talk.at, now)} />}
       <Who identity={mainIdentity()} name="Main" size={size} />
       <div className={styles.say}>
         <div className={styles.bubble}>
@@ -135,7 +176,7 @@ const RunningTalk = ({ talk, compact, faces, stage }: { talk: FleetRunningTalk; 
           </span>
         </div>
       </div>
-      <Who identity={identity} name={who(talk)} size={size} activity="running" label={onIt(talk)}>
+      <Who identity={identity} name={who(talk)} size={size} activity="running" label={onIt(talk)} expression={live ? 'working' : undefined} ghosts={live}>
         {!talk.queued && <ThoughtCloud name={talk.agent.name} />}
       </Who>
     </div>
@@ -162,6 +203,7 @@ const ResultTalk = ({
       className={`${styles.talk} ${styles.result} ${talk.failed ? styles.resultFailed : ''} ${compact ? styles.talkCompact : ''}`}
       style={useAgentColor(identity)}
     >
+      {!talk.failed && <Sfx word="DONE!" tone="done" level={shoutLevel(talk.at, now)} />}
       <Who identity={mainIdentity()} name="Main" size={compact ? 28 : 36} />
       <div className={styles.say}>
         <p className={styles.asked} title={talk.asked}>
@@ -186,7 +228,7 @@ const ResultTalk = ({
           {talk.failed ? <Cross /> : <Check />} {talk.failed ? 'failed' : 'done'} · {shortTime(talk.at, now)}
         </span>
       </div>
-      <Who identity={identity} name={talk.agent.name} size={compact ? 36 : 48} />
+      <Who identity={identity} name={talk.agent.name} size={compact ? 36 : 48} expression={talk.failed ? undefined : 'done'} />
     </div>
   );
 };
@@ -198,12 +240,7 @@ const ToYou = ({ scene, quiet, now, stage }: { scene: Scene; quiet: boolean; now
   const full = stage?.streaming || stage?.message || note?.text;
   return (
     <div className={`${styles.toYou} ${quiet ? styles.toYouQuiet : ''}`}>
-      <Who identity={mainIdentity()} name="Main" size={stage ? 56 : quiet ? 32 : 48} activity={asleep ? 'idle' : 'none'}>
-        {asleep && (
-          <span className={styles.zz} aria-hidden="true">
-            zz
-          </span>
-        )}
+      <Who identity={mainIdentity()} name="Main" size={stage ? 56 : quiet ? 32 : 48} activity={asleep ? 'idle' : 'none'} expression={asleep ? 'asleep' : undefined}>
         {scene.mainBusy && !quiet && <ThoughtCloud name="Main" />}
       </Who>
       {stage && full ? (
@@ -286,8 +323,8 @@ const FleetScene = ({ scene, now, faces, stage }: { scene: Scene; now: number; f
           {scene.caption}
         </span>
       </p>
-      {scene.running.map((talk) => (
-        <RunningTalk key={talk.key} talk={talk} compact={compact} faces={faces} stage={stage} />
+      {scene.running.map((talk, index) => (
+        <RunningTalk key={talk.key} talk={talk} index={index} compact={compact} now={now} faces={faces} stage={stage} />
       ))}
       {scene.finished.map((talk) => (
         <ResultTalk key={talk.key} talk={talk} compact={compact} now={now} faces={faces} stage={stage} />

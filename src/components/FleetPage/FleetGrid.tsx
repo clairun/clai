@@ -2,6 +2,7 @@ import { memo, useCallback } from 'react';
 import type { AgentIdentity } from '../Agents/agentIdentity';
 import {
   GRID_GAP,
+  cardLoudness,
   cardPhase,
   stageSpan,
   type FleetCard as FleetCardModel,
@@ -10,6 +11,7 @@ import {
 } from '../../fleet/fleetModel';
 import FleetCard from './FleetCard';
 import FleetSelectedCard from './FleetSelectedCard';
+import fx, { FLEET_FX } from './FleetEffects';
 import styles from './FleetPage.module.css';
 
 /** An unselected card's border by phase; a selected card shows its phase in the header. */
@@ -32,14 +34,15 @@ interface FleetGridProps {
 /**
  * The card grid: the stage card, in its large form, spans the top-left
  * 2 × 2; the rest flow into the 1 × 1 slots around it. Nothing animates: on
- * WebKitGTK even a short transition blinks.
+ * WebKitGTK even a short transition blinks. The drawn effects switch on here.
  */
 const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, now, onSelect }: FleetGridProps) => {
   const handleSelect = useCallback((id: string) => onSelect(id), [onSelect]);
 
   return (
     <div
-      className={styles.grid}
+      className={`${styles.grid} ${fx.fx}`}
+      data-fx={FLEET_FX}
       style={{
         gridTemplateColumns: `repeat(${cols}, minmax(0, 1fr))`,
         gridTemplateRows: `repeat(${rows}, minmax(0, 1fr))`,
@@ -54,17 +57,19 @@ const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, now, onS
         if (!card) return null;
         const selected = id === selectedId;
         const stage = slot === 0 ? stageSpan({ cols, rows }) : null;
+        const loud = cardLoudness(card, live, now, selected);
         return (
           <article
             key={id}
             className={`${styles.card} ${selected ? styles.cardSelected : (PHASE_BORDER[cardPhase(card, live)] ?? '')}`}
             aria-current={selected || undefined}
+            data-loud={loud ?? undefined}
             style={stage ? { gridColumn: `1 / span ${stage.cols}`, gridRow: `1 / span ${stage.rows}` } : undefined}
           >
             {stage ? (
-              <FleetSelectedCard card={card} live={live} selected={selected} faces={faces} now={now} onSelect={onSelect} />
+              <FleetSelectedCard card={card} live={live} selected={selected} faces={faces} now={now} loud={loud} onSelect={onSelect} />
             ) : (
-              <FleetCard card={card} live={live} faces={faces} now={now} onSelect={handleSelect} />
+              <FleetCard card={card} live={live} faces={faces} now={now} loud={loud} onSelect={handleSelect} />
             )}
           </article>
         );

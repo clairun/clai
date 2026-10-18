@@ -10,10 +10,13 @@ import {
   type FleetAttention,
   type FleetCard as FleetCardModel,
   type FleetLive,
+  type FleetLoudness,
   type FleetPhase,
+  type FleetRequestScene,
 } from '../../fleet/fleetModel';
 import FleetRequestPanel from './FleetRequestPanel';
 import FleetScene from './FleetScene';
+import fx from './FleetEffects';
 import styles from './FleetPage.module.css';
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
@@ -29,6 +32,39 @@ export const attentionLabel = (a: FleetAttention): string =>
 
 export const phaseLabel = (phase: FleetPhase, attention: FleetAttention): string =>
   phase === 'waiting' ? `Needs you · ${attentionLabel(attention)}` : phase === 'working' ? 'Working' : 'Idle';
+
+/**
+ * The header's phase. On the card that needs you it is also a skewed amber
+ * sticker in two words; the full label stays for screen readers.
+ */
+export const PhaseLabel = ({ phase, attention, sticker }: { phase: FleetPhase; attention: FleetAttention; sticker: string | null }) => {
+  const label = phaseLabel(phase, attention);
+  return (
+    <span className={styles.phase} data-phase={phase}>
+      {sticker ? (
+        <>
+          <span className={fx.sticker} aria-hidden="true">
+            {sticker}
+          </span>
+          <span className={fx.stickerLabel}>{label}</span>
+        </>
+      ) : (
+        <>
+          {phase === 'waiting' && (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" aria-hidden="true">
+              <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+            </svg>
+          )}
+          {label}
+        </>
+      )}
+    </span>
+  );
+};
+
+/** The sticker of a loud card that needs you, by what its first request asks. */
+export const stickerFor = (loud: FleetLoudness, request: FleetRequestScene | null): string | null =>
+  loud === 'needs' && request ? (request.request.kind === 'approval' ? 'Approve?' : 'Needs you') : null;
 
 const MAX_HEADER_FACES = 4;
 
@@ -69,11 +105,13 @@ interface FleetCardProps {
   faces: Record<string, AgentIdentity>;
   /** The time of the last Fleet event: the card changes on events, not on a timer. */
   now: number;
+  /** Drawn loud: it needs you, or a task on it just finished. */
+  loud?: FleetLoudness;
   onSelect: (workspaceId: string) => void;
 }
 
 /** An unselected card: a comic panel of what happened, or its open request, answerable in place. */
-const FleetCard = ({ card, live, faces, now, onSelect }: FleetCardProps) => {
+const FleetCard = ({ card, live, faces, now, loud = null, onSelect }: FleetCardProps) => {
   const phase = cardPhase(card, live);
   const attention = cardAttention(card);
   const request = useMemo(() => requestScene(card, live, now), [card, live, now]);
@@ -94,17 +132,10 @@ const FleetCard = ({ card, live, faces, now, onSelect }: FleetCardProps) => {
         >
           {title}
         </button>
-        <span className={styles.phase} data-phase={phase}>
-          {phase === 'waiting' && (
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" aria-hidden="true">
-              <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
-            </svg>
-          )}
-          {phaseLabel(phase, attention)}
-        </span>
+        <PhaseLabel phase={phase} attention={attention} sticker={stickerFor(loud, request)} />
       </header>
       {scene && <FleetScene scene={scene} now={now} faces={faces} />}
-      {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={faces} />}
+      {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={faces} loud={loud === 'needs'} />}
     </div>
   );
 };

@@ -328,16 +328,6 @@
   text-overflow: ellipsis;
 }
 
-.zz {
-  position: absolute;
-  top: -8px;
-  right: -10px;
-  font-size: 13px;
-  font-weight: 800;
-  font-style: italic;
-  color: var(--color-text-past);
-}
-
 /* Static on purpose: an animation here would keep WebKitGTK repainting for
  * as long as the task runs (see the note at the top of this file). */
 .think {
@@ -471,6 +461,7 @@
 
 /* ── Just finished: the bubble flips to the agent ── */
 .result {
+  position: relative;
   grid-template-columns: 36px minmax(0, 1fr) 52px;
   padding-top: 6px;
   background: var(--color-success-alpha-06);
@@ -682,6 +673,14 @@
 
 /* ── A card that needs you: the agent asking, the answer below ──
  * The request takes the whole card and scrolls inside it when taller. */
+.requestFrame {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
 .request {
   display: flex;
   flex: 1;

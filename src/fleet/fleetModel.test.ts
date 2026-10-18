@@ -20,6 +20,8 @@ import {
   applyUserSent,
   cardAttention,
   cardScene,
+  cardLoudness,
+  shoutLevel,
   requestScene,
   firstSentence,
   plainText,
@@ -64,6 +66,7 @@ const task = (id: string, status: WorkspaceTaskResponse['status'], updatedAt: nu
     assignedAgentDisplayName: 'Researcher',
     assignedAgentDefinitionId: 'def-r',
     assignedToWorkspaceAgentId: 'wa-r',
+    createdAt: BigInt(updatedAt),
     updatedAt: BigInt(updatedAt),
     ...extra,
   }) as unknown as WorkspaceTaskResponse;
@@ -222,8 +225,8 @@ describe('fleet reducer', () => {
       task('next', 'queued', 3),
     );
     expect(cardScene(emptyCard(WS), live, NOW).running).toEqual([
-      { key: 'task:root', taskId: 'root', title: 'Task root', agent: { name: 'Researcher', seed: 'def-r' }, queued: false, helpers: 1 },
-      { key: 'task:next', taskId: 'next', title: 'Task next', agent: { name: 'Researcher', seed: 'def-r' }, queued: true, helpers: 0 },
+      { key: 'task:root', taskId: 'root', title: 'Task root', agent: { name: 'Researcher', seed: 'def-r' }, queued: false, helpers: 1, at: 1 },
+      { key: 'task:next', taskId: 'next', title: 'Task next', agent: { name: 'Researcher', seed: 'def-r' }, queued: true, helpers: 0, at: 3 },
     ]);
   });
 
@@ -308,6 +311,21 @@ describe('fleet reducer', () => {
     expect(requestScene(card(s), live, NOW)).toMatchObject({ count: 2, asker: { name: 'Writer', seed: 'def-w' }, request: { text: 'Which?' } });
     const named = applyRequest(EMPTY_FLEET, { kind: 'approval', request: { ...(approval('a1') as object), agentName: 'Committer' } as never }, 5);
     expect(requestScene(card(named), NO_LIVE, NOW)?.asker).toEqual({ name: 'Committer', seed: 'Committer' });
+  });
+
+  it('shouts a beat in full, then at half strength, then not at all, over FRESH_MS', () => {
+    expect([0, FRESH_MS / 2 - 1, FRESH_MS / 2, FRESH_MS - 1, FRESH_MS].map((age) => shoutLevel(NOW - age, NOW))).toEqual(['full', 'full', 'half', 'half', null]);
+  });
+
+  it('draws loud only the unselected card that needs the user or just finished', () => {
+    const asking = card(apply(EMPTY_FLEET, askEvent('q', 1)));
+    expect(cardLoudness(asking, NO_LIVE, NOW, false)).toBe('needs');
+    expect(cardLoudness(asking, NO_LIVE, NOW, true)).toBeNull();
+    const fresh = withTasks(task('t', 'completed', NOW - 60_000));
+    expect(cardLoudness(emptyCard(WS), fresh, NOW, false)).toBe('done');
+    expect(cardLoudness(emptyCard(WS), fresh, NOW + FRESH_MS, false)).toBeNull();
+    expect(cardLoudness(emptyCard(WS), withTasks(task('r', 'running', NOW)), NOW, false)).toBeNull();
+    expect(cardLoudness(emptyCard(WS), withTasks(task('f', 'failed', NOW - 60_000)), NOW, false)).toBeNull();
   });
 
   it('changes only with what happened: the same tasks fetched again give the same scene', () => {

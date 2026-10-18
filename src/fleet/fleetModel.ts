@@ -403,6 +403,8 @@ export interface FleetRunningTalk {
   queued: boolean;
   /** Other agents working on its subtasks. */
   helpers: number;
+  /** When it was handed over. */
+  at: number;
 }
 
 /** A task that just ended: the agent answers, and Main's question shrinks. */
@@ -519,7 +521,7 @@ export const cardScene = (card: FleetCard, live: FleetLive, now: number, { stage
     const agent = agentOf(root);
     if (group.some((t) => isTaskLive(t.status))) {
       const helpers = new Set(group.map((t) => agentOf(t).seed).filter((seed) => seed !== agent.seed)).size;
-      running.push({ key: `task:${root.id}`, taskId: root.id, title: root.title, agent, queued: root.status === 'queued', helpers });
+      running.push({ key: `task:${root.id}`, taskId: root.id, title: root.title, agent, queued: root.status === 'queued', helpers, at: Number(root.createdAt) });
       continue;
     }
     const at = Math.max(...group.map((t) => Number(t.completedAt ?? t.updatedAt)));
@@ -575,6 +577,29 @@ export const cardScene = (card: FleetCard, live: FleetLive, now: number, { stage
     userMessage: card.userMessage,
     earlier: stage ? earlier : earlier.slice(0, EARLIER_LIMIT),
   };
+};
+
+/**
+ * How loud a beat still is: a "GO!" or "DONE!" is drawn in full for half of
+ * `FRESH_MS`, at half strength for the rest, then not at all.
+ */
+export type FleetShout = 'full' | 'half' | null;
+
+export const shoutLevel = (at: number, now: number): FleetShout =>
+  now - at < FRESH_MS / 2 ? 'full' : now - at < FRESH_MS ? 'half' : null;
+
+/**
+ * The one panel the page draws loud: it needs the user, or a task on it just
+ * finished well. A selected card never is: the user is already looking at it.
+ */
+export type FleetLoudness = 'needs' | 'done' | null;
+
+export const cardLoudness = (card: FleetCard, live: FleetLive, now: number, selected: boolean): FleetLoudness => {
+  if (selected) return null;
+  if (openRequests(card).length > 0) return 'needs';
+  const scene = cardScene(card, live, now);
+  // A failure is news too, but not a cheer: no green shadow.
+  return scene.mood === 'fresh' && scene.finished.some((f) => !f.failed) ? 'done' : null;
 };
 
 /** A card that needs the user, as the comic draws it. */
