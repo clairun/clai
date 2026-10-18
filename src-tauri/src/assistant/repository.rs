@@ -451,8 +451,24 @@ pub async fn list_messages_before(
     rows.iter().map(map_message_row).collect()
 }
 
+/// Rows with non-blank text that no run in flight is still writing: an
+/// active run's text is partial. Expects the message table aliased `m`.
+fn completed_text_filter() -> String {
+    format!(
+        r#"EXISTS (
+              SELECT 1 FROM json_each(m.content_json) AS part
+              WHERE json_extract(part.value, '$.type') = 'text'
+                AND trim(json_extract(part.value, '$.text'), char(32, 9, 10, 13)) <> ''
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM assistant_runs AS r
+              WHERE r.id = m.run_id AND r.status IN {ACTIVE_RUN_STATUSES}
+          )"#
+    )
+}
+
 /// The session's newest assistant message with non-blank text, skipping
-/// rows of a run still in flight: their text is partial.
+/// rows of a run still in flight.
 pub async fn last_completed_assistant_text(
     pool: &DbPool,
     session_id: &str,
@@ -463,18 +479,11 @@ pub async fn last_completed_assistant_text(
         FROM assistant_messages AS m
         WHERE session_id = ?
           AND role = 'assistant'
-          AND EXISTS (
-              SELECT 1 FROM json_each(m.content_json) AS part
-              WHERE json_extract(part.value, '$.type') = 'text'
-                AND trim(json_extract(part.value, '$.text'), char(32, 9, 10, 13)) <> ''
-          )
-          AND NOT EXISTS (
-              SELECT 1 FROM assistant_runs AS r
-              WHERE r.id = m.run_id AND r.status IN {ACTIVE_RUN_STATUSES}
-          )
+          AND {}
         ORDER BY created_at DESC, id DESC
         LIMIT 1
-        "#
+        "#,
+        completed_text_filter()
     ))
     .bind(session_id)
     .fetch_optional(pool)
@@ -482,6 +491,38 @@ pub async fn last_completed_assistant_text(
     .map_err(|e| format!("Failed to load the last assistant message: {}", e))?;
 
     row.as_ref().map(map_message_row).transpose()
+}
+
+/// The newest `limit` user and assistant messages with text across every
+/// session, oldest first, each with the run that wrote it. Skips tool rows,
+/// tool-only replies and runs in flight, like `last_completed_assistant_text`.
+pub async fn recent_conversation_messages(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<(AssistantMessage, Option<String>)>, String> {
+    // Walks `idx_assistant_messages_created` backwards and stops after
+    // `limit` matches, so the cost doesn't grow with the transcript.
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json,
+               created_at, run_id
+        FROM assistant_messages AS m
+        WHERE role IN ('user', 'assistant')
+          AND {}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        "#,
+        completed_text_filter()
+    ))
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load recent messages: {}", e))?;
+
+    rows.iter()
+        .rev()
+        .map(|row| Ok((map_message_row(row)?, row.get("run_id"))))
+        .collect()
 }
 
 pub async fn count_session_messages(pool: &DbPool, session_id: &str) -> Result<u32, String> {

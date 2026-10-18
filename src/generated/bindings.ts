@@ -153,6 +153,11 @@ export type FilesystemPathGrant = { path: string, access: FilesystemPathAccess,
 origin?: GrantOrigin | null, };
 
 /**
+ * One message of the workspace's recent conversation, cut to a preview.
+ */
+export type FleetHighlight = { messageId: string, sessionId: string, role: MessageRole, origin: MessageOrigin, text: string, truncated: boolean, createdAt: bigint, runId: string | null, };
+
+/**
  * The text of the main session's newest assistant reply, cut to a preview.
  */
 export type FleetMessagePreview = { messageId: string, text: string, truncated: boolean, createdAt: bigint, };
@@ -176,7 +181,12 @@ activeRunIds: Array<string>,
 /**
  * Unfinished tasks plus the most recently finished ones, newest first.
  */
-tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingAsks: Array<PendingAsk>, lastAssistantMessage: FleetMessagePreview | null, };
+tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingAsks: Array<PendingAsk>, lastAssistantMessage: FleetMessagePreview | null, 
+/**
+ * The newest user and assistant messages with text across every
+ * session, oldest first; tool calls and results are left out.
+ */
+recentMessages: Array<FleetHighlight>, };
 
 /**
  * Provenance for a `FilesystemPathGrant`. Lets the agent-settings UI tell

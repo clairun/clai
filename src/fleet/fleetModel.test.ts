@@ -412,6 +412,7 @@ describe('snapshot', () => {
     pendingPathGrants: [],
     pendingAsks: [],
     lastAssistantMessage: null,
+    recentMessages: [],
     ...patch,
   });
 

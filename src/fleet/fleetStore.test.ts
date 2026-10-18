@@ -35,6 +35,7 @@ const snapshot: FleetWorkspace = {
   pendingPathGrants: [],
   pendingAsks: [{ pendingId: 'q1', workspaceId: 'ws', sessionId: 'main', runId: 'r1', question: '?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n }],
   lastAssistantMessage: { messageId: 'm', text: 'Done', truncated: false, createdAt: 4n },
+  recentMessages: [],
 };
 
 describe('fleet store snapshot', () => {
