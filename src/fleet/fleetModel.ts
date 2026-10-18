@@ -28,8 +28,8 @@ import { buildTaskTree, type TaskNode } from '../utils/taskTree';
 
 /** A workspace with no event in this window and nothing live gets no card. */
 export const RECENT_WINDOW_MS = 12 * 60 * 60 * 1000;
-/** Resolved items a card keeps on display. */
-export const HISTORY_LIMIT = 12;
+/** Resolved items a card keeps on display: a glance of history, so the last message gets the room. */
+export const HISTORY_LIMIT = 3;
 const NOTE_CHARS = 600;
 
 export type FleetRequestKind = 'approval' | 'grant';

@@ -9,6 +9,7 @@ import type {
 } from '../generated/bindings';
 import {
   EMPTY_FLEET,
+  HISTORY_LIMIT,
   RECENT_WINDOW_MS,
   applyAssistantEvent,
   applyRequest,
@@ -245,6 +246,14 @@ describe('fleet reducer', () => {
       'user:u1',
       'task:t2',
     ]);
+  });
+
+  it('keeps every live item but only the newest HISTORY_LIMIT resolved ones, plus the last message', () => {
+    const done = Array.from({ length: HISTORY_LIMIT + 2 }, (_, i) => task(`d${i}`, 'completed', i + 1));
+    const s = apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'All done.') } }, 50));
+    const keys = cardItems(card(s), withTasks(...done, task('r1', 'running', 60), task('r2', 'queued', 61))).map((i) => i.key);
+    const newest = done.slice(-HISTORY_LIMIT).map((t) => `task:${t.id}`);
+    expect(keys).toEqual([...newest, 'assistant:a1', 'task:r1', 'task:r2']);
   });
 
   it('keeps showing the last completed assistant message while the workspace works', () => {
