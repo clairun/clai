@@ -415,14 +415,15 @@ describe('FleetPage', () => {
       expect(dialog).toHaveAttribute('data-tail-side', 'left');
       // One bubble at a time: the card's hides, keeping its place, and comes back.
       expect(source.style.visibility).toBe('hidden');
-      // Its author's colour, the same as on the card.
-      expect(dialog.style.getPropertyValue('--agent-color')).toBe(origin.style.getPropertyValue('--agent-color'));
-      expect(origin.style.getPropertyValue('--agent-color')).not.toBe('');
+      // An agent's bubble is the one agent neutral: no agent colour on it, nor on its zoom.
+      expect(source.style.getPropertyValue('--agent-color')).toBe('');
+      expect(dialog.style.getPropertyValue('--agent-color')).toBe('');
+      expect(dialog.style.getPropertyValue('--bubble-border')).not.toContain('fleet-you-bubble');
       fireEvent.keyDown(window, { key: 'Escape' });
       expect(source.style.visibility).toBe('');
     });
 
-    it("takes your bubble's one colour, not an agent's", async () => {
+    it("takes your bubble's neutral, not an agent's", async () => {
       layout({ left: 600, top: 500, width: 200, height: 40 });
       // Room for both bubbles.
       vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
@@ -453,7 +454,10 @@ describe('FleetPage', () => {
       renderFleet();
       const row = within(await screen.findByRole('list', { name: 'Earlier' })).getByRole('button');
       fireEvent.click(row);
-      expect(within(screen.getByRole('dialog', { name: 'Message from You' })).getByText('Ship it.')).toBeInTheDocument();
+      const dialog = screen.getByRole('dialog', { name: 'Message from You' });
+      expect(within(dialog).getByText('Ship it.')).toBeInTheDocument();
+      // No bubble to copy, yet still your neutral.
+      expect(dialog.style.getPropertyValue('--bubble-border')).toBe('var(--fleet-you-bubble)');
     });
 
     it('shows a cut message at once and swaps in the whole one when it arrives', async () => {

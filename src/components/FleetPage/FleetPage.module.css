@@ -13,8 +13,14 @@
   --fleet-warn-text: var(--color-warning);
   --fleet-bad-text: var(--color-critical-light);
   --fleet-stale-fade: 0.62;
-  /* The one colour of the user's own bubbles; agents' are their faces'. */
-  --fleet-you-color: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
+}
+
+/* Bubbles in two neutrals, the user's and every agent's: the face says who speaks.
+ * The zoom is outside the page, so it gets them too. */
+.page,
+.zoomLayer {
+  --fleet-you-bubble: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
+  --fleet-agent-bubble: color-mix(in srgb, var(--color-text-primary) 25%, transparent);
 }
 
 :global([data-theme='light']) .page {
@@ -469,8 +475,7 @@ button.crewButton {
 }
 
 .bubble {
-  /* A bubble is its author's colour, on the card and zoomed alike. */
-  --bubble-border: var(--agent-color, var(--fleet-you-color));
+  --bubble-border: var(--fleet-agent-bubble);
   position: relative;
   padding: 8px 12px;
   border: 2px solid var(--bubble-border);
@@ -593,6 +598,10 @@ button.crewButton {
 }
 
 /* The user's own words, on the right. */
+.fromYou .bubble {
+  --bubble-border: var(--fleet-you-bubble);
+}
+
 .fromYou {
   display: flex;
   flex-direction: column;
@@ -861,8 +870,6 @@ button.crewButton {
  * the bubble grows out of it (`FleetZoom` places it and sets its origin at
  * the tail's tip) with a slight overshoot, then shrinks back into it. */
 .zoomLayer {
-  /* Outside the page: the user's bubble colour again (`.page`). */
-  --fleet-you-color: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
   position: fixed;
   inset: 0;
   z-index: 1000;

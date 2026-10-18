@@ -76,7 +76,6 @@ export const zoomStart = (origin: HTMLElement): ZoomStart => {
       source: bubble,
       face,
       look: {
-        '--agent-color': origin.style.getPropertyValue('--agent-color') || undefined,
         '--bubble-border': css.borderTopColor || undefined,
         padding: css.padding || undefined,
         fontSize: css.fontSize || undefined,
@@ -95,7 +94,7 @@ export const zoomStart = (origin: HTMLElement): ZoomStart => {
     side: 'left',
     source: null,
     face,
-    look: { '--agent-color': origin.style.getPropertyValue('--agent-color') || undefined } as CSSProperties,
+    look: {},
   };
 };
 

@@ -16,10 +16,10 @@ export type Cast = Record<string, CastIdentity>;
 /** Where a card's cast keeps its Main; no agent definition id looks like it. */
 export const MAIN_FACE = '@main';
 
-/** The picked faces, and this workspace's Main: its hue, its accessory. */
+/** The picked faces, and this workspace's Main with its accessory; Main's face is the same everywhere. */
 export const castFor = (faces: Record<string, AgentIdentity>, look: WorkspaceLook): Cast => ({
   ...faces,
-  [MAIN_FACE]: { ...mainIdentity(), hue: look.hue, accessory: look.accessory },
+  [MAIN_FACE]: { ...mainIdentity(), accessory: look.accessory },
 });
 
 /**

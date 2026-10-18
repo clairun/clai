@@ -110,7 +110,9 @@ export const Who = ({
   </figure>
 );
 
-/** A bubble is its author's colour; the user's, with no face, keeps the one "you" colour of the CSS. */
+/** The effects drawn over an agent's line (speed lines, GO!, the tilted frame) take its colour; its bubble does not. */
+const YOU_LOOK = { '--bubble-border': 'var(--fleet-you-bubble)' } as CSSProperties;
+
 const useAuthorColor = (author: AgentIdentity | null) => {
   const theme = useAppTheme();
   return author ? ({ '--agent-color': identityRingColor(author, theme) } as CSSProperties) : undefined;
@@ -444,19 +446,16 @@ const FleetFeed = ({
   faces: Faces;
 }) => {
   const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines);
-  const theme = useAppTheme();
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const open = useCallback<Open>(
     (line, origin) =>
       setZoom((z) => {
         if (z) return z;
-        // A row has no bubble to copy: its zoom still takes its author's colour.
-        const author = faceFor(line.from, faces);
         const start = zoomStart(origin);
-        const color = author ? { '--agent-color': identityRingColor(author, theme) } : {};
-        return { line, origin, start: { ...start, look: { ...color, ...start.look } as CSSProperties } };
+        // A row has no bubble to copy: the user's words still take the user's bubble.
+        return faceFor(line.from, faces) ? { line, origin, start } : { line, origin, start: { ...start, look: { ...YOU_LOOK, ...start.look } } };
       }),
-    [faces, theme]
+    [faces]
   );
   const closed = useCallback(() => setZoom(null), []);
   const split = feed.lines.length - count;

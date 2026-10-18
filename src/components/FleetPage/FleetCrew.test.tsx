@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import type { FleetCrewMember } from '../../fleet/fleetModel';
-import { castFor } from './FleetFace';
+import { MAIN_AVATAR_HUE } from '../Agents/agentIdentity';
+import { castFor, MAIN_FACE } from './FleetFace';
 import FleetCrew from './FleetCrew';
 
 const member = (name: string, patch: Partial<FleetCrewMember> = {}): FleetCrewMember => ({
@@ -15,6 +16,14 @@ const member = (name: string, patch: Partial<FleetCrewMember> = {}): FleetCrewMe
   ...patch,
 });
 const cast = castFor({}, { accessory: 'scarf', hue: 200, screentone: 'dots' });
+
+describe('castFor', () => {
+  it("keeps Main's face the same in every workspace; only its accessory differs", () => {
+    const other = castFor({}, { accessory: 'cap', hue: 320, screentone: 'lines' });
+    expect(cast[MAIN_FACE]).toMatchObject({ hue: MAIN_AVATAR_HUE, accessory: 'scarf' });
+    expect(other[MAIN_FACE]).toMatchObject({ hue: MAIN_AVATAR_HUE, accessory: 'cap' });
+  });
+});
 
 describe('FleetCrew', () => {
   it('labels every face with what it is up to and counts the rest', () => {

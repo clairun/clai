@@ -1,7 +1,8 @@
 /**
  * What tells one workspace's card from another's at a glance, derived from
  * its id alone, so it never changes and needs no setting: the accessory its
- * Main wears, an accent hue used sparingly, and a screentone behind the card.
+ * Main wears, an accent hue for its "Now" caption, and a screentone behind
+ * the card. Main's face itself is the same in every workspace.
  */
 
 /** Drawn over Main's face (`FleetFace`); Main already has an antenna of its own. */
