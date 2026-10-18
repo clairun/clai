@@ -9,10 +9,13 @@ import {
   type AgentActivity,
   type AgentIdentity,
 } from '../Agents/agentIdentity';
+import { useMinute } from '../../fleet/useMinute';
 import {
+  captionText,
   shortTime,
   shoutLevel,
   type FleetAgentRef,
+  type FleetCaption,
   type FleetEarlierItem,
   type FleetResultTalk,
   type FleetRunningTalk,
@@ -43,6 +46,19 @@ const TaskLink = ({ taskId, stage, children }: { taskId: string; stage?: StageEx
   );
 
 /** A hand-drawn speech-bubble tail; `right` points at the face on the right. */
+/**
+ * The caption box: when. Worded against the minute clock, never older than
+ * the event that drew the panel; the only part of a panel that ticks.
+ */
+export const Caption = ({ caption, mood, now }: { caption: FleetCaption; mood: string; now: number }) => {
+  const clock = useMinute();
+  return (
+    <span className={styles.caption} data-mood={mood}>
+      {captionText(caption, Math.max(clock, now))}
+    </span>
+  );
+};
+
 export const Tail = ({ right = false }: { right?: boolean }) => (
   <svg className={`${styles.tail} ${right ? styles.tailRight : ''}`} width="24" height="22" viewBox="0 0 28 24" aria-hidden="true">
     <path className={styles.tailFill} d="M28 3 C20 6 10 12 1 21 C11 17 19 15.5 28 15.5 Z" />
@@ -319,9 +335,7 @@ const FleetScene = ({ scene, now, faces, stage }: { scene: Scene; now: number; f
   return (
     <div className={styles.scene} data-mood={scene.mood} data-size={stage ? 'stage' : 'small'}>
       <p className={styles.captionRow}>
-        <span className={styles.caption} data-mood={scene.mood}>
-          {scene.caption}
-        </span>
+        <Caption caption={scene.caption} mood={scene.mood} now={now} />
       </p>
       {scene.running.map((talk, index) => (
         <RunningTalk key={talk.key} talk={talk} index={index} compact={compact} now={now} faces={faces} stage={stage} />

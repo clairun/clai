@@ -203,7 +203,8 @@
   border: 1.5px solid var(--color-warning);
   border-radius: 2px;
   background: var(--color-warning);
-  color: var(--color-text-on-warning);
+  /* Ink on amber: 6:1 in both themes (the light theme's on-warning is 2.9:1). */
+  color: var(--fx-ink);
   font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.05em;

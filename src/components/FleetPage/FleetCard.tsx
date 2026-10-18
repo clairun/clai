@@ -114,7 +114,7 @@ interface FleetCardProps {
 const FleetCard = ({ card, live, faces, now, loud = null, onSelect }: FleetCardProps) => {
   const phase = cardPhase(card, live);
   const attention = cardAttention(card);
-  const request = useMemo(() => requestScene(card, live, now), [card, live, now]);
+  const request = useMemo(() => requestScene(card, live), [card, live]);
   const scene = useMemo(() => (request ? null : cardScene(card, live, now)), [request, card, live, now]);
   const title = card.title || 'Workspace';
 
@@ -135,7 +135,7 @@ const FleetCard = ({ card, live, faces, now, loud = null, onSelect }: FleetCardP
         <PhaseLabel phase={phase} attention={attention} sticker={stickerFor(loud, request)} />
       </header>
       {scene && <FleetScene scene={scene} now={now} faces={faces} />}
-      {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={faces} loud={loud === 'needs'} />}
+      {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={faces} loud={loud === 'needs'} now={now} />}
     </div>
   );
 };

@@ -11,7 +11,7 @@ import InlineApprovalCard from '../InlineApprovalCard';
 import InlinePathGrantCard from '../InlinePathGrantCard';
 import type { FleetRequest, FleetRequestScene } from '../../fleet/fleetModel';
 import fx, { Sfx } from './FleetEffects';
-import { Tail, Who } from './FleetScene';
+import { Caption, Tail, Who } from './FleetScene';
 import styles from './FleetPage.module.css';
 
 /** Clicks inside the request answer it; they never select the card. */
@@ -62,6 +62,8 @@ interface FleetRequestPanelProps {
   stage?: boolean;
   /** Draw it loud: the amber burst, and "!?" or "!!". Never on the selected card. */
   loud?: boolean;
+  /** The time of the last Fleet event. */
+  now: number;
 }
 
 /**
@@ -75,6 +77,7 @@ const FleetRequestPanel = ({
   faces,
   stage = false,
   loud = false,
+  now,
 }: FleetRequestPanelProps) => {
   const theme = useAppTheme();
   const { request, asker, count, caption } = scene;
@@ -107,9 +110,7 @@ const FleetRequestPanel = ({
         onClick={stop}
       >
         <p className={styles.captionRow}>
-          <span className={styles.caption} data-mood="waiting">
-            {caption}
-          </span>
+          <Caption caption={caption} mood="waiting" now={now} />
           {count > 1 && <span className={styles.requestCount}>1 of {count}</span>}
           {loud && <Sfx word={request.kind === 'ask' ? '!?' : '!!'} tone="warn" />}
         </p>

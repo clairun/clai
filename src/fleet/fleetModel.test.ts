@@ -20,12 +20,12 @@ import {
   applyUserSent,
   cardAttention,
   cardScene,
+  captionText,
   cardLoudness,
   shoutLevel,
   requestScene,
   firstSentence,
   plainText,
-  shortTime,
   openRequests,
   cardPhase,
   emptyCard,
@@ -235,7 +235,7 @@ describe('fleet reducer', () => {
     const live = withTasks(task('t', 'completed', at, { resultSummary: 'Shipped **v2** to `main`. Tests pass.' }));
     expect(cardScene(emptyCard(WS), live, NOW)).toMatchObject({
       mood: 'fresh',
-      caption: `Just now · ${shortTime(at, NOW)}`,
+      caption: { kind: 'fresh', at },
       finished: [{ asked: 'Task t', result: 'Shipped v2 to main.', failed: false, at }],
       earlier: [],
     });
@@ -261,7 +261,7 @@ describe('fleet reducer', () => {
     const many = Array.from({ length: TALK_LIMIT + 1 }, (_, i) => task(`r${i}`, 'running', NOW));
     const running = cardScene(emptyCard(WS), withTasks(...many), NOW);
     expect(running.running).toHaveLength(TALK_LIMIT);
-    expect(running.caption).toBe(`Now · ${TALK_LIMIT + 1} at once`);
+    expect(captionText(running.caption, NOW)).toBe(`Now · ${TALK_LIMIT + 1} at once`);
 
     const done = (id: string, ago: number) => task(id, 'completed', NOW - ago);
     const mixed = cardScene(emptyCard(WS), withTasks(task('r', 'running', NOW), done('f1', 1), done('f2', 2), done('f3', 3), done('old', FRESH_MS + 5)), NOW);
@@ -273,16 +273,37 @@ describe('fleet reducer', () => {
   it('keeps Main’s last word, with its first sentence, while the workspace works; a run of no task is Main’s', () => {
     const s = apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', '## Done\nAll **green**. Next: deploy.') } }, NOW - 5));
     const scene = cardScene(card(s), { runs: { [WS]: ['main-run'] }, tasks: {} }, NOW);
-    expect(scene).toMatchObject({ mood: 'working', caption: 'Now', mainBusy: true, toYou: { text: '## Done\nAll **green**. Next: deploy.', headline: 'Done' } });
+    expect(scene).toMatchObject({ mood: 'working', caption: { kind: 'working', count: 0 }, mainBusy: true, toYou: { text: '## Done\nAll **green**. Next: deploy.', headline: 'Done' } });
     expect(cardScene(card(s), withTasks(task('t', 'running', 1, { runId: 'task-run' } as never)), NOW).mainBusy).toBe(false);
   });
 
   it('captions an idle card with its last word, and a stale one in days', () => {
     const at = (ago: number) => card(apply(withMain(), env({ type: 'assistant_message_completed', payload: { message: message('a1', 'assistant', 'Hi.') } }, NOW - ago)));
-    expect(cardScene(at(60_000), NO_LIVE, NOW)).toMatchObject({ mood: 'idle', caption: `Last word · ${shortTime(NOW - 60_000, NOW)}` });
-    expect(cardScene(at(STALE_MS), NO_LIVE, NOW)).toMatchObject({ mood: 'stale', caption: 'Yesterday' });
-    expect(cardScene(at(3 * STALE_MS + 5), NO_LIVE, NOW)).toMatchObject({ mood: 'stale', caption: '3 days ago' });
-    expect(cardScene(emptyCard(WS), NO_LIVE, NOW)).toMatchObject({ mood: 'idle', caption: 'Nothing yet', toYou: null });
+    const caption = (scene: { caption: Parameters<typeof captionText>[0] }, clock = NOW) => captionText(scene.caption, clock);
+    expect(cardScene(at(60_000), NO_LIVE, NOW).mood).toBe('idle');
+    expect(caption(cardScene(at(60_000), NO_LIVE, NOW))).toBe('Last word · 1 min ago');
+    expect(cardScene(at(STALE_MS), NO_LIVE, NOW).mood).toBe('stale');
+    expect(caption(cardScene(at(STALE_MS), NO_LIVE, NOW))).toBe('Yesterday');
+    expect(caption(cardScene(at(3 * STALE_MS + 5), NO_LIVE, NOW))).toBe('3 days ago');
+    expect(cardScene(emptyCard(WS), NO_LIVE, NOW)).toMatchObject({ mood: 'idle', toYou: null });
+    expect(caption(cardScene(emptyCard(WS), NO_LIVE, NOW))).toBe('Nothing yet');
+  });
+
+  it('words captions against the clock, so they age by the minute while the scene waits for events', () => {
+    const idle = { kind: 'idle', at: NOW } as const;
+    expect([0, 59_999, 60_000, 35 * 60_000, 3 * 3_600_000, 25 * 3_600_000, 50 * 3_600_000].map((age) => captionText(idle, NOW + age))).toEqual([
+      'Last word · just now',
+      'Last word · just now',
+      'Last word · 1 min ago',
+      'Last word · 35 min ago',
+      'Last word · 3 h ago',
+      'Last word · yesterday',
+      'Last word · 2 days ago',
+    ]);
+    expect(captionText({ kind: 'waiting', at: NOW }, NOW + 12 * 60_000)).toBe('Waiting on you · 12 min');
+    expect(captionText({ kind: 'waiting', at: NOW }, NOW + 10)).toBe('Waiting on you · under a minute');
+    expect(captionText({ kind: 'fresh', at: NOW }, NOW + 10)).toBe('Just now');
+    expect(captionText({ kind: 'fresh', at: NOW }, NOW + 3 * 60_000)).toBe('Just finished · 3 min ago');
   });
 
   it('draws everything on the stage: every talk, every result in full, the whole history with its results', () => {
@@ -303,14 +324,14 @@ describe('fleet reducer', () => {
   });
 
   it('says a request through whoever asked: a subtask\'s agent, a named agent, or Main', () => {
-    expect(requestScene(emptyCard(WS), NO_LIVE, NOW)).toBeNull();
+    expect(requestScene(emptyCard(WS), NO_LIVE)).toBeNull();
     const live = withTasks(task('sub', 'running', NOW, { sessionId: 'sub-session', assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w' }));
     let s = apply(EMPTY_FLEET, askEvent('q1', NOW - 120_000));
-    expect(requestScene(card(s), live, NOW)).toMatchObject({ count: 1, asker: null, caption: `Waiting on you · ${shortTime(NOW - 120_000, NOW)}` });
+    expect(requestScene(card(s), live)).toMatchObject({ count: 1, asker: null, caption: { kind: 'waiting', at: NOW - 120_000 } });
     s = apply(s, env({ type: 'ask_user_requested', payload: { pending_id: 'q2', question: 'Which?', options: null, multi_select: false } } as AssistantUiEvent, NOW - 200_000, 'sub-session'));
-    expect(requestScene(card(s), live, NOW)).toMatchObject({ count: 2, asker: { name: 'Writer', seed: 'def-w' }, request: { text: 'Which?' } });
+    expect(requestScene(card(s), live)).toMatchObject({ count: 2, asker: { name: 'Writer', seed: 'def-w' }, request: { text: 'Which?' } });
     const named = applyRequest(EMPTY_FLEET, { kind: 'approval', request: { ...(approval('a1') as object), agentName: 'Committer' } as never }, 5);
-    expect(requestScene(card(named), NO_LIVE, NOW)?.asker).toEqual({ name: 'Committer', seed: 'Committer' });
+    expect(requestScene(card(named), NO_LIVE)?.asker).toEqual({ name: 'Committer', seed: 'Committer' });
   });
 
   it('shouts a beat in full, then at half strength, then not at all, over FRESH_MS', () => {

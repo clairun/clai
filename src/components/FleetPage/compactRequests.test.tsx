@@ -150,7 +150,7 @@ describe('compact requests (small Fleet cards)', () => {
     const live = { runs: {}, tasks: { 'ws-1': { t1: { sessionId: 'sub', assignedAgentDefinitionId: 'd1', assignedToWorkspaceAgentId: 'a1', assignedAgentDisplayName: 'Researcher' } } } } as never;
     const panel = (...requests: FleetRequest[]) => {
       const card = { ...emptyCard('ws-1'), requests: Object.fromEntries(requests.map((r, i) => [`ask:${i}`, { ...r, at: i, resolvedAt: null }])) };
-      return <FleetRequestPanel scene={requestScene(card, live, 10)!} workspaceId="ws-1" faces={{}} />;
+      return <FleetRequestPanel scene={requestScene(card, live)!} workspaceId="ws-1" faces={{}} now={10} />;
     };
     const fromMain = { kind: 'ask', ask: { ...ask, sessionId: 'main' } } as unknown as FleetRequest;
     const { unmount } = render(panel(fromMain));
@@ -175,7 +175,7 @@ describe('compact requests (small Fleet cards)', () => {
   it('says a command in monospace in the bubble, without the approval card\'s tag, and still decides it', async () => {
     const request = { kind: 'approval', request: { ...approval, agentName: 'Committer' }, agentName: 'Committer', text: approval.command } as unknown as FleetRequest;
     const card = { ...emptyCard('ws-1'), requests: { 'approval:perm-1': { ...request, at: 1, resolvedAt: null } } };
-    render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} }, 10)!} workspaceId="ws-1" faces={{}} stage />);
+    render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} })!} workspaceId="ws-1" faces={{}} now={10} stage />);
     const section = screen.getByRole('region', { name: 'Committer needs you' });
     expect(within(section).getByLabelText('Command').tagName).toBe('PRE');
     expect(within(section).getByLabelText('Command')).toHaveTextContent('cd /srv/app && cargo test');

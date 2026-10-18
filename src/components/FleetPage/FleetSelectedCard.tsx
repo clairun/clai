@@ -80,7 +80,7 @@ const FleetSelectedCard = ({ card, live, selected, faces, now, loud = null, onSe
     [navigate, workspaceId]
   );
 
-  const request = useMemo(() => requestScene(card, live, now), [card, live, now]);
+  const request = useMemo(() => requestScene(card, live), [card, live]);
   const scene = useMemo(() => (request ? null : cardScene(card, live, now, { stage: true })), [request, card, live, now]);
   const last = useMemo(() => lastAssistantText(messages), [messages]);
   const streamed = streaming ? Object.values(streaming).join('').trim() : '';
@@ -127,7 +127,7 @@ const FleetSelectedCard = ({ card, live, selected, faces, now, loud = null, onSe
         )}
       </header>
       {request ? (
-        <FleetRequestPanel scene={request} workspaceId={workspaceId} faces={faces} loud={loud === 'needs'} stage />
+        <FleetRequestPanel scene={request} workspaceId={workspaceId} faces={faces} loud={loud === 'needs'} now={now} stage />
       ) : (
         scene && <FleetScene scene={scene} now={now} faces={faces} stage={stage} />
       )}

@@ -5,6 +5,25 @@
  * has the same border width; only the selected and working cards colour it.
  */
 
+/* Coloured small text on a card. The light theme's own green, amber, red
+ * and indigo are under 4.5:1 on white, so it takes their darker steps. */
+.page {
+  --fleet-run-text: var(--color-primary);
+  --fleet-ok-text: var(--color-success);
+  --fleet-warn-text: var(--color-warning);
+  --fleet-bad-text: var(--color-critical-light);
+  --fleet-stale-fade: 0.62;
+}
+
+:global([data-theme='light']) .page {
+  --fleet-run-text: var(--color-primary-dark);
+  --fleet-ok-text: var(--color-healthy-darker);
+  --fleet-warn-text: var(--color-warning-dark);
+  --fleet-bad-text: var(--color-critical-dark);
+  /* A faded bubble on white keeps ≥4.5:1 only down to about 0.72. */
+  --fleet-stale-fade: 0.75;
+}
+
 .page {
   position: relative;
   display: flex;
@@ -217,16 +236,16 @@
   flex-shrink: 0;
   font-size: 11px;
   font-weight: 600;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-past);
   white-space: nowrap;
 }
 
 .phase[data-phase='working'] {
-  color: var(--color-primary);
+  color: var(--fleet-run-text);
 }
 
 .phase[data-phase='waiting'] {
-  color: var(--color-warning);
+  color: var(--fleet-warn-text);
 }
 
 .closeButton {
@@ -236,7 +255,7 @@
   border: 0;
   border-radius: var(--radius-sm);
   background: none;
-  color: var(--color-text-tertiary);
+  color: var(--color-text-past);
   font-size: 18px;
   line-height: 1;
   cursor: pointer;
@@ -299,12 +318,12 @@
 
 .caption[data-mood='working'] {
   border-color: var(--color-primary-alpha-40);
-  color: var(--color-primary);
+  color: var(--fleet-run-text);
 }
 
 .caption[data-mood='fresh'] {
   border-color: var(--color-success);
-  color: var(--color-success);
+  color: var(--fleet-ok-text);
 }
 
 /* ── Faces ── */
@@ -328,8 +347,9 @@
   text-overflow: ellipsis;
 }
 
-/* Static on purpose: an animation here would keep WebKitGTK repainting for
- * as long as the task runs (see the note at the top of this file). */
+/* No CSS animation: it would keep WebKitGTK repainting for as long as the
+ * task runs (see the note at the top of this file). `useThoughtBeat` steps
+ * the bright dot instead; without it the dots are drawn still. */
 .think {
   position: absolute;
   top: -20px;
@@ -353,6 +373,16 @@
 
 .thinkDot:nth-of-type(2) {
   opacity: 0.7;
+}
+
+.think[data-beat] .thinkDot {
+  opacity: 0.35;
+}
+
+.think[data-beat='0'] .thinkDot:nth-of-type(1),
+.think[data-beat='1'] .thinkDot:nth-of-type(2),
+.think[data-beat='2'] .thinkDot:nth-of-type(3) {
+  opacity: 1;
 }
 
 /* ── Bubbles ── */
@@ -456,7 +486,7 @@
 }
 
 .metaRun {
-  color: var(--color-primary);
+  color: var(--fleet-run-text);
 }
 
 /* ── Just finished: the bubble flips to the agent ── */
@@ -475,7 +505,7 @@
 }
 
 .resultFailed {
-  background: color-mix(in srgb, var(--color-critical) 8%, transparent);
+  background: color-mix(in srgb, var(--color-critical) 5%, transparent);
 }
 
 .resultFailed .bubble {
@@ -502,11 +532,11 @@
 }
 
 .metaOk {
-  color: var(--color-success);
+  color: var(--fleet-ok-text);
 }
 
 .metaBad {
-  color: var(--color-critical-light);
+  color: var(--fleet-bad-text);
 }
 
 /* ── Main's word to the reader ── */
@@ -602,7 +632,7 @@
 
 /* Stale: fade the drawing, not the small text, so meta stays readable. */
 .scene[data-mood='stale'] :is(.face, .bubble) {
-  opacity: 0.62;
+  opacity: var(--fleet-stale-fade);
   filter: grayscale(0.6);
 }
 
@@ -660,11 +690,11 @@
 }
 
 .earlierStatus svg {
-  color: var(--color-success);
+  color: var(--fleet-ok-text);
 }
 
 .earlierFailed {
-  color: var(--color-critical-light);
+  color: var(--fleet-bad-text);
 }
 
 .earlierFailed svg {
@@ -698,7 +728,7 @@
 
 .caption[data-mood='waiting'] {
   border-color: var(--color-warning);
-  color: var(--color-warning);
+  color: var(--fleet-warn-text);
 }
 
 .requestCount {
@@ -873,7 +903,7 @@
   margin: 0;
   flex-shrink: 0;
   font-size: 12px;
-  color: var(--color-critical-light);
+  color: var(--fleet-bad-text);
 }
 
 /* ── Ctrl+Tab switcher: static, no blur ──────────────────────────────── */

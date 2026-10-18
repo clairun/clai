@@ -1,4 +1,4 @@
-import { memo, useCallback } from 'react';
+import { memo, useCallback, useRef } from 'react';
 import type { AgentIdentity } from '../Agents/agentIdentity';
 import {
   GRID_GAP,
@@ -12,6 +12,7 @@ import {
 import FleetCard from './FleetCard';
 import FleetSelectedCard from './FleetSelectedCard';
 import fx, { FLEET_FX } from './FleetEffects';
+import { useThoughtBeat } from './useThoughtBeat';
 import styles from './FleetPage.module.css';
 
 /** An unselected card's border by phase; a selected card shows its phase in the header. */
@@ -38,9 +39,12 @@ interface FleetGridProps {
  */
 const FleetGrid = ({ order, cards, cols, rows, selectedId, live, faces, now, onSelect }: FleetGridProps) => {
   const handleSelect = useCallback((id: string) => onSelect(id), [onSelect]);
+  const gridRef = useRef<HTMLDivElement | null>(null);
+  useThoughtBeat(gridRef, order.some((id) => cards[id] && cardPhase(cards[id], live) === 'working'));
 
   return (
     <div
+      ref={gridRef}
       className={`${styles.grid} ${fx.fx}`}
       data-fx={FLEET_FX}
       style={{

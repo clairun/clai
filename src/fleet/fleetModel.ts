@@ -449,7 +449,7 @@ export interface FleetSpeech extends FleetNote {
  */
 export interface FleetScene {
   mood: FleetMood;
-  caption: string;
+  caption: FleetCaption;
   running: FleetRunningTalk[];
   finished: FleetResultTalk[];
   /** Main's own run is in flight. */
@@ -482,6 +482,59 @@ export const firstSentence = (markdown: string | null | undefined): string => {
   const end = plain.search(/[.!?…](?=\s|$)/);
   const sentence = end >= 0 ? plain.slice(0, end + 1) : plain;
   return sentence.length > SENTENCE_CHARS ? `${sentence.slice(0, SENTENCE_CHARS - 1)}…` : sentence;
+};
+
+/**
+ * A panel's caption box: when, not what. Which caption is an event's doing;
+ * its words are relative and are worded against a clock (`captionText`), so
+ * they can age by the minute while the panel itself waits for events.
+ */
+export type FleetCaption =
+  | { kind: 'working'; count: number }
+  | { kind: 'fresh' | 'idle' | 'stale' | 'waiting'; at: number }
+  | { kind: 'empty' };
+
+const MINUTE_MS = 60_000;
+
+/** `just now`, `12 min ago`, `3 h ago`, `yesterday`, `3 days ago`. */
+export const ago = (at: number, clock: number): string => {
+  const minutes = Math.floor((clock - at) / MINUTE_MS);
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ago`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? 'yesterday' : `${days} days ago`;
+};
+
+/** How long something has waited: `under a minute`, `12 min`, `3 h`, `2 days`. */
+const waited = (at: number, clock: number): string => {
+  const minutes = Math.floor((clock - at) / MINUTE_MS);
+  if (minutes < 1) return 'under a minute';
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h`;
+  const days = Math.floor(hours / 24);
+  return days === 1 ? '1 day' : `${days} days`;
+};
+
+const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+export const captionText = (caption: FleetCaption, clock: number): string => {
+  switch (caption.kind) {
+    case 'working':
+      return caption.count > 1 ? `Now · ${caption.count} at once` : 'Now';
+    case 'fresh':
+      return clock - caption.at < MINUTE_MS ? 'Just now' : `Just finished · ${ago(caption.at, clock)}`;
+    case 'idle':
+      return `Last word · ${ago(caption.at, clock)}`;
+    case 'stale':
+      return capitalize(ago(caption.at, clock));
+    case 'waiting':
+      return `Waiting on you · ${waited(caption.at, clock)}`;
+    case 'empty':
+      return 'Nothing yet';
+  }
 };
 
 /** `14:05` on `now`'s day, `Oct 16` before. */
@@ -557,13 +610,14 @@ export const cardScene = (card: FleetCard, live: FleetLive, now: number, { stage
         : lastWord > 0 && now - lastWord >= STALE_MS
           ? 'stale'
           : 'idle';
-  const days = Math.floor((now - lastWord) / DAY_MS);
-  const caption = {
-    working: running.length > 1 ? `Now · ${running.length} at once` : 'Now',
-    fresh: `Just now · ${shortTime(shownFinished[0]?.at ?? now, now)}`,
-    idle: lastWord > 0 ? `Last word · ${shortTime(lastWord, now)}` : 'Nothing yet',
-    stale: days === 1 ? 'Yesterday' : `${days} days ago`,
-  }[mood];
+  const caption: FleetCaption =
+    mood === 'working'
+      ? { kind: 'working', count: running.length }
+      : mood === 'fresh'
+        ? { kind: 'fresh', at: shownFinished[0]!.at }
+        : lastWord > 0
+          ? { kind: mood, at: lastWord }
+          : { kind: 'empty' };
 
   return {
     mood,
@@ -607,7 +661,7 @@ export interface FleetRequestScene {
   request: FleetRequest;
   /** Open requests, this one included: they are answered one at a time, oldest first. */
   count: number;
-  caption: string;
+  caption: FleetCaption;
   /** The asking agent, or `null` for Main. */
   asker: FleetAgentRef | null;
 }
@@ -617,7 +671,7 @@ export interface FleetRequestScene {
  * asked it. A question names its session, which is a task's or the Main's; an
  * approval or a grant names its agent, and Main's name is no agent's.
  */
-export const requestScene = (card: FleetCard, live: FleetLive, now: number): FleetRequestScene | null => {
+export const requestScene = (card: FleetCard, live: FleetLive): FleetRequestScene | null => {
   const open = openRequests(card);
   const request = open[0];
   if (!request) return null;
@@ -628,7 +682,7 @@ export const requestScene = (card: FleetCard, live: FleetLive, now: number): Fle
   } else if (request.agentName) {
     asker = { name: request.agentName, seed: request.agentName };
   }
-  return { request, count: open.length, caption: `Waiting on you · ${shortTime(request.at, now)}`, asker };
+  return { request, count: open.length, caption: { kind: 'waiting', at: request.at }, asker };
 };
 
 /** An agent with work in flight: its tasks, or `main` for the workspace's own session. */
