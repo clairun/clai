@@ -24,6 +24,7 @@ import { usePermissionAttention } from '../hooks/usePermissionAttention';
 import { errText, num } from '../fleet/workspaceStatus';
 import { cardAttention } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
+import { useFleetToggle } from '../fleet/useFleetToggle';
 import { onWorkspaceUiCommand, setPendingForkPrompt } from '../utils/workspaceUiEvents';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 import styles from './FleetLayout.module.css';
@@ -207,6 +208,14 @@ const FleetLayout = () => {
       navigate(`/workspace/${id}`);
     },
     [navigate],
+  );
+
+  // Ctrl+Shift+F: to the Fleet, with this workspace selected there.
+  useFleetToggle(
+    useCallback(() => {
+      if (selectedId) useFleetStore.getState().select(selectedId);
+      navigate('/fleet');
+    }, [selectedId, navigate]),
   );
 
   const handleCreate = useCallback(async () => {

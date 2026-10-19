@@ -95,6 +95,7 @@ const renderFleet = (initialPath = '/workspace/a') =>
           <Route path="/workspace" element={<div data-testid="fleet-index" />} />
           <Route path="/workspace/:workspaceId" element={<div data-testid="workspace" />} />
         </Route>
+        <Route path="/fleet" element={<div data-testid="fleet" />} />
       </Routes>
     </MemoryRouter>
   );
@@ -351,5 +352,19 @@ describe('FleetLayout run now', () => {
     expect(await screen.findByText('Failed to start run.')).toBeInTheDocument();
     expect(useFleetActivityStore.getState().runNowSkipped).toEqual([]);
     expect(useFleetActivityStore.getState().activeRunsByWorkspace).toEqual({});
+  });
+});
+
+describe('FleetLayout switch to the Fleet', () => {
+  it('goes to the Fleet on Ctrl+Shift+F with this workspace selected there', async () => {
+    useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null });
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    renderFleet('/workspace/a');
+    expect(await screen.findByTestId('workspace')).toBeInTheDocument();
+
+    await userEvent.keyboard('{Control>}{Shift>}F{/Shift}{/Control}');
+    expect(await screen.findByTestId('fleet')).toBeInTheDocument();
+    expect(useFleetStore.getState().selectedId).toBe('a');
   });
 });

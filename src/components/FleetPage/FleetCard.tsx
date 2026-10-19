@@ -81,10 +81,11 @@ interface FleetCardProps {
   /** Drawn loud: it needs you, or a task on it just finished. */
   loud?: FleetLoudness;
   onSelect: (workspaceId: string) => void;
+  onOpen: (workspaceId: string) => void;
 }
 
 /** A miniature: the workspace's conversation as highlights, or its open request, answerable in place. */
-const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect }: FleetCardProps) => {
+const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect, onOpen }: FleetCardProps) => {
   const cast = useMemo(() => castFor(faces, card.main), [faces, card.main]);
   const crew = useMemo(() => cardCrew(card, live, now), [card, live, now]);
   const phase = cardPhase(card, live);
@@ -98,6 +99,7 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect
         <button
           type="button"
           className={styles.cardTitle}
+          data-card-title
           onClick={(e) => {
             e.stopPropagation();
             onSelect(card.workspaceId);
@@ -107,6 +109,20 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect
           {title}
         </button>
         <PhaseLabel phase={phase} attention={attention} sticker={stickerFor(loud, request)} />
+        <button
+          type="button"
+          className={styles.cardOpen}
+          title="Open workspace"
+          aria-label={`Open ${title}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen(card.workspaceId);
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
+          </svg>
+        </button>
       </header>
       <FleetCrew crew={crew} cast={cast} />
       {feed && <FleetFeed workspaceId={card.workspaceId} feed={feed} shouts={shouts} now={now} faces={cast} />}

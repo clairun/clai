@@ -31,6 +31,8 @@ interface FleetGridProps {
   /** The clock the panels are judged against: freshness, shouts and captions. */
   now: number;
   onSelect: (workspaceId: string | null) => void;
+  /** Leave for the workspace's own page. */
+  onOpen: (workspaceId: string) => void;
 }
 
 /**
@@ -38,7 +40,7 @@ interface FleetGridProps {
  * are more; the selected one is only highlighted. Nothing animates: on
  * WebKitGTK even a short transition blinks. The drawn effects switch on here.
  */
-const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect }: FleetGridProps) => {
+const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpen }: FleetGridProps) => {
   const handleSelect = useCallback((id: string) => onSelect(id), [onSelect]);
   const gridRef = useRef<HTMLDivElement | null>(null);
   const theme = useAppTheme();
@@ -74,7 +76,7 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect }: Fle
               data-screentone
               style={accentStyle(look.hue, theme)}
             >
-              <FleetCard card={card} feed={feed} shouts={loud.rows} live={live} faces={faces} now={now} loud={cardLoud} onSelect={handleSelect} />
+              <FleetCard card={card} feed={feed} shouts={loud.rows} live={live} faces={faces} now={now} loud={cardLoud} onSelect={handleSelect} onOpen={onOpen} />
             </article>
           );
         })}

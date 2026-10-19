@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router';
 import AppTopBar from '../components/AppTopBar';
 import FleetGrid from '../components/FleetPage/FleetGrid';
 import FleetSwitcher from '../components/FleetPage/FleetSwitcher';
@@ -15,11 +16,20 @@ import {
 } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useMinute } from '../fleet/useMinute';
+import { useFleetToggle } from '../fleet/useFleetToggle';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
 import { markWorkspaceOpened } from '../workspace/client';
 
 const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
+
+/**
+ * Where Enter does its own thing, so it doesn't open the selected workspace.
+ * A card's title is a button only to select the card, so Enter there opens.
+ */
+const OWNS_ENTER = 'input, textarea, select, a, button:not([data-card-title]), [contenteditable="true"], [role="dialog"]';
+/** A zoom or a modal; an agent question sits inline in its card (see Escape above). */
+const OPEN_DIALOG = '[role="dialog"]:not([aria-label="Agent question"])';
 
 /**
  * The Fleet: one card per recently active workspace, with the shared
@@ -113,6 +123,22 @@ const FleetPage = () => {
     return { working, waiting };
   }, [cards, live]);
 
+  // Opening a workspace: the card's icon, Enter, or Ctrl+Shift+F with a card selected.
+  const navigate = useNavigate();
+  const openWorkspace = useCallback((id: string) => navigate(`/workspace/${id}`), [navigate]);
+  useFleetToggle(useMemo(() => (selectedId ? () => openWorkspace(selectedId) : null), [selectedId, openWorkspace]));
+  useEffect(() => {
+    if (!selectedId) return undefined;
+    const onEnter = (e: KeyboardEvent) => {
+      if (e.key !== 'Enter' || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      if ((e.target instanceof Element && e.target.closest(OWNS_ENTER)) || document.querySelector(OPEN_DIALOG)) return;
+      e.preventDefault();
+      openWorkspace(selectedId);
+    };
+    window.addEventListener('keydown', onEnter);
+    return () => window.removeEventListener('keydown', onEnter);
+  }, [selectedId, openWorkspace]);
+
   const switcherOrder = useMemo(() => recentlyOpened(placed, cards), [placed, cards]);
   const handleSelect = useCallback((id: string | null) => select(id), [select]);
 
@@ -137,6 +163,7 @@ const FleetPage = () => {
             faces={faces}
             now={clock}
             onSelect={handleSelect}
+            onOpen={openWorkspace}
           />
         ) : (
           loadedAt != null && (

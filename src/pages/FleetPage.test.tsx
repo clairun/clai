@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { useEffect, useRef } from 'react';
-import { MemoryRouter } from 'react-router';
+import { MemoryRouter, Route, Routes, useParams } from 'react-router';
 import { FOCUS_TERMINAL_EVENT } from '../utils/workspaceUiEvents';
 
 import FleetPage from './FleetPage';
@@ -497,6 +497,52 @@ describe('FleetPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Select Alpha' }));
     fireEvent.click(screen.getAllByRole('article')[0]!.parentElement!);
     expect(useFleetStore.getState().selectedId).toBeNull();
+  });
+
+  describe('opening a workspace', () => {
+    const Opened = () => <p data-testid="opened">{useParams().workspaceId}</p>;
+    const renderRoutes = () =>
+      render(
+        <MemoryRouter initialEntries={['/fleet']}>
+          <Routes>
+            <Route path="/fleet" element={<><FleetPage /><FakeTerminal /></>} />
+            <Route path="/workspace/:workspaceId" element={<Opened />} />
+          </Routes>
+        </MemoryRouter>
+      );
+
+    it("opens from the card's icon, without selecting or zooming", async () => {
+      fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000)]);
+      renderRoutes();
+      const icon = await screen.findByRole('button', { name: 'Open Alpha' });
+      expect(icon).toHaveAttribute('title', 'Open workspace');
+      fireEvent.click(icon);
+      expect(screen.getByTestId('opened').textContent).toBe('a');
+      expect(useFleetStore.getState().selectedId).toBeNull();
+      expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('opens the selected card on Enter, but not while typing in the terminal', async () => {
+      fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000)]);
+      renderRoutes();
+      fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
+      fireEvent.keyDown(screen.getByRole('textbox', { name: 'Terminal' }), { key: 'Enter' });
+      expect(screen.queryByTestId('opened')).toBeNull();
+      fireEvent.keyDown(screen.getByRole('button', { name: 'Select Alpha' }), { key: 'Enter' });
+      expect(screen.getByTestId('opened').textContent).toBe('a');
+    });
+
+    it('opens the selected card on Ctrl+Shift+F, from the terminal too; nothing selected, nothing happens', async () => {
+      fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+      renderRoutes();
+      const terminal = await screen.findByRole('textbox', { name: 'Terminal' });
+      await screen.findByRole('button', { name: 'Select Alpha' });
+      fireEvent.keyDown(terminal, { key: 'F', code: 'KeyF', ctrlKey: true, shiftKey: true });
+      expect(screen.queryByTestId('opened')).toBeNull();
+      act(() => useFleetStore.getState().select('a'));
+      fireEvent.keyDown(terminal, { key: 'F', code: 'KeyF', ctrlKey: true, shiftKey: true });
+      expect(screen.getByTestId('opened').textContent).toBe('a');
+    });
   });
 
   it('brings a workspace that is not on the Fleet onto it, selected, when picked', async () => {
