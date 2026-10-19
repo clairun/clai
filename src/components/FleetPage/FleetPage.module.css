@@ -348,20 +348,6 @@ button.crewButton {
   margin: 0;
 }
 
-/* A workspace's Main wears its accessory over the face (`FleetFace`). */
-.castFace {
-  position: relative;
-  display: inline-flex;
-  flex-shrink: 0;
-}
-
-.accessory {
-  position: absolute;
-  inset: 0;
-  overflow: visible;
-  pointer-events: none;
-}
-
 /* ── A small card as a comic panel ───────────────────────────────────────
  * Read top to bottom in the order things happened: caption box (when), the
  * older highlights as one-line rows, then the newest as bubbles, as many as

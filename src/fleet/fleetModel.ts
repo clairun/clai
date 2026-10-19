@@ -84,6 +84,14 @@ export interface FleetCard {
   said: FleetSaid[];
   /** The workspace's enabled members, Main excluded, in roster order (from the snapshot). */
   agents: FleetAgentRef[];
+  /** The workspace's Main, for its face (from the snapshot); `null` until one says. */
+  main: FleetMainRef | null;
+}
+
+/** What Main's face is drawn from (`mainIdentity`). */
+export interface FleetMainRef {
+  id: string;
+  avatar: AgentRefSnapshot['avatar'];
 }
 
 export interface FleetState {
@@ -107,6 +115,7 @@ export const emptyCard = (workspaceId: string, title = ''): FleetCard => ({
   requests: {},
   said: [],
   agents: [],
+  main: null,
 });
 
 const updateCard = (
@@ -349,6 +358,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
         lastOpenedAt: Math.max(card.lastOpenedAt, Number(ws.lastOpenedAt)),
         requests,
         agents: ws.agents.filter((a) => !a.isDefault).map(agentRef),
+        main: mainRef(ws.agents) ?? card.main,
       },
       seed,
       false
@@ -406,6 +416,11 @@ const agentRef = (agent: AgentRefSnapshot): FleetAgentRef => ({
   name: agent.displayName,
   seed: agent.agentDefinitionId || agent.workspaceAgentId,
 });
+
+const mainRef = (agents: readonly AgentRefSnapshot[]): FleetMainRef | null => {
+  const main = agents.find((a) => a.isDefault);
+  return main ? { id: main.workspaceAgentId, avatar: main.avatar ?? null } : null;
+};
 
 /** Every distinct agent with a task on the card, live ones first, then the most recent. */
 export const cardAgents = (card: FleetCard, live: FleetLive): FleetAgentRef[] => {

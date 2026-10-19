@@ -6,9 +6,10 @@
  * seed falls back to the definition id and then to the workspace-local id:
  * every agent has a stable face on first launch, no migration.
  *
- * The Main is the exception on purpose: it always wears the same face, in the
- * app's primary indigo, in every workspace. One face users learn once means
- * "the main of this workspace" wherever it shows up.
+ * The Main is drawn the same way, from its picked seed or its workspace agent
+ * id, so each workspace's Main has its own face; but always in the app's
+ * primary purple, and always wearing an accessory the seed picks. Purple and
+ * the accessory say "a Main" wherever it shows up.
  */
 import type { AgentAvatarRef, WorkspaceTaskResponse } from '../../generated/bindings';
 import { isTaskRunning } from '../../utils/taskDisplay';
@@ -25,7 +26,7 @@ import {
 
 export { GENERATOR_VERSION };
 
-/** Fixed seed for every workspace's Main. Chosen by hand from a candidate sheet. */
+/** Main's seed when its agent is unknown (an older snapshot). Chosen by hand from a candidate sheet. */
 export const MAIN_AVATAR_SEED = 'clai-main-847';
 /** OKLCH hue of `--color-primary` (#818CF8). The Main ignores its seed's hue. */
 export const MAIN_AVATAR_HUE = 277;
@@ -35,6 +36,8 @@ export interface AgentIdentity {
   /** `undefined` means "use the hue the seed maps to". */
   hue?: number;
   generatorVersion: number;
+  /** A workspace's Main: it wears the accessory its seed picks. */
+  main?: boolean;
 }
 
 /** The subset of `WorkspaceAgentResponse` / `AgentDefinitionDetail` identity needs. */
@@ -46,19 +49,21 @@ export interface AgentLike {
   displayName?: string | null;
 }
 
-export const mainIdentity = (): AgentIdentity => ({
-  seed: MAIN_AVATAR_SEED,
+/** A workspace's Main: its picked seed, else its workspace agent id, else `MAIN_AVATAR_SEED`; always purple. */
+export const mainIdentity = (agent?: Pick<AgentLike, 'id' | 'avatar'> | null): AgentIdentity => ({
+  seed: agent?.avatar?.seed || agent?.id || MAIN_AVATAR_SEED,
   hue: MAIN_AVATAR_HUE,
-  generatorVersion: GENERATOR_VERSION,
+  generatorVersion: agent?.avatar?.seed ? agent.avatar.generatorVersion : GENERATOR_VERSION,
+  main: true,
 });
 
 /** A face by seed: the picked one when known, else the one the seed maps to. */
 export const faceOf = (faces: Record<string, AgentIdentity>, seed: string): AgentIdentity =>
   faces[seed] ?? { seed, generatorVersion: GENERATOR_VERSION };
 
-/** Resolve an agent's face: Main → fixed; else picked face → definition id → local id. */
+/** Resolve an agent's face: Main → `mainIdentity`; else picked face → definition id → local id. */
 export const identityFor = (agent: AgentLike): AgentIdentity => {
-  if (agent.isDefault) return mainIdentity();
+  if (agent.isDefault) return mainIdentity(agent);
   if (agent.avatar?.seed) {
     return { seed: agent.avatar.seed, generatorVersion: agent.avatar.generatorVersion };
   }
@@ -93,6 +98,7 @@ export const renderIdentity = (
     ...options,
     hue: identity.hue,
     version: identity.generatorVersion,
+    accessory: identity.main,
   });
 
 /**

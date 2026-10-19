@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import AgentAvatar from '../Agents/AgentAvatar';
-import { mainIdentity } from '../Agents/agentIdentity';
+import { mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
 import { useFleetStore } from '../../fleet/fleetStore';
 import { listWorkspaces } from '../../workspace/client';
 import type { WorkspaceListEntry } from '../../generated/bindings';
@@ -11,6 +11,8 @@ interface PickerEntry {
   id: string;
   title: string;
   detail: string;
+  /** Its Main's face; only the Fleet's workspaces know their Main. */
+  main: AgentIdentity;
 }
 
 /** The create entry: no selection, so the next prompt creates a workspace. */
@@ -50,6 +52,7 @@ const WorkspacePicker = ({ onClose }: { onClose: () => void }) => {
         id: card.workspaceId,
         title: card.title || 'Workspace',
         detail: `On the Fleet · ${formatRelativeTime(card.lastActivityAt)}`,
+        main: mainIdentity(card.main),
       }));
     const rest = all
       .filter((w) => !cards[w.id])
@@ -58,6 +61,7 @@ const WorkspacePicker = ({ onClose }: { onClose: () => void }) => {
         id: w.id,
         title: w.title || 'Workspace',
         detail: `${Number(w.messageCount)} messages · ${formatRelativeTime(w.updatedAt)}`,
+        main: mainIdentity(),
       }));
     return [...onFleet, ...rest];
   }, [cards, all]);
@@ -131,7 +135,7 @@ const WorkspacePicker = ({ onClose }: { onClose: () => void }) => {
           >
             {entry ? (
               <>
-                <AgentAvatar identity={mainIdentity()} size={20} ring={false} label="Main" />
+                <AgentAvatar identity={entry.main} size={20} ring={false} label="Main" />
                 <span className={styles.pickerTitle}>{entry.title}</span>
                 <span className={styles.pickerDetail}>{entry.detail}</span>
               </>

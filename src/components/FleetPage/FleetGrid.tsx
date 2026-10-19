@@ -71,10 +71,10 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect }: Fle
               className={`${styles.card} ${selected ? styles.cardSelected : (PHASE_BORDER[cardPhase(card, live)] ?? '')}`}
               aria-current={selected || undefined}
               data-loud={cardLoud ?? undefined}
-              data-screentone={look.screentone}
+              data-screentone
               style={accentStyle(look.hue, theme)}
             >
-              <FleetCard card={card} feed={feed} shouts={loud.rows} live={live} faces={faces} look={look} now={now} loud={cardLoud} onSelect={handleSelect} />
+              <FleetCard card={card} feed={feed} shouts={loud.rows} live={live} faces={faces} now={now} loud={cardLoud} onSelect={handleSelect} />
             </article>
           );
         })}

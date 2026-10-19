@@ -2,7 +2,8 @@ import { useCallback, useState, type CSSProperties, type MouseEvent } from 'reac
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { faceOf, identityRingColor } from '../Agents/agentIdentity';
 import type { FleetCrew as Crew, FleetCrewMember, FleetCrewStatus } from '../../fleet/fleetModel';
-import FleetFace, { MAIN_FACE, type Cast } from './FleetFace';
+import AgentAvatar from '../Agents/AgentAvatar';
+import { MAIN_FACE, type Cast } from './FleetFace';
 import FleetZoom, { zoomStart, type ZoomStart } from './FleetZoom';
 import styles from './FleetPage.module.css';
 
@@ -53,7 +54,7 @@ const FleetCrew = ({ crew, cast }: { crew: Crew; cast: Cast }) => {
   const theme = useAppTheme();
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const closed = useCallback(() => setZoom(null), []);
-  const faceFor = (m: FleetCrewMember) => (m.main ? cast[MAIN_FACE]! : faceOf(cast, m.seed));
+  const faceFor = (m: FleetCrewMember) => (m.main ? cast[MAIN_FACE] : faceOf(cast, m.seed));
   const open = (member: FleetCrewMember) => (e: MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
     const origin = e.currentTarget;
@@ -68,7 +69,7 @@ const FleetCrew = ({ crew, cast }: { crew: Crew; cast: Cast }) => {
         {crew.shown.map((m) => {
           const face = (
             <span className={styles.crewFace} data-anchor>
-              <FleetFace identity={faceFor(m)} size={22} ring={false} activity={m.status === 'running' ? 'running' : m.status === 'idle' ? 'idle' : 'none'} />
+              <AgentAvatar identity={faceFor(m)} size={22} ring={false} activity={m.status === 'running' ? 'running' : m.status === 'idle' ? 'idle' : 'none'} />
               <Sticker member={m} />
             </span>
           );
@@ -97,7 +98,7 @@ const FleetCrew = ({ crew, cast }: { crew: Crew; cast: Cast }) => {
         <FleetZoom
           origin={zoom.origin}
           start={zoom.start}
-          face={zoom.start.face && <FleetFace identity={faceFor(zoom.member)} size={Math.round(zoom.start.face.width)} ring={false} />}
+          face={zoom.start.face && <AgentAvatar identity={faceFor(zoom.member)} size={Math.round(zoom.start.face.width)} ring={false} />}
           label={describe(zoom.member)}
           onClosed={closed}
         >

@@ -147,33 +147,11 @@
   isolation: isolate;
 }
 
-/* ── Screentone: each workspace's own, faint, behind the whole card ──
+/* ── Screentone: the same faint dots behind every card ──
  * Neutral ink at a few percent, so no text loses contrast over it. */
 .fx[data-fx='on'] [data-screentone] {
-  --tone-ink: color-mix(in srgb, var(--color-text-primary) 7%, transparent);
-}
-
-.fx[data-fx='on'] [data-screentone='dots'] {
-  background-image: radial-gradient(var(--tone-ink) 1px, transparent 1.5px);
+  background-image: radial-gradient(color-mix(in srgb, var(--color-text-primary) 7%, transparent) 1px, transparent 1.5px);
   background-size: 7px 7px;
-}
-
-.fx[data-fx='on'] [data-screentone='lines'] {
-  background-image: repeating-linear-gradient(135deg, var(--tone-ink) 0 1px, transparent 1px 7px);
-}
-
-.fx[data-fx='on'] [data-screentone='hatch'] {
-  background-image:
-    repeating-linear-gradient(45deg, var(--tone-ink) 0 1px, transparent 1px 9px),
-    repeating-linear-gradient(135deg, var(--tone-ink) 0 1px, transparent 1px 9px);
-}
-
-/* Dots that thicken towards the bottom of the panel. */
-.fx[data-fx='on'] [data-screentone='fade'] {
-  background-image:
-    linear-gradient(var(--color-bg-elevated) 15%, transparent 85%),
-    radial-gradient(var(--tone-ink) 1.4px, transparent 1.9px);
-  background-size: auto, 6px 6px;
 }
 
 /* ── The card that needs you: amber burst, focus lines, sticker ── */

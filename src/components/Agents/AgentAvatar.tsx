@@ -48,11 +48,11 @@ const AgentAvatar = ({
 }: AgentAvatarProps) => {
   const theme = useAppTheme();
   const mood = moodFor(activity);
-  const { seed, hue, generatorVersion } = identity;
+  const { seed, hue, generatorVersion, main } = identity;
 
   const svg = useMemo(
-    () => renderIdentity({ seed, hue, generatorVersion }, { size, theme, mood }),
-    [seed, hue, generatorVersion, size, theme, mood]
+    () => renderIdentity({ seed, hue, generatorVersion, main }, { size, theme, mood }),
+    [seed, hue, generatorVersion, main, size, theme, mood]
   );
   const ringColor = useMemo(
     () => identityRingColor({ seed, hue, generatorVersion }, theme),

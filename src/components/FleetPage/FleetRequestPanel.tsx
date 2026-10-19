@@ -3,7 +3,6 @@ import { useAppTheme } from '../../hooks/useAppTheme';
 import {
   faceOf,
   identityRingColor,
-  mainIdentity,
 } from '../Agents/agentIdentity';
 import AskUserPanel from '../AskUserPanel/AskUserPanel';
 import InlineApprovalCard from '../InlineApprovalCard';
@@ -79,7 +78,7 @@ const FleetRequestPanel = ({
 }: FleetRequestPanelProps) => {
   const theme = useAppTheme();
   const { request, asker, count, caption } = scene;
-  const identity = asker ? faceOf(faces, asker.seed) : (faces[MAIN_FACE] ?? mainIdentity());
+  const identity = asker ? faceOf(faces, asker.seed) : faces[MAIN_FACE];
   const name = asker?.name ?? 'Main';
   const speaker = (prompt: ReactNode) => (
     <div className={styles.asks}>

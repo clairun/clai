@@ -1,9 +1,17 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import type { FleetCrewMember } from '../../fleet/fleetModel';
-import { MAIN_AVATAR_HUE } from '../Agents/agentIdentity';
+import { MAIN_AVATAR_HUE, MAIN_AVATAR_SEED } from '../Agents/agentIdentity';
+import { agentAvatar } from '../Agents/avatarGenerator';
 import { castFor, MAIN_FACE } from './FleetFace';
 import FleetCrew from './FleetCrew';
+
+/** The generator's markup as the DOM serialises it. */
+const asHtml = (svg: string) => {
+  const div = document.createElement('div');
+  div.innerHTML = svg;
+  return div.innerHTML;
+};
 
 const member = (name: string, patch: Partial<FleetCrewMember> = {}): FleetCrewMember => ({
   seed: `def-${name}`,
@@ -15,13 +23,16 @@ const member = (name: string, patch: Partial<FleetCrewMember> = {}): FleetCrewMe
   level: null,
   ...patch,
 });
-const cast = castFor({}, { accessory: 'scarf', hue: 200, screentone: 'dots' });
+const cast = castFor({}, { id: 'ws-1-main', avatar: null });
 
 describe('castFor', () => {
-  it("keeps Main's face the same in every workspace; only its accessory differs", () => {
-    const other = castFor({}, { accessory: 'cap', hue: 320, screentone: 'lines' });
-    expect(cast[MAIN_FACE]).toMatchObject({ hue: MAIN_AVATAR_HUE, accessory: 'scarf' });
-    expect(other[MAIN_FACE]).toMatchObject({ hue: MAIN_AVATAR_HUE, accessory: 'cap' });
+  it("draws the card's own Main: its seed, always purple", () => {
+    const other = castFor({}, { id: 'ws-2-main', avatar: null });
+    expect(cast[MAIN_FACE]).toMatchObject({ seed: 'ws-1-main', hue: MAIN_AVATAR_HUE, main: true });
+    expect(other[MAIN_FACE]).toMatchObject({ seed: 'ws-2-main', hue: MAIN_AVATAR_HUE, main: true });
+    expect(castFor({}, { id: 'ws-1-main', avatar: { seed: 'picked', generatorVersion: 1 } })[MAIN_FACE].seed).toBe('picked');
+    // An older snapshot that names no Main.
+    expect(castFor({}, null)[MAIN_FACE].seed).toBe(MAIN_AVATAR_SEED);
   });
 });
 
@@ -42,8 +53,10 @@ describe('FleetCrew', () => {
     expect(screen.getByLabelText('Main needs you: Ship it?')).toBeTruthy();
     expect(screen.getByText('Draft the release…')).toBeTruthy();
     expect(screen.getByText('+2').getAttribute('title')).toBe('Idle one, idle\nIdle two, idle');
-    // Main wears its workspace's accessory.
-    expect(document.querySelector('[data-accessory="scarf"]')).toBeTruthy();
+    // Main's face is its own seed's, accessory included.
+    expect(screen.getByLabelText('Main needs you: Ship it?').innerHTML).toContain(
+      asHtml(agentAvatar('ws-1-main', { size: 22, theme: 'light', hue: MAIN_AVATAR_HUE, accessory: true }))
+    );
   });
 
   it('zooms a busy face out to its whole task; an idle face is only labelled', () => {

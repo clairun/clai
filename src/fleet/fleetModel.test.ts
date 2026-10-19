@@ -614,6 +614,14 @@ describe('the crew strip', () => {
     expect(strip(crewCard([]))).toEqual(['Main:idle']);
   });
 
+  it("keeps the workspace's Main for its face, and the last one known when a snapshot names none", () => {
+    expect(crewCard().main).toEqual({ id: 'wa-main', avatar: null });
+    const picked = { ...MANAGER, avatar: { seed: 'picked', generatorVersion: 1 } };
+    const seeded = seedFleet(EMPTY_FLEET, [{ ...snapshotOf(), agents: [picked] }]);
+    expect(card(seeded).main).toEqual({ id: 'wa-main', avatar: { seed: 'picked', generatorVersion: 1 } });
+    expect(card(seedFleet(seeded, [{ ...snapshotOf(), agents: [] }])).main?.avatar?.seed).toBe('picked');
+  });
+
   it('gives a running member the first words of its task, the whole title for the zoom', () => {
     const t = task('r1', 'running', NOW, { title: 'Crawl the October feeds and drop duplicates' });
     expect(strip(crewCard(), live([t]))).toEqual(['Main:idle', 'Writer:idle', 'Researcher:running Crawl the October…']);

@@ -1386,12 +1386,6 @@ const WorkspaceHeader = ({
   );
 };
 
-// The workspace chat is always the Main's session, so its in-flight footer
-// always wears the Main's face. Built once at module scope because the footer
-// is memoized on this prop: a fresh object per render would re-render it on
-// every parent render for the whole of every run.
-const MAIN_IDENTITY = mainIdentity();
-
 // Chat is the workspace's primary surface. Memories, artifacts, tasks, and
 // member agents live in the drawer (toggled from the header counters) and
 // open in modals when inspected — the chat is never hidden.
@@ -1439,6 +1433,10 @@ const ChatFirstLayout = ({
   taskRoster,
   onOpenTask,
 }: ChatFirstLayoutProps) => {
+  // The workspace chat is always the Main's session, so its in-flight footer
+  // wears the Main's face. Keyed on the roster, which keeps one reference
+  // across polls (`useStableRoster`): the footer is memoized on this prop.
+  const mainFace = useMemo(() => mainIdentity(taskRoster.find((agent) => agent.isDefault)), [taskRoster]);
   // Streaming deltas are the highest-frequency store updates (many per
   // second). Subscribing here — instead of in the Workspace page shell —
   // scopes each delta's re-render to the chat area only.
@@ -1513,7 +1511,7 @@ const ChatFirstLayout = ({
             runError={runError}
             runErrorIsLimit={runErrorIsLimit}
             runStartedAt={runStartedAt}
-            runningIdentity={MAIN_IDENTITY}
+            runningIdentity={mainFace}
             queuedMessageIds={queuedMessageIds}
             onDeleteQueuedMessage={onDeleteQueuedMessage}
             onEditQueuedMessage={onEditQueuedMessage}

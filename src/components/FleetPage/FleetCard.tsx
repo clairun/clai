@@ -13,7 +13,6 @@ import {
   type FleetRequestScene,
   type FleetFeed as Feed,
 } from '../../fleet/fleetModel';
-import type { WorkspaceLook } from '../../fleet/workspaceLook';
 import { castFor } from './FleetFace';
 import FleetCrew from './FleetCrew';
 import FleetRequestPanel from './FleetRequestPanel';
@@ -77,8 +76,6 @@ interface FleetCardProps {
   live: FleetLive;
   /** Picked agent faces, by agent definition id. */
   faces: Record<string, AgentIdentity>;
-  /** What tells this workspace's card from the others (`workspaceLook`). */
-  look: WorkspaceLook;
   /** The page's clock: the last Fleet event or the minute tick, whichever is later. */
   now: number;
   /** Drawn loud: it needs you, or a task on it just finished. */
@@ -87,8 +84,8 @@ interface FleetCardProps {
 }
 
 /** A miniature: the workspace's conversation as highlights, or its open request, answerable in place. */
-const FleetCard = ({ card, feed, shouts, live, faces, look, now, loud = null, onSelect }: FleetCardProps) => {
-  const cast = useMemo(() => castFor(faces, look), [faces, look]);
+const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect }: FleetCardProps) => {
+  const cast = useMemo(() => castFor(faces, card.main), [faces, card.main]);
   const crew = useMemo(() => cardCrew(card, live, now), [card, live, now]);
   const phase = cardPhase(card, live);
   const attention = cardAttention(card);

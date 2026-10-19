@@ -16,7 +16,6 @@ import { useAppTheme } from '../../hooks/useAppTheme';
 import {
   faceOf,
   identityRingColor,
-  mainIdentity,
   type AgentActivity,
   type AgentIdentity,
 } from '../Agents/agentIdentity';
@@ -32,7 +31,8 @@ import {
   type FleetSpeaker,
 } from '../../fleet/fleetModel';
 import fx, { FaceExpression, Sfx, SpeedLines, type Expression } from './FleetEffects';
-import FleetFace, { MAIN_FACE, type Cast, type CastIdentity } from './FleetFace';
+import AgentAvatar from '../Agents/AgentAvatar';
+import { MAIN_FACE, type Cast } from './FleetFace';
 import FleetZoom, { Tail, zoomStart, type ZoomStart } from './FleetZoom';
 import styles from './FleetPage.module.css';
 
@@ -82,7 +82,7 @@ export const Who = ({
   ghosts = false,
   children,
 }: {
-  identity: CastIdentity;
+  identity: AgentIdentity;
   name: string;
   size: number;
   activity?: AgentActivity;
@@ -99,10 +99,10 @@ export const Who = ({
       {ghosts &&
         [0, 1].map((i) => (
           <span key={i} className={fx.ghost} aria-hidden="true">
-            <FleetFace identity={identity} size={size} activity={activity} ring={false} />
+            <AgentAvatar identity={identity} size={size} activity={activity} ring={false} />
           </span>
         ))}
-      <FleetFace identity={identity} size={size} activity={activity} ring={false} />
+      <AgentAvatar identity={identity} size={size} activity={activity} ring={false} />
       {expression && <FaceExpression kind={expression} size={size} />}
     </span>
     {children}
@@ -141,8 +141,8 @@ const Cross = () => (
 
 
 const nameOf = (s: FleetSpeaker): string => (s.kind === 'you' ? 'You' : s.kind === 'main' ? 'Main' : s.agent.name);
-const faceFor = (s: FleetSpeaker, faces: Faces): CastIdentity | null =>
-  s.kind === 'agent' ? faceOf(faces, s.agent.seed) : s.kind === 'main' ? (faces[MAIN_FACE] ?? mainIdentity()) : null;
+const faceFor = (s: FleetSpeaker, faces: Faces): AgentIdentity | null =>
+  s.kind === 'agent' ? faceOf(faces, s.agent.seed) : s.kind === 'main' ? faces[MAIN_FACE] : null;
 
 /**
  * `Main → Researcher`, with how a task ended or that it waits its turn. Main's
@@ -240,12 +240,12 @@ const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: 
         <span className={styles.rowFaces} aria-hidden="true">
           {from && (
             <span className={styles.rowFace} data-anchor>
-              <FleetFace identity={from} size={16} ring={false} />
+              <AgentAvatar identity={from} size={16} ring={false} />
             </span>
           )}
           {to && (
             <span className={styles.rowFace} data-anchor>
-              <FleetFace identity={to} size={16} ring={false} />
+              <AgentAvatar identity={to} size={16} ring={false} />
             </span>
           )}
         </span>
@@ -482,7 +482,7 @@ const FleetFeed = ({
         <FleetZoom
           origin={zoom.origin}
           start={zoom.start}
-          face={zoomFace && zoom.start.face && <FleetFace identity={zoomFace} size={Math.round(zoom.start.face.width)} ring={false} />}
+          face={zoomFace && zoom.start.face && <AgentAvatar identity={zoomFace} size={Math.round(zoom.start.face.width)} ring={false} />}
           label={`Message from ${nameOf(zoom.line.from)}`}
           onClosed={closed}
         >
