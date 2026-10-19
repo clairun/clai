@@ -499,6 +499,22 @@ describe('FleetPage', () => {
     expect(useFleetStore.getState().selectedId).toBeNull();
   });
 
+  it('readies the terminal when a card is clicked, but not when the board deselects', async () => {
+    fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+    renderFleet();
+    const terminal = screen.getByRole('textbox', { name: 'Terminal' });
+    const card = (await screen.findByRole('button', { name: 'Select Alpha' })).closest('article')!;
+    fireEvent.click(card.firstElementChild!);
+    expect(useFleetStore.getState().selectedId).toBe('a');
+    expect(terminal).toHaveFocus();
+
+    terminal.blur();
+    fireEvent.click(card.parentElement!);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(useFleetStore.getState().selectedId).toBeNull();
+    expect(terminal).not.toHaveFocus();
+  });
+
   describe('opening a workspace', () => {
     const Opened = () => <p data-testid="opened">{useParams().workspaceId}</p>;
     const renderRoutes = () =>

@@ -12,6 +12,7 @@ import {
 } from '../../fleet/fleetModel';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { workspaceLook } from '../../fleet/workspaceLook';
+import { dispatchFocusTerminal } from '../../utils/workspaceUiEvents';
 import FleetCard from './FleetCard';
 import { accentStyle } from './FleetFace';
 import fx, { FLEET_FX } from './FleetEffects';
@@ -41,7 +42,14 @@ interface FleetGridProps {
  * WebKitGTK even a short transition blinks. The drawn effects switch on here.
  */
 const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpen }: FleetGridProps) => {
-  const handleSelect = useCallback((id: string) => onSelect(id), [onSelect]);
+  // Choosing a card readies the terminal for it, as the switcher does.
+  const handleSelect = useCallback(
+    (id: string) => {
+      onSelect(id);
+      dispatchFocusTerminal();
+    },
+    [onSelect]
+  );
   const gridRef = useRef<HTMLDivElement | null>(null);
   const theme = useAppTheme();
   useThoughtBeat(gridRef, order.some((id) => cards[id] && cardPhase(cards[id], live) === 'working'));

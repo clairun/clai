@@ -78,7 +78,7 @@ export const takePendingForkPrompt = (workspaceId: string): string | null => {
 
 /**
  * Put the keyboard in the shared terminal's input, as Ctrl+L does: after the
- * Fleet's switcher picks a workspace, typing goes to it at once.
+ * Fleet's switcher or a card click picks a workspace, typing goes to it at once.
  */
 export const FOCUS_TERMINAL_EVENT = 'clai-focus-terminal';
 
