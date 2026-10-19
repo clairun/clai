@@ -241,7 +241,7 @@ const FleetZoom = ({
       }
       return;
     }
-    if (e.key !== 'Tab') return;
+    if (e.code !== 'Tab') return;
     const order = [e.currentTarget, ...e.currentTarget.querySelectorAll<HTMLElement>(FOCUSABLE)];
     const at = Math.max(0, order.indexOf(document.activeElement as HTMLElement));
     e.preventDefault();

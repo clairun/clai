@@ -116,7 +116,7 @@ describe('FleetPage', () => {
     renderFleet();
     await screen.findByRole('button', { name: 'Select Alpha' });
     const terminal = screen.getByRole('textbox', { name: 'Terminal' });
-    const press = (shiftKey = false) => fireEvent.keyDown(terminal, { key: 'Tab', ctrlKey: true, shiftKey });
+    const press = (shiftKey = false) => fireEvent.keyDown(terminal, { key: 'Tab', code: 'Tab', ctrlKey: true, shiftKey });
     const entries = () => screen.getAllByRole('option').map((o) => o.textContent);
     const highlighted = () =>
       within(screen.getByRole('listbox', { name: 'Switch workspace' })).getByRole('option', { selected: true })
@@ -171,7 +171,9 @@ describe('FleetPage', () => {
     renderFleet();
     await screen.findByRole('button', { name: 'Select Alpha' });
     const terminal = screen.getByRole('textbox', { name: 'Terminal' });
-    const press = (shiftKey = false) => fireEvent.keyDown(terminal, { key: 'Tab', ctrlKey: true, shiftKey });
+    // WebKitGTK reports Shift+Tab (keysym ISO_Left_Tab) as key 'Unidentified'; only `code` is 'Tab'.
+    const press = (shiftKey = false) =>
+      fireEvent.keyDown(terminal, { key: shiftKey ? 'Unidentified' : 'Tab', code: 'Tab', ctrlKey: true, shiftKey });
     const highlighted = () => screen.getByRole('option', { selected: true }).textContent;
     press();
     expect(highlighted()).toContain(screen.getAllByRole('option')[0]!.textContent!);

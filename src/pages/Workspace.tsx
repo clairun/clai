@@ -2505,7 +2505,7 @@ const Workspace = () => {
                               ref={artifactAddMenuRef}
                               style={artifactAddMenu.style}
                               onKeyDown={(e) => {
-                                if (e.key !== 'Tab') return;
+                                if (e.code !== 'Tab') return;
                                 const items = Array.from(
                                   e.currentTarget.querySelectorAll<HTMLElement>(
                                     '[role="menuitem"]:not([disabled])'

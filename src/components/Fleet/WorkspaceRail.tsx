@@ -524,7 +524,7 @@ const WorkspaceRail = ({
                       // click-swallowing backdrop. Dismiss and hand focus
                       // back to the trigger instead, so the next Tab
                       // continues from the row.
-                      if (e.key !== 'Tab') return;
+                      if (e.code !== 'Tab') return;
                       const items = Array.from(
                         e.currentTarget.querySelectorAll<HTMLElement>(
                           '[role="menuitem"]:not([disabled])',

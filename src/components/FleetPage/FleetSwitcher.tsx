@@ -60,7 +60,7 @@ const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: Flee
         choose(highlightId);
         return;
       }
-      if (e.key !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey || order.length === 0) return;
+      if (e.code !== 'Tab' || !e.ctrlKey || e.altKey || e.metaKey || order.length === 0) return;
       e.preventDefault();
       e.stopPropagation();
       setHighlightId(cycleCard(entries, highlightId ?? selectedId ?? NEW_WORKSPACE, e.shiftKey ? -1 : 1));
