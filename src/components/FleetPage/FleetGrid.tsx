@@ -1,4 +1,5 @@
-import { memo, useCallback, useMemo, useRef, type CSSProperties } from 'react';
+import { memo, useCallback, useMemo, useRef, useState, type CSSProperties } from 'react';
+import { Link } from 'react-router';
 import type { AgentIdentity } from '../Agents/agentIdentity';
 import {
   boardShape,
@@ -10,6 +11,7 @@ import {
   type FleetLive,
   type FleetPhase,
 } from '../../fleet/fleetModel';
+import { boardSlots, hiddenActivity } from '../../fleet/boardSlots';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { workspaceLook } from '../../fleet/workspaceLook';
 import { dispatchFocusTerminal } from '../../utils/workspaceUiEvents';
@@ -37,9 +39,11 @@ interface FleetGridProps {
 }
 
 /**
- * The board: every card the same size (`boardShape`), scrolling when there
- * are more; the selected one is only highlighted. Nothing animates: on
- * WebKitGTK even a short transition blinks. The drawn effects switch on here.
+ * The board: every card the same size (`boardShape`), never scrolling; when
+ * there are more cards than fit, `boardSlots` picks the ones on it and a line
+ * under it counts the active ones left off. The selected one is only
+ * highlighted. Nothing animates: on WebKitGTK even a short transition blinks.
+ * The drawn effects switch on here.
  */
 const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpen }: FleetGridProps) => {
   // Choosing a card readies the terminal for it, as the switcher does.
@@ -52,25 +56,37 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
   );
   const gridRef = useRef<HTMLDivElement | null>(null);
   const theme = useAppTheme();
-  useThoughtBeat(gridRef, order.some((id) => cards[id] && cardPhase(cards[id], live) === 'working'));
+  const shape = boardShape(order.length);
+  // The previous slots, so cards on the board keep them (derived state, as
+  // FleetPage keeps its order; the slots are a fixed point of themselves).
+  const [slots, setSlots] = useState<string[]>([]);
+  const capacity = shape.cols * shape.rows;
+  const board = useMemo(
+    () => boardSlots(order, cards, { live, selectedId, prev: slots, capacity }),
+    [order, cards, live, selectedId, slots, capacity]
+  );
+  if (board.visible.join(',') !== slots.join(',')) setSlots(board.visible);
+  const { visible } = board;
+  const more = hiddenActivity(board.hidden);
+  useThoughtBeat(gridRef, visible.some((id) => cards[id] && cardPhase(cards[id], live) === 'working'));
   // Each card's feed, once. A card with an open request shows that instead.
   const panels = useMemo(
     () =>
-      order.flatMap((id) => {
+      visible.flatMap((id) => {
         const card = cards[id];
         if (!card) return [];
         const feed = openRequests(card).length > 0 ? null : cardFeed(card, live, now);
         return [{ card, feed, selected: id === selectedId, look: workspaceLook(id) }];
       }),
-    [order, cards, live, now, selectedId]
+    [visible, cards, live, now, selectedId]
   );
   const loud = useMemo(() => fleetLoudness(panels), [panels]);
-  const shape = boardShape(panels.length);
   const deselect = (e: React.MouseEvent) => {
     if (e.target === e.currentTarget) onSelect(null);
   };
 
   return (
+    <>
     <div ref={gridRef} className={`${styles.board} ${fx.fx}`} data-fx={FLEET_FX} onClick={deselect}>
       <div className={styles.cards} style={{ '--cols': shape.cols, '--rows': shape.rows } as CSSProperties} onClick={deselect}>
         {panels.map(({ card, feed, selected, look }) => {
@@ -90,6 +106,12 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
         })}
       </div>
     </div>
+    {more && (
+      <p className={styles.offBoard}>
+        {more} — Ctrl+Tab to switch, or open the <Link to="/workspace">Workspace view</Link>
+      </p>
+    )}
+    </>
   );
 };
 

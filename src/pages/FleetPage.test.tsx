@@ -8,6 +8,7 @@ import FleetPage from './FleetPage';
 import WorkspacePicker from '../components/TerminalEmulator/WorkspacePicker';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
+import { useTaskStore } from '../workspace/taskStore';
 import { EMPTY_FLEET, emptyCard, shortTime } from '../fleet/fleetModel';
 import type { FleetWorkspace } from '../generated/bindings';
 
@@ -61,6 +62,7 @@ const renderFleet = () =>
 beforeEach(() => {
   useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null, loadedAt: null, loadError: null, buffer: null });
   useFleetActivityStore.setState({ activeRunsByWorkspace: {} });
+  useTaskStore.setState({ tasks: {}, seeded: {} });
   // A 4 × 3 grid.
   vi.stubGlobal(
     'ResizeObserver',
@@ -254,7 +256,6 @@ describe('FleetPage', () => {
     const task = (id: string, status: string, ago: number) =>
       ({ id, title: `Task ${id}`, status, resultSummary: `Result ${id}.`, parentTaskId: null, createdAt: BigInt(Date.now() - ago), updatedAt: BigInt(Date.now() - ago), completedAt: status === 'running' ? null : BigInt(Date.now() - ago), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never;
     fleetSnapshot.mockResolvedValue([
-      workspace('s', 'Staged'),
       { ...workspace('r1', 'Run one', 10), tasks: [task('r1', 'running', 3 * 60_000)] },
       { ...workspace('r2', 'Run two', 20), tasks: [task('r2', 'running', 60_000)] },
       { ...workspace('r3', 'Run three', 30), tasks: [task('r3', 'running', 2 * 60_000)] },
@@ -584,15 +585,18 @@ describe('FleetPage', () => {
     mockInvoke.mockImplementation(async () => undefined);
   });
 
-  it('lays six cards 3 × 2, the rest scroll, and selecting one only highlights it; two cards keep two columns', async () => {
+  it('lays six cards 3 × 2, leaves the rest off the board, and selecting one only highlights it; two cards keep two columns', async () => {
     fleetSnapshot.mockResolvedValue(Array.from({ length: 8 }, (_, i) => workspace(`w${i}`, `W${i}`, i * 1000)));
     const { unmount } = renderFleet();
-    await screen.findByRole('button', { name: 'Select W7' });
-    const grid = () => screen.getByRole('button', { name: 'Select W7' }).closest('article')!.parentElement!;
+    await screen.findByRole('button', { name: 'Select W5' });
+    const grid = () => screen.getByRole('button', { name: 'Select W5' }).closest('article')!.parentElement!;
     const shape = () => [grid().style.getPropertyValue('--cols'), grid().style.getPropertyValue('--rows'), grid().children.length];
-    expect(shape()).toEqual(['3', '2', 8]);
+    expect(shape()).toEqual(['3', '2', 6]);
+    expect(screen.queryByRole('button', { name: 'Select W6' })).not.toBeInTheDocument();
+    // Idle cards left off the board need no word.
+    expect(screen.queryByText(/Ctrl\+Tab to switch/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Select W2' }));
-    expect(shape()).toEqual(['3', '2', 8]);
+    expect(shape()).toEqual(['3', '2', 6]);
     expect(document.querySelectorAll('[aria-current]')).toHaveLength(1);
     unmount();
 
@@ -601,6 +605,27 @@ describe('FleetPage', () => {
     renderFleet();
     const lone = (await screen.findByRole('button', { name: 'Select W0' })).closest('article')!.parentElement!;
     expect(lone.style.getPropertyValue('--cols')).toBe('2');
+  });
+
+  it('brings an active card onto a full board in the least pressing slot, and counts the active ones left off', async () => {
+    const running = { id: 't', title: 'Task', status: 'running', parentTaskId: null, createdAt: BigInt(Date.now()), updatedAt: BigInt(Date.now()), completedAt: null, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never;
+    const ask = { pendingId: 'q', workspaceId: 'w7', sessionId: 'main', runId: 'r', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
+    fleetSnapshot.mockResolvedValue([
+      ...Array.from({ length: 7 }, (_, i) => ({ ...workspace(`w${i}`, `W${i}`, i * 1000), tasks: [{ ...(running as object), id: `t${i}` }] as never })),
+      { ...workspace('w7', 'W7', 7000), pendingAsks: [ask] },
+    ]);
+    renderFleet();
+    await screen.findByRole('button', { name: 'Select W7' });
+    const shown = () => screen.getAllByRole('button', { name: /^Select / }).map((b) => b.textContent);
+    // Needs you first, then the most recent working; the oldest working ones are off the board.
+    expect(shown()).toEqual(['W7', 'W0', 'W1', 'W2', 'W3', 'W4']);
+    const line = screen.getByText(/Ctrl\+Tab to switch/);
+    expect(line).toHaveTextContent('2 more working — Ctrl+Tab to switch, or open the Workspace view');
+    expect(within(line).getByRole('link', { name: 'Workspace view' })).toHaveAttribute('href', '/workspace');
+    // Choosing one off the board (as the switcher does) takes the least recent working card's slot.
+    act(() => useFleetStore.getState().select('w6'));
+    expect(shown()).toEqual(['W7', 'W0', 'W1', 'W2', 'W3', 'W6']);
+    expect(line).toHaveTextContent('2 more working');
   });
 
   it('counts one waiting workspace as "1 needs you", and an unselected card never marks a workspace seen', async () => {

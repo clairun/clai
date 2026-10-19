@@ -570,7 +570,7 @@ describe('card picking', () => {
     expect(pick([mk('a', NOW - 1), mk('b', NOW - 3), mk('new', NOW)], null, prev)).toEqual(['a', 'b', 'new']);
   });
 
-  it('lays six cards 3 × 2 and scrolls beyond; fewer grow, but never past half the width', () => {
+  it('lays at most six cards 3 × 2; fewer grow, but never past half the width', () => {
     expect([1, 2, 3, 4, 5, 6, 10].map(boardShape)).toEqual([
       { cols: 2, rows: 1 },
       { cols: 2, rows: 1 },

@@ -71,17 +71,34 @@
   container-type: size;
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow: hidden;
 }
 
-/* `--rows` of cards on screen, the rest scroll. Sized against the board
- * (`cqh`), so their content never sizes them. */
+/* `--rows` of cards, filling the board; it never scrolls (`boardSlots`
+ * picks the cards). Sized against the board (`cqh`), so their content never
+ * sizes them. */
 .cards {
   display: grid;
   gap: 16px;
   min-height: 100%;
   grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
   grid-auto-rows: calc((100cqh - (var(--rows) - 1) * 16px) / var(--rows));
+}
+
+/* Active cards left off the board: one quiet line in the gap above the terminal. */
+.offBoard {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: calc(var(--terminal-rest-height, 80px) + 12px);
+  margin: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--color-text-secondary);
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .notice {

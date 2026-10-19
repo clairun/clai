@@ -937,14 +937,14 @@ export const recentlyOpened = (ids: readonly string[], cards: Record<string, Fle
       return cb.lastOpenedAt - ca.lastOpenedAt || cb.lastActivityAt - ca.lastActivityAt;
     });
 
-/** The grid: columns, and rows on screen before it scrolls. */
+/** The grid: columns and rows; the board never scrolls (`boardSlots`). */
 export interface BoardShape {
   cols: number;
   rows: number;
 }
 
 /**
- * Six cards 3 × 2, scrolling beyond; with fewer, each grows. Never fewer than
+ * Six cards 3 × 2, the rest off the board; with fewer, each grows. Never fewer than
  * two columns, so a lone card's bubbles don't stretch into very long lines.
  */
 export const boardShape = (count: number): BoardShape => {
