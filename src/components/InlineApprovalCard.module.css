@@ -324,8 +324,6 @@
 }
 
 .compact .segmentButtons {
-  flex-shrink: 0;
-  flex-wrap: nowrap;
   gap: 4px;
 }
 
@@ -334,6 +332,16 @@
   border-radius: var(--radius-full);
   font-size: 11px;
   line-height: 18px;
+}
+
+/* The prefix an "always" chip saves; whole in its tooltip. */
+.compact .btn code {
+  display: inline-block;
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
 }
 
 .compact .cardFooter {

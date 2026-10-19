@@ -40,8 +40,8 @@ interface InlineApprovalCardProps {
   /**
    * For a small Fleet card: no badge or collapse, the command and each part
    * on one line, with short decision chips (full labels in the tooltips). No
-   * prefix editing, so no "always" decisions: the rule they save would be
-   * hidden. The full card keeps them.
+   * prefix editing: an "always" chip saves the suggested prefix and shows it
+   * (`Always · cargo`). The full card keeps the editable field.
    */
   compact?: boolean;
   /**
@@ -329,6 +329,19 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false, speaker }: 
           const savedOn = isSharedAgent
             ? 'Saved on the shared agent, so it applies wherever this agent works'
             : 'Saved on this workspace\'s own agent';
+          const reach = isSharedAgent ? 'every workspace' : 'this agent';
+          // An "always" decision: the compact chip names the prefix it saves.
+          const alwaysChip = (verb: 'allow' | 'deny', prefix: string) =>
+            compact
+              ? {
+                  title: `Always ${verb} commands starting with \`${prefix}\` (${reach})`,
+                  children: (
+                    <>
+                      {verb === 'allow' ? 'Always' : 'Never'} · <code>{prefix}</code>
+                    </>
+                  ),
+                }
+              : { title: savedOn, children: `Always ${verb} (${reach})` };
           return (
             <article
               key={req.requestId}
@@ -446,29 +459,23 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false, speaker }: 
                           disabled={isSubmitting}
                           {...chipText('Allow once', 'Once')}
                         />
-                        {canPersist && !compact && (
+                        {canPersist && (
                           <button
                             type="button"
                             className={`${styles.btn} ${styles.btnAllow} ${cell.decision === 'allowAlways' ? styles.btnSelected : ''}`}
                             onClick={() => handleSegmentDecision(req, idx, 'allowAlways')}
                             disabled={isSubmitting}
-                            title={savedOn}
-                          >
-                            {isSharedAgent
-                              ? 'Always allow (every workspace)'
-                              : 'Always allow (this agent)'}
-                          </button>
+                            {...alwaysChip('allow', seg.suggestedPrefix)}
+                          />
                         )}
-                        {!compact && (
+                        {(canPersist || !compact) && (
                           <button
                             type="button"
                             className={`${styles.btn} ${styles.btnDeny} ${cell.decision === 'denyAlways' ? styles.btnSelected : ''}`}
                             onClick={() => handleSegmentDecision(req, idx, 'denyAlways')}
                             disabled={isSubmitting}
-                            title={savedOn}
-                          >
-                            {isSharedAgent ? 'Always deny (every workspace)' : 'Always deny (this agent)'}
-                          </button>
+                            {...alwaysChip('deny', seg.suggestedPrefix)}
+                          />
                         )}
                         <button
                           type="button"
@@ -487,16 +494,18 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false, speaker }: 
               )}
               {req.segments.length > 1 && (
                 <footer className={styles.cardFooter}>
-                  {!compact && (
+                  {(!compact || req.segments.some((seg) => seg.suggestedPrefix)) && (
                     <button
                       type="button"
                       className={`${styles.btn} ${styles.btnAllow}`}
                       onClick={() => allowAllAlways(req)}
                       disabled={isSubmitting}
-                      title="Persist every persistable prefix and run. Segments without a stable prefix fall back to allow-once."
-                    >
-                      Allow all (always)
-                    </button>
+                      {...chipText(
+                        'Allow all (always)',
+                        'All always',
+                        'Persist every persistable prefix and run. Segments without a stable prefix fall back to allow-once.'
+                      )}
+                    />
                   )}
                   <button
                     type="button"

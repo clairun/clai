@@ -104,10 +104,36 @@ describe('compact requests (small Fleet cards)', () => {
     // The parts alone would hide the `&&` and any part that needs no decision.
     expect(screen.getByText('cd /srv/app && cargo test')).toHaveAttribute('title', 'cd /srv/app && cargo test');
     expect(screen.getAllByText('cd /srv/app')).toHaveLength(1);
-    expect(screen.getAllByText('cargo test')).toHaveLength(1);
+    expect(screen.getAllByText('cargo test', { ignore: 'button *' })).toHaveLength(1);
     expect(screen.queryByLabelText('Save as prefix:')).not.toBeInTheDocument();
-    // No "always" decision: it would save a prefix rule the card doesn't show.
-    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Once', 'Deny', 'Once', 'Deny', 'Deny all']);
+    // "Always" chips name the suggested prefix they save, since it can't be edited here.
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'Once', 'Always · cd', 'Never · cd', 'Deny',
+      'Once', 'Always · cargo test', 'Never · cargo test', 'Deny',
+      'All always', 'Deny all',
+    ]);
+    expect(screen.getByRole('button', { name: 'Always · cargo test' })).toHaveAttribute(
+      'title',
+      'Always allow commands starting with `cargo test` (this agent)'
+    );
+  });
+
+  it('saves the suggested prefix from an "always" chip, scoped to a shared agent when it is one', async () => {
+    const single = { ...approval, persistsToSharedAgent: true, command: 'cargo test', segments: [approval.segments[1]!] };
+    render(<InlineApprovalCard workspaceId="ws-1" request={single} compact />);
+    const always = screen.getByRole('button', { name: 'Always · cargo test' });
+    expect(always.title).toMatch(/\(every workspace\)$/);
+    await userEvent.click(always);
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'perm-1',
+      decisions: [{ kind: 'allowAlways', scope: 'agent', prefix: 'cargo test' }],
+    });
+  });
+
+  it('offers no "always" chip for a part without a suggested prefix', () => {
+    const bare = { ...approval, command: './run.sh', segments: [{ text: './run.sh', kind: 'simple', suggestedPrefix: '' }] };
+    render(<InlineApprovalCard workspaceId="ws-1" request={bare as PermissionRequest} compact />);
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Once', 'Deny']);
   });
 
   it('flags a part it cannot reduce to one command in words, with the reason in the tooltip', () => {
