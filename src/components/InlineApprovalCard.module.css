@@ -360,6 +360,7 @@
 
 .spoken .cardBody {
   flex: 1;
+  min-height: 0;
   max-height: none;
   overflow: visible;
 }
@@ -368,13 +369,13 @@
   margin-top: auto;
 }
 
-/* Long commands wrap anywhere and scroll inside the bubble. */
+/* Long commands wrap anywhere and scroll inside the bubble once it is out of room. */
 .compact .spokenCommand,
 .spokenCommand {
   display: block;
+  min-height: 0;
   margin-top: 4px;
   padding: 4px 8px;
-  max-height: calc(var(--command-lines, 6) * 1.45em + 10px);
   overflow: auto;
   font-size: 12.5px;
   font-weight: 400;

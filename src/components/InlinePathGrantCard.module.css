@@ -379,6 +379,7 @@
 
 .spoken .cardBody {
   flex: 1;
+  min-height: 0;
   max-height: none;
   overflow: visible;
 }

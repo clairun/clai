@@ -780,13 +780,16 @@ button.crewButton {
   color: var(--color-text-past);
 }
 
-/* The asker's face, the question in its bubble. */
+/* The asker's face, the question in its bubble: as tall as its words while
+ * the card has room, then it gives way to the answer and scrolls inside. */
 .asks {
   display: grid;
   grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-rows: minmax(0, auto);
   align-items: start;
   gap: 18px;
-  flex-shrink: 0;
+  flex: 0 1 auto;
+  min-height: 0;
 }
 
 .asks .who {
@@ -807,16 +810,18 @@ button.crewButton {
 
 .asks .bubble {
   --bubble-border: var(--color-warning);
+  display: flex;
+  flex-direction: column;
   min-width: 0;
+  max-height: 100%;
   padding: 6px 12px;
 }
 
-/* Lines of a command before it scrolls inside the bubble (read by the approval card). */
-.asks {
-  --command-lines: 3;
-}
-
 .askText {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
   font-size: 14px;
   font-weight: 600;
   line-height: 1.35;
