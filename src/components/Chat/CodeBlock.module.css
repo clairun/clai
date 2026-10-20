@@ -1,0 +1,52 @@
+.codeBlock {
+  position: relative;
+  margin: 12px 0;
+}
+
+/* Absolutely positioned so showing/hiding it never shifts the code. */
+.copyButton {
+  appearance: none;
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  background: var(--color-bg-elevated);
+  border: 1px solid var(--color-code-border);
+  border-radius: var(--radius-sm);
+  color: var(--color-text-secondary);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition-fast), color var(--transition-fast);
+}
+
+.codeBlock:hover .copyButton,
+.copyButton:focus-visible,
+.copyButton[data-state='copied'],
+.copyButton[data-state='failed'] {
+  opacity: 1;
+}
+
+.copyButton:hover {
+  background: var(--color-bg-elevated-hover);
+  color: var(--color-text-primary);
+}
+
+.copyButton[data-state='copied'] {
+  color: var(--color-success);
+}
+
+.copyButton[data-state='failed'] {
+  color: var(--color-critical);
+}
+
+/* No hover on touch screens: keep the button visible. */
+@media (hover: none) {
+  .copyButton {
+    opacity: 1;
+  }
+}
