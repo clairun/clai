@@ -213,6 +213,17 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
         add_dir_filter(&mut write_filters, &mut metadata_filters, &tmp)?;
     }
 
+    if matches!(command.profile.network, SandboxNetworkMode::Host) {
+        // `/etc/resolv.conf` -> `/private/var/run/resolv.conf`; the target
+        // lives outside the `/private/etc` default, so name it exactly rather
+        // than opening all of `/var/run`.
+        add_literal_filter(
+            &mut read_filters,
+            &mut metadata_filters,
+            Path::new("/private/var/run/resolv.conf"),
+        )?;
+    }
+
     for grant in &command.profile.filesystem.path_grants {
         add_grant_filters(
             &mut read_filters,
@@ -233,6 +244,8 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
     append_mach_lookup_rule(&mut profile, command.profile.network);
     if matches!(command.profile.network, SandboxNetworkMode::Host) {
         profile.push_str("(allow network*)\n");
+        profile.push_str(HOST_NETWORK_SYSTEM_SOCKET);
+        profile.push('\n');
     }
     append_rule(&mut profile, "file-read-metadata", &metadata_filters);
     append_rule(&mut profile, "file-read*", &read_filters);
@@ -318,6 +331,25 @@ fn append_subpath_allow(profile: &mut String, operation: &str, paths: &[String])
     profile.push_str(")\n");
 }
 
+/// Services the system resolver and TLS stack reach when network is on; the
+/// set follows Chromium's `sandbox/policy/mac/network.sb`.
+const HOST_NETWORK_MACH_SERVICES: [&str; 7] = [
+    "com.apple.mDNSResponder",
+    // DNS resolver configuration (configd `dnsinfo`) and network settings.
+    "com.apple.SystemConfiguration.DNSConfiguration",
+    "com.apple.SystemConfiguration.configd",
+    "com.apple.networkd",
+    // Certificate trust evaluation for TLS.
+    "com.apple.SecurityServer",
+    "com.apple.ocspd",
+    "com.apple.trustd.agent",
+];
+
+/// AF_SYSTEM/SYSPROTO_CONTROL sockets back the system resolver and network
+/// framework; `network*` does not cover the `system-socket` operation.
+const HOST_NETWORK_SYSTEM_SOCKET: &str =
+    "(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))";
+
 fn append_mach_lookup_rule(profile: &mut String, network: SandboxNetworkMode) {
     profile.push_str("(allow mach-lookup\n");
     profile.push_str("  (global-name \"com.apple.cfprefsd.agent\")\n");
@@ -325,7 +357,11 @@ fn append_mach_lookup_rule(profile: &mut String, network: SandboxNetworkMode) {
     profile.push_str("  (global-name \"com.apple.system.logger\")\n");
     profile.push_str("  (global-name \"com.apple.system.opendirectoryd.libinfo\")\n");
     if matches!(network, SandboxNetworkMode::Host) {
-        profile.push_str("  (global-name \"com.apple.mDNSResponder\")\n");
+        for service in HOST_NETWORK_MACH_SERVICES {
+            profile.push_str("  (global-name \"");
+            profile.push_str(service);
+            profile.push_str("\")\n");
+        }
     }
     profile.push_str(")\n");
 }
@@ -534,6 +570,8 @@ mod tests {
         SandboxEnv, SandboxPathGrant, SandboxProfile, SandboxSessionBusMode,
     };
 
+    const RESOLV_CONF_READ: &str = "(literal \"/private/var/run/resolv.conf\")";
+
     /// A path that is guaranteed absent: a tempdir created and immediately
     /// dropped (deleted). Safer than hardcoding a literal that could one day
     /// exist and silently un-pin the regression.
@@ -580,6 +618,11 @@ mod tests {
         assert!(profile.contains("(allow file-read-data (literal \"/\"))"));
         assert!(!profile.contains("(subpath \"/\")"));
         assert!(profile.contains("(allow network*)"));
+        assert!(profile.contains(HOST_NETWORK_SYSTEM_SOCKET));
+        assert!(profile.contains(RESOLV_CONF_READ));
+        for service in HOST_NETWORK_MACH_SERVICES {
+            assert!(profile.contains(&format!("(global-name \"{service}\")")));
+        }
         assert!(profile.contains(&format!("(subpath \"{}\")", workspace_path)));
         assert!(
             profile.contains("(allow file-write*"),
@@ -651,7 +694,11 @@ mod tests {
         let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
 
         assert!(!profile.contains("(allow network*)"));
-        assert!(!profile.contains("com.apple.mDNSResponder"));
+        assert!(!profile.contains("system-socket"));
+        assert!(!profile.contains("resolv.conf"));
+        for service in HOST_NETWORK_MACH_SERVICES {
+            assert!(!profile.contains(service), "{service} leaked: {profile}");
+        }
     }
 
     #[test]
