@@ -222,6 +222,8 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
             &mut metadata_filters,
             Path::new("/private/var/run/resolv.conf"),
         )?;
+        // libinfo connects to `/var/run/mDNSResponder`; namei must read the `/var` symlink.
+        metadata_filters.insert(PathFilter::Literal("/var".to_string()));
     }
 
     for grant in &command.profile.filesystem.path_grants {
@@ -334,7 +336,8 @@ fn append_subpath_allow(profile: &mut String, operation: &str, paths: &[String])
 /// Services the system resolver and TLS stack reach when network is on; the
 /// set follows Chromium's `sandbox/policy/mac/network.sb`.
 const HOST_NETWORK_MACH_SERVICES: [&str; 7] = [
-    "com.apple.mDNSResponder",
+    // mDNSResponder's XPC getaddrinfo, used by Network.framework clients.
+    "com.apple.dnssd.service",
     // DNS resolver configuration (configd `dnsinfo`) and network settings.
     "com.apple.SystemConfiguration.DNSConfiguration",
     "com.apple.SystemConfiguration.configd",
@@ -571,6 +574,7 @@ mod tests {
     };
 
     const RESOLV_CONF_READ: &str = "(literal \"/private/var/run/resolv.conf\")";
+    const VAR_SYMLINK_METADATA: &str = "(literal \"/var\")";
 
     /// A path that is guaranteed absent: a tempdir created and immediately
     /// dropped (deleted). Safer than hardcoding a literal that could one day
@@ -620,6 +624,7 @@ mod tests {
         assert!(profile.contains("(allow network*)"));
         assert!(profile.contains(HOST_NETWORK_SYSTEM_SOCKET));
         assert!(profile.contains(RESOLV_CONF_READ));
+        assert!(profile.contains(VAR_SYMLINK_METADATA));
         for service in HOST_NETWORK_MACH_SERVICES {
             assert!(profile.contains(&format!("(global-name \"{service}\")")));
         }
@@ -696,6 +701,7 @@ mod tests {
         assert!(!profile.contains("(allow network*)"));
         assert!(!profile.contains("system-socket"));
         assert!(!profile.contains("resolv.conf"));
+        assert!(!profile.contains(VAR_SYMLINK_METADATA));
         for service in HOST_NETWORK_MACH_SERVICES {
             assert!(!profile.contains(service), "{service} leaked: {profile}");
         }
@@ -817,7 +823,7 @@ mod tests {
 
         assert!(!profile.contains("(allow mach-lookup)\n"));
         assert!(profile.contains("(global-name \"com.apple.system.logger\")"));
-        assert!(profile.contains("(global-name \"com.apple.mDNSResponder\")"));
+        assert!(profile.contains("(global-name \"com.apple.dnssd.service\")"));
     }
 
     #[test]
