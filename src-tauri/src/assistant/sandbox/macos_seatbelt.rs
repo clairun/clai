@@ -399,6 +399,14 @@ fn add_default_filters(
         }
     }
 
+    // `/bin/sh` is a trampoline: it readlinks `/private/var/select/sh` to pick
+    // bash, dash or zsh, and warns on stderr for every command when denied.
+    add_literal_filter(
+        read_filters,
+        metadata_filters,
+        Path::new("/private/var/select/sh"),
+    )?;
+
     Ok(())
 }
 
@@ -575,6 +583,7 @@ mod tests {
 
     const RESOLV_CONF_READ: &str = "(literal \"/private/var/run/resolv.conf\")";
     const VAR_SYMLINK_METADATA: &str = "(literal \"/var\")";
+    const SH_SELECT_LINK: &str = "(literal \"/private/var/select/sh\")";
 
     /// A path that is guaranteed absent: a tempdir created and immediately
     /// dropped (deleted). Safer than hardcoding a literal that could one day
@@ -704,6 +713,42 @@ mod tests {
         assert!(!profile.contains(VAR_SYMLINK_METADATA));
         for service in HOST_NETWORK_MACH_SERVICES {
             assert!(!profile.contains(service), "{service} leaked: {profile}");
+        }
+    }
+
+    // macOS /bin/sh readlinks `/private/var/select/sh` before exec'ing the
+    // real shell; the grant is a shell concern, so it holds in every network
+    // mode.
+    #[test]
+    fn profile_lets_sh_trampoline_read_select_link_in_every_network_mode() {
+        for network in [SandboxNetworkMode::Disabled, SandboxNetworkMode::Host] {
+            let workspace = tempfile::tempdir().unwrap();
+            let private_tmp = tempfile::tempdir_in(workspace.path()).unwrap();
+            let mut command = sample_command(workspace.path());
+            command.profile.network = network;
+
+            let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
+
+            let read_section = profile
+                .split("(allow file-read*\n")
+                .nth(1)
+                .expect("read section should exist");
+            assert!(
+                read_section.contains(SH_SELECT_LINK),
+                "{network:?}: select link must be readable; profile:\n{profile}"
+            );
+            let metadata_section = profile
+                .split("(allow file-read-metadata\n")
+                .nth(1)
+                .expect("metadata section should exist");
+            assert!(
+                metadata_section.contains("(literal \"/private/var/select\")"),
+                "{network:?}: select dir metadata missing; profile:\n{profile}"
+            );
+            assert!(
+                !profile.contains("(subpath \"/private/var\")"),
+                "{network:?}: /private/var must not be opened wholesale; profile:\n{profile}"
+            );
         }
     }
 
