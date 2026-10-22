@@ -229,7 +229,7 @@ export default function WorkspaceTaskTranscriptPanel({
             identity={taskIdentity(task, roster)}
             size={20}
             activity={taskActivity(task)}
-            label={task.assignedAgentDisplayName}
+            label={agentName}
           />
           <span className={styles.title} title={task.title}>{task.title}</span>
           <span className={`${styles.statusPill} ${statusClass}`}>{statusLabel}</span>

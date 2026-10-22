@@ -35,6 +35,7 @@ import {
   cardPhase,
   emptyCard,
   MAX_CREW,
+  cardAgents,
   cardCrew,
   firstWords,
   pickCards,
@@ -599,8 +600,8 @@ describe('card picking', () => {
 });
 
 describe('the crew strip', () => {
-  const crewCard = (agents = [WRITER, RESEARCHER]) =>
-    card(seedFleet(EMPTY_FLEET, [{ ...snapshotOf(), agents: [MANAGER, ...agents] }]));
+  const crewSeed = (agents = [WRITER, RESEARCHER]) => seedFleet(EMPTY_FLEET, [{ ...snapshotOf(), agents: [MANAGER, ...agents] }]);
+  const crewCard = (agents = [WRITER, RESEARCHER]) => card(crewSeed(agents));
   const live = (tasks: WorkspaceTaskResponse[], runs: string[] = []): FleetLive => ({
     runs: { [WS]: runs },
     tasks: { [WS]: Object.fromEntries(tasks.map((t) => [t.id, t])) },
@@ -649,6 +650,23 @@ describe('the crew strip', () => {
     expect(strip(crewCard(), live([done]), NOW + 1000)).toContain('Researcher:done full');
     expect(strip(crewCard(), live([done]), NOW + FRESH_MS * 0.75)).toContain('Researcher:done half');
     expect(strip(crewCard(), live([done]), NOW + FRESH_MS)).toContain('Researcher:idle');
+  });
+
+  it("draws the Main's own tasks, their reports and their questions as the Main's", () => {
+    const self = { assignedAgentDisplayName: 'Manager', assignedAgentDefinitionId: 'def-main', assignedToWorkspaceAgentId: 'wa-main' };
+    const mine = task('m1', 'running', NOW - 30_000, { ...self, title: 'Daily report', sessionId: 'task-m1' });
+    const done = task('m0', 'completed', NOW - 60_000, { ...self, title: 'Loki report' });
+    let s = apply(crewSeed(), created(message('rep', 'user', 'Loki is fine.', report('m0', 'completed', MANAGER)), NOW - 50_000));
+    s = apply(s, env({ type: 'ask_user_requested', payload: { pending_id: 'p1', question: 'Which day?', options: null, multi_select: false } } as AssistantUiEvent, NOW, 'task-m1'));
+    const l = live([mine, done]);
+    expect(cardFeed(card(s), l, NOW).lines.map(said)).toEqual([
+      'Main → Main: Loki report',
+      'Main → Main: Loki is fine. [done]',
+      'Main → Main: Daily report [running]',
+    ]);
+    expect(strip(card(s), l)).toEqual(['Main:needs', 'Writer:idle', 'Researcher:idle']);
+    expect(requestScene(card(s), l)?.asker).toBeNull();
+    expect(cardAgents(card(s), l)).toEqual([]);
   });
 
   it('keeps an agent the roster lost while it works', () => {

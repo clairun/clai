@@ -357,7 +357,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
         lastActivityAt: Math.max(card.lastActivityAt, activity),
         lastOpenedAt: Math.max(card.lastOpenedAt, Number(ws.lastOpenedAt)),
         requests,
-        agents: ws.agents.filter((a) => !a.isDefault).map(agentRef),
+        agents: ws.agents.flatMap((a) => agentRef(a) ?? []),
         main: mainRef(ws.agents) ?? card.main,
       },
       seed,
@@ -406,28 +406,28 @@ export const cardPhase = (card: FleetCard, live: FleetLive): FleetPhase => {
   return workspaceTasks(card, live).some((t) => isTaskLive(t.status)) ? 'working' : 'stopped';
 };
 
-export const agentOf = (task: WorkspaceTaskResponse): FleetAgentRef => ({
-  name: task.assignedAgentDisplayName,
-  seed: task.assignedAgentDefinitionId || task.assignedToWorkspaceAgentId,
-});
+/** Who a task was handed to, with the same face seed as its messages; `null` for the Main's own task. */
+const assigneeOf = (card: FleetCard, task: WorkspaceTaskResponse): FleetAgentRef | null =>
+  card.main && task.assignedToWorkspaceAgentId === card.main.id
+    ? null
+    : { name: task.assignedAgentDisplayName, seed: task.assignedAgentDefinitionId || task.assignedToWorkspaceAgentId };
 
-/** An agent as a message names it, with the same face seed as its tasks. */
-const agentRef = (agent: AgentRefSnapshot): FleetAgentRef => ({
-  name: agent.displayName,
-  seed: agent.agentDefinitionId || agent.workspaceAgentId,
-});
+/** An agent as a message names it, with the same face seed as its tasks; `null` for the Main. */
+const agentRef = (agent: AgentRefSnapshot): FleetAgentRef | null =>
+  agent.isDefault ? null : { name: agent.displayName, seed: agent.agentDefinitionId || agent.workspaceAgentId };
 
 const mainRef = (agents: readonly AgentRefSnapshot[]): FleetMainRef | null => {
   const main = agents.find((a) => a.isDefault);
   return main ? { id: main.workspaceAgentId, avatar: main.avatar ?? null } : null;
 };
 
-/** Every distinct agent with a task on the card, live ones first, then the most recent. */
+/** Every distinct agent other than the Main with a task on the card, live ones first, then the most recent. */
 export const cardAgents = (card: FleetCard, live: FleetLive): FleetAgentRef[] => {
   const tasks = workspaceTasks(card, live).sort(
     (a, b) => Number(isTaskLive(b.status)) - Number(isTaskLive(a.status)) || Number(b.updatedAt) - Number(a.updatedAt)
   );
-  return [...new Map(tasks.map((t) => [agentOf(t).seed, agentOf(t)])).values()];
+  const agents = tasks.flatMap((t) => assigneeOf(card, t) ?? []);
+  return [...new Map(agents.map((a) => [a.seed, a])).values()];
 };
 
 
@@ -584,7 +584,7 @@ export const mainRunning = (card: FleetCard, live: FleetLive): boolean => {
 
 const YOU: FleetSpeaker = { kind: 'you' };
 const MAIN: FleetSpeaker = { kind: 'main' };
-const agentSpeaker = (agent: FleetAgentRef): FleetSpeaker => ({ kind: 'agent', agent });
+const speaker = (agent: FleetAgentRef | null): FleetSpeaker => (agent ? { kind: 'agent', agent } : MAIN);
 const OUTCOMES: Partial<Record<TaskStatus, FleetOutcome>> = { completed: 'done', failed: 'failed', stopped: 'stopped' };
 
 /** How a task ended, in a few words. */
@@ -621,7 +621,7 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
   const ownerOf = (sessionId: string): FleetSpeaker | null => {
     if (sessionId === main) return MAIN;
     const task = bySession.get(sessionId);
-    return task ? agentSpeaker(agentOf(task)) : null;
+    return task ? speaker(assigneeOf(card, task)) : null;
   };
 
   const lines: FleetLine[] = [];
@@ -636,17 +636,16 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
       lines.push(fromSaid(said, YOU, to));
     } else if (origin.kind === 'agent') {
       if (said.text.startsWith(ASSIGNMENT_PREFIX)) continue;
-      const from = origin.agent.isDefault ? MAIN : agentSpeaker(agentRef(origin.agent));
-      lines.push(fromSaid(said, from, to));
+      lines.push(fromSaid(said, speaker(agentRef(origin.agent)), to));
     } else {
       reported.add(`${origin.taskId}:${origin.cycleNo}`);
-      lines.push(fromSaid(said, agentSpeaker(agentRef(origin.agent)), to, OUTCOMES[origin.status] ?? null));
+      lines.push(fromSaid(said, speaker(agentRef(origin.agent)), to, OUTCOMES[origin.status] ?? null));
     }
   }
   for (const task of tasks) {
-    const agent = agentSpeaker(agentOf(task));
+    const agent = speaker(assigneeOf(card, task));
     const parent = task.parentTaskId ? byId.get(task.parentTaskId) : undefined;
-    const boss = parent ? agentSpeaker(agentOf(parent)) : MAIN;
+    const boss = parent ? speaker(assigneeOf(card, parent)) : MAIN;
     const state = task.status === 'queued' ? 'queued' : isTaskLive(task.status) ? 'running' : null;
     lines.push(line(`task:${task.id}`, Number(task.createdAt), boss, agent, task.title, null, state));
     const outcome = OUTCOMES[task.status];
@@ -789,7 +788,7 @@ export const requestScene = (card: FleetCard, live: FleetLive): FleetRequestScen
   let asker: FleetAgentRef | null = null;
   if (request.kind === 'ask') {
     const task = workspaceTasks(card, live).find((t) => t.sessionId === request.ask.sessionId);
-    asker = task ? agentOf(task) : null;
+    asker = task ? assigneeOf(card, task) : null;
   } else if (request.agentName) {
     asker = { name: request.agentName, seed: request.agentName };
   }
@@ -844,7 +843,8 @@ export const cardCrew = (card: FleetCard, live: FleetLive, now: number): FleetCr
   const tasks = workspaceTasks(card, live).sort((a, b) => Number(b.updatedAt) - Number(a.updatedAt));
   const members = new Map<string, FleetAgentRef & { main: boolean }>([[MAIN_SEED, { seed: MAIN_SEED, name: 'Main', main: true }]]);
   for (const agent of card.agents) if (!members.has(agent.seed)) members.set(agent.seed, { ...agent, main: false });
-  const join = (agent: FleetAgentRef) => {
+  const join = (agent: FleetAgentRef | null) => {
+    if (!agent) return MAIN_SEED;
     if (!members.has(agent.seed)) members.set(agent.seed, { ...agent, main: false });
     return agent.seed;
   };
@@ -856,17 +856,17 @@ export const cardCrew = (card: FleetCard, live: FleetLive, now: number): FleetCr
   for (const request of openRequests(card)) {
     const task = request.kind === 'ask' ? tasks.find((t) => t.sessionId === request.ask.sessionId) : undefined;
     const named = request.kind === 'ask' ? undefined : [...members.values()].find((m) => !m.main && m.name === request.agentName);
-    say(task ? join(agentOf(task)) : (named?.seed ?? MAIN_SEED), 'needs', request.text);
+    say(task ? join(assigneeOf(card, task)) : (named?.seed ?? MAIN_SEED), 'needs', request.text);
   }
   if (mainRunning(card, live)) {
     const asked = [...card.said].reverse().find((s) => s.sessionId === card.mainSessionId && s.origin?.kind === 'user');
     say(MAIN_SEED, 'running', asked ? `Answering: ${firstSentence(asked.text)}` : 'Answering in the chat');
   }
-  for (const task of tasks) if (task.status === 'running' || task.status === 'stopping') say(join(agentOf(task)), 'running', task.title);
-  for (const task of tasks) if (task.status === 'queued') say(join(agentOf(task)), 'queued', task.title);
+  for (const task of tasks) if (task.status === 'running' || task.status === 'stopping') say(join(assigneeOf(card, task)), 'running', task.title);
+  for (const task of tasks) if (task.status === 'queued') say(join(assigneeOf(card, task)), 'queued', task.title);
   for (const task of tasks) {
     const level = task.status === 'completed' ? shoutLevel(Number(task.completedAt ?? task.updatedAt), now) : null;
-    if (level) say(join(agentOf(task)), 'done', task.title, level);
+    if (level) say(join(assigneeOf(card, task)), 'done', task.title, level);
   }
 
   const all: FleetCrewMember[] = [...members.values()].map((m) => {
