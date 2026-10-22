@@ -213,6 +213,19 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
         add_dir_filter(&mut write_filters, &mut metadata_filters, &tmp)?;
     }
 
+    if matches!(command.profile.network, SandboxNetworkMode::Host) {
+        // `/etc/resolv.conf` -> `/private/var/run/resolv.conf`; the target
+        // lives outside the `/private/etc` default, so name it exactly rather
+        // than opening all of `/var/run`.
+        add_literal_filter(
+            &mut read_filters,
+            &mut metadata_filters,
+            Path::new("/private/var/run/resolv.conf"),
+        )?;
+        // libinfo connects to `/var/run/mDNSResponder`; namei must read the `/var` symlink.
+        metadata_filters.insert(PathFilter::Literal("/var".to_string()));
+    }
+
     for grant in &command.profile.filesystem.path_grants {
         add_grant_filters(
             &mut read_filters,
@@ -233,6 +246,8 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
     append_mach_lookup_rule(&mut profile, command.profile.network);
     if matches!(command.profile.network, SandboxNetworkMode::Host) {
         profile.push_str("(allow network*)\n");
+        profile.push_str(HOST_NETWORK_SYSTEM_SOCKET);
+        profile.push('\n');
     }
     append_rule(&mut profile, "file-read-metadata", &metadata_filters);
     append_rule(&mut profile, "file-read*", &read_filters);
@@ -318,6 +333,26 @@ fn append_subpath_allow(profile: &mut String, operation: &str, paths: &[String])
     profile.push_str(")\n");
 }
 
+/// Services the system resolver and TLS stack reach when network is on; the
+/// set follows Chromium's `sandbox/policy/mac/network.sb`.
+const HOST_NETWORK_MACH_SERVICES: [&str; 7] = [
+    // mDNSResponder's XPC getaddrinfo, used by Network.framework clients.
+    "com.apple.dnssd.service",
+    // DNS resolver configuration (configd `dnsinfo`) and network settings.
+    "com.apple.SystemConfiguration.DNSConfiguration",
+    "com.apple.SystemConfiguration.configd",
+    "com.apple.networkd",
+    // Certificate trust evaluation for TLS.
+    "com.apple.SecurityServer",
+    "com.apple.ocspd",
+    "com.apple.trustd.agent",
+];
+
+/// AF_SYSTEM/SYSPROTO_CONTROL sockets back the system resolver and network
+/// framework; `network*` does not cover the `system-socket` operation.
+const HOST_NETWORK_SYSTEM_SOCKET: &str =
+    "(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))";
+
 fn append_mach_lookup_rule(profile: &mut String, network: SandboxNetworkMode) {
     profile.push_str("(allow mach-lookup\n");
     profile.push_str("  (global-name \"com.apple.cfprefsd.agent\")\n");
@@ -325,7 +360,11 @@ fn append_mach_lookup_rule(profile: &mut String, network: SandboxNetworkMode) {
     profile.push_str("  (global-name \"com.apple.system.logger\")\n");
     profile.push_str("  (global-name \"com.apple.system.opendirectoryd.libinfo\")\n");
     if matches!(network, SandboxNetworkMode::Host) {
-        profile.push_str("  (global-name \"com.apple.mDNSResponder\")\n");
+        for service in HOST_NETWORK_MACH_SERVICES {
+            profile.push_str("  (global-name \"");
+            profile.push_str(service);
+            profile.push_str("\")\n");
+        }
     }
     profile.push_str(")\n");
 }
@@ -359,6 +398,14 @@ fn add_default_filters(
             add_literal_filter(write_filters, metadata_filters, Path::new(path))?;
         }
     }
+
+    // `/bin/sh` is a trampoline: it readlinks `/private/var/select/sh` to pick
+    // bash, dash or zsh, and warns on stderr for every command when denied.
+    add_literal_filter(
+        read_filters,
+        metadata_filters,
+        Path::new("/private/var/select/sh"),
+    )?;
 
     Ok(())
 }
@@ -534,6 +581,10 @@ mod tests {
         SandboxEnv, SandboxPathGrant, SandboxProfile, SandboxSessionBusMode,
     };
 
+    const RESOLV_CONF_READ: &str = "(literal \"/private/var/run/resolv.conf\")";
+    const VAR_SYMLINK_METADATA: &str = "(literal \"/var\")";
+    const SH_SELECT_LINK: &str = "(literal \"/private/var/select/sh\")";
+
     /// A path that is guaranteed absent: a tempdir created and immediately
     /// dropped (deleted). Safer than hardcoding a literal that could one day
     /// exist and silently un-pin the regression.
@@ -580,6 +631,12 @@ mod tests {
         assert!(profile.contains("(allow file-read-data (literal \"/\"))"));
         assert!(!profile.contains("(subpath \"/\")"));
         assert!(profile.contains("(allow network*)"));
+        assert!(profile.contains(HOST_NETWORK_SYSTEM_SOCKET));
+        assert!(profile.contains(RESOLV_CONF_READ));
+        assert!(profile.contains(VAR_SYMLINK_METADATA));
+        for service in HOST_NETWORK_MACH_SERVICES {
+            assert!(profile.contains(&format!("(global-name \"{service}\")")));
+        }
         assert!(profile.contains(&format!("(subpath \"{}\")", workspace_path)));
         assert!(
             profile.contains("(allow file-write*"),
@@ -651,7 +708,48 @@ mod tests {
         let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
 
         assert!(!profile.contains("(allow network*)"));
-        assert!(!profile.contains("com.apple.mDNSResponder"));
+        assert!(!profile.contains("system-socket"));
+        assert!(!profile.contains("resolv.conf"));
+        assert!(!profile.contains(VAR_SYMLINK_METADATA));
+        for service in HOST_NETWORK_MACH_SERVICES {
+            assert!(!profile.contains(service), "{service} leaked: {profile}");
+        }
+    }
+
+    // macOS /bin/sh readlinks `/private/var/select/sh` before exec'ing the
+    // real shell; the grant is a shell concern, so it holds in every network
+    // mode.
+    #[test]
+    fn profile_lets_sh_trampoline_read_select_link_in_every_network_mode() {
+        for network in [SandboxNetworkMode::Disabled, SandboxNetworkMode::Host] {
+            let workspace = tempfile::tempdir().unwrap();
+            let private_tmp = tempfile::tempdir_in(workspace.path()).unwrap();
+            let mut command = sample_command(workspace.path());
+            command.profile.network = network;
+
+            let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
+
+            let read_section = profile
+                .split("(allow file-read*\n")
+                .nth(1)
+                .expect("read section should exist");
+            assert!(
+                read_section.contains(SH_SELECT_LINK),
+                "{network:?}: select link must be readable; profile:\n{profile}"
+            );
+            let metadata_section = profile
+                .split("(allow file-read-metadata\n")
+                .nth(1)
+                .expect("metadata section should exist");
+            assert!(
+                metadata_section.contains("(literal \"/private/var/select\")"),
+                "{network:?}: select dir metadata missing; profile:\n{profile}"
+            );
+            assert!(
+                !profile.contains("(subpath \"/private/var\")"),
+                "{network:?}: /private/var must not be opened wholesale; profile:\n{profile}"
+            );
+        }
     }
 
     #[test]
@@ -770,7 +868,7 @@ mod tests {
 
         assert!(!profile.contains("(allow mach-lookup)\n"));
         assert!(profile.contains("(global-name \"com.apple.system.logger\")"));
-        assert!(profile.contains("(global-name \"com.apple.mDNSResponder\")"));
+        assert!(profile.contains("(global-name \"com.apple.dnssd.service\")"));
     }
 
     #[test]
