@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
 
 // The chart renderer has its own tests; here we only care that markdown
 // routes the right constructs to it with the right props.
@@ -16,7 +16,13 @@ vi.mock('./VegaChart', async (importOriginal) => ({
   ),
 }));
 
+const readWorkspaceFileBase64Mock = vi.fn();
+vi.mock('../../workspace/client', () => ({
+  readWorkspaceFileBase64: (...args: unknown[]) => readWorkspaceFileBase64Mock(...args),
+}));
+
 import MarkdownMessage from './MarkdownMessage';
+import { WorkspaceFileContext, type WorkspaceFileLocation } from './WorkspaceFileContext';
 
 const SPEC = '{"mark": "bar", "data": {"url": "sales.csv"}}';
 
@@ -82,14 +88,86 @@ describe('MarkdownMessage — Vega-Lite embedding', () => {
     );
   });
 
-  it('keeps ordinary and external images as <img>', () => {
-    render(
-      <MarkdownMessage
-        content={'![photo](shots/a.png)\n\n![remote](https://example.com/chart.vl.json)'}
-      />,
-    );
+  it('leaves an external .vl.json image as a plain <img>', () => {
+    render(<MarkdownMessage content="![remote](https://example.com/chart.vl.json)" />);
     expect(screen.queryByTestId('vega-chart-mock')).not.toBeInTheDocument();
-    expect(screen.getByAltText('photo')).toHaveAttribute('src', 'shots/a.png');
     expect(screen.getByAltText('remote')).toHaveAttribute('src', 'https://example.com/chart.vl.json');
+  });
+});
+
+describe('MarkdownMessage — workspace images', () => {
+  const CHAT: WorkspaceFileLocation = { workspaceId: 'ws-1', basePath: '' };
+
+  const renderIn = (location: WorkspaceFileLocation | null, content: string) =>
+    render(
+      <WorkspaceFileContext.Provider value={location}>
+        <MarkdownMessage content={content} />
+      </WorkspaceFileContext.Provider>,
+    );
+
+  beforeEach(() => {
+    readWorkspaceFileBase64Mock.mockReset();
+  });
+
+  it('loads a relative image from the workspace as a data URL', async () => {
+    readWorkspaceFileBase64Mock.mockResolvedValue({ path: 'shots/a.png', mime: 'image/png', base64: 'UE5H' });
+    renderIn(CHAT, '![photo](shots/a.png)');
+
+    expect(screen.getByText('Loading image…')).toBeInTheDocument();
+    expect(await screen.findByAltText('photo')).toHaveAttribute('src', 'data:image/png;base64,UE5H');
+    expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'shots/a.png');
+  });
+
+  it('resolves against the enclosing document, with a leading / meaning the workspace root', async () => {
+    readWorkspaceFileBase64Mock.mockResolvedValue({ path: '', mime: 'image/webp', base64: 'V0VCUA==' });
+    renderIn({ workspaceId: 'ws-1', basePath: 'reports/weekly.md' }, '![a](img/1.webp) ![b](/shots/2.webp)');
+
+    await screen.findByAltText('a');
+    await screen.findByAltText('b');
+    expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'reports/img/1.webp');
+    expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'shots/2.webp');
+  });
+
+  it('leaves http(s) and data: images untouched', () => {
+    renderIn(CHAT, '![remote](https://example.com/a.png) ![inline](data:image/gif;base64,R0lG)');
+
+    expect(screen.getByAltText('remote')).toHaveAttribute('src', 'https://example.com/a.png');
+    // react-markdown's URL sanitizer drops `data:` before it reaches us.
+    expect(screen.getByAltText('inline')).not.toHaveAttribute('src');
+    expect(readWorkspaceFileBase64Mock).not.toHaveBeenCalled();
+  });
+
+  it('shows the read error instead of a broken image', async () => {
+    readWorkspaceFileBase64Mock.mockRejectedValue('File not found: shots/missing.png');
+    renderIn(CHAT, '![gone](shots/missing.png)');
+
+    expect(await screen.findByText('File not found: shots/missing.png')).toBeInTheDocument();
+    expect(screen.getByText('Image failed to load')).toBeInTheDocument();
+    expect(screen.queryByAltText('gone')).not.toBeInTheDocument();
+  });
+
+  it('reports bytes the WebView cannot decode as an image', async () => {
+    readWorkspaceFileBase64Mock.mockResolvedValue({ path: '', mime: 'application/octet-stream', base64: 'eA==' });
+    renderIn(CHAT, '![notes](notes.bin)');
+
+    fireEvent.error(await screen.findByAltText('notes'));
+    expect(screen.getByText('notes.bin is not a displayable image')).toBeInTheDocument();
+  });
+
+  it('explains why a relative image cannot load outside a workspace', () => {
+    renderIn(null, '![photo](shots/a.png)');
+
+    expect(screen.getByText('Cannot load shots/a.png: no workspace to read it from')).toBeInTheDocument();
+    expect(readWorkspaceFileBase64Mock).not.toHaveBeenCalled();
+  });
+
+  it('zooms a workspace image on click and closes on Escape', async () => {
+    readWorkspaceFileBase64Mock.mockResolvedValue({ path: 'shots/a.png', mime: 'image/png', base64: 'UE5H' });
+    renderIn(CHAT, '![photo](shots/a.png)');
+
+    fireEvent.click(await screen.findByRole('button', { name: 'photo' }));
+    expect(screen.getByRole('dialog', { name: 'photo' })).toBeInTheDocument();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });

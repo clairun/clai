@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import CodeBlock from './CodeBlock';
 import MermaidDiagram from './MermaidDiagram';
 import VegaChart, { isVegaLiteSpecPath } from './VegaChart';
+import WorkspaceImage from './WorkspaceImage';
 import { isWorkspaceRelativeHref } from '../../utils/htmlBundle';
 import styles from './MarkdownMessage.module.css';
 
@@ -19,8 +20,9 @@ interface MarkdownMessageProps {
 const remarkPlugins = [remarkGfm];
 
 // `![title](charts/q3.vl.json)` embeds a Vega-Lite spec file as a live chart
-// (resolved relative to the enclosing document, see WorkspaceFileContext);
-// any other image renders as usual.
+// and `![shot](screens/1.png)` a workspace image, both resolved relative to
+// the enclosing document (see WorkspaceFileContext); `http(s):`/`data:`
+// images render as usual.
 const isVegaLiteSpecLink = (src: string | undefined): src is string =>
   !!src && isWorkspaceRelativeHref(src) && isVegaLiteSpecPath(src);
 
@@ -130,7 +132,10 @@ const useMarkdownComponents = (isStreaming: boolean): Components =>
       if (isVegaLiteSpecLink(source)) {
         return <VegaChart specPath={source} />;
       }
-      return <img src={source} alt={alt} title={title} />;
+      if (source && isWorkspaceRelativeHref(source)) {
+        return <WorkspaceImage path={source} alt={alt} title={title} />;
+      }
+      return <img className={styles.image} src={source} alt={alt} title={title} />;
     },
     a: ({ href, children, node }) =>
       containsChartLink(node) ? (
