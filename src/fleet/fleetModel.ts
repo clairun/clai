@@ -7,8 +7,11 @@
  * (`FleetLive`).
  *
  * A card keeps the messages said in the workspace (`said`): what the user,
- * Main and the agents told each other. `cardFeed` turns them, with the
- * tasks, into the miniature's highlights, in the order they happened.
+ * Main and the agents told each other. Main's words are heard a block of
+ * text at a time, at each tool call (`assistant_message_updated`, at most
+ * five a second) and when the message completes; deltas never reach the
+ * Fleet. `cardFeed` turns them, with the tasks, into the miniature's
+ * highlights, in the order they happened.
  */
 import type {
   AgentRefSnapshot,
@@ -56,6 +59,12 @@ export type FleetRequest = {
   | { kind: 'grant'; request: PathGrantRequest }
 );
 
+/** How far an assistant message's text had got (`end`, in characters) at `at`. */
+export interface FleetMark {
+  at: number;
+  end: number;
+}
+
 /** A message said in the workspace, as the feed needs it. */
 export interface FleetSaid {
   id: string;
@@ -63,11 +72,15 @@ export interface FleetSaid {
   role: 'user' | 'assistant';
   /** Who sent a user message; `null` for an assistant message. */
   origin: MessageOrigin | null;
-  /** Clipped to `NOTE_CHARS`, ending in `…` when cut. */
+  /** A user message clipped to `NOTE_CHARS`, ending in `…` when cut; an assistant message whole, as heard so far. */
   text: string;
   /** Cut short: the full message has to be fetched. */
   truncated: boolean;
+  /** When last heard. */
   at: number;
+  runId: string | null;
+  /** An assistant message, block by block as it was heard, oldest first; empty for a user message. */
+  marks: readonly FleetMark[];
 }
 
 export interface FleetCard {
@@ -82,6 +95,8 @@ export interface FleetCard {
   requests: Record<string, FleetRequest>;
   /** Oldest first, at most `SAID_LIMIT`. */
   said: FleetSaid[];
+  /** When questions were asked (`ask_user`), at most `SAID_LIMIT`: each closes Main's bubble. */
+  asked: number[];
   /** The workspace's enabled members, Main excluded, in roster order (from the snapshot). */
   agents: FleetAgentRef[];
   /** The workspace's Main, for its face (from the snapshot); `null` until one says. */
@@ -114,6 +129,7 @@ export const emptyCard = (workspaceId: string, title = ''): FleetCard => ({
   lastOpenedAt: 0,
   requests: {},
   said: [],
+  asked: [],
   agents: [],
   main: null,
 });
@@ -150,13 +166,15 @@ export const fullMessageText = (message: AssistantMessage): string =>
 export const isTaskLive = (status: TaskStatus): boolean =>
   status === 'queued' || status === 'running' || status === 'stopping';
 
-const saidOf = (message: AssistantMessage, at: number): FleetSaid => ({
+const userSaid = (message: AssistantMessage, at: number, runId: string | null): FleetSaid => ({
   id: message.id,
   sessionId: message.sessionId,
-  role: message.role === 'assistant' ? 'assistant' : 'user',
-  origin: message.role === 'assistant' ? null : message.origin,
+  role: 'user',
+  origin: message.origin,
   ...clip(fullMessageText(message)),
   at,
+  runId,
+  marks: [],
 });
 
 /**
@@ -172,6 +190,33 @@ const addSaid = (card: FleetCard, said: readonly FleetSaid[], replace: boolean):
   const ids = new Set(incoming.map((s) => s.id));
   const next = [...card.said.filter((s) => !ids.has(s.id)), ...incoming].sort((a, b) => a.at - b.at);
   return { ...card, said: next.slice(-SAID_LIMIT) };
+};
+
+/**
+ * Main's `message` as heard now: mid-run at a tool call, or complete. The
+ * text past what was heard is the next block, heard at `at`; nothing new
+ * changes nothing. Text that doesn't continue what was heard (a seed's
+ * preview, an edit) restates the message as one block.
+ */
+const hear = (card: FleetCard, message: AssistantMessage, runId: string | null, at: number): FleetCard => {
+  if (message.role !== 'assistant') return card;
+  const text = fullMessageText(message);
+  const held = card.said.find((s) => s.id === message.id);
+  if (!text || text === held?.text) return card;
+  const marks =
+    held && text.startsWith(held.text) ? [...held.marks, { at, end: text.length }] : [{ at: held?.marks[0]?.at ?? at, end: text.length }];
+  const said: FleetSaid = {
+    id: message.id,
+    sessionId: message.sessionId,
+    role: 'assistant',
+    origin: null,
+    text,
+    truncated: false,
+    at: marks.at(-1)!.at,
+    runId: runId ?? held?.runId ?? null,
+    marks,
+  };
+  return addSaid(card, [said], true);
 };
 
 const requestKey = (kind: FleetRequest['kind'], id: string) => `${kind}:${id}`;
@@ -191,7 +236,7 @@ const askRequest = (ask: FleetAsk, at: number): FleetRequest => ({
   at,
 });
 
-/** The variants the Fleet reads. Everything else, streaming above all, is ignored. */
+/** The variants the Fleet reads. Everything else, deltas above all, is ignored. */
 const FLEET_EVENTS: ReadonlySet<AssistantUiEvent['type']> = new Set([
   'message_created',
   'message_deleted',
@@ -200,6 +245,7 @@ const FLEET_EVENTS: ReadonlySet<AssistantUiEvent['type']> = new Set([
   'run_completed',
   'run_failed',
   'run_cancelled',
+  'assistant_message_updated',
   'assistant_message_completed',
   'ask_user_requested',
   'ask_user_resolved',
@@ -218,13 +264,19 @@ export const applyAssistantEvent = (
   const at = Number(envelope.timestamp);
 
   return updateCard(state, workspaceId, (current) => {
+    if (event.type === 'assistant_message_updated') {
+      // A tool call mid-run: news only when it closed a block of Main's text.
+      if (current.mainSessionId && current.mainSessionId !== sessionId) return current;
+      const heard = hear(current, event.payload.message, envelope.runId, at);
+      return heard === current ? current : bump(heard, at);
+    }
     const card = bump(current, at);
     switch (event.type) {
       case 'message_created': {
         // Every session's user messages: the user's, an agent's and a task's
-        // report. An assistant message is said when it completes.
+        // report. An assistant message is heard as it is written.
         const { message } = event.payload;
-        return message.role === 'user' ? addSaid(card, [saidOf(message, at)], true) : card;
+        return message.role === 'user' ? addSaid(card, [userSaid(message, at, envelope.runId)], true) : card;
       }
       case 'message_deleted': {
         const said = card.said.filter((s) => s.id !== event.payload.message_id);
@@ -234,10 +286,11 @@ export const applyAssistantEvent = (
         // Main's replies, to the user. A task's own replies reach Main as its report;
         // before the main session is known, keep them and let `cardFeed` choose.
         if (card.mainSessionId && card.mainSessionId !== sessionId) return card;
-        return addSaid(card, [saidOf(event.payload.message, at)], true);
+        return hear(card, event.payload.message, envelope.runId, at);
       case 'ask_user_requested':
         return {
           ...card,
+          asked: [...card.asked, at].slice(-SAID_LIMIT),
           requests: {
             ...card.requests,
             [requestKey('ask', event.payload.pending_id)]: askRequest(
@@ -300,12 +353,35 @@ export const applyUserSent = (
 ): FleetState =>
   updateCard(state, workspaceId, (card) => {
     const next = { ...bump(card, at), mainSessionId: sessionId };
-    return message ? addSaid(next, [saidOf(message, at)], true) : next;
+    return message ? addSaid(next, [userSaid(message, at, null)], true) : next;
   });
 
 /** The user opened the workspace at `at`: the switcher's order knows it before the next snapshot. */
 export const applyOpened = (state: FleetState, workspaceId: string, at: number): FleetState =>
   state.cards[workspaceId] ? updateCard(state, workspaceId, (card) => ({ ...card, lastOpenedAt: Math.max(card.lastOpenedAt, at) })) : state;
+
+/** A snapshot's message: an assistant one is a single block, heard when it was created. */
+const seedSaid = (
+  id: string,
+  sessionId: string,
+  origin: MessageOrigin | null,
+  preview: { text: string; truncated: boolean; createdAt: bigint },
+  runId: string | null
+): FleetSaid => {
+  const text = preview.truncated ? `${preview.text}…` : preview.text;
+  const at = Number(preview.createdAt);
+  return {
+    id,
+    sessionId,
+    role: origin ? 'user' : 'assistant',
+    origin,
+    text,
+    truncated: preview.truncated,
+    at,
+    runId,
+    marks: origin ? [] : [{ at, end: text.length }],
+  };
+};
 
 /**
  * Apply a snapshot. The Fleet becomes exactly the snapshot's workspaces, so a
@@ -321,26 +397,12 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
     const card = state.cards[ws.workspaceId] ?? emptyCard(ws.workspaceId);
     const activity = Number(ws.lastActivityAt);
     const mainSessionId = ws.mainSessionId ?? card.mainSessionId;
-    const seed: FleetSaid[] = ws.recentMessages.map((m) => ({
-      id: m.messageId,
-      sessionId: m.sessionId,
-      role: m.role === 'assistant' ? 'assistant' : 'user',
-      origin: m.role === 'assistant' ? null : m.origin,
-      text: m.truncated ? `${m.text}…` : m.text,
-      truncated: m.truncated,
-      at: Number(m.createdAt),
-    }));
+    const seed: FleetSaid[] = ws.recentMessages.map((m) =>
+      seedSaid(m.messageId, m.sessionId, m.role === 'assistant' ? null : m.origin, m, m.runId)
+    );
     const preview = ws.lastAssistantMessage;
     if (preview && mainSessionId && !seed.some((m) => m.id === preview.messageId)) {
-      seed.push({
-        id: preview.messageId,
-        sessionId: mainSessionId,
-        role: 'assistant',
-        origin: null,
-        text: preview.truncated ? `${preview.text}…` : preview.text,
-        truncated: preview.truncated,
-        at: Number(preview.createdAt),
-      });
+      seed.push(seedSaid(preview.messageId, mainSessionId, null, preview, null));
     }
     // Approvals and grants carry no timestamp; the workspace's activity orders them among waiting cards.
     const requests: Record<string, FleetRequest> = {};
@@ -357,6 +419,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
         lastActivityAt: Math.max(card.lastActivityAt, activity),
         lastOpenedAt: Math.max(card.lastOpenedAt, Number(ws.lastOpenedAt)),
         requests,
+        asked: [...new Set([...card.asked, ...ws.pendingAsks.map((a) => Number(a.requestedAt))])].sort((a, b) => a - b).slice(-SAID_LIMIT),
         agents: ws.agents.flatMap((a) => agentRef(a) ?? []),
         main: mainRef(ws.agents) ?? card.main,
       },
@@ -476,6 +539,8 @@ export interface FleetLine {
   outcome: FleetOutcome | null;
   /** A task handed over and not ended yet: its agent is (or will be) working. */
   live: 'running' | 'queued' | null;
+  /** Main's words in a run still going: the bubble may grow. */
+  writing: boolean;
 }
 
 export type FleetMood = 'working' | 'fresh' | 'idle' | 'stale';
@@ -498,6 +563,28 @@ const plainLine = (line: string): string =>
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\*\*|__|`|\*/g, '')
     .trim();
+
+/** A chart a message embeds, `![title](path.vl.json)`; a bubble draws it as a chip. */
+const CHART_EMBED = /!\[([^\]]*)\]\(<?([^)\s>]+\.vl\.json)>?\)/g;
+
+export type FleetWords = { kind: 'text'; text: string } | { kind: 'chart'; title: string; path: string };
+
+/** Main's words as plain lines, one per markdown line, and its charts in between. */
+export const wordsOf = (markdown: string): FleetWords[] => {
+  const words: FleetWords[] = [];
+  const text = (from: number, to: number) => {
+    const plain = markdown.slice(from, to).split('\n').map(plainLine).filter(Boolean).join('\n');
+    if (plain) words.push({ kind: 'text', text: plain });
+  };
+  let at = 0;
+  for (const embed of markdown.matchAll(CHART_EMBED)) {
+    text(at, embed.index);
+    words.push({ kind: 'chart', title: plainLine(embed[1]!) || 'Chart', path: embed[2]! });
+    at = embed.index + embed[0].length;
+  }
+  text(at, markdown.length);
+  return words;
+};
 
 /** A markdown text as one plain paragraph, for a bubble that clamps its lines. */
 export const plainText = (markdown: string | null | undefined): string =>
@@ -584,6 +671,8 @@ export const mainRunning = (card: FleetCard, live: FleetLive): boolean => {
 
 const YOU: FleetSpeaker = { kind: 'you' };
 const MAIN: FleetSpeaker = { kind: 'main' };
+/** Main's words to you: a bubble that opens in place and grows while Main writes. */
+export const isSpeech = (line: FleetLine): boolean => line.from.kind === 'main' && line.to.kind === 'you';
 const speaker = (agent: FleetAgentRef | null): FleetSpeaker => (agent ? { kind: 'agent', agent } : MAIN);
 const OUTCOMES: Partial<Record<TaskStatus, FleetOutcome>> = { completed: 'done', failed: 'failed', stopped: 'stopped' };
 
@@ -601,14 +690,65 @@ const line = (
   outcome: FleetOutcome | null = null,
   live: FleetLine['live'] = null,
   message: FleetLine['message'] = null
-): FleetLine => ({ key, at, from, to, text: plainText(text), markdown: text, message, headline: firstSentence(text), outcome, live });
+): FleetLine => ({ key, at, from, to, text: plainText(text), markdown: text, message, headline: firstSentence(text), outcome, live, writing: false });
+
+const messageOf = (said: FleetSaid): FleetLine['message'] => ({ sessionId: said.sessionId, id: said.id, truncated: said.truncated });
 
 const fromSaid = (said: FleetSaid, from: FleetSpeaker, to: FleetSpeaker, outcome: FleetOutcome | null = null) =>
-  line(said.id, said.at, from, to, said.text, outcome, null, { sessionId: said.sessionId, id: said.id, truncated: said.truncated });
+  line(said.id, said.at, from, to, said.text, outcome, null, messageOf(said));
+
+/** A block of Main's words to you, before `speak` joins it into a bubble. */
+interface Stretch {
+  key: string;
+  at: number;
+  run: string | null;
+  markdown: string;
+  message: FleetLine['message'];
+}
+
+const isStretch = (item: FleetLine | Stretch): item is Stretch => 'run' in item;
+
+/** An assistant message's blocks, each at the time it was heard. */
+const stretches = (said: FleetSaid): Stretch[] =>
+  said.marks.flatMap((mark, i) => {
+    const markdown = said.text.slice(i ? said.marks[i - 1]!.end : 0, mark.end).trim();
+    return markdown ? [{ key: i ? `${said.id}:${i}` : said.id, at: mark.at, run: said.runId, markdown, message: messageOf(said) }] : [];
+  });
+
+/**
+ * Lines in time order, Main's blocks joined into bubbles: blocks of one run
+ * share a bubble until something else is said, a task is handed over or a
+ * question is asked between them. A bubble is keyed by its first block, so
+ * it keeps its key as it grows, and is timed by its last.
+ */
+const speak = (items: readonly (FleetLine | Stretch)[], asked: readonly number[], running: ReadonlySet<string>): FleetLine[] => {
+  const lines: FleetLine[] = [];
+  let bubble: Stretch[] = [];
+  const close = () => {
+    const first = bubble[0];
+    if (!first) return;
+    const message = bubble.every((s) => s.message?.id === first.message?.id) ? first.message : null;
+    const markdown = bubble.map((s) => s.markdown).join('\n\n');
+    lines.push({ ...line(first.key, bubble.at(-1)!.at, MAIN, YOU, markdown, null, null, message), writing: first.run !== null && running.has(first.run) });
+    bubble = [];
+  };
+  for (const item of items) {
+    if (!isStretch(item)) {
+      close();
+      lines.push(item);
+      continue;
+    }
+    const last = bubble.at(-1);
+    if (last && (item.run === null || item.run !== last.run || asked.some((t) => t > last.at && t <= item.at))) close();
+    bubble.push(item);
+  }
+  close();
+  return lines;
+};
 
 /**
  * A miniature's highlights, oldest first: the user's messages and Main's
- * replies on the main session, what agents told each other (Main to a task,
+ * words on the main session (`speak`), what agents told each other (Main to a task,
  * a task's report to whoever handed it over), and each task handed over and
  * ended. Tool calls are never said. A task's report is how it ended; its own
  * status says so only when no report has arrived.
@@ -624,14 +764,14 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
     return task ? speaker(assigneeOf(card, task)) : null;
   };
 
-  const lines: FleetLine[] = [];
+  const lines: (FleetLine | Stretch)[] = [];
   const reported = new Set<string>();
   for (const said of card.said) {
     const to = said.role === 'assistant' ? (said.sessionId === main ? YOU : null) : ownerOf(said.sessionId);
     const origin = said.origin;
     if (!to) continue;
     if (!origin) {
-      lines.push(fromSaid(said, MAIN, to));
+      lines.push(...stretches(said));
     } else if (origin.kind === 'user') {
       lines.push(fromSaid(said, YOU, to));
     } else if (origin.kind === 'agent') {
@@ -654,7 +794,7 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
     }
   }
   lines.sort((a, b) => a.at - b.at);
-  const shown = lines.slice(-FEED_LIMIT);
+  const shown = speak(lines, card.asked, new Set(live.runs[card.workspaceId])).slice(-FEED_LIMIT);
 
   const working = tasks.filter((t) => isTaskLive(t.status)).length;
   const ended = [...shown].reverse().find((l) => l.outcome === 'done' || l.outcome === 'failed');

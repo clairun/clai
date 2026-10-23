@@ -324,7 +324,8 @@ describe('FleetPage', () => {
     const card = within((await screen.findByText('Shipped v2')).closest('article')!);
     // Three bubbles fit, newest last: Main's, yours, Main's.
     const bubbles = card.getAllByRole('button', { name: /On it|Thanks|Shipped/ });
-    const words = (b: HTMLElement) => b.querySelector('[title] > span:last-child')?.textContent;
+    const stamp = (b: HTMLElement) => b.querySelector('[class*=stamp]')!.textContent;
+    const words = (b: HTMLElement) => b.querySelector('[data-bubble]')!.textContent!.replace(stamp(b)!, '');
     expect(bubbles.map(words)).toEqual(['On it. Two tasks out.', 'Thanks!', 'Shipped v2']);
     // Two rows of what came before; older ones hide.
     const rows = within(card.getByRole('list', { name: 'Earlier' }));
@@ -339,7 +340,6 @@ describe('FleetPage', () => {
     // Each bubble starts with its time; no line under it. Main is named once,
     // under its face; your word to Main needs no label at all.
     const now = Date.now();
-    const stamp = (b: HTMLElement) => b.querySelector('[title] > span:first-child')!.textContent;
     expect(bubbles.map(stamp)).toEqual([30, 20, 10].map((min) => `${shortTime(now - min * 60_000, now)} · `));
     expect(card.queryByText('you')).not.toBeInTheDocument();
     expect(bubbles[0]!.textContent!.match(/Main/g)).toHaveLength(1);
@@ -360,10 +360,12 @@ describe('FleetPage', () => {
   });
 
   describe('zoom', () => {
+    // An agent's word to Main: Main's own bubbles open in place instead (`FleetFeed.test`).
+    const scout = { kind: 'agent', agent: { workspaceAgentId: 'wa-s', agentDefinitionId: 'def-s', displayName: 'Scout', isDefault: false }, sessionId: 'task-s', runId: null, replyAddress: null };
     const seed = (patch: Partial<FleetWorkspace['recentMessages'][number]> = {}) =>
       fleetSnapshot.mockResolvedValue([
         workspace('s', 'Staged'),
-        { ...workspace('a', 'Alpha', 1000), mainSessionId: 'main-a', recentMessages: [said('u1', 'Ship it.', 20 * 60_000), said('a2', 'Shipped **v2** to staging', 10 * 60_000, { role: 'assistant', ...patch })] },
+        { ...workspace('a', 'Alpha', 1000), mainSessionId: 'main-a', recentMessages: [said('u1', 'Ship it.', 20 * 60_000), said('a2', 'Shipped **v2** to staging', 10 * 60_000, { origin: scout, ...patch })] },
       ]);
     const bubble = async (text: RegExp) => (await screen.findByText(text)).closest<HTMLElement>('[role=button]')!;
 
@@ -372,22 +374,22 @@ describe('FleetPage', () => {
       renderFleet();
       const origin = await bubble(/^Shipped v2/);
       fireEvent.click(origin);
-      const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
+      const dialog = screen.getByRole('dialog', { name: 'Message from Scout' });
       expect(within(dialog).getByText('v2').tagName).toBe('STRONG');
       // The zoom says who to whom and when, in full, before the words.
-      expect(dialog.querySelector('p')).toHaveTextContent(/^Main · \S/);
+      expect(dialog.querySelector('p')).toHaveTextContent(/^Scout → Main · \S/);
       expect(dialog).toHaveFocus();
       // Zooming is not selecting the card.
       expect(useFleetStore.getState().selectedId).toBeNull();
       expect(mockInvoke).not.toHaveBeenCalledWith('assistant_get_message', expect.anything());
 
       fireEvent.keyDown(window, { key: 'Escape' });
-      expect(screen.queryByRole('dialog', { name: 'Message from Main' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: 'Message from Scout' })).not.toBeInTheDocument();
       expect(origin).toHaveFocus();
 
       // From the keyboard too; a click on the panel zooms back.
       fireEvent.keyDown(origin, { key: 'Enter' });
-      fireEvent.click(screen.getByRole('dialog', { name: 'Message from Main' }));
+      fireEvent.click(screen.getByRole('dialog', { name: 'Message from Scout' }));
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
 
@@ -411,7 +413,7 @@ describe('FleetPage', () => {
       const origin = await bubble(/^Shipped v2/);
       const source = origin.querySelector<HTMLElement>('[data-bubble]')!;
       fireEvent.click(origin);
-      const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
+      const dialog = screen.getByRole('dialog', { name: 'Message from Scout' });
       // jsdom measures no content, so the zoom ends no taller than the bubble: same edges but the far one.
       expect(dialog.style).toMatchObject({ left: '152px', top: '190px', height: '60px', width: `${Math.min(560, 1024 * 0.6)}px` });
       expect(dialog.querySelector<HTMLElement>('[data-tail]')!.style.top).toBe('20px');
@@ -469,7 +471,7 @@ describe('FleetPage', () => {
       mockInvoke.mockImplementation(((cmd: string) => (cmd === 'assistant_get_message' ? new Promise((r) => (resolve = r)) : Promise.resolve(undefined))) as never);
       renderFleet();
       fireEvent.click(await bubble(/^Shipped v2 to…/));
-      const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
+      const dialog = screen.getByRole('dialog', { name: 'Message from Scout' });
       expect(dialog).toHaveTextContent('Shipped v2 to…');
       expect(mockInvoke).toHaveBeenCalledWith('assistant_get_message', { workspaceId: 'a', sessionId: 'main-a', messageId: 'a2' });
       await act(async () => resolve({ id: 'a2', sessionId: 'main-a', role: 'assistant', content: [{ type: 'text', text: 'Shipped **v2** to staging and prod.' }] }));
@@ -483,7 +485,7 @@ describe('FleetPage', () => {
       fireEvent.click(await bubble(/^Shipped v2 to…/));
       await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('assistant_get_message', expect.anything()));
       await act(async () => {});
-      expect(screen.getByRole('dialog', { name: 'Message from Main' })).toHaveTextContent('Shipped v2 to…');
+      expect(screen.getByRole('dialog', { name: 'Message from Scout' })).toHaveTextContent('Shipped v2 to…');
     });
   });
 

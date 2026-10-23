@@ -113,6 +113,28 @@ describe('fleet store snapshot', () => {
     expect(useFleetStore.getState().selectedId).toBe('picked');
   });
 
+  it("notifies only when Main's words grow: never for a delta, a tool call or a task's words", () => {
+    useFleetStore.getState().noteUserSent('ws', 'main', null);
+    const text = (t: string) => ({ type: 'text', text: t });
+    const tool = { type: 'tool_use', tool_call_id: 'c1', tool_name: 'bash_exec', arguments: {} };
+    const updated = (content: unknown[], sessionId = 'main') =>
+      ({ ...askEvent('q', 2, 'ask_user_requested'), sessionId, event: { type: 'assistant_message_updated', payload: { message: { id: 'm', sessionId, role: 'assistant', content, origin: { kind: 'user' } } } } }) as AssistantEventEnvelope;
+    const notified = vi.fn();
+    const unsubscribe = useFleetStore.subscribe(notified);
+    const { applyEvent } = useFleetStore.getState();
+    applyEvent({ ...askEvent('q', 1, 'ask_user_requested'), event: { type: 'assistant_delta', payload: { message_id: 'm', text: 'x' } } } as AssistantEventEnvelope);
+    applyEvent({ ...askEvent('q', 1, 'ask_user_requested'), event: { type: 'tool_call_started', payload: { tool_call: {} } } } as AssistantEventEnvelope);
+    applyEvent(updated([tool]));
+    applyEvent(updated([text('Busy.'), tool], 'task-session'));
+    expect(notified).not.toHaveBeenCalled();
+    applyEvent(updated([text('Found it.'), tool]));
+    expect(notified).toHaveBeenCalledTimes(1);
+    applyEvent(updated([text('Found it.'), tool, tool]));
+    expect(notified).toHaveBeenCalledTimes(1);
+    unsubscribe();
+    expect(useFleetStore.getState().fleet.cards.ws!.said).toMatchObject([{ id: 'm', text: 'Found it.' }]);
+  });
+
   it('ignores streaming events entirely', () => {
     const before = useFleetStore.getState().fleet;
     useFleetStore.getState().applyEvent({

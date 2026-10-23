@@ -538,11 +538,62 @@ button.crewButton {
   stroke-linecap: round;
 }
 
+/* `--lines`: how many lines a bubble shows, from its start or (`data-tail`) its end. */
 .bubbleText {
+  --lines: 3;
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
+  -webkit-line-clamp: var(--lines);
   overflow: hidden;
+}
+
+/* Main still writing: its newest lines, following each block as it lands. */
+.bubbleText[data-tail] {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  max-height: calc(var(--lines) * 1lh);
+}
+
+/* Main's bubble opened in place: all of it, scrolling inside. */
+.bubbleText[data-open] {
+  display: block;
+  -webkit-line-clamp: none;
+  max-height: 50cqh;
+  overflow-y: auto;
+  white-space: pre-line;
+}
+
+.scene [aria-expanded='true'] {
+  cursor: zoom-out;
+}
+
+/* A chart in Main's words: a chip that opens the workspace, where it is drawn. */
+.chartChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 4px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chartChip:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-focus);
+}
+
+.chartChip:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 1px;
 }
 
 .stamp {
@@ -584,17 +635,17 @@ button.crewButton {
 }
 
 .said .bubbleText {
-  -webkit-line-clamp: 2;
+  --lines: 2;
 }
 
 /* The newest says more where the panel has room. */
 .said:last-child .bubbleText {
-  -webkit-line-clamp: 3;
+  --lines: 3;
 }
 
 @container (min-height: 340px) {
   .said:last-child .bubbleText {
-    -webkit-line-clamp: 5;
+    --lines: 5;
   }
 }
 
@@ -602,7 +653,7 @@ button.crewButton {
 @container (max-height: 260px) {
   .said .bubbleText,
   .fromYou .bubbleText {
-    -webkit-line-clamp: 1;
+    --lines: 1;
   }
 
   .said {
@@ -622,7 +673,7 @@ button.crewButton {
 
   .said:last-child .bubbleText,
   .fromYou:last-child .bubbleText {
-    -webkit-line-clamp: 2;
+    --lines: 2;
   }
 }
 
@@ -645,7 +696,7 @@ button.crewButton {
 }
 
 .fromYou .bubbleText {
-  -webkit-line-clamp: 2;
+  --lines: 2;
 }
 
 .nothing {
@@ -961,6 +1012,11 @@ button.crewButton {
   min-width: 0;
   overflow-y: auto;
   cursor: auto;
+}
+
+.zoomWords {
+  margin: 0;
+  white-space: pre-line;
 }
 
 .zoomStamp {

@@ -41,6 +41,7 @@ import {
   pickCards,
   recentlyOpened,
   seedFleet,
+  wordsOf,
   type FleetCard,
   type FleetLine,
   type FleetLive,
@@ -107,6 +108,12 @@ const fromAgent = (agent = MANAGER): AssistantMessage['origin'] => ({ kind: 'age
 const report = (taskId: string, status: WorkspaceTaskResponse['status'], agent = RESEARCHER): AssistantMessage['origin'] =>
   ({ kind: 'task', taskId, agent, title: `Task ${taskId}`, cycleNo: 1n, status }) as AssistantMessage['origin'];
 
+const text = (t: string) => ({ type: 'text', text: t }) as AssistantMessage['content'][number];
+const tool = (id: string) => ({ type: 'tool_use', tool_call_id: id, tool_name: 'bash_exec', arguments: {} }) as AssistantMessage['content'][number];
+const withParts = (id: string, ...content: AssistantMessage['content']): AssistantMessage => ({ ...message(id, 'assistant', ''), content });
+/** Main's message as heard mid-run, at a tool call. */
+const updated = (m: AssistantMessage, at: number, runId: string | null = 'r1') =>
+  ({ ...env({ type: 'assistant_message_updated', payload: { message: m } } as AssistantUiEvent, at, m.sessionId), runId }) as AssistantEventEnvelope;
 const created = (m: AssistantMessage, at: number) => env({ type: 'message_created', payload: { message: m } } as AssistantUiEvent, at, m.sessionId);
 const completed = (m: AssistantMessage, at: number) => env({ type: 'assistant_message_completed', payload: { message: m } } as AssistantUiEvent, at, m.sessionId);
 
@@ -119,18 +126,21 @@ const feedOf = (state: FleetState, live = NO_LIVE, now = NOW) => cardFeed(card(s
 const lines = (state: FleetState, live = NO_LIVE) => feedOf(state, live).lines.map(said);
 
 describe('fleet reducer', () => {
-  it('ignores streaming variants without producing a new state', () => {
-    const base = apply(EMPTY_FLEET, env({ type: 'run_started', payload: { run: run('r1') } }, 1));
+  it('ignores deltas and tool calls, and an update with no new text, without producing a new state', () => {
+    const base = apply(withMain(), env({ type: 'run_started', payload: { run: run('r1') } }, 1), updated(message('m', 'assistant', 'x'), 2));
     const streaming: AssistantUiEvent[] = [
       { type: 'assistant_delta', payload: { message_id: 'm', text: 'x' } },
       { type: 'assistant_thinking_delta', payload: { message_id: 'm', text: 'x' } },
-      { type: 'assistant_message_updated', payload: { message: message('m', 'assistant', 'x') } },
+      { type: 'assistant_message_updated', payload: { message: withParts('m', text('x'), tool('t1')) } },
+      { type: 'assistant_message_updated', payload: { message: withParts('m2', tool('t2')) } },
       { type: 'tool_call_started', payload: { invocation: {} } },
       { type: 'tool_call_completed', payload: { invocation: {} } },
     ] as AssistantUiEvent[];
     for (const event of streaming) {
       expect(applyAssistantEvent(base, env(event, 99))).toBe(base);
     }
+    // A task's words reach Main as its report.
+    expect(applyAssistantEvent(base, updated(message('t', 'assistant', 'Working', { kind: 'user' }, 'task-session-t'), 99))).toBe(base);
   });
 
   it('keeps every message said, in time order, at most SAID_LIMIT; a deleted one leaves', () => {
@@ -259,13 +269,14 @@ describe('the highlight feed', () => {
     expect(card(s).said.map((m) => m.id)).toEqual(['u1']);
   });
 
-  it('marks a live message cut to fit the card, so the zoom fetches it whole', () => {
+  it("marks a live message cut to fit the card, so the zoom fetches it whole; Main's words are kept whole", () => {
     const long = `${'word '.repeat(200)}end`;
-    const s = apply(withMain(), created(message('u1', 'user', 'Short.'), NOW - 2), completed(message('a1', 'assistant', long), NOW - 1));
-    const [short, cut] = feedOf(s).lines;
-    expect(short!.message).toEqual({ sessionId: MAIN, id: 'u1', truncated: false });
-    expect(cut!.message).toEqual({ sessionId: MAIN, id: 'a1', truncated: true });
+    const s = apply(withMain(), created(message('u1', 'user', long), NOW - 2), completed(message('a1', 'assistant', long), NOW - 1));
+    const [cut, whole] = feedOf(s).lines;
+    expect(cut!.message).toEqual({ sessionId: MAIN, id: 'u1', truncated: true });
     expect(cut!.markdown.endsWith('…')).toBe(true);
+    expect(whole!.message).toEqual({ sessionId: MAIN, id: 'a1', truncated: false });
+    expect(whole!.markdown).toBe(long);
   });
 
   it("says how a task ended from its status when no report came, and a subtask answers its parent's agent", () => {
@@ -371,6 +382,82 @@ describe('the highlight feed', () => {
     expect(captionText({ kind: 'waiting', at: NOW }, NOW + 10)).toBe('Waiting on you · under a minute');
     expect(captionText({ kind: 'fresh', at: NOW }, NOW + 10)).toBe('Just now');
     expect(captionText({ kind: 'fresh', at: NOW }, NOW + 3 * 60_000)).toBe('Just finished · 3 min ago');
+  });
+});
+
+describe("Main's bubbles", () => {
+  const T = NOW - 60_000;
+  /** Main's message `m1` in run `r1`: a block of text, a tool call, and another block. */
+  const first = withParts('m1', text('Before.'), tool('c1'));
+  const both = withParts('m1', text('Before.'), tool('c1'), text('After.'), tool('c2'));
+  const bubbles = (state: FleetState, live = NO_LIVE) => feedOf(state, live).lines.filter((l) => l.from.kind === 'main' && l.to.kind === 'you');
+
+  it('adds each block of text as it closes, at a tool call, into the same bubble', () => {
+    let s = apply(withMain(), updated(first, T));
+    expect(bubbles(s).map((l) => l.markdown)).toEqual(['Before.']);
+    s = apply(s, updated(both, T + 10));
+    const [bubble] = bubbles(s);
+    expect(bubbles(s)).toHaveLength(1);
+    expect(bubble).toMatchObject({ key: 'm1', markdown: 'Before.\n\nAfter.', at: T + 10 });
+  });
+
+  it('says nothing twice: completing a message adds only the text not yet heard', () => {
+    let s = apply(withMain(), updated(first, T), updated(both, T + 10));
+    const heard = s;
+    s = apply(s, completed(both, T + 20));
+    expect(card(s).said).toEqual(card(heard).said);
+    s = apply(s, completed(withParts('m1', text('Before.'), tool('c1'), text('After.'), tool('c2'), text('Done.')), T + 30));
+    expect(bubbles(s).map((l) => l.markdown)).toEqual(['Before.\n\nAfter.\n\nDone.']);
+  });
+
+  it('joins the blocks of one run across messages, but never two runs', () => {
+    const next = { ...completed(message('m2', 'assistant', 'Second message.'), T + 10), runId: 'r1' } as AssistantEventEnvelope;
+    let s = apply(withMain(), { ...completed(message('m1', 'assistant', 'First message.'), T), runId: 'r1' } as AssistantEventEnvelope, next);
+    expect(bubbles(s).map((l) => l.markdown)).toEqual(['First message.\n\nSecond message.']);
+    // Spanning two messages, the bubble has no one message to fetch.
+    expect(bubbles(s)[0]!.message).toBeNull();
+    s = apply(s, { ...completed(message('m3', 'assistant', 'Next run.'), T + 20), runId: 'r2' } as AssistantEventEnvelope);
+    expect(bubbles(s).map((l) => l.markdown)).toEqual(['First message.\n\nSecond message.', 'Next run.']);
+  });
+
+  const between = T + 5;
+  it.each<[string, (s: FleetState) => FleetState, FleetLive, string]>([
+    ['a message from you', (s) => apply(s, created(message('u', 'user', 'Wait.'), between)), NO_LIVE, 'You → Main: Wait.'],
+    ['a task handed over', (s) => s, withTasks(task('t', 'running', between)), 'Main → Researcher: Task t [running]'],
+    ["a task's report", (s) => apply(s, created(message('rep', 'user', 'Found it.', report('t', 'completed')), between)), NO_LIVE, 'Researcher → Main: Found it. [done]'],
+    ['a message to an agent', (s) => apply(s, created(message('m2t', 'user', 'Also staging.', fromAgent(), 'task-session-t'), between)), withTasks(task('t', 'running', T - 1)), 'Main → Researcher: Also staging.'],
+    ['a message between agents', (s) => apply(s, created(message('w2t', 'user', 'Numbers?', fromAgent(WRITER), 'task-session-t'), between)), withTasks(task('t', 'running', T - 1)), 'Writer → Researcher: Numbers?'],
+  ])('closes the bubble at %s: later words start a new one after it', (_, say, live, line) => {
+    const s = apply(say(apply(withMain(), updated(first, T))), updated(both, T + 10));
+    expect(lines(s, live).slice(-3)).toEqual([
+      'Main → You: Before.',
+      line,
+      'Main → You: After.',
+    ]);
+    // The new bubble is keyed by its own first block; the closed one keeps its key.
+    expect(bubbles(s, live).map((l) => l.key)).toEqual(['m1', 'm1:1']);
+  });
+
+  it('closes the bubble at a question, answered or not, which says nothing itself', () => {
+    const s = apply(withMain(), updated(first, T), askEvent('q1', between), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, between + 1), updated(both, T + 10));
+    expect(lines(s)).toEqual(['Main → You: Before.', 'Main → You: After.']);
+  });
+
+  it('is still being written while its run goes on', () => {
+    const s = apply(withMain(), updated(first, T));
+    expect(bubbles(s, { runs: { [WS]: ['r1'] }, tasks: {} })[0]!.writing).toBe(true);
+    expect(bubbles(s, { runs: { [WS]: ['r2'] }, tasks: {} })[0]!.writing).toBe(false);
+    expect(bubbles(s)[0]!.writing).toBe(false);
+  });
+
+  it('reads charts out of the words: each becomes a chip, the text around it plain lines', () => {
+    expect(wordsOf('## Results\nSee ![Leaks by **day**](charts/leaks.vl.json) for the trend.\n![](a b.png)\n![Q3](</r/q3.vl.json>)')).toEqual([
+      { kind: 'text', text: 'Results\nSee' },
+      { kind: 'chart', title: 'Leaks by day', path: 'charts/leaks.vl.json' },
+      { kind: 'text', text: 'for the trend.' },
+      { kind: 'chart', title: 'Q3', path: '/r/q3.vl.json' },
+    ]);
+    expect(wordsOf('![](x.vl.json)')).toEqual([{ kind: 'chart', title: 'Chart', path: 'x.vl.json' }]);
   });
 });
 

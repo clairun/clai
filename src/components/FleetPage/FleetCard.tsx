@@ -125,7 +125,7 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect
         </button>
       </header>
       <FleetCrew crew={crew} cast={cast} />
-      {feed && <FleetFeed workspaceId={card.workspaceId} feed={feed} shouts={shouts} now={now} faces={cast} />}
+      {feed && <FleetFeed workspaceId={card.workspaceId} feed={feed} shouts={shouts} now={now} faces={cast} onOpen={onOpen} />}
       {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={cast} loud={loud === 'needs'} now={now} />}
     </div>
   );
