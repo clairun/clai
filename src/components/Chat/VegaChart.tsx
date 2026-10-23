@@ -4,7 +4,7 @@ import type { Loader, LoggerInterface } from 'vega';
 import { readWorkspaceFileBase64 } from '../../workspace/client';
 import { openExternal } from '../../utils/openExternal';
 import { base64ToText, isWorkspaceRelativeHref, resolveWorkspacePath } from '../../utils/htmlBundle';
-import { useWorkspaceFileLocation, type WorkspaceFileLocation } from './WorkspaceFileContext';
+import { resolveWorkspaceHref, useWorkspaceFileLocation, type WorkspaceFileLocation } from './WorkspaceFileContext';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { buildVegaConfig, readChartThemeTokens } from './vegaTheme';
 import { withChartInteractions } from './vegaInteractions';
@@ -214,8 +214,8 @@ const VegaChart = memo(({ source, specPath, isStreaming = false }: VegaChartProp
   // document for inline specs, the spec file itself for `.vl.json` links.
   const resolvedSpecPath = useMemo(() => {
     if (!specPath) return null;
-    return resolveWorkspacePath(location?.basePath ?? '', specPath);
-  }, [specPath, location?.basePath]);
+    return resolveWorkspaceHref(location, specPath);
+  }, [specPath, location]);
   const dataBasePath = resolvedSpecPath ?? location?.basePath ?? '';
 
   // Load a referenced spec file. Inline sources need no fetch.
