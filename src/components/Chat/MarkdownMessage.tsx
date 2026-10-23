@@ -5,6 +5,7 @@ import CodeBlock from './CodeBlock';
 import MermaidDiagram from './MermaidDiagram';
 import VegaChart, { isVegaLiteSpecPath } from './VegaChart';
 import WorkspaceImage from './WorkspaceImage';
+import { resolveWorkspaceHref, useWorkspaceFileLocation } from './WorkspaceFileContext';
 import { isWorkspaceRelativeHref } from '../../utils/htmlBundle';
 import styles from './MarkdownMessage.module.css';
 
@@ -48,6 +49,32 @@ const containsChartLink = (node: HastNodeLike | undefined): boolean =>
         isVegaLiteSpecLink(typeof child.properties?.src === 'string' ? child.properties.src : undefined)) ||
       containsChartLink(child),
   );
+
+// A link to a workspace file opens it in the app's preview panel. It must
+// never reach the WebView, which would resolve it against the app origin.
+// Without an opener (no workspace UI around) it renders as plain text.
+const WorkspaceLink = ({ href, children }: { href: string; children: React.ReactNode }) => {
+  const location = useWorkspaceFileLocation();
+  const path = resolveWorkspaceHref(location, href);
+  const openFile = location?.openFile;
+  if (!openFile || !path) {
+    return <span title={href}>{children}</span>;
+  }
+  return (
+    <a
+      href={href}
+      className={styles.link}
+      title={path}
+      onClick={(event) => {
+        event.preventDefault();
+        openFile(path);
+      }}
+      onAuxClick={(event) => event.preventDefault()}
+    >
+      {children}
+    </a>
+  );
+};
 
 /**
  * MarkdownMessage Component
@@ -137,14 +164,17 @@ const useMarkdownComponents = (isStreaming: boolean): Components =>
       }
       return <img className={styles.image} src={source} alt={alt} title={title} />;
     },
-    a: ({ href, children, node }) =>
-      containsChartLink(node) ? (
-        <>{children}</>
-      ) : (
+    a: ({ href, children, node }) => {
+      if (containsChartLink(node)) return <>{children}</>;
+      if (href && isWorkspaceRelativeHref(href)) {
+        return <WorkspaceLink href={href}>{children}</WorkspaceLink>;
+      }
+      return (
         <a href={href} className={styles.link} target="_blank" rel="noopener noreferrer">
           {children}
         </a>
-      ),
+      );
+    },
     table: ({ children }) => (
       <div className={styles.tableWrapper}>
         <table className={styles.table}>{children}</table>

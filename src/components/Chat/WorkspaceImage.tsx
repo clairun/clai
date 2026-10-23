@@ -1,15 +1,13 @@
 import { memo, useEffect, useState } from 'react';
 import { readWorkspaceFileBase64 } from '../../workspace/client';
-import { resolveWorkspacePath } from '../../utils/htmlBundle';
-import { useWorkspaceFileLocation } from './WorkspaceFileContext';
+import { resolveWorkspaceHref, useWorkspaceFileLocation } from './WorkspaceFileContext';
 import ImageLightbox from './ImageLightbox';
 import styles from './WorkspaceImage.module.css';
 
 /**
  * A workspace image embedded in markdown (`![shot](screens/1.png)`). The
  * WebView has no origin a relative `src` could resolve against, so the file
- * is resolved like a `.vl.json` chart link (relative to the enclosing
- * document, leading `/` = workspace root; see WorkspaceFileContext), read
+ * is resolved like a `.vl.json` chart link (see `resolveWorkspaceHref`), read
  * through the workspace file API and shown as a data URL. Click to zoom.
  *
  * Renders only phrasing content: markdown puts images inside <p>.
@@ -31,7 +29,7 @@ interface WorkspaceImageProps {
 const WorkspaceImage = memo(({ path, alt = '', title }: WorkspaceImageProps) => {
   const location = useWorkspaceFileLocation();
   const workspaceId = location?.workspaceId;
-  const resolvedPath = resolveWorkspacePath(location?.basePath ?? '', path);
+  const resolvedPath = resolveWorkspaceHref(location, path);
   const [image, setImage] = useState<LoadedImage | null>(null);
   const [zoomed, setZoomed] = useState(false);
 

@@ -1123,6 +1123,28 @@ describe('Workspace file preview', () => {
     expect(await screen.findByRole('region', { name: 'Memory: notes.md' })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Delete file' })).toBeNull();
   });
+
+  it('opens a workspace file linked from chat in the artifact preview', async () => {
+    loadSessionMessagesPage.mockResolvedValue(
+      messagePage([
+        {
+          ...streamingAssistantMessage('sess-a', 'm1'),
+          content: [{ type: 'text', text: 'Run [bisect.sh](/tmp/a/scratch/bisect.sh)' }],
+        },
+      ])
+    );
+    readWorkspaceFile.mockImplementation(async (_workspaceId, path) => ({
+      path,
+      viewer: 'code',
+      content: 'echo bisect',
+    }));
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('link', { name: 'bisect.sh' }));
+
+    expect(await screen.findByRole('region', { name: 'Artifact: bisect.sh' })).toBeInTheDocument();
+    expect(readWorkspaceFile.mock.calls.map((call) => call[1])).toContain('scratch/bisect.sh');
+  });
 });
 
 describe('Workspace task transcript', () => {

@@ -171,3 +171,68 @@ describe('MarkdownMessage — workspace images', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });
+
+describe('MarkdownMessage — workspace file links', () => {
+  const openFile = vi.fn();
+  const CHAT: WorkspaceFileLocation = { workspaceId: 'ws-1', basePath: '', rootPath: '/home/u/ws', openFile };
+
+  const renderIn = (location: WorkspaceFileLocation | null, content: string) =>
+    render(
+      <WorkspaceFileContext.Provider value={location}>
+        <MarkdownMessage content={content} />
+      </WorkspaceFileContext.Provider>,
+    );
+
+  beforeEach(() => {
+    openFile.mockReset();
+    readWorkspaceFileBase64Mock.mockReset();
+  });
+
+  it.each([
+    ['an absolute path inside the workspace', '[bisect.sh](/home/u/ws/scratch/bisect.sh)', 'scratch/bisect.sh'],
+    ['a path relative to the workspace root', '[bisect.sh](scratch/bisect.sh)', 'scratch/bisect.sh'],
+    ['a /-rooted path', '[bisect.sh](/scratch/bisect.sh)', 'scratch/bisect.sh'],
+    ['a percent-encoded path with a fragment', '[bisect.sh](<scratch/mac dns/bisect.sh#L3>)', 'scratch/mac dns/bisect.sh'],
+  ])('opens %s in the preview instead of navigating', (_case, content, expected) => {
+    renderIn(CHAT, content);
+    const link = screen.getByRole('link', { name: 'bisect.sh' });
+
+    expect(link).not.toHaveAttribute('target');
+    // fireEvent returns false when the default (WebView navigation) was prevented.
+    expect(fireEvent.click(link)).toBe(false);
+    expect(openFile).toHaveBeenCalledWith(expected);
+  });
+
+  it('resolves a relative link against the previewed document', () => {
+    renderIn({ ...CHAT, basePath: 'reports/weekly.md' }, '[q3](q3.md)');
+    fireEvent.click(screen.getByRole('link', { name: 'q3' }));
+    expect(openFile).toHaveBeenCalledWith('reports/q3.md');
+  });
+
+  it('keeps a path outside the workspace inside the workspace, where the preview reports it missing', () => {
+    renderIn(CHAT, '[hosts](/etc/hosts)');
+    expect(fireEvent.click(screen.getByRole('link', { name: 'hosts' }))).toBe(false);
+    expect(openFile).toHaveBeenCalledWith('etc/hosts');
+  });
+
+  it('renders a workspace link as plain text when nothing can open it', () => {
+    renderIn({ workspaceId: 'ws-1', basePath: '' }, '[bisect.sh](scratch/bisect.sh)');
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    expect(screen.getByText('bisect.sh')).toHaveAttribute('title', 'scratch/bisect.sh');
+  });
+
+  it('keeps http(s) and mailto links external', () => {
+    renderIn(CHAT, '[site](https://example.com/a) [mail](mailto:a@example.com)');
+    expect(screen.getByRole('link', { name: 'site' })).toHaveAttribute('target', '_blank');
+    expect(screen.getByRole('link', { name: 'mail' })).toHaveAttribute('href', 'mailto:a@example.com');
+    fireEvent.click(screen.getByRole('link', { name: 'site' }));
+    expect(openFile).not.toHaveBeenCalled();
+  });
+
+  it('loads an image written as an absolute path inside the workspace', async () => {
+    readWorkspaceFileBase64Mock.mockResolvedValue({ path: 'shot.png', mime: 'image/png', base64: 'UE5H' });
+    renderIn(CHAT, '![shot](/home/u/ws/shot.png)');
+    expect(await screen.findByAltText('shot')).toHaveAttribute('src', 'data:image/png;base64,UE5H');
+    expect(readWorkspaceFileBase64Mock).toHaveBeenCalledWith('ws-1', 'shot.png');
+  });
+});
