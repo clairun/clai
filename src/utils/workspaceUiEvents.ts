@@ -77,6 +77,16 @@ export const takePendingForkPrompt = (workspaceId: string): string | null => {
 };
 
 /**
+ * Put the keyboard in the shared terminal's input, as Ctrl+L does: after the
+ * Fleet's switcher or a card click picks a workspace, typing goes to it at once.
+ */
+export const FOCUS_TERMINAL_EVENT = 'clai-focus-terminal';
+
+export const dispatchFocusTerminal = (): void => {
+  window.dispatchEvent(new Event(FOCUS_TERMINAL_EVENT));
+};
+
+/**
  * Fire-and-forget signal asking the active chat conversation to scroll to the
  * bottom (if the reader was already near the bottom). Used when entering
  * terminal mode shrinks the conversation viewport, so the latest messages stay

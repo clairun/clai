@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use crate::assistant::types::WorkspaceAgentSummary;
+use crate::assistant::types::{AgentRefSnapshot, WorkspaceAgentSummary};
 use crate::config::global_agents::{AgentSource, ResolvedAgent};
 use crate::config::workspace_config::{self, AgentAvatarRef};
 use crate::config::{AppConfig, ExecutionCapabilityConfig, WorkspaceConfig};
@@ -38,6 +38,18 @@ impl WorkspaceAgentRow {
             &self.agent_definition_id
         } else {
             &self.name
+        }
+    }
+}
+
+impl From<&WorkspaceAgentRow> for AgentRefSnapshot {
+    fn from(row: &WorkspaceAgentRow) -> Self {
+        Self {
+            workspace_agent_id: row.id.clone(),
+            agent_definition_id: Some(row.agent_definition_id.clone()),
+            display_name: row.display_name().to_string(),
+            is_default: row.role == "manager",
+            avatar: row.avatar.clone(),
         }
     }
 }

@@ -1,16 +1,23 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { useLocation } from 'react-router';
+import { useFleetStore } from '../../fleet/fleetStore';
+import { useTerminalTarget } from './useTerminalTarget';
+import { openGlobalSettings } from '../../utils/globalSettings';
+import WorkspacePicker, { PICKER_SHORTCUT } from './WorkspacePicker';
 import WorkspaceContextBar from '../../workspace/components/WorkspaceContextBar';
 import CommandHelpModal from './CommandHelpModal';
 import WorkspaceTerminal from './WorkspaceTerminal';
 import {
   dispatchScrollChatToBottom,
+  FOCUS_TERMINAL_EVENT,
   dispatchWorkspaceUiCommand,
 } from '../../utils/workspaceUiEvents';
 import type { ContentPart } from '../../generated/bindings';
 import styles from './TerminalEmulator.module.css';
 import { restoreFailedPrompt } from '../../utils/composerRestore';
 import { computeTextareaSize } from '../../utils/composerTextarea';
+
+/** The composer's one-line height; it grows by this per line. */
+const INPUT_LINE_PX = 20;
 
 type OutputType = 'info' | 'success' | 'error' | 'warning';
 
@@ -58,7 +65,6 @@ const TerminalEmulator = ({
   recoverablePrompt = '',
   onRecoverablePromptConsumed,
 }: TerminalEmulatorProps) => {
-  const location = useLocation();
   const [inputValue, setInputValue] = useState('');
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [isAttaching, setIsAttaching] = useState(false);
@@ -66,6 +72,8 @@ const TerminalEmulator = ({
   const [isOutputVisible, setIsOutputVisible] = useState(true);
   const [isHoveringOutput, setIsHoveringOutput] = useState(false);
   const [showHelp, setShowHelp] = useState(false);
+  // On the Fleet with no card selected, Enter asks once before a prompt creates a workspace.
+  const [confirmingCreate, setConfirmingCreate] = useState(false);
   // Terminal mode: when on, the composer is replaced by a real PTY-backed
   // shell (WorkspaceTerminal). Only meaningful on workspace routes.
   const [terminalMode, setTerminalMode] = useState(false);
@@ -95,12 +103,21 @@ const TerminalEmulator = ({
     return cmd;
   }, []);
 
-  const isWorkspaceRoute =
-    location.pathname === '/workspace' || location.pathname.startsWith('/workspace/');
-  const workspaceRouteMatch = location.pathname.match(/^\/workspace\/([^/]+)\/?$/);
-  const currentWorkspaceId = workspaceRouteMatch
-    ? decodeURIComponent(workspaceRouteMatch[1]!)
-    : null;
+  const target = useTerminalTarget();
+  const isWorkspaceRoute = target.surface === 'workspace';
+  const isFleetRoute = target.surface === 'fleet';
+  // The integrated terminal (PTY) belongs to the workspace page only.
+  const currentWorkspaceId = isWorkspaceRoute ? target.workspaceId : null;
+  // Chat-side features (context bar, attachments, drafts) follow the target,
+  // which on the Fleet is the selected card.
+  const chatWorkspaceId = target.workspaceId;
+  // Whether prompts have somewhere to go: the target, or on the Fleet the
+  // workspace they create. Both look the same, so the composer's height never
+  // depends on the selection.
+  const canPrompt = Boolean(chatWorkspaceId) || isFleetRoute;
+  const fleetTargetTitle = useFleetStore((s) =>
+    isFleetRoute && chatWorkspaceId ? s.fleet.cards[chatWorkspaceId]?.title || 'workspace' : null
+  );
   const terminalAvailable = isWorkspaceRoute && Boolean(currentWorkspaceId);
   // Show the terminal only when the active workspace actually has a live
   // (kept-alive) terminal. This also recovers gracefully if a workspace's shell
@@ -160,9 +177,9 @@ const TerminalEmulator = ({
     const textarea = inputRef.current;
     if (textarea) {
       // Collapse to one line so scrollHeight reflects only the content.
-      textarea.style.height = '20px';
+      textarea.style.height = `${INPUT_LINE_PX}px`;
       // Grow to fit, then cap + scroll (kept in sync with the CSS max-height).
-      const { height, overflowY } = computeTextareaSize(textarea.scrollHeight, 20, 150);
+      const { height, overflowY } = computeTextareaSize(textarea.scrollHeight, INPUT_LINE_PX, 150);
       textarea.style.height = `${height}px`;
       textarea.style.overflowY = overflowY;
     }
@@ -259,7 +276,7 @@ const TerminalEmulator = ({
   // terminal mode when the workspace context goes away" logic: navigating off a
   // workspace switches to the empty key, which defaults terminal mode off (and
   // `showTerminal` also guards on `terminalAvailable`).
-  const composerKey = currentWorkspaceId ?? '';
+  const composerKey = chatWorkspaceId ?? '';
   const [savedComposerState, setSavedComposerState] = useState<{
     activeKey: string;
     drafts: Map<string, string>;
@@ -502,6 +519,12 @@ const TerminalEmulator = ({
       return;
     }
 
+    // Off a workspace page there is no workspace-settings host: open the app's.
+    if (commandName === 'settings' && !isWorkspaceRoute) {
+      openGlobalSettings();
+      return;
+    }
+
     // Workspace UI commands — delivered to FleetLayout (which owns the
     // settings modal and the fork flow) via a window event, since the
     // terminal lives in a different React subtree.
@@ -535,10 +558,25 @@ const TerminalEmulator = ({
     // Enter sends message (Shift+Enter for newline)
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
+      const trimmed = inputValue.trim();
+      const createsWorkspace =
+        isFleetRoute &&
+        !useFleetStore.getState().selectedId &&
+        (attachments.length > 0 || (trimmed !== '' && !/^[/!]/.test(trimmed)));
+      if (createsWorkspace && !confirmingCreate) {
+        setConfirmingCreate(true);
+        return;
+      }
+      setConfirmingCreate(false);
       handleCommandExecution(inputValue);
     }
-    // Escape: Clear output
-    else if (e.key === 'Escape') {
+    else if (e.key === 'Escape' && confirmingCreate) {
+      e.preventDefault();
+      setConfirmingCreate(false);
+    }
+    // Escape: clear output, if any; otherwise it is free for the page (the Fleet deselects).
+    else if (e.key === 'Escape' && outputMessages.length > 0) {
+      e.preventDefault();
       setOutputMessages([]);
     }
   };
@@ -549,6 +587,31 @@ const TerminalEmulator = ({
       inputRef.current.focus();
     }
   }, []);
+
+  // Closing the help (button, /help or Esc) returns to the input.
+  const closeHelp = useCallback(() => {
+    setShowHelp(false);
+    inputRef.current?.focus();
+  }, []);
+
+  // The Fleet's workspace picker: Ctrl/Cmd+K opens it; closing it returns
+  // to the input, ready for the message.
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const closePicker = useCallback(() => {
+    setPickerOpen(false);
+    inputRef.current?.focus();
+  }, []);
+  useEffect(() => {
+    if (!isFleetRoute) return undefined;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setPickerOpen(true);
+      }
+    };
+    document.addEventListener('keydown', onKeyDown);
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [isFleetRoute]);
 
   // Global keyboard shortcut to focus terminal (Ctrl+L or Cmd+L)
   useEffect(() => {
@@ -564,10 +627,13 @@ const TerminalEmulator = ({
 
     // Add global event listener
     document.addEventListener('keydown', handleGlobalKeyDown);
+    const focusInput = () => inputRef.current?.focus();
+    window.addEventListener(FOCUS_TERMINAL_EVENT, focusInput);
 
     // Cleanup on unmount
     return () => {
       document.removeEventListener('keydown', handleGlobalKeyDown);
+      window.removeEventListener(FOCUS_TERMINAL_EVENT, focusInput);
     };
   }, []);
 
@@ -580,6 +646,10 @@ const TerminalEmulator = ({
       // Use offsetHeight to include padding and borders
       const height = terminal.offsetHeight;
       document.documentElement.style.setProperty('--terminal-height', `${height}px`);
+      // Its height with a one-line input, for pages the input should grow over.
+      // A hidden composer (terminal mode) has no growth.
+      const growth = Math.max(0, (inputRef.current?.offsetHeight ?? 0) - INPUT_LINE_PX);
+      document.documentElement.style.setProperty('--terminal-rest-height', `${height - growth}px`);
     });
 
     resizeObserver.observe(terminal);
@@ -628,10 +698,11 @@ const TerminalEmulator = ({
           box); it is hidden — not unmounted — while the terminal is on screen,
           so composer state is preserved too. */}
       <div style={{ display: showTerminal ? 'none' : 'contents' }}>
-          {/* Workspace context bar — MCP badges inside the terminal on workspace routes */}
-          {isWorkspaceRoute && currentWorkspaceId && (
+          {/* Workspace context bar — model and MCP for the target; on the Fleet
+              with no card selected, for the workspace the next prompt creates */}
+          {canPrompt && (
             <div className={styles.workspaceContextWrapper}>
-              <WorkspaceContextBar key={currentWorkspaceId} workspaceId={currentWorkspaceId} />
+              <WorkspaceContextBar key={chatWorkspaceId ?? 'new'} workspaceId={chatWorkspaceId} />
             </div>
           )}
 
@@ -681,12 +752,32 @@ const TerminalEmulator = ({
 
             {/* Composer input box */}
             <div className={styles.terminalInputWrapper} ref={inputWrapperRef}>
+              {isFleetRoute && (
+                <button
+                  type="button"
+                  className={styles.fleetTarget}
+                  data-new={!fleetTargetTitle || undefined}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setPickerOpen(true);
+                  }}
+                  aria-haspopup="dialog"
+                  aria-expanded={pickerOpen}
+                  title={`Choose the workspace (${PICKER_SHORTCUT})`}
+                >
+                  {fleetTargetTitle ? `→ ${fleetTargetTitle}` : '+ Create workspace'}
+                </button>
+              )}
+              {pickerOpen && <WorkspacePicker onClose={closePicker} />}
               <textarea
                 ref={inputRef}
                 rows={1}
                 className={styles.terminalInput}
                 value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
+                onChange={(e) => {
+                  setInputValue(e.target.value);
+                  setConfirmingCreate(false);
+                }}
                 onKeyDown={handleKeyDown}
                 onPaste={handlePaste}
                 onClick={(e) => e.stopPropagation()}
@@ -696,19 +787,37 @@ const TerminalEmulator = ({
                     ? 'Agent is working — Enter queues a follow-up message...'
                     : isWorkspaceRoute
                       ? 'Message this workspace…  (!cmd runs a terminal command)'
-                      : 'Open a workspace to chat, or run a /command (/help)...'
+                      : fleetTargetTitle
+                        ? `Message ${fleetTargetTitle}…  (Esc for a new workspace)`
+                        : isFleetRoute
+                          ? 'Type to start a new workspace…'
+                          : 'Open a workspace to chat, or run a /command (/help)...'
                 }
                 spellCheck={false}
                 autoComplete="off"
                 autoCorrect="off"
                 autoCapitalize="off"
               />
+              {/* In the input row: the one row every page has, and the
+                  icon fits its line, so it adds no height. */}
+              <button
+                type="button"
+                className={styles.helpButton}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setShowHelp(true);
+                }}
+                aria-label="Help"
+                title="Help (/help)"
+              >
+                ?
+              </button>
             </div>
 
             {/* Action toolbar: attach + terminal-mode, below the input */}
-            {((onPickImage && isWorkspaceRoute) || terminalAvailable) && (
+            {canPrompt && (
               <div className={styles.composerToolbar}>
-                {onPickImage && isWorkspaceRoute && (
+                {onPickImage && (
                   <button
                     type="button"
                     className={styles.attachButton}
@@ -749,6 +858,12 @@ const TerminalEmulator = ({
                     {'>_'}
                   </button>
                 )}
+                {/* In the toolbar row, so asking doesn't grow the composer. */}
+                {confirmingCreate && isFleetRoute && !fleetTargetTitle && (
+                  <p className={styles.confirmCreate} role="status">
+                    Create a new workspace with this message? <kbd>Enter</kbd> to confirm · <kbd>Esc</kbd> to cancel
+                  </p>
+                )}
               </div>
             )}
           </div>
@@ -773,7 +888,7 @@ const TerminalEmulator = ({
           )}
       </div>
 
-      {showHelp && <CommandHelpModal onClose={() => setShowHelp(false)} />}
+      {showHelp && <CommandHelpModal onClose={closeHelp} />}
     </div>
   );
 };

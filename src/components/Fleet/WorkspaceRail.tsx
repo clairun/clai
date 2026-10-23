@@ -140,7 +140,7 @@ const rowMenuStyle = (trigger: HTMLElement): React.CSSProperties => {
  * every workspace grouped into explicit, labeled sections (Claude-style)
  * so ordering is never a mystery:
  *
- *   1. "Needs attention" — pending approvals and path grants.
+ *   1. "Needs attention" — open questions, pending approvals and path grants.
  *   2. "Starred" — user-pinned workspaces (star via hover icon or ⋯ menu).
  *   3. "Recent" — everything else, most-recently-updated first.
  *
@@ -524,7 +524,7 @@ const WorkspaceRail = ({
                       // click-swallowing backdrop. Dismiss and hand focus
                       // back to the trigger instead, so the next Tab
                       // continues from the row.
-                      if (e.key !== 'Tab') return;
+                      if (e.code !== 'Tab') return;
                       const items = Array.from(
                         e.currentTarget.querySelectorAll<HTMLElement>(
                           '[role="menuitem"]:not([disabled])',

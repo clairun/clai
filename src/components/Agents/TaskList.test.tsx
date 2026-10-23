@@ -138,8 +138,8 @@ describe('TaskList', () => {
     expect(within(review).getByText('Main')).toBeInTheDocument();
     expect(within(review).getByText('→')).toBeInTheDocument();
     expect(within(review).getByText('Reviewer')).toBeInTheDocument();
-    // The creator is the Main: its face is the fixed one.
-    expect(review.innerHTML).toContain(svgOf(mainIdentity(), 14));
+    // The creator is the Main: its face is this workspace's Main's.
+    expect(review.innerHTML).toContain(svgOf(mainIdentity(MAIN), 14));
 
     // Created by the user: assignee only, no arrow.
     expect(within(fromUser).queryByText('→')).toBeNull();

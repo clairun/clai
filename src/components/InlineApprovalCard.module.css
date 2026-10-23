@@ -266,3 +266,176 @@
   text-overflow: ellipsis;
   word-break: normal;
 }
+
+/* ── Compact (a small Fleet card): the same card, denser ── */
+.stackCompact {
+  padding: 0;
+  gap: 6px;
+}
+
+.compact {
+  padding: 6px 10px 6px 12px;
+  gap: 6px;
+}
+
+.compact .cardBody {
+  gap: 6px;
+  max-height: none;
+  overflow: visible;
+}
+
+.compact .segments {
+  gap: 4px;
+}
+
+.compact .command {
+  padding: 2px 6px;
+  font-size: 12px;
+}
+
+/* Commands wrap, up to 4 lines each; past that the request area scrolls. */
+.compact .command,
+.compact .segmentText code {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+  overflow: hidden;
+  line-height: 1.35;
+}
+
+.compact .segmentRow {
+  flex-direction: row;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.compact .segmentText {
+  flex: 1;
+  min-width: 0;
+  align-items: flex-start;
+}
+
+.compact .segmentText code {
+  min-width: 0;
+  border: none;
+}
+
+.compact .segmentButtons {
+  gap: 4px;
+}
+
+.compact .btn {
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  line-height: 18px;
+}
+
+/* The prefix an "always" chip saves; whole in its tooltip. */
+.compact .btn code {
+  display: inline-block;
+  max-width: 14ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+}
+
+.compact .cardFooter {
+  justify-content: flex-start;
+  gap: 4px;
+}
+
+/* ── Spoken (the Fleet): the command is the agent's bubble, drawn by the
+ * caller; the card is bare and fills its parent, decisions at the bottom. ── */
+.stackSpoken {
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+}
+
+.spoken {
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.spoken .cardBody {
+  flex: 1;
+  min-height: 0;
+  max-height: none;
+  overflow: visible;
+}
+
+.spoken .cardBody > :nth-child(2) {
+  margin-top: auto;
+}
+
+/* Long commands wrap anywhere and scroll inside the bubble once it is out of room. */
+.compact .spokenCommand,
+.spokenCommand {
+  display: block;
+  min-height: 0;
+  margin-top: 4px;
+  padding: 4px 8px;
+  overflow: auto;
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+  -webkit-line-clamp: none;
+}
+
+.spoken .btn {
+  font-size: 13px;
+}
+
+/* A small card: each part on one line (its tooltip has it whole). */
+.spoken.compact .segmentText code {
+  -webkit-line-clamp: 1;
+  word-break: break-all;
+}
+
+.spoken.compact .cardBody {
+  gap: 4px;
+}
+
+.spoken.compact .segments {
+  gap: 2px;
+}
+
+/* The stage: each part's prefix and decisions on as few lines as fit. */
+.spoken:not(.compact) .segmentRow {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  padding: 6px 10px;
+}
+
+.spoken:not(.compact) .segmentText {
+  flex-basis: 100%;
+}
+
+.spoken:not(.compact) .prefixField {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+}
+
+.spoken:not(.compact) .prefixField input {
+  width: 14ch;
+  padding: 3px 8px;
+}
+
+.spoken:not(.compact) .btn {
+  padding: 4px 10px;
+}

@@ -1156,6 +1156,21 @@ describe('Workspace task transcript', () => {
     await waitFor(() => expect(panel).toHaveTextContent('Completed'));
     expect(panel).not.toHaveTextContent('Running');
   });
+
+  it('opens the task a route arrives with', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [FAILED_TASK] })
+    );
+    vi.mocked(workspaceClient.getWorkspaceTask).mockResolvedValueOnce(FAILED_TASK);
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/workspace/a', state: { openTaskId: FAILED_TASK.id } }]}>
+        <Routes>
+          <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    await screen.findByRole('region', { name: `Transcript for ${FAILED_TASK.title}` });
+  });
 });
 
 const AssistantEvents = () => {

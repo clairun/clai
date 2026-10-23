@@ -249,6 +249,31 @@ pub(crate) async fn list_recent_tasks(
     rows.iter().map(WorkspaceTaskRow::from_sql).collect()
 }
 
+/// Up to `open_limit` unfinished tasks and the `finished_limit` most recently
+/// finished ones, newest first.
+pub(crate) async fn list_open_and_recent_tasks(
+    pool: &DbPool,
+    open_limit: i64,
+    finished_limit: i64,
+) -> Result<Vec<WorkspaceTaskRow>, String> {
+    let rows = sqlx::query(&format!(
+        "SELECT * FROM (SELECT {TASK_COLUMNS} FROM workspace_tasks \
+           WHERE status IN ('queued', 'running', 'stopping') \
+           ORDER BY updated_at DESC LIMIT ?) \
+         UNION ALL \
+         SELECT * FROM (SELECT {TASK_COLUMNS} FROM workspace_tasks \
+           WHERE status NOT IN ('queued', 'running', 'stopping') \
+           ORDER BY updated_at DESC LIMIT ?) \
+         ORDER BY updated_at DESC"
+    ))
+    .bind(open_limit)
+    .bind(finished_limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load workspace tasks: {}", e))?;
+    rows.iter().map(WorkspaceTaskRow::from_sql).collect()
+}
+
 /// Where a task was assigned from: the caller's session and run, and the
 /// task that session belongs to, if any.
 #[derive(Debug, Clone, Default)]

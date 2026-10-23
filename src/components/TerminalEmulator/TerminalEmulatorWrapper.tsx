@@ -1,23 +1,39 @@
 /**
  * TerminalEmulatorWrapper
  *
- * Routes free-text terminal prompts into the assistant engine. Prompts only
- * have a target on workspace routes (the workspace's manager session, keyed
- * `workspace:<id>` in the assistant store); on other routes the terminal
- * accepts slash commands but tells the user to open a workspace to chat.
+ * Routes free-text terminal prompts into the assistant engine. The target
+ * (see `useTerminalTarget`) is the open workspace's manager session, or on
+ * the Fleet the selected card's — keyed `workspace:<id>` in the assistant
+ * store. On the Fleet with no card selected, a prompt creates a workspace
+ * (with the model and MCP chosen in the terminal) and sends to it, images
+ * included.
  */
 
-import { useCallback } from 'react';
-import { useLocation } from 'react-router';
+import { useCallback, useMemo } from 'react';
 import { useAssistantStore, assistantClient } from '../../assistant';
 import { readImage } from '@tauri-apps/plugin-clipboard-manager';
+import { mainRunning } from '../../fleet/fleetModel';
+import { useFleetStore } from '../../fleet/fleetStore';
+import { useFleetActivityStore } from '../../stores/fleetActivityStore';
+import { useTaskStore } from '../../workspace/taskStore';
 import {
+  applyNewWorkspaceDraft,
+  draftConnectionId,
+  draftImagePart,
+  dropDraftImages,
+  storeDraftImages,
+} from '../../fleet/newWorkspaceDraft';
+import {
+  createWorkspace,
   getOrCreateWorkspaceSession,
   storeWorkspaceImage,
   pickAndStoreWorkspaceImage,
+  pickImage,
 } from '../../workspace/client';
 import type { ContentPart } from '../../generated/bindings';
+import { openGlobalSettings } from '../../utils/globalSettings';
 import TerminalEmulator from './TerminalEmulator';
+import { useTerminalTarget } from './useTerminalTarget';
 
 const errorMessage = (err: unknown, fallback: string): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : fallback;
@@ -81,20 +97,98 @@ async function readClipboardImageAsFile(): Promise<File | null> {
   }
 }
 
-const TerminalEmulatorWrapper = () => {
-  const location = useLocation();
-  const workspaceRouteMatch = location.pathname.match(/^\/workspace(?:\/([^/]+))?\/?$/);
-  const isWorkspaceRoute = Boolean(workspaceRouteMatch);
-  const currentWorkspaceId = workspaceRouteMatch?.[1]
-    ? decodeURIComponent(workspaceRouteMatch[1])
-    : 'default';
+const NO_CONNECTION_ERROR =
+  'Add an enabled assistant provider connection before sending prompts from this workspace.';
 
-  // Track whether the workspace's canonical manager session has a
-  // non-terminal run so the input can show queued-message wording while
-  // still accepting text. Workspace.tsx populates the `workspace:<id>`
-  // tab-key on load.
+const openProviderSetup = () => openGlobalSettings({ tab: 'provider', providerAction: 'new' });
+
+/** Send `query` to `workspaceId`'s main session, binding it in the assistant store. */
+async function sendToWorkspace(
+  workspaceId: string,
+  query: string,
+  images: ContentPart[]
+): Promise<{ error?: string }> {
+  const binding = await getOrCreateWorkspaceSession(workspaceId);
+  const connectionId = binding.providerConnectionId;
+  if (!connectionId) {
+    openProviderSetup();
+    return { error: NO_CONNECTION_ERROR };
+  }
+
+  const store = useAssistantStore.getState();
+  store.initSession(binding.session);
+  // Bridge workspace session to the chat panel via a synthetic tab key
+  store.setActiveSessionForTab(`workspace:${workspaceId}`, binding.session.id);
+
+  const result = await assistantClient.sendMessage(
+    workspaceId,
+    binding.session.id,
+    query,
+    connectionId,
+    images,
+  );
+  store.addMessage(binding.session.id, result.message);
+  if (result.queued) {
+    // Sent while a run was active — show the "Queued" chip until a
+    // run picks it up (queued_messages_delivered clears it).
+    store.markMessageQueued(binding.session.id, result.message.id);
+  }
+  useFleetStore.getState().noteUserSent(workspaceId, binding.session.id, result.message);
+  return {};
+}
+
+/** Why images can't go to `workspaceId` (`null`: the Fleet's new workspace), or `null` if they can. */
+async function imageAttachError(workspaceId: string | null): Promise<string | null> {
+  const connectionId = workspaceId
+    ? (await getOrCreateWorkspaceSession(workspaceId)).providerConnectionId
+    : draftConnectionId(await assistantClient.listProviderConnections());
+  if (!connectionId) return 'Add an enabled assistant provider connection before attaching images.';
+  const supported = await assistantClient.connectionSupportsImages(connectionId);
+  return supported ? null : 'The selected model does not support image input.';
+}
+
+/** A workspace being created from the Fleet; prompts sent meanwhile join it instead of creating another. */
+let creatingWorkspace: Promise<string> | null = null;
+
+/** Checks for a provider first, so a first run without one leaves no empty workspace behind. */
+async function createFleetWorkspace(): Promise<string> {
+  const connections = await assistantClient.listProviderConnections();
+  if (!connections.some((c) => c.enabled)) {
+    openProviderSetup();
+    throw NO_CONNECTION_ERROR;
+  }
+  const workspaceId = await createWorkspace();
+  await applyNewWorkspaceDraft(workspaceId, connections);
+  return workspaceId;
+}
+
+/** Create a workspace and send to it; select it once the send worked, unless the user picked a card meanwhile. */
+export async function sendToNewWorkspace(query: string, images: ContentPart[]): Promise<{ error?: string }> {
+  const creating = (creatingWorkspace ??= createFleetWorkspace());
+  try {
+    const workspaceId = await creating;
+    const result = await sendToWorkspace(workspaceId, query, await storeDraftImages(workspaceId, images));
+    if (!result.error) dropDraftImages(images);
+    const fleet = useFleetStore.getState();
+    if (!result.error && !fleet.selectedId) fleet.select(workspaceId);
+    return result;
+  } finally {
+    if (creatingWorkspace === creating) creatingWorkspace = null;
+  }
+}
+
+const TerminalEmulatorWrapper = () => {
+  const target = useTerminalTarget();
+  const targetWorkspaceId = target.workspaceId;
+  const onFleet = target.surface === 'fleet';
+
+  // Track whether the target's main session has a non-terminal run so the
+  // input can show queued-message wording while still accepting text. The
+  // workspace page populates the `workspace:<id>` tab-key on load; the Fleet
+  // doesn't load its cards' sessions, so there its live runs say it.
   const workspaceSessionId = useAssistantStore(
-    (state) => state.activeSessionByTab[`workspace:${currentWorkspaceId}`] || null
+    (state) =>
+      (targetWorkspaceId && state.activeSessionByTab[`workspace:${targetWorkspaceId}`]) || null
   );
   const workspaceIsStreaming = useAssistantStore(
     (state) => (workspaceSessionId ? !!state.sessions[workspaceSessionId]?.isStreaming : false)
@@ -112,47 +206,33 @@ const TerminalEmulatorWrapper = () => {
     }
   }, [workspaceSessionId]);
 
-  const inputDisabled = isWorkspaceRoute && workspaceIsStreaming;
+  const fleetCard = useFleetStore((s) => (onFleet && targetWorkspaceId ? s.fleet.cards[targetWorkspaceId] : undefined));
+  const fleetRuns = useFleetActivityStore((s) => (fleetCard ? s.activeRunsByWorkspace[fleetCard.workspaceId] : undefined));
+  const fleetTasks = useTaskStore((s) => (fleetCard ? s.tasks[fleetCard.workspaceId] : undefined));
+  const fleetMainWorking = useMemo(
+    () =>
+      !!fleetCard &&
+      mainRunning(fleetCard, {
+        runs: { [fleetCard.workspaceId]: fleetRuns ?? [] },
+        tasks: { [fleetCard.workspaceId]: fleetTasks ?? {} },
+      }),
+    [fleetCard, fleetRuns, fleetTasks]
+  );
+
+  const inputDisabled = !!targetWorkspaceId && (workspaceIsStreaming || fleetMainWorking);
 
   /**
    * Handle sending a query through the assistant engine.
    */
   const handleSendToAgent = useCallback(
     async (query: string, images: ContentPart[] = []): Promise<{ error?: string }> => {
-      if (!isWorkspaceRoute) {
-        return { error: OPEN_WORKSPACE_ERROR };
-      }
-
       try {
-        const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
-        const connectionId = binding.providerConnectionId;
-        if (!connectionId) {
-          return {
-            error: 'Add an enabled assistant provider connection before sending prompts from this workspace.',
-          };
-        }
-
-        const store = useAssistantStore.getState();
-        store.initSession(binding.session);
-
-        // Bridge workspace session to the chat panel via a synthetic tab key
-        const workspaceTabKey = `workspace:${currentWorkspaceId}`;
-        store.setActiveSessionForTab(workspaceTabKey, binding.session.id);
-
-        const result = await assistantClient.sendMessage(
-          currentWorkspaceId,
-          binding.session.id,
-          query,
-          connectionId,
-          images,
-        );
-        store.addMessage(binding.session.id, result.message);
-        if (result.queued) {
-          // Sent while a run was active — show the "Queued" chip until a
-          // run picks it up (queued_messages_delivered clears it).
-          store.markMessageQueued(binding.session.id, result.message.id);
-        }
-        return {};
+        // On the Fleet the selection is read now, not at render: a card
+        // selected since (or by a create that just finished) is the target.
+        const workspaceId = onFleet ? useFleetStore.getState().selectedId : targetWorkspaceId;
+        if (workspaceId) return await sendToWorkspace(workspaceId, query, images);
+        if (onFleet) return await sendToNewWorkspace(query, images);
+        return { error: OPEN_WORKSPACE_ERROR };
       } catch (err) {
         console.error('[TerminalEmulatorWrapper] Workspace assistant error:', err);
         return {
@@ -160,90 +240,67 @@ const TerminalEmulatorWrapper = () => {
         };
       }
     },
-    [currentWorkspaceId, isWorkspaceRoute]
+    [onFleet, targetWorkspaceId]
   );
 
   /**
-   * Resolve + store a pasted/attached image, gated on the active connection's
-   * image capability. Returns the stored `ContentPart` to attach, or an error
-   * string to surface in the composer. The gate is the same backend resolver
-   * the send-filter uses, so the UI never offers what the provider would drop.
+   * Resolve + store a pasted/attached image, gated on the target connection's
+   * image capability. Returns the `ContentPart` to attach, or an error string
+   * to surface in the composer. The gate is the same backend resolver the
+   * send-filter uses, so the UI never offers what the provider would drop. On
+   * the Fleet with no card selected the image waits in the new-workspace draft.
    */
   const handleAttachImage = useCallback(
     async (file: File): Promise<{ part?: ContentPart; error?: string }> => {
-      if (!isWorkspaceRoute) {
-        return { error: OPEN_WORKSPACE_ERROR };
-      }
+      if (!targetWorkspaceId && !onFleet) return { error: OPEN_WORKSPACE_ERROR };
       try {
-        const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
-        const connectionId = binding.providerConnectionId;
-        if (!connectionId) {
-          return {
-            error: 'Add an enabled assistant provider connection before attaching images.',
-          };
-        }
-        const supported = await assistantClient.connectionSupportsImages(connectionId);
-        if (!supported) {
-          return { error: 'The selected model does not support image input.' };
-        }
+        const error = await imageAttachError(targetWorkspaceId);
+        if (error) return { error };
         const dataBase64 = await fileToBase64(file);
-        const part = await storeWorkspaceImage(
-          currentWorkspaceId,
-          dataBase64,
-          file.type,
-          file.name || null,
-        );
+        const filename = file.name || null;
+        const part = targetWorkspaceId
+          ? await storeWorkspaceImage(targetWorkspaceId, dataBase64, file.type, filename)
+          : draftImagePart({ dataBase64, mediaType: file.type, filename });
         return { part };
       } catch (err) {
         console.error('[TerminalEmulatorWrapper] Workspace image attach error:', err);
         return { error: errorMessage(err, 'Could not attach image.') };
       }
     },
-    [currentWorkspaceId, isWorkspaceRoute]
+    [targetWorkspaceId, onFleet]
   );
 
   /**
    * Reliable cross-platform attach: open the native file dialog, gate on the
-   * active connection, and store the chosen image. Clipboard paste is flaky in
+   * target connection, and store the chosen image. Clipboard paste is flaky in
    * the Linux WebKitGTK webview, so this picker is the primary affordance.
    */
   const handlePickImage = useCallback(async (): Promise<{
     part?: ContentPart;
     error?: string;
   }> => {
-    if (!isWorkspaceRoute) {
-      return { error: OPEN_WORKSPACE_ERROR };
-    }
+    if (!targetWorkspaceId && !onFleet) return { error: OPEN_WORKSPACE_ERROR };
     try {
-      const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
-      const connectionId = binding.providerConnectionId;
-      if (!connectionId) {
-        return {
-          error: 'Add an enabled assistant provider connection before attaching images.',
-        };
-      }
-      const supported = await assistantClient.connectionSupportsImages(connectionId);
-      if (!supported) {
-        return { error: 'The selected model does not support image input.' };
-      }
+      const error = await imageAttachError(targetWorkspaceId);
+      if (error) return { error };
       // Dialog runs backend-side: the picked path never crosses the
       // renderer boundary, closing the arbitrary-file-read hole.
-      const part = await pickAndStoreWorkspaceImage(currentWorkspaceId);
-      if (!part) {
-        return {}; // user cancelled, no attachment, no error
-      }
-      return { part };
+      const part = targetWorkspaceId
+        ? await pickAndStoreWorkspaceImage(targetWorkspaceId)
+        : await pickImage().then((image) => image && draftImagePart(image));
+      return part ? { part } : {}; // null: user cancelled, no attachment, no error
     } catch (err) {
       console.error('[TerminalEmulatorWrapper] Workspace image pick error:', err);
       return { error: errorMessage(err, 'Could not attach image.') };
     }
-  }, [currentWorkspaceId, isWorkspaceRoute]);
+  }, [targetWorkspaceId, onFleet]);
 
   const handleAgentCommand = useCallback(
     async (command: string): Promise<{ error?: string; message?: string }> => {
       const [name] = command.trim().split(/\s+/, 1);
 
-      if (!isWorkspaceRoute) {
+      const currentWorkspaceId = targetWorkspaceId;
+      if (!currentWorkspaceId) {
         return { error: OPEN_WORKSPACE_ERROR };
       }
 
@@ -260,6 +317,7 @@ const TerminalEmulatorWrapper = () => {
           const fresh = await getOrCreateWorkspaceSession(currentWorkspaceId);
           store.initSession(fresh.session);
           store.setActiveSessionForTab(`workspace:${currentWorkspaceId}`, fresh.session.id);
+          useFleetStore.getState().noteUserSent(currentWorkspaceId, fresh.session.id, null);
           return { message: 'Conversation history cleared.' };
         } catch (err) {
           console.error('[TerminalEmulatorWrapper] Workspace clear error:', err);
@@ -300,7 +358,7 @@ const TerminalEmulatorWrapper = () => {
         };
       }
     },
-    [currentWorkspaceId, isWorkspaceRoute]
+    [targetWorkspaceId]
   );
 
   return (

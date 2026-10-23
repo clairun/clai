@@ -1,7 +1,8 @@
 import { describe, it, expect, vi, beforeAll } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { act, render, screen, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useNavigate } from 'react-router';
+import { dispatchFocusTerminal } from '../../utils/workspaceUiEvents';
 
 // jsdom lacks ResizeObserver, which the composer observes on mount.
 beforeAll(() => {
@@ -55,6 +56,8 @@ vi.mock('../../workspace/components/WorkspaceContextBar', () => ({
 }));
 
 import TerminalEmulator from './TerminalEmulator';
+import { useFleetStore } from '../../fleet/fleetStore';
+import { emptyCard } from '../../fleet/fleetModel';
 
 // A button that navigates the shared router so the (persistent, global)
 // TerminalEmulator instance sees a workspace switch — exactly how MainLayout
@@ -429,5 +432,168 @@ describe('TerminalEmulator image attachments', () => {
     expect(onSendToChat).toHaveBeenCalled();
     // Failed send keeps the image attached (cleared only on success).
     expect(await screen.findByAltText('shot.png')).toBeInTheDocument();
+  });
+});
+
+describe('TerminalEmulator on the Fleet', () => {
+  const renderFleetComposer = (onSendToChat = vi.fn(async () => ({}))) => {
+    render(
+      <MemoryRouter initialEntries={['/fleet']}>
+        <TerminalEmulator onSendToChat={onSendToChat} />
+      </MemoryRouter>
+    );
+    return onSendToChat;
+  };
+
+  it('asks once before a message creates a workspace; a second Enter sends it', async () => {
+    useFleetStore.setState({ selectedId: null });
+    const user = userEvent.setup();
+    const send = renderFleetComposer();
+    expect(screen.getByRole('button', { name: '+ Create workspace' })).toBeInTheDocument();
+    // Model and MCP for the workspace to be created: same bar, same height.
+    expect(screen.getByTestId('context-bar')).toBeInTheDocument();
+
+    await user.type(screen.getByRole('textbox'), 'hello{Enter}');
+    expect(send).not.toHaveBeenCalled();
+    expect(screen.getByRole('status')).toHaveTextContent('Create a new workspace with this message?');
+    expect(screen.getByRole('textbox')).toHaveValue('hello');
+
+    await user.keyboard('{Enter}');
+    expect(send).toHaveBeenCalledWith('hello', []);
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
+  it('cancels the pending creation on Esc or an edit, keeping the text', async () => {
+    useFleetStore.setState({ selectedId: null });
+    const user = userEvent.setup();
+    const send = renderFleetComposer();
+    const input = screen.getByRole('textbox');
+
+    await user.type(input, 'hello{Enter}{Escape}');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(input).toHaveValue('hello');
+    await user.keyboard('{Enter}');
+    expect(send).not.toHaveBeenCalled();
+    expect(screen.getByRole('status')).toBeInTheDocument();
+
+    await user.type(input, '!');
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('shows the same controls with and without a selected card', () => {
+    const controls = () => [
+      screen.queryByTestId('context-bar'),
+      screen.queryByRole('button', { name: 'Attach image' }),
+    ];
+    const renderWith = () =>
+      render(
+        <MemoryRouter initialEntries={['/fleet']}>
+          <TerminalEmulator onSendToChat={vi.fn(async () => ({}))} onPickImage={vi.fn(async () => ({}))} />
+        </MemoryRouter>
+      );
+
+    useFleetStore.setState({ selectedId: null });
+    const { unmount } = renderWith();
+    expect(controls().every(Boolean)).toBe(true);
+    unmount();
+
+    useFleetStore.setState((s) => ({
+      selectedId: 'ws-a',
+      fleet: { ...s.fleet, cards: { 'ws-a': { ...emptyCard('ws-a'), title: 'Alpha' } } },
+    }));
+    renderWith();
+    expect(controls().every(Boolean)).toBe(true);
+    useFleetStore.setState({ selectedId: null });
+  });
+
+  it('sends to the selected card without asking, and shows it as the target', async () => {
+    useFleetStore.setState((s) => ({
+      selectedId: 'ws-a',
+      fleet: { ...s.fleet, cards: { 'ws-a': { ...emptyCard('ws-a'), title: 'Alpha' } } },
+    }));
+    const user = userEvent.setup();
+    const send = renderFleetComposer();
+    expect(screen.getByText('→ Alpha')).toBeInTheDocument();
+
+    await user.type(screen.getByRole('textbox'), 'hi{Enter}');
+    expect(send).toHaveBeenCalledWith('hi', []);
+    useFleetStore.setState({ selectedId: null });
+  });
+});
+
+describe('TerminalEmulator help button', () => {
+  const renderAt = (path: string) =>
+    render(
+      <MemoryRouter initialEntries={[path]}>
+        <TerminalEmulator onSendToChat={vi.fn(async () => ({}))} />
+      </MemoryRouter>
+    );
+
+  it('opens the same help as /help with no workspace selected; Esc closes it, back to the input', async () => {
+    useFleetStore.setState({ selectedId: null });
+    const user = userEvent.setup();
+    renderAt('/fleet');
+    const input = screen.getByRole('textbox');
+
+    await user.click(screen.getByRole('button', { name: 'Help' }));
+    const fromButton = screen.getByRole('dialog', { name: 'Available commands' }).innerHTML;
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(input).toHaveFocus();
+
+    await user.type(input, '/help{Enter}');
+    expect(screen.getByRole('dialog', { name: 'Available commands' }).innerHTML).toBe(fromButton);
+  });
+
+  it('takes the keyboard when the Fleet switcher picks a workspace', () => {
+    renderAt('/fleet');
+    const input = screen.getByRole('textbox');
+    input.blur();
+    act(() => dispatchFocusTerminal());
+    expect(input).toHaveFocus();
+  });
+
+  it('is on pages without a target too, and opens from the keyboard', async () => {
+    const user = userEvent.setup();
+    renderAt('/settings');
+    const help = screen.getByRole('button', { name: 'Help' });
+    expect(help).toHaveAttribute('title', 'Help (/help)');
+    help.focus();
+    await user.keyboard('{Enter}');
+    expect(screen.getByRole('dialog', { name: 'Available commands' })).toBeInTheDocument();
+  });
+});
+
+describe('TerminalEmulator published height', () => {
+  it('publishes its height with a one-line input apart from its height, for pages the input grows over', () => {
+    const Previous = globalThis.ResizeObserver;
+    let measure = () => {};
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        constructor(cb: () => void) {
+          measure = cb;
+        }
+        observe() {}
+        disconnect() {}
+      }
+    );
+    const { container } = renderComposer();
+    vi.stubGlobal('ResizeObserver', Previous);
+    const terminal = container.lastElementChild!;
+    const input = screen.getByRole('textbox');
+    const resize = (terminalPx: number, inputPx: number) => {
+      Object.defineProperty(terminal, 'offsetHeight', { configurable: true, value: terminalPx });
+      Object.defineProperty(input, 'offsetHeight', { configurable: true, value: inputPx });
+      measure();
+      const root = document.documentElement.style;
+      return [root.getPropertyValue('--terminal-height'), root.getPropertyValue('--terminal-rest-height')];
+    };
+
+    expect(resize(122, 20)).toEqual(['122px', '122px']);
+    expect(resize(222, 120)).toEqual(['222px', '122px']);
+    // Terminal mode hides the composer: all of the terminal is its rest height.
+    expect(resize(400, 0)).toEqual(['400px', '400px']);
   });
 });

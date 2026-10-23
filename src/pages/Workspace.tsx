@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
-import { useOutletContext, useParams } from 'react-router';
+import { useLocation, useNavigate, useOutletContext, useParams } from 'react-router';
 import type { FleetOutletContext } from '../layouts/FleetLayout';
 import { workspaceDeleteAgent } from '../api/client';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
@@ -15,6 +15,8 @@ import { useTask, useTaskStore, useWorkspaceTasks } from '../workspace/taskStore
 import * as assistantClient from '../assistant/client';
 import useAssistantStore, { isRunActive } from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
+import { restorePendingAsk } from '../assistant/pendingAsks';
+import { hydrateSession, useSessionChatActions } from '../assistant/sessionChat';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
 import { mainIdentity } from '../components/Agents/agentIdentity';
@@ -59,7 +61,6 @@ import styles from './Workspace.module.css';
 
 const DEFAULT_WORKSPACE_ID = 'default';
 const REFRESH_INTERVAL_MS = 5000;
-const MESSAGE_PAGE_LIMIT = 100;
 // The workspace page is the one caller that wants the filesystem walk: it
 // re-walks on every poll so memories created by a running agent surface
 // without the user having to re-enter the workspace, and so the artifact
@@ -1385,12 +1386,6 @@ const WorkspaceHeader = ({
   );
 };
 
-// The workspace chat is always the Main's session, so its in-flight footer
-// always wears the Main's face. Built once at module scope because the footer
-// is memoized on this prop: a fresh object per render would re-render it on
-// every parent render for the whole of every run.
-const MAIN_IDENTITY = mainIdentity();
-
 // Chat is the workspace's primary surface. Memories, artifacts, tasks, and
 // member agents live in the drawer (toggled from the header counters) and
 // open in modals when inspected — the chat is never hidden.
@@ -1438,6 +1433,10 @@ const ChatFirstLayout = ({
   taskRoster,
   onOpenTask,
 }: ChatFirstLayoutProps) => {
+  // The workspace chat is always the Main's session, so its in-flight footer
+  // wears the Main's face. Keyed on the roster, which keeps one reference
+  // across polls (`useStableRoster`): the footer is memoized on this prop.
+  const mainFace = useMemo(() => mainIdentity(taskRoster.find((agent) => agent.isDefault)), [taskRoster]);
   // Streaming deltas are the highest-frequency store updates (many per
   // second). Subscribing here — instead of in the Workspace page shell —
   // scopes each delta's re-render to the chat area only.
@@ -1512,7 +1511,7 @@ const ChatFirstLayout = ({
             runError={runError}
             runErrorIsLimit={runErrorIsLimit}
             runStartedAt={runStartedAt}
-            runningIdentity={MAIN_IDENTITY}
+            runningIdentity={mainFace}
             queuedMessageIds={queuedMessageIds}
             onDeleteQueuedMessage={onDeleteQueuedMessage}
             onEditQueuedMessage={onEditQueuedMessage}
@@ -1861,28 +1860,16 @@ const Workspace = () => {
             (hasUnloadedUpdate && !streamingRuns?.some(isRunActive));
 
           if (shouldHydrateSession) {
-            const [messagePage, runs] = await Promise.all([
-              assistantClient.loadSessionMessagesPage({
-                workspaceId,
-                sessionId: nextDetails.session.id,
-                limit: MESSAGE_PAGE_LIMIT,
-              }),
-              streamingRuns ?? assistantClient.listRuns(workspaceId, nextDetails.session.id),
-            ]);
-            if (currentWorkspaceIdRef.current !== workspaceId) return;
-
-            store.loadSessionData(
-              nextDetails.session.id,
-              nextDetails.session,
-              messagePage.messages,
-              runs,
-              messagePage.toolCalls,
-              nextDetails.queuedMessageIds || [],
-              messagePage.nextCursor ?? null,
-              messagePage.hasMore,
-              messagePage.totalCount
-            );
+            const hydrated = await hydrateSession(workspaceId, nextDetails.session, {
+              queuedMessageIds: nextDetails.queuedMessageIds || [],
+              runs: streamingRuns ?? undefined,
+              isCurrent: () => currentWorkspaceIdRef.current === workspaceId,
+            });
+            if (!hydrated) return;
             lastLoadedSessionUpdatedAtRef.current = nextDetails.session.updatedAt || null;
+            if (needsInitialHydration) {
+              void restorePendingAsk(workspaceId, nextDetails.session.id);
+            }
           }
         }
       } catch (err) {
@@ -2103,69 +2090,11 @@ const Workspace = () => {
   // details cover the first render before hydration.
   const queuedMessageIds =
     storeQueuedMessageIds ?? details?.queuedMessageIds ?? EMPTY_QUEUED_IDS;
-  const handleDeleteQueuedMessage = useCallback(
-    (messageId: string) => {
-      if (!sessionId) return;
-      // MessageDeleted from the backend removes it from the store; on a
-      // lost race ("already picked up") the chip clears via
-      // queued_messages_delivered instead, so both outcomes self-resolve.
-      assistantClient.deleteQueuedMessage(workspaceId, sessionId, messageId).catch((err) => {
-        console.error('[Workspace] Failed to delete queued message:', err);
-      });
-    },
-    [sessionId, workspaceId]
-  );
-  const handleEditQueuedMessage = useCallback(
-    async (messageId: string, text: string) => {
-      if (!sessionId) return;
-      // AssistantMessageUpdated from the backend swaps the text in the
-      // store. On a lost race ("already picked up") the edit errors and the
-      // original text is left untouched.
-      try {
-        await assistantClient.editQueuedMessage(workspaceId, sessionId, messageId, text);
-      } catch (err) {
-        console.error('[Workspace] Failed to edit queued message:', err);
-      }
-    },
-    [sessionId, workspaceId]
-  );
-  const handleLoadOlderMessages = useCallback(() => {
-    if (!sessionId) return;
-    const store = useAssistantStore.getState();
-    const current = store.sessions[sessionId];
-    if (
-      !current?.hasOlderMessages ||
-      !current.olderMessageCursor ||
-      current.isLoadingOlderMessages
-    ) {
-      return;
-    }
-
-    store.setOlderMessagesLoading(sessionId, true);
-    assistantClient
-      .loadSessionMessagesPage({
-        workspaceId,
-        sessionId,
-        before: current.olderMessageCursor,
-        limit: MESSAGE_PAGE_LIMIT,
-      })
-      .then((page) => {
-        useAssistantStore
-          .getState()
-          .prependMessagePage(
-            sessionId,
-            page.messages,
-            page.toolCalls,
-            page.nextCursor ?? null,
-            page.hasMore,
-            page.totalCount
-          );
-      })
-      .catch((err) => {
-        console.error('[Workspace] Failed to load older messages:', err);
-        useAssistantStore.getState().setOlderMessagesLoading(sessionId, false);
-      });
-  }, [sessionId, workspaceId]);
+  const {
+    onDeleteQueuedMessage: handleDeleteQueuedMessage,
+    onEditQueuedMessage: handleEditQueuedMessage,
+    onLoadOlderMessages: handleLoadOlderMessages,
+  } = useSessionChatActions(workspaceId, sessionId);
 
   const forkPromptStartedRef = useRef<Set<string>>(new Set());
   useEffect(() => {
@@ -2267,6 +2196,16 @@ const Workspace = () => {
     },
     [openTaskById, patchWorkspaceUi]
   );
+  // A task opened from elsewhere (a Fleet stage card) rides in on the route state, once.
+  const location = useLocation();
+  const navigate = useNavigate();
+  const routedTaskId = (location.state as { openTaskId?: string } | null)?.openTaskId;
+  useEffect(() => {
+    if (!routedTaskId) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- consumes the route state, an external one-shot input, and clears it.
+    openTask(routedTaskId);
+    navigate(location.pathname, { replace: true });
+  }, [routedTaskId, openTask, navigate, location.pathname]);
   // From inside a task's log: Back returns to it.
   const openNestedTask = useCallback(
     (taskId: string) => {
@@ -2566,7 +2505,7 @@ const Workspace = () => {
                               ref={artifactAddMenuRef}
                               style={artifactAddMenu.style}
                               onKeyDown={(e) => {
-                                if (e.key !== 'Tab') return;
+                                if (e.code !== 'Tab') return;
                                 const items = Array.from(
                                   e.currentTarget.querySelectorAll<HTMLElement>(
                                     '[role="menuitem"]:not([disabled])'
