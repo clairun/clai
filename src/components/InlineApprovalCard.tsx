@@ -17,6 +17,13 @@ const PERMISSION_REQUEST_EVENT = 'permissions://request';
 // card. Payload: { requestId }.
 const PERMISSION_RESOLVED_EVENT = 'permissions://resolved';
 
+/** A compact chip names its prefix by its first words; its tooltip has it whole. */
+const CHIP_PREFIX_CHARS = 16;
+const chipPrefix = (prefix: string): string => {
+  const line = prefix.split('\n', 1)[0]!.trim();
+  return line.length > CHIP_PREFIX_CHARS || line !== prefix.trim() ? `${line.slice(0, CHIP_PREFIX_CHARS - 1)}…` : line;
+};
+
 // Local UI alias matching the discriminator on SegmentDecision. Kept
 // in its own type because the per-segment radio buttons need a flat
 // enum, not the full discriminated union (the scope/prefix only enter
@@ -337,7 +344,7 @@ const InlineApprovalCard = ({ workspaceId, request, compact = false, speaker }: 
                   title: `Always ${verb} commands starting with \`${prefix}\` (${reach})`,
                   children: (
                     <>
-                      {verb === 'allow' ? 'Always' : 'Never'} · <code>{prefix}</code>
+                      {verb === 'allow' ? 'Always' : 'Never'} · <code>{chipPrefix(prefix)}</code>
                     </>
                   ),
                 }

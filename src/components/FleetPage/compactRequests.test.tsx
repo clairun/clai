@@ -1,3 +1,5 @@
+/// <reference types="node" />
+import { readFileSync } from 'node:fs';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -128,6 +130,28 @@ describe('compact requests (small Fleet cards)', () => {
       requestId: 'perm-1',
       decisions: [{ kind: 'allowAlways', scope: 'agent', prefix: 'cargo test' }],
     });
+  });
+
+  it('keeps a long, many-line command out of its decisions; the bubble has it whole', () => {
+    const note = '"Loki 8f42532a DONE: errors 348/338/133.\nConfirms alert-config blocker (model switch 10-21 14:11— 18:02) → 10 eval"';
+    const long = { ...approval, command: note, segments: [{ text: note, kind: 'simple', suggestedPrefix: note }] } as PermissionRequest;
+    const card = { ...emptyCard('ws-1'), requests: { 'approval:perm-1': { kind: 'approval', request: long, at: 1 } as unknown as FleetRequest } };
+    render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} })!} workspaceId="ws-1" faces={castFor({}, null)} now={10} />);
+    const buttons = screen.getAllByRole('button');
+    // A chip names the prefix it saves by its first words; the tooltip has it whole.
+    expect(buttons.map((b) => b.textContent)).toEqual(['Once', 'Always · "Loki 8f42532a …', 'Never · "Loki 8f42532a …', 'Deny']);
+    expect(buttons[1]!.title).toContain('Confirms alert-config blocker');
+    expect(screen.getByLabelText('Command').textContent).toBe(note);
+  });
+
+  it('keeps a part\'s decisions on one row: chips never wrap, a prefix gives way first', () => {
+    // jsdom lays nothing out, so the compact rules say it.
+    const css = readFileSync('src/components/InlineApprovalCard.module.css', 'utf8');
+    const rule = (selector: string) => css.split(`\n${selector} {`)[1]?.split('}')[0] ?? '';
+    expect(rule('.compact .segmentButtons')).toMatch(/flex-wrap: nowrap/);
+    expect(rule('.compact .btn')).toMatch(/white-space: nowrap/);
+    expect(rule('.compact .btn:has(code)')).toMatch(/min-width: 0/);
+    expect(rule('.compact .btn code')).toMatch(/white-space: nowrap/);
   });
 
   it('offers no "always" chip for a part without a suggested prefix', () => {
