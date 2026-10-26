@@ -6,10 +6,10 @@
  */
 
 import React, { useState, useCallback, useEffect, useMemo, memo } from 'react';
-import ReactDOM from 'react-dom';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
-import { WorkspaceFileContext, type WorkspaceFileLocation } from '../Chat/WorkspaceFileContext';
+import { WorkspaceFileContext, useDocumentLocation } from '../Chat/WorkspaceFileContext';
+import ImageLightbox from '../Chat/ImageLightbox';
 import VirtualizedList from '../common/VirtualizedList';
 import type {
   AssistantMessage,
@@ -123,51 +123,6 @@ const getImageContent = (message: AssistantMessage): ImagePart[] => {
  * i.e. when its message scrolls into the virtualized view — so a long
  * history with many images never loads them all at once.
  */
-/**
- * Full-screen zoom overlay for a transcript image. Portals to <body> so it
- * escapes the virtualized list's transformed/overflow ancestors; closes on
- * Escape, backdrop click, or the × button. Reuses the already-loaded data URL
- * (no re-fetch).
- */
-const ImageLightbox = ({
-  src,
-  alt,
-  onClose,
-}: {
-  src: string;
-  alt: string;
-  onClose: () => void;
-}) => {
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
-
-  return ReactDOM.createPortal(
-    <div className={styles.imageLightboxBackdrop} onClick={onClose} role="dialog" aria-label={alt}>
-      <img
-        className={styles.imageLightboxImage}
-        src={src}
-        alt={alt}
-        onClick={(event) => event.stopPropagation()}
-      />
-      <button
-        type="button"
-        className={styles.imageLightboxClose}
-        onClick={onClose}
-        aria-label="Close"
-      >
-        ×
-      </button>
-    </div>,
-    document.body
-  );
-};
-ImageLightbox.displayName = 'ImageLightbox';
-
 const ImageAttachment = memo(({ workspaceId, part }: { workspaceId: string; part: ImagePart }) => {
   const [src, setSrc] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
@@ -659,11 +614,9 @@ const ChatMessageList = ({
   }, [toolCalls]);
 
   // Lets markdown in messages resolve workspace-relative references (a
-  // `.vl.json` chart link, a spec's `data.url`) against the workspace root.
-  const fileLocation = useMemo<WorkspaceFileLocation>(
-    () => ({ workspaceId, basePath: '' }),
-    [workspaceId]
-  );
+  // `.vl.json` chart link, a spec's `data.url`, an image, a file link)
+  // against the workspace root.
+  const fileLocation = useDocumentLocation(workspaceId, '');
 
   // External scroll-to-bottom nudges (e.g. entering terminal mode shrinks the
   // conversation viewport). Folded into scrollToBottomSignal below with a wide

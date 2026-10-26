@@ -260,6 +260,12 @@
 }
 
 /* Horizontal rule */
+/* Remote images; workspace images style themselves (WorkspaceImage). */
+.image {
+  max-width: 100%;
+  height: auto;
+}
+
 .horizontalRule {
   margin: 16px 0;
   border: none;
