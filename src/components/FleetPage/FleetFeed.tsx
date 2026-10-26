@@ -2,7 +2,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -25,7 +24,6 @@ import {
   fullMessageText,
   isSpeech,
   splitFeed,
-  wordsOf,
   shortTime,
   shoutLevel,
   type FleetCaption,
@@ -35,6 +33,7 @@ import {
 } from '../../fleet/fleetModel';
 import fx, { FaceExpression, Sfx, SpeedLines, type Expression } from './FleetEffects';
 import AgentAvatar from '../Agents/AgentAvatar';
+import FleetMarkdown, { ChartOpen, MINIATURE } from './FleetMarkdown';
 import { MAIN_FACE, type Cast } from './FleetFace';
 import FleetZoom, { Tail, zoomStart, type ZoomStart } from './FleetZoom';
 import styles from './FleetPage.module.css';
@@ -200,37 +199,6 @@ const expandable = (open: boolean, toggle: () => void) => ({
   },
 });
 
-/** A chart Main embedded: only its title, which opens the workspace to see it. */
-const ChartChip = ({ title, onOpen }: { title: string; onOpen: () => void }) => (
-  <button
-    type="button"
-    className={styles.chartChip}
-    title={`Open the workspace to see ${title}`}
-    onClick={(e) => {
-      e.stopPropagation();
-      onOpen();
-    }}
-    onKeyDown={(e) => e.stopPropagation()}
-  >
-    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" aria-hidden="true">
-      <path d="M4 20V10M10 20V4M16 20v-7M22 20H2" />
-    </svg>
-    {title}
-  </button>
-);
-
-/** Main's words as plain lines (`wordsOf`), each chart a chip. */
-const Words = ({ markdown, onChart }: { markdown: string; onChart: () => void }) => {
-  const words = useMemo(() => wordsOf(markdown), [markdown]);
-  return (
-    <>
-      {words.map((w, i) =>
-        w.kind === 'chart' ? <ChartChip key={i} title={w.title} onOpen={onChart} /> : <span key={i}>{w.text}</span>
-      )}
-    </>
-  );
-};
-
 /** A date and time, for the zoomed message. */
 const fullTime = (at: number): string =>
   new Date(at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
@@ -324,7 +292,6 @@ const Said = ({
   open,
   expanded,
   onToggle,
-  onChart,
 }: {
   workspaceId: string;
   line: FleetLine;
@@ -335,7 +302,6 @@ const Said = ({
   /** Main's bubble, open in place. */
   expanded: boolean;
   onToggle: (key: string) => void;
-  onChart: () => void;
 }) => {
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
@@ -374,12 +340,14 @@ const Said = ({
           <Tail />
           {speech ? (
             // Still being written, it shows its newest lines; done, its first.
-            <span className={styles.bubbleText} data-tail={(line.writing && !expanded) || undefined} data-open={expanded || undefined}>
-              <span>
+            <div className={`${styles.bubbleText} ${styles.speech}`} data-newest={(line.writing && !expanded) || undefined} data-open={expanded || undefined}>
+              <div>
                 <Stamp line={line} time={time} />
-                {expanded ? <FullWords workspaceId={workspaceId} line={line} onChart={onChart} /> : <Words markdown={line.markdown} onChart={onChart} />}
-              </span>
-            </span>
+                <div className={styles.speechText}>
+                  {expanded ? <FullSpeech workspaceId={workspaceId} line={line} /> : <FleetMarkdown content={line.markdown} />}
+                </div>
+              </div>
+            </div>
           ) : (
             <span className={styles.bubbleText} title={line.text}>
               <Stamp line={line} time={time} />
@@ -479,25 +447,19 @@ const useFullText = (workspaceId: string, line: FleetLine): string => {
 };
 
 /** Main's whole bubble, fetched when its text was cut. */
-const FullWords = ({ workspaceId, line, onChart }: { workspaceId: string; line: FleetLine; onChart: () => void }) => (
-  <Words markdown={useFullText(workspaceId, line)} onChart={onChart} />
+const FullSpeech = ({ workspaceId, line }: { workspaceId: string; line: FleetLine }) => (
+  <FleetMarkdown content={useFullText(workspaceId, line)} />
 );
 
-/** The zoomed highlight: who said it to whom and when, then the whole message as markdown; Main's words as its bubble says them. */
-const Zoomed = ({ workspaceId, line, onChart }: { workspaceId: string; line: FleetLine; onChart: () => void }) => {
+/** The zoomed highlight: who said it to whom and when, then the whole message as markdown; Main's charts as its bubble draws them. */
+const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine }) => {
   const text = useFullText(workspaceId, line);
   return (
     <div className={styles.zoomText}>
       <p className={styles.zoomStamp}>
         <Route line={line} /> · <Outcome line={line} time={fullTime(line.at)} />
       </p>
-      {isSpeech(line) ? (
-        <p className={styles.zoomWords}>
-          <Words markdown={text} onChart={onChart} />
-        </p>
-      ) : (
-        <MarkdownMessage content={text} />
-      )}
+      <MarkdownMessage content={text} components={isSpeech(line) ? MINIATURE : undefined} />
     </div>
   );
 };
@@ -553,44 +515,45 @@ const FleetFeed = ({
   const bubbles = feed.lines.slice(split);
   const zoomFace = zoom && faceFor(zoom.line.from, faces);
   return (
-    <div ref={ref} className={styles.scene} data-mood={feed.mood}>
-      <p className={styles.captionRow}>
-        <Caption caption={feed.caption} mood={feed.mood} now={now} />
-      </p>
-      {rows.length > 0 && (
-        <ul className={styles.rows} aria-label="Earlier">
-          {rows.map((line) => (
-            <Row key={line.key} line={line} now={now} faces={faces} open={open} />
-          ))}
-        </ul>
-      )}
-      {bubbles.map((line) => (
-        <Said
-          key={line.key}
-          workspaceId={workspaceId}
-          line={line}
-          shout={shouts.has(line.key)}
-          now={now}
-          faces={faces}
-          open={open}
-          expanded={expanded === line.key}
-          onToggle={toggle}
-          onChart={onChart}
-        />
-      ))}
-      {feed.lines.length === 0 && <p className={styles.nothing}>No messages yet.</p>}
-      {zoom && (
-        <FleetZoom
-          origin={zoom.origin}
-          start={zoom.start}
-          face={zoomFace && zoom.start.face && <AgentAvatar identity={zoomFace} size={Math.round(zoom.start.face.width)} ring={false} />}
-          label={`Message from ${nameOf(zoom.line.from)}`}
-          onClosed={closed}
-        >
-          <Zoomed workspaceId={workspaceId} line={zoom.line} onChart={onChart} />
-        </FleetZoom>
-      )}
-    </div>
+    <ChartOpen.Provider value={onChart}>
+      <div ref={ref} className={styles.scene} data-mood={feed.mood}>
+        <p className={styles.captionRow}>
+          <Caption caption={feed.caption} mood={feed.mood} now={now} />
+        </p>
+        {rows.length > 0 && (
+          <ul className={styles.rows} aria-label="Earlier">
+            {rows.map((line) => (
+              <Row key={line.key} line={line} now={now} faces={faces} open={open} />
+            ))}
+          </ul>
+        )}
+        {bubbles.map((line) => (
+          <Said
+            key={line.key}
+            workspaceId={workspaceId}
+            line={line}
+            shout={shouts.has(line.key)}
+            now={now}
+            faces={faces}
+            open={open}
+            expanded={expanded === line.key}
+            onToggle={toggle}
+          />
+        ))}
+        {feed.lines.length === 0 && <p className={styles.nothing}>No messages yet.</p>}
+        {zoom && (
+          <FleetZoom
+            origin={zoom.origin}
+            start={zoom.start}
+            face={zoomFace && zoom.start.face && <AgentAvatar identity={zoomFace} size={Math.round(zoom.start.face.width)} ring={false} />}
+            label={`Message from ${nameOf(zoom.line.from)}`}
+            onClosed={closed}
+          >
+            <Zoomed workspaceId={workspaceId} line={zoom.line} />
+          </FleetZoom>
+        )}
+      </div>
+    </ChartOpen.Provider>
   );
 };
 

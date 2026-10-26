@@ -4,6 +4,18 @@ import type { AssistantEventEnvelope, AssistantMessage, AssistantUiEvent } from 
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }));
 
+/** Every markdown text parsed, in order. */
+const parsed = vi.hoisted(() => [] as string[]);
+vi.mock('react-markdown', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('react-markdown')>();
+  const { createElement } = await import('react');
+  const Counted = (props: Parameters<typeof actual.default>[0]) => {
+    parsed.push(String(props.children));
+    return createElement(actual.default, props);
+  };
+  return { ...actual, default: Counted };
+});
+
 import FleetFeed from './FleetFeed';
 import { castFor } from './FleetFace';
 import { EMPTY_FLEET, applyAssistantEvent, applyUserSent, cardFeed, type FleetLive, type FleetState } from '../../fleet/fleetModel';
@@ -28,20 +40,23 @@ const fleet = (...events: AssistantEventEnvelope[]): FleetState =>
 const twoBlocks = (second = 'After that, the fix.') =>
   fleet(updated(message('m1', [text('First, the leaks.'), tool('c1')]), NOW - 2000), updated(message('m1', [text('First, the leaks.'), tool('c1'), text(second), tool('c2')]), NOW - 1000));
 
-const Feed = ({ state, live = IDLE, onOpen = () => {} }: { state: FleetState; live?: FleetLive; onOpen?: (id: string) => void }) => (
-  <FleetFeed workspaceId={WS} feed={cardFeed(state.cards[WS]!, live, NOW)} shouts={new Set()} now={NOW} faces={castFor({}, null)} onOpen={onOpen} />
+const Feed = ({ state, live = IDLE, now = NOW, onOpen = () => {} }: { state: FleetState; live?: FleetLive; now?: number; onOpen?: (id: string) => void }) => (
+  <FleetFeed workspaceId={WS} feed={cardFeed(state.cards[WS]!, live, now)} shouts={new Set()} now={now} faces={castFor({}, null)} onOpen={onOpen} />
 );
+const saying = (markdown: string) => fleet(updated(message('m1', [text(markdown), tool('c1')]), NOW - 1000));
 
-const mainBubble = () => screen.getByText(/First, the leaks/).closest<HTMLElement>('[role=button]')!;
-const words = () => mainBubble().querySelector('[data-bubble] > span')!;
+const bubbleOf = (words: RegExp) => screen.getByText(words).closest<HTMLElement>('[role=button]')!;
+const mainBubble = () => bubbleOf(/First, the leaks/);
+const words = () => mainBubble().querySelector<HTMLElement>('[data-bubble] > div')!;
 
 describe("Main's bubble", () => {
   it('shows its newest lines while its run goes on, and its first once the run is done', () => {
     const { rerender } = render(<Feed state={twoBlocks()} live={RUNNING} />);
-    expect(words()).toHaveAttribute('data-tail');
-    expect(words()).toHaveTextContent('First, the leaks. After that, the fix.');
+    expect(words()).toHaveAttribute('data-newest');
+    expect(words()).toHaveTextContent('First, the leaks.');
+    expect(words()).toHaveTextContent('After that, the fix.');
     rerender(<Feed state={twoBlocks()} live={IDLE} />);
-    expect(words()).not.toHaveAttribute('data-tail');
+    expect(words()).not.toHaveAttribute('data-newest');
   });
 
   it('opens in place on a click, keeps growing open, and closes on the next click; it never zooms', () => {
@@ -51,7 +66,7 @@ describe("Main's bubble", () => {
     expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
     // Open, it scrolls inside instead of following the newest lines.
     expect(words()).toHaveAttribute('data-open');
-    expect(words()).not.toHaveAttribute('data-tail');
+    expect(words()).not.toHaveAttribute('data-newest');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
 
     rerender(<Feed state={twoBlocks('After that, the fix. Then the docs.')} live={RUNNING} />);
@@ -65,11 +80,43 @@ describe("Main's bubble", () => {
     expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
   });
 
+  it('says its words as markdown, closed and open', () => {
+    render(<Feed state={saying('First, the leaks, in **two** places:\n\n- the pool\n- the cache')} />);
+    const shown = () => {
+      expect(within(words()).getByText('two').tagName).toBe('STRONG');
+      expect(within(words()).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['the pool', 'the cache']);
+    };
+    shown();
+    fireEvent.click(mainBubble());
+    expect(words()).toHaveAttribute('data-open');
+    shown();
+  });
+
+  it('shows a code block as its source, a diagram or chart spec too, never drawn', () => {
+    render(<Feed state={saying('First, the leaks:\n\n```mermaid\ngraph TD; A-->B\n```\n\n```vega-lite\n{"mark": "bar"}\n```')} />);
+    expect([...words().querySelectorAll('pre > code')].map((c) => c.textContent)).toEqual(['graph TD; A-->B', '{"mark": "bar"}']);
+    expect(mainBubble().querySelector('canvas, svg[role=graphics-document], [class*=mermaid]')).toBeNull();
+  });
+
+  it('parses its markdown again only when its words change', () => {
+    parsed.length = 0;
+    const { rerender } = render(<Feed state={twoBlocks()} live={RUNNING} />);
+    const times = () => parsed.filter((t) => t.startsWith('First, the leaks.')).length;
+    expect(times()).toBe(1);
+    // The clock, a new word of yours, a new callback: the same words.
+    rerender(<Feed state={applyUserSent(twoBlocks(), WS, MAIN, { ...message('u2', [text('Thanks')]), role: 'user' }, NOW)} live={RUNNING} now={NOW + 60_000} onOpen={() => {}} />);
+    expect(screen.getByText(/Thanks/)).toBeInTheDocument();
+    expect(times()).toBe(1);
+    rerender(<Feed state={twoBlocks('After that, the fix. Then the docs.')} live={RUNNING} />);
+    expect(times()).toBe(2);
+  });
+
   it('draws a chart as a chip that opens the workspace, without opening the bubble', () => {
     const onOpen = vi.fn();
-    const state = fleet(updated(message('m1', [text('First, the leaks: ![Leaks by day](charts/leaks.vl.json) Worst on Monday.'), tool('c1')]), NOW - 1000));
-    render(<Feed state={state} onOpen={onOpen} />);
+    render(<Feed state={saying('First, the leaks:\n\n- by day: ![Leaks by day](charts/leaks.vl.json), worst on Monday')} onOpen={onOpen} />);
     const chip = within(mainBubble()).getByRole('button', { name: /Leaks by day/ });
+    // Through the markdown: the chip sits in its list item.
+    expect(chip.closest('li')).toHaveTextContent('by day: Leaks by day, worst on Monday');
     expect(mainBubble().querySelector('img, canvas, svg[role=graphics-document]')).toBeNull();
     fireEvent.click(chip);
     fireEvent.keyDown(chip, { key: 'Enter' });

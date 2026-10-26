@@ -41,7 +41,6 @@ import {
   pickCards,
   recentlyOpened,
   seedFleet,
-  wordsOf,
   type FleetCard,
   type FleetLine,
   type FleetLive,
@@ -448,16 +447,6 @@ describe("Main's bubbles", () => {
     expect(bubbles(s, { runs: { [WS]: ['r1'] }, tasks: {} })[0]!.writing).toBe(true);
     expect(bubbles(s, { runs: { [WS]: ['r2'] }, tasks: {} })[0]!.writing).toBe(false);
     expect(bubbles(s)[0]!.writing).toBe(false);
-  });
-
-  it('reads charts out of the words: each becomes a chip, the text around it plain lines', () => {
-    expect(wordsOf('## Results\nSee ![Leaks by **day**](charts/leaks.vl.json) for the trend.\n![](a b.png)\n![Q3](</r/q3.vl.json>)')).toEqual([
-      { kind: 'text', text: 'Results\nSee' },
-      { kind: 'chart', title: 'Leaks by day', path: 'charts/leaks.vl.json' },
-      { kind: 'text', text: 'for the trend.' },
-      { kind: 'chart', title: 'Q3', path: '/r/q3.vl.json' },
-    ]);
-    expect(wordsOf('![](x.vl.json)')).toEqual([{ kind: 'chart', title: 'Chart', path: 'x.vl.json' }]);
   });
 });
 

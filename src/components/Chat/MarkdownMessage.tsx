@@ -14,6 +14,9 @@ interface MarkdownMessageProps {
   // content is still arriving; all other elements render the same
   // regardless of streaming state.
   isStreaming?: boolean;
+  // Renderers that replace the defaults for some elements. Pass a stable
+  // object: a new one re-renders the whole block.
+  components?: Components;
 }
 
 // Memoized code block styles to prevent recreation
@@ -37,7 +40,7 @@ const remarkPlugins = [remarkGfm];
 // `![title](charts/q3.vl.json)` embeds a Vega-Lite spec file as a live chart
 // (resolved relative to the enclosing document, see WorkspaceFileContext);
 // any other image renders as usual.
-const isVegaLiteSpecLink = (src: string | undefined): src is string =>
+export const isVegaLiteSpecLink = (src: string | undefined): src is string =>
   !!src && isWorkspaceRelativeHref(src) && isVegaLiteSpecPath(src);
 
 // Minimal structural view of the hast node react-markdown hands to
@@ -82,7 +85,7 @@ const containsChartLink = (node: HastNodeLike | undefined): boolean =>
  * The components object is also memoized to prevent ReactMarkdown from
  * re-processing on every render.
  */
-const useMarkdownComponents = (isStreaming: boolean): Components =>
+const useMarkdownComponents = (isStreaming: boolean, overrides?: Components): Components =>
   useMemo<Components>(() => ({
     // Customize rendering of specific elements. react-markdown v10 dropped
     // `inline` from the official code-renderer prop type, but still passes
@@ -183,10 +186,11 @@ const useMarkdownComponents = (isStreaming: boolean): Components =>
     em: ({ children }) => <em className={styles.italic}>{children}</em>,
     del: ({ children }) => <del className={styles.strikethrough}>{children}</del>,
     hr: () => <hr className={styles.horizontalRule} />,
-  }), [isStreaming]); // styles object is stable; isStreaming feeds mermaid/vega-lite blocks
+    ...overrides,
+  }), [isStreaming, overrides]); // styles object is stable; isStreaming feeds mermaid/vega-lite blocks
 
-export const MarkdownBlock = memo(({ content, isStreaming = false }: MarkdownMessageProps) => {
-  const components = useMarkdownComponents(isStreaming);
+export const MarkdownBlock = memo(({ content, isStreaming = false, components: overrides }: MarkdownMessageProps) => {
+  const components = useMarkdownComponents(isStreaming, overrides);
 
   return (
     <ReactMarkdown
@@ -200,10 +204,10 @@ export const MarkdownBlock = memo(({ content, isStreaming = false }: MarkdownMes
 
 MarkdownBlock.displayName = 'MarkdownBlock';
 
-const MarkdownMessage = memo(({ content, isStreaming = false }: MarkdownMessageProps) => {
+const MarkdownMessage = memo(({ content, isStreaming = false, components }: MarkdownMessageProps) => {
   return (
     <div className={styles.markdownContainer}>
-      <MarkdownBlock content={content} isStreaming={isStreaming} />
+      <MarkdownBlock content={content} isStreaming={isStreaming} components={components} />
     </div>
   );
 });

@@ -529,7 +529,7 @@ export interface FleetLine {
   to: FleetSpeaker;
   /** As plain text, for a bubble that clamps its lines. */
   text: string;
-  /** As said, in markdown, for the zoomed bubble. */
+  /** As said, in markdown, for Main's bubble and the zoom. */
   markdown: string;
   /** The message said, to fetch in full when `truncated`; `null` for a task's own line. */
   message: { sessionId: string; id: string; truncated: boolean } | null;
@@ -563,28 +563,6 @@ const plainLine = (line: string): string =>
     .replace(/!?\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\*\*|__|`|\*/g, '')
     .trim();
-
-/** A chart a message embeds, `![title](path.vl.json)`; a bubble draws it as a chip. */
-const CHART_EMBED = /!\[([^\]]*)\]\(<?([^)\s>]+\.vl\.json)>?\)/g;
-
-export type FleetWords = { kind: 'text'; text: string } | { kind: 'chart'; title: string; path: string };
-
-/** Main's words as plain lines, one per markdown line, and its charts in between. */
-export const wordsOf = (markdown: string): FleetWords[] => {
-  const words: FleetWords[] = [];
-  const text = (from: number, to: number) => {
-    const plain = markdown.slice(from, to).split('\n').map(plainLine).filter(Boolean).join('\n');
-    if (plain) words.push({ kind: 'text', text: plain });
-  };
-  let at = 0;
-  for (const embed of markdown.matchAll(CHART_EMBED)) {
-    text(at, embed.index);
-    words.push({ kind: 'chart', title: plainLine(embed[1]!) || 'Chart', path: embed[2]! });
-    at = embed.index + embed[0].length;
-  }
-  text(at, markdown.length);
-  return words;
-};
 
 /** A markdown text as one plain paragraph, for a bubble that clamps its lines. */
 export const plainText = (markdown: string | null | undefined): string =>

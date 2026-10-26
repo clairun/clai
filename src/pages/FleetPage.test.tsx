@@ -321,7 +321,7 @@ describe('FleetPage', () => {
       },
     ]);
     renderFleet();
-    const card = within((await screen.findByText('Shipped v2')).closest('article')!);
+    const card = within((await screen.findByText('v2')).closest('article')!);
     // Three bubbles fit, newest last: Main's, yours, Main's.
     const bubbles = card.getAllByRole('button', { name: /On it|Thanks|Shipped/ });
     const stamp = (b: HTMLElement) => b.querySelector('[class*=stamp]')!.textContent;
@@ -463,6 +463,28 @@ describe('FleetPage', () => {
       expect(within(dialog).getByText('Ship it.')).toBeInTheDocument();
       // No bubble to copy, yet still your neutral.
       expect(dialog.style.getPropertyValue('--bubble-border')).toBe('var(--fleet-you-bubble)');
+    });
+
+    it("zooms a row of Main's words as markdown, its chart a chip", async () => {
+      vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.hasAttribute('data-row') ? 100 : 0;
+      });
+      vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.className.includes('scene') ? 160 : 0;
+      });
+      fleetSnapshot.mockResolvedValue([
+        {
+          ...workspace('a', 'Alpha', 1000),
+          mainSessionId: 'main-a',
+          recentMessages: [said('a1', 'Leaks:\n\n- by day: ![Leaks by day](charts/leaks.vl.json)', 20 * 60_000, { role: 'assistant' }), said('u2', 'Thanks', 10 * 60_000)],
+        },
+      ]);
+      renderFleet();
+      fireEvent.click(within(await screen.findByRole('list', { name: 'Earlier' })).getByRole('button'));
+      const dialog = screen.getByRole('dialog', { name: 'Message from Main' });
+      const chip = within(dialog).getByRole('button', { name: /Leaks by day/ });
+      expect(chip.closest('li')).toHaveTextContent('by day: Leaks by day');
+      expect(dialog.querySelector('canvas, svg[role=graphics-document]')).toBeNull();
     });
 
     it('shows a cut message at once and swaps in the whole one when it arrives', async () => {

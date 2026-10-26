@@ -538,7 +538,7 @@ button.crewButton {
   stroke-linecap: round;
 }
 
-/* `--lines`: how many lines a bubble shows, from its start or (`data-tail`) its end. */
+/* `--lines`: how many lines a bubble shows. */
 .bubbleText {
   --lines: 3;
   display: -webkit-box;
@@ -547,21 +547,79 @@ button.crewButton {
   overflow: hidden;
 }
 
-/* Main still writing: its newest lines, following each block as it lands. */
-.bubbleText[data-tail] {
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
+/* Main's words, as markdown: clipped by height, at its start or (`data-newest`) its end. */
+.speech {
+  display: block;
+  -webkit-line-clamp: none;
   max-height: calc(var(--lines) * 1lh);
 }
 
-/* Main's bubble opened in place: all of it, scrolling inside. */
-.bubbleText[data-open] {
-  display: block;
-  -webkit-line-clamp: none;
+/* Still being written: its newest lines, following each block as it lands. */
+.speech[data-newest] {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+/* Opened in place: all of it, scrolling inside. */
+.speech[data-open] {
   max-height: 50cqh;
   overflow-y: auto;
-  white-space: pre-line;
+}
+
+/* The time leads the first line: a first paragraph or heading runs on after it. */
+.speechText {
+  display: contents;
+}
+
+.speechText > :is(p, h1, h2, h3, h4, h5, h6):first-child {
+  display: inline;
+}
+
+/* Every block on the bubble's line grid, so the clip falls between lines. */
+.speechText :is(p, ul, ol, li, blockquote, pre, div, h1, h2, h3, h4, h5, h6) {
+  margin: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.speechText :is(h1, h2, h3, h4, h5, h6) {
+  padding: 0;
+  border: none;
+}
+
+.speechText :is(ul, ol) {
+  padding-left: 1.25em;
+}
+
+.speechText blockquote {
+  padding: 0 0 0 8px;
+  border-left-width: 2px;
+}
+
+.speechText :is(table, th, td) {
+  font-size: inherit;
+}
+
+.speechText :is(th, td) {
+  padding: 0 6px;
+}
+
+.speechText img {
+  max-width: 100%;
+  max-height: calc(3 * 1lh);
+}
+
+/* A code block in Main's words: its source, never drawn or highlighted. */
+.source {
+  margin: 0 0 12px;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  font-size: 0.9em;
+  white-space: pre-wrap;
+}
+
+.speech[data-open] .speechText > * + * {
+  margin-top: 0.5em;
 }
 
 .scene [aria-expanded='true'] {
@@ -1012,11 +1070,6 @@ button.crewButton {
   min-width: 0;
   overflow-y: auto;
   cursor: auto;
-}
-
-.zoomWords {
-  margin: 0;
-  white-space: pre-line;
 }
 
 .zoomStamp {
