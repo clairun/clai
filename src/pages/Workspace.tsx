@@ -1108,8 +1108,6 @@ const WorkspaceHeader = ({
   const schedulePaused = !!details?.schedulePaused;
   // Running or queued tasks disable Run-now; tasks waiting for subtasks do not.
   const hasRunningTask = (details?.tasks || []).some(isTaskRunning);
-  // Manager is invisible to the user — exclude it from the headline count so
-  // the chip and the drawer (which already filters !isDefault) agree.
   // Count includes the main (default) agent — the manager is now a
   // first-class entry in the workspace's agent list.
   const assignedAgentCount = (details?.assignedAgents || []).length;
@@ -1193,10 +1191,11 @@ const WorkspaceHeader = ({
     leading: React.ReactNode = null
   ) => {
     const isActive = activePanel === panel;
+    const displayedCount = details ? count : '…';
     if (!clickable) {
       return (
         <span className={styles.metric}>
-          {count} {label}
+          {displayedCount} {label}
         </span>
       );
     }
@@ -1214,7 +1213,7 @@ const WorkspaceHeader = ({
             aria-hidden="true"
           />
         )}
-        {count} {label}
+        {displayedCount} {label}
         {activeCount > 0 && (
           <span className={styles.metricActiveSuffix}> · {activeCount} active</span>
         )}
