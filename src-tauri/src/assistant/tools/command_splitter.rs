@@ -68,6 +68,20 @@ pub fn split_command(input: &str) -> Vec<Segment> {
 
     let mut i = 0;
     while i < n {
+        // Shell syntax is ASCII, so any other character is literal text in
+        // every state: copy it whole. Read byte by byte, `—` would become
+        // `â\u{80}\u{94}`. Every other step moves over ASCII bytes, so `i`
+        // is always on a character boundary here.
+        if !bytes[i].is_ascii() {
+            let ch = input[i..]
+                .chars()
+                .next()
+                .unwrap_or(char::REPLACEMENT_CHARACTER);
+            buf.push(ch);
+            escape = false;
+            i += ch.len_utf8();
+            continue;
+        }
         let c = bytes[i] as char;
         let next = if i + 1 < n {
             Some(bytes[i + 1] as char)
@@ -282,26 +296,28 @@ pub fn split_command(input: &str) -> Vec<Segment> {
             }
             // Parse the delimiter — may be quoted ('EOF' / "EOF") or
             // bare (EOF).
-            let mut delim = String::new();
+            let delim;
             if i < n && (bytes[i] == b'\'' || bytes[i] == b'"') {
                 let quote = bytes[i];
                 buf.push(bytes[i] as char);
                 i += 1;
+                let start = i;
                 while i < n && bytes[i] != quote {
-                    delim.push(bytes[i] as char);
-                    buf.push(bytes[i] as char);
                     i += 1;
                 }
+                delim = &input[start..i];
+                buf.push_str(delim);
                 if i < n {
                     buf.push(bytes[i] as char);
                     i += 1; // closing quote
                 }
             } else {
-                while i < n && !(bytes[i] as char).is_ascii_whitespace() {
-                    delim.push(bytes[i] as char);
-                    buf.push(bytes[i] as char);
+                let start = i;
+                while i < n && !bytes[i].is_ascii_whitespace() {
                     i += 1;
                 }
+                delim = &input[start..i];
+                buf.push_str(delim);
             }
 
             // Malformed (no delimiter parsed) — leave it as Opaque and
@@ -316,10 +332,11 @@ pub fn split_command(input: &str) -> Vec<Segment> {
             // follows the delimiter on the same line). We consume it
             // into the segment buffer without doing any separator
             // splitting, then move on to the body.
+            let start = i;
             while i < n && bytes[i] != b'\n' {
-                buf.push(bytes[i] as char);
                 i += 1;
             }
+            buf.push_str(&input[start..i]);
             if i < n {
                 buf.push('\n');
                 i += 1;
@@ -335,13 +352,9 @@ pub fn split_command(input: &str) -> Vec<Segment> {
                 while i < n && bytes[i] != b'\n' {
                     i += 1;
                 }
-                let line_bytes = &bytes[line_start..i];
-                let trimmed = std::str::from_utf8(line_bytes).unwrap_or("").trim();
-                // Push the line content verbatim.
-                for &b in line_bytes {
-                    buf.push(b as char);
-                }
-                let is_closer = trimmed == delim;
+                let line = &input[line_start..i];
+                buf.push_str(line);
+                let is_closer = line.trim() == delim;
                 if i < n {
                     buf.push('\n');
                     i += 1;
@@ -913,6 +926,26 @@ mod tests {
         assert!(segs[0].is_opaque());
         assert!(segs[0].text().contains("//! comment"));
         assert!(segs[0].text().contains("pub mod x"));
+    }
+
+    #[test]
+    fn keeps_non_ascii_text_whole() {
+        // The text the user approves is the command as written: `—` and `→`,
+        // not their UTF-8 bytes read as Latin-1 (`â\u{80}\u{94}`).
+        assert_eq!(
+            split("echo \"14:11— 18:02 → 10 eval\" | tee -a notes.md"),
+            vec![
+                simple("echo \"14:11— 18:02 → 10 eval\""),
+                simple("tee -a notes.md")
+            ]
+        );
+        let heredoc = "cat <<'FIN' > notes.md\nswitch — 18:02 → café\nFIN";
+        assert_eq!(split(heredoc), vec![opaque(heredoc)]);
+        // A compound construct is found again in the input by its parts'
+        // text, so a mangled part cut it short ("… Confi", at the `fi` in
+        // "Confirms").
+        let compound = "if true; then echo \"Confirms — the blocker\"; fi";
+        assert_eq!(split(compound), vec![opaque(compound)]);
     }
 
     #[test]
