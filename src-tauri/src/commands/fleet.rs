@@ -9,7 +9,6 @@ use serde::Serialize;
 use tauri::State;
 use ts_rs::TS;
 
-use crate::assistant::conversation::content_text;
 use crate::assistant::repository;
 use crate::assistant::tools::ask_user::{self, PendingAsk};
 use crate::assistant::types::{AgentRefSnapshot, AssistantMessage, MessageOrigin, MessageRole};
@@ -239,10 +238,32 @@ fn preview(message: &AssistantMessage) -> Option<FleetMessagePreview> {
     })
 }
 
+// Keep this aligned with fleetModel.ts fullMessageText: a seeded preview
+// must be a prefix of the next live update for hear() to preserve its marks.
+fn fleet_content_text(message: &AssistantMessage) -> String {
+    let mut blocks = Vec::new();
+    let mut current = String::new();
+    for part in &message.content {
+        if let crate::assistant::types::ContentPart::Text { text } = part {
+            current.push_str(text);
+        } else if !current.is_empty() {
+            blocks.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        blocks.push(current);
+    }
+    blocks.join(if message.role == MessageRole::Assistant {
+        "\n\n"
+    } else {
+        ""
+    })
+}
+
 /// The trimmed text cut to `LAST_MESSAGE_MAX_CHARS`, and whether it was cut;
 /// `None` for a message with no text (tool calls or thinking only).
 fn preview_text(message: &AssistantMessage) -> Option<(String, bool)> {
-    let text = content_text(&message.content);
+    let text = fleet_content_text(message);
     let text = text.trim();
     if text.is_empty() {
         return None;
@@ -353,6 +374,43 @@ mod tests {
         )
         .await
         .expect("run")
+    }
+
+    #[test]
+    fn preview_separates_tool_interleaved_text_like_fleet_events() {
+        let message = AssistantMessage {
+            id: "m".to_string(),
+            session_id: "s".to_string(),
+            role: MessageRole::Assistant,
+            content: vec![
+                ContentPart::Text {
+                    text: "Before".into(),
+                },
+                ContentPart::Text { text: ".".into() },
+                ContentPart::ToolUse {
+                    tool_call_id: "c".into(),
+                    tool_name: "bash".into(),
+                    arguments: serde_json::Value::Null,
+                },
+                ContentPart::Text {
+                    text: "After.".into(),
+                },
+            ],
+            created_at: 0,
+            provider_metadata: None,
+            origin: MessageOrigin::User,
+        };
+        assert_eq!(
+            preview_text(&message),
+            Some(("Before.\n\nAfter.".into(), false))
+        );
+        assert_eq!(
+            preview_text(&AssistantMessage {
+                role: MessageRole::User,
+                ..message
+            }),
+            Some(("Before.After.".into(), false))
+        );
     }
 
     #[tokio::test]

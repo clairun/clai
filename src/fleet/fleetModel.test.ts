@@ -38,6 +38,7 @@ import {
   cardAgents,
   cardCrew,
   firstWords,
+  fullMessageText,
   pickCards,
   recentlyOpened,
   seedFleet,
@@ -391,6 +392,12 @@ describe("Main's bubbles", () => {
   const both = withParts('m1', text('Before.'), tool('c1'), text('After.'), tool('c2'));
   const bubbles = (state: FleetState, live = NO_LIVE) => feedOf(state, live).lines.filter((l) => l.from.kind === 'main' && l.to.kind === 'you');
 
+  it('joins adjacent text parts without inventing a paragraph break', () => {
+    const assistant = withParts('m', text('Hello'), text(' world'), tool('c1'), text('Next.'));
+    expect(fullMessageText(assistant)).toBe('Hello world\n\nNext.');
+    expect(fullMessageText({ ...assistant, role: 'user', content: [text('Hello'), text(' world')] })).toBe('Hello world');
+  });
+
   it('adds each block of text as it closes, at a tool call, into the same bubble', () => {
     let s = apply(withMain(), updated(first, T));
     expect(bubbles(s).map((l) => l.markdown)).toEqual(['Before.']);
@@ -575,6 +582,16 @@ describe('snapshot', () => {
       'Main → You: All done.',
     ]);
     expect(card(s).said.filter((m) => m.id === 'a1')).toHaveLength(1);
+  });
+
+  it('continues a tool-separated reply after a reload at the new update time', () => {
+    const started = NOW - 1000;
+    const seeded = seedFleet(EMPTY_FLEET, [snapshotOf({
+      recentMessages: [highlight('m', started, { role: 'assistant', text: 'Before.\n\nAfter.', runId: 'r1' })],
+    })]);
+    const continued = apply(seeded, updated(withParts('m', text('Before.'), tool('c1'), text('After.'), tool('c2'), text('More.')), NOW));
+    expect(card(continued).said[0]!.marks).toEqual([{ at: started, end: 'Before.\n\nAfter.'.length }, { at: NOW, end: 'Before.\n\nAfter.\n\nMore.'.length }]);
+    expect(feedOf(continued).lines.map((line) => [line.markdown, line.at])).toEqual([['Before.\n\nAfter.\n\nMore.', NOW]]);
   });
 
   it('keeps which message a line says and whether it was cut, so the zoom can fetch it whole', () => {

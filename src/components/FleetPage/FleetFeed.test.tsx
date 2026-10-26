@@ -92,6 +92,31 @@ describe("Main's bubble", () => {
     shown();
   });
 
+  it('keeps tool-separated text in distinct paragraphs in a bubble and its zoom', () => {
+    const state = fleet(updated(message('m1', [text('Before.'), tool('c1'), text('After.')]), NOW - 1000));
+    const { rerender } = render(<Feed state={state} />);
+    expect([...bubbleOf(/Before/).querySelectorAll('p')].map((p) => p.textContent)).toEqual(['Before.', 'After.']);
+
+    const later = applyUserSent(
+      applyUserSent(state, WS, MAIN, { ...message('u1', [text('First reply.')]), role: 'user' }, NOW),
+      WS, MAIN, { ...message('u2', [text('Second reply.')]), role: 'user' }, NOW + 1
+    );
+    const afterThirdReply = applyUserSent(later, WS, MAIN, { ...message('u3', [text('Third reply.')]), role: 'user' }, NOW + 2);
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+    const rowHeight = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.tagName === 'P' ? 20 : 40;
+    });
+    try {
+      rerender(<Feed state={afterThirdReply} />);
+      const row = within(screen.getByRole('list', { name: 'Earlier' })).getByText(/Before/).closest('button')!;
+      fireEvent.click(row);
+      expect([...screen.getByRole('dialog').querySelectorAll('p')].map((p) => p.textContent).filter((t) => t === 'Before.' || t === 'After.')).toEqual(['Before.', 'After.']);
+    } finally {
+      height.mockRestore();
+      rowHeight.mockRestore();
+    }
+  });
+
   it('shows a code block as its source, a diagram or chart spec too, never drawn', () => {
     render(<Feed state={saying('First, the leaks:\n\n```mermaid\ngraph TD; A-->B\n```\n\n```vega-lite\n{"mark": "bar"}\n```')} />);
     expect([...words().querySelectorAll('pre > code')].map((c) => c.textContent)).toEqual(['graph TD; A-->B', '{"mark": "bar"}']);

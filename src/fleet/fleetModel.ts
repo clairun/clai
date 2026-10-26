@@ -155,13 +155,22 @@ const clip = (text: string): { text: string; truncated: boolean } => {
     : { text: trimmed, truncated: false };
 };
 
-/** A message's text parts, in full. */
-export const fullMessageText = (message: AssistantMessage): string =>
-  message.content
-    .map((part) => (part.type === 'text' ? part.text : ''))
-    .filter(Boolean)
-    .join('\n')
-    .trim();
+// Keep this aligned with fleet_content_text in commands/fleet.rs so a
+// snapshot preview remains a prefix of the next live update for hear().
+export const fullMessageText = (message: AssistantMessage): string => {
+  const blocks: string[] = [];
+  let current = '';
+  for (const part of message.content) {
+    if (part.type === 'text') {
+      current += part.text;
+    } else if (current) {
+      blocks.push(current);
+      current = '';
+    }
+  }
+  if (current) blocks.push(current);
+  return blocks.join(message.role === 'assistant' ? '\n\n' : '').trim();
+};
 
 export const isTaskLive = (status: TaskStatus): boolean =>
   status === 'queued' || status === 'running' || status === 'stopping';
