@@ -410,6 +410,11 @@ button.crewButton {
   flex-shrink: 0;
 }
 
+/* An open Main bubble gets the feed; earlier highlights return on close. */
+.scene[data-expanded] > [data-row]:not([aria-expanded='true']) {
+  display: none;
+}
+
 /* Narration box: square, like a manga caption. */
 .captionRow {
   display: flex;
@@ -565,6 +570,12 @@ button.crewButton {
 .speech[data-open] {
   max-height: 50cqh;
   overflow-y: auto;
+}
+
+/* Leave room for the caption, row gap, and bubble chrome, including the
+ * working row's larger top padding. */
+.scene[data-expanded] .speech[data-open] {
+  max-height: max(0px, calc(100cqh - 72px));
 }
 
 /* The time leads the first line: a first paragraph or heading runs on after it. */

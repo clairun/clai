@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { AssistantEventEnvelope, AssistantMessage, AssistantUiEvent } from '../../generated/bindings';
@@ -78,6 +79,46 @@ describe("Main's bubble", () => {
     expect(words()).not.toHaveAttribute('data-open');
     fireEvent.keyDown(mainBubble(), { key: 'Enter' });
     expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('keeps an older Main bubble expanded and gives it the card space', () => {
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+    const rowHeight = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      if (this.tagName === 'P') return 20;
+      return this.getAttribute('aria-expanded') === 'true' ? 120 : 40;
+    });
+    try {
+      const first = applyUserSent(EMPTY_FLEET, WS, MAIN, { ...message('u0', [text('Earlier.')]), role: 'user' }, NOW - 3000);
+      const main = applyAssistantEvent(first, updated(message('m1', [text('First, the leaks.')]), NOW - 2000));
+      const next = applyUserSent(main, WS, MAIN, { ...message('u1', [text('Next reply.')]), role: 'user' }, NOW - 1000);
+      const state = applyUserSent(next, WS, MAIN, { ...message('u2', [text('Newest reply.')]), role: 'user' }, NOW);
+      render(<Feed state={state} />);
+
+      fireEvent.click(mainBubble());
+      expect(screen.getByText('First, the leaks.').closest('[aria-expanded]')).toHaveAttribute('aria-expanded', 'true');
+      const css = readFileSync('src/components/FleetPage/FleetPage.module.css', 'utf8');
+      expect(mainBubble().closest('[data-mood]')).toHaveAttribute('data-expanded', 'true');
+      expect(css).toMatch(/\.scene\[data-expanded\] > \[data-row\]:not\(\[aria-expanded='true'\]\) \{\s*display: none;/);
+      expect(css).toMatch(/\.speech\[data-open\] \{[^}]*overflow-y: auto;/s);
+      expect(css).toMatch(/\.scene\[data-expanded\] \.speech\[data-open\] \{\s*max-height: max\(0px, calc\(100cqh - 72px\)\);/);
+      fireEvent.click(mainBubble());
+      expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
+      expect(mainBubble().closest('[data-mood]')).not.toHaveAttribute('data-expanded');
+      expect(screen.getByRole('list', { name: 'Earlier' })).toBeInTheDocument();
+    } finally {
+      height.mockRestore();
+      rowHeight.mockRestore();
+    }
+  });
+
+  it('releases the feed when the expanded message leaves it', () => {
+    const { rerender } = render(<Feed state={saying('First, the leaks.')} />);
+    fireEvent.click(mainBubble());
+    expect(mainBubble().closest('[data-mood]')).toHaveAttribute('data-expanded', 'true');
+
+    rerender(<Feed state={fleet(updated(message('m2', [text('Other words.'), tool('c2')]), NOW))} />);
+    expect(screen.getByText('Other words.')).toBeInTheDocument();
+    expect(screen.getByText('Other words.').closest('[data-mood]')).not.toHaveAttribute('data-expanded');
   });
 
   it('says its words as markdown, closed and open', () => {

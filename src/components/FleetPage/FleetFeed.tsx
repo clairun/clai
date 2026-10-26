@@ -426,7 +426,7 @@ const useFit = (lines: readonly FleetLine[], expanded: string | null) => {
     return () => observer.disconnect();
   }, []);
 
-  return { ref, bubbles: measuring ? lines.length : fit.bubbles, rows: measuring ? 0 : fit.rows };
+  return { ref, bubbles: expanded || measuring ? lines.length : fit.bubbles, rows: expanded || measuring ? 0 : fit.rows };
 };
 
 /** A truncated message's full text, once fetched; the preview until then, or if it can't be. */
@@ -497,7 +497,8 @@ const FleetFeed = ({
   const [expanded, setExpanded] = useState<string | null>(null);
   const toggle = useCallback((key: string) => setExpanded((k) => (k === key ? null : key)), []);
   const onChart = useCallback(() => onOpen(workspaceId), [onOpen, workspaceId]);
-  const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines, expanded);
+  const openKey = feed.lines.some((line) => line.key === expanded) ? expanded : null;
+  const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines, openKey);
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const open = useCallback<Open>(
     (line, origin) =>
@@ -516,7 +517,7 @@ const FleetFeed = ({
   const zoomFace = zoom && faceFor(zoom.line.from, faces);
   return (
     <ChartOpen.Provider value={onChart}>
-      <div ref={ref} className={styles.scene} data-mood={feed.mood}>
+      <div ref={ref} className={styles.scene} data-mood={feed.mood} data-expanded={!!openKey || undefined}>
         <p className={styles.captionRow}>
           <Caption caption={feed.caption} mood={feed.mood} now={now} />
         </p>
@@ -536,7 +537,7 @@ const FleetFeed = ({
             now={now}
             faces={faces}
             open={open}
-            expanded={expanded === line.key}
+            expanded={openKey === line.key}
             onToggle={toggle}
           />
         ))}
