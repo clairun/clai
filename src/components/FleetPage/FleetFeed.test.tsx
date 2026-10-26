@@ -113,7 +113,8 @@ describe("Main's bubble", () => {
 
   it('draws a chart as a chip that opens the workspace, without opening the bubble', () => {
     const onOpen = vi.fn();
-    render(<Feed state={saying('First, the leaks:\n\n- by day: ![Leaks by day](charts/leaks.vl.json), worst on Monday')} onOpen={onOpen} />);
+    render(<Feed state={saying('First, the leaks:\n\n- by day: ![Leaks by day](charts/leaks.vl.json), worst on Monday\n\n![The pool](shots/pool.png)')} onOpen={onOpen} />);
+    expect(within(mainBubble()).getByRole('button', { name: /The pool/ })).toBeInTheDocument();
     const chip = within(mainBubble()).getByRole('button', { name: /Leaks by day/ });
     // Through the markdown: the chip sits in its list item.
     expect(chip.closest('li')).toHaveTextContent('by day: Leaks by day, worst on Monday');

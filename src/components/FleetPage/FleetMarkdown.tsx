@@ -1,12 +1,13 @@
 import { createContext, useContext } from 'react';
 import type { Components } from 'react-markdown';
-import { MarkdownBlock, isVegaLiteSpecLink } from '../Chat/MarkdownMessage';
+import { MarkdownBlock } from '../Chat/MarkdownMessage';
+import { isWorkspaceRelativeHref } from '../../utils/htmlBundle';
 import styles from './FleetPage.module.css';
 
-/** What a chart chip does: open the workspace, where the chart is drawn. */
+/** What a chip does: open the workspace, where its chart or image is drawn. */
 export const ChartOpen = createContext<() => void>(() => undefined);
 
-const ChartChip = ({ title }: { title: string }) => {
+const Chip = ({ title }: { title: string }) => {
   const open = useContext(ChartOpen);
   return (
     <button
@@ -35,14 +36,15 @@ interface Hast {
 const textOf = (node: Hast | undefined): string => node?.value ?? (node?.children ?? []).map(textOf).join('');
 
 /**
- * A miniature draws no charts or diagrams: an embedded chart is a chip, and
- * every code block, mermaid and vega-lite too, is its plain source. Module
- * level, so a bubble's markdown parses again only when its text changes.
+ * A miniature draws no charts, diagrams or workspace images: an embedded chart
+ * or image is a chip, and every code block, mermaid and vega-lite too, is its
+ * plain source. Module level, so a bubble's markdown parses again only when
+ * its text changes.
  */
 export const MINIATURE: Components = {
   img: ({ src, alt, title }) => {
     const source = typeof src === 'string' ? src : undefined;
-    return isVegaLiteSpecLink(source) ? <ChartChip title={alt || 'Chart'} /> : <img src={source} alt={alt} title={title} />;
+    return source && isWorkspaceRelativeHref(source) ? <Chip title={alt || source} /> : <img src={source} alt={alt} title={title} />;
   },
   pre: ({ node }) => (
     <pre className={styles.source}>

@@ -40,7 +40,7 @@ const remarkPlugins = [remarkGfm];
 // `![title](charts/q3.vl.json)` embeds a Vega-Lite spec file as a live chart
 // (resolved relative to the enclosing document, see WorkspaceFileContext);
 // any other image renders as usual.
-export const isVegaLiteSpecLink = (src: string | undefined): src is string =>
+const isVegaLiteSpecLink = (src: string | undefined): src is string =>
   !!src && isWorkspaceRelativeHref(src) && isVegaLiteSpecPath(src);
 
 // Minimal structural view of the hast node react-markdown hands to
