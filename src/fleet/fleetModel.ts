@@ -17,6 +17,7 @@ import type {
   AgentRefSnapshot,
   AssistantEventEnvelope,
   AssistantMessage,
+  AssistantRun,
   AssistantUiEvent,
   FleetWorkspace,
   MessageOrigin,
@@ -88,6 +89,7 @@ export interface FleetCard {
   title: string;
   /** From the snapshot, or set when the user sends or clears from the terminal. */
   mainSessionId: string | null;
+  lastMainRun: AssistantRun | null;
   lastActivityAt: number;
   /** When the user last opened the workspace (here or on its page); 0 = never. */
   lastOpenedAt: number;
@@ -125,6 +127,7 @@ export const emptyCard = (workspaceId: string, title = ''): FleetCard => ({
   workspaceId,
   title,
   mainSessionId: null,
+  lastMainRun: null,
   lastActivityAt: 0,
   lastOpenedAt: 0,
   requests: {},
@@ -285,7 +288,11 @@ export const applyAssistantEvent = (
         // Every session's user messages: the user's, an agent's and a task's
         // report. An assistant message is heard as it is written.
         const { message } = event.payload;
-        return message.role === 'user' ? addSaid(card, [userSaid(message, at, envelope.runId)], true) : card;
+        if (message.role !== 'user') return card;
+        const main = message.origin.kind === 'user' && card.mainSessionId === null
+          ? { ...card, mainSessionId: sessionId, lastMainRun: null }
+          : card;
+        return addSaid(main, [userSaid(message, at, envelope.runId)], true);
       }
       case 'message_deleted': {
         const said = card.said.filter((s) => s.id !== event.payload.message_id);
@@ -296,6 +303,18 @@ export const applyAssistantEvent = (
         // before the main session is known, keep them and let `cardFeed` choose.
         if (card.mainSessionId && card.mainSessionId !== sessionId) return card;
         return hear(card, event.payload.message, envelope.runId, at);
+      case 'run_queued':
+      case 'run_started':
+      case 'run_completed':
+      case 'run_failed':
+      case 'run_cancelled': {
+        const run = event.payload.run;
+        if (sessionId !== card.mainSessionId) return card;
+        const held = card.lastMainRun;
+        return held && (held.startedAt > run.startedAt || (held.startedAt === run.startedAt && held.id > run.id))
+          ? card
+          : { ...card, lastMainRun: run };
+      }
       case 'ask_user_requested':
         return {
           ...card,
@@ -361,7 +380,8 @@ export const applyUserSent = (
   at: number
 ): FleetState =>
   updateCard(state, workspaceId, (card) => {
-    const next = { ...bump(card, at), mainSessionId: sessionId };
+    const next = { ...bump(card, at), mainSessionId: sessionId,
+      lastMainRun: card.mainSessionId === sessionId ? card.lastMainRun : null };
     return message ? addSaid(next, [userSaid(message, at, null)], true) : next;
   });
 
@@ -425,6 +445,9 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
         ...card,
         title: ws.title || card.title,
         mainSessionId,
+        lastMainRun: card.mainSessionId === mainSessionId && card.lastMainRun &&
+          (!ws.lastMainRun || card.lastMainRun.startedAt > ws.lastMainRun.startedAt)
+          ? card.lastMainRun : ws.lastMainRun,
         lastActivityAt: Math.max(card.lastActivityAt, activity),
         lastOpenedAt: Math.max(card.lastOpenedAt, Number(ws.lastOpenedAt)),
         requests,

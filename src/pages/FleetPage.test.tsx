@@ -28,6 +28,7 @@ const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspac
   lastOpenedAt: 0n,
   agents: [],
   mainSessionId: null,
+  lastMainRun: null,
   activeRunIds: [],
   tasks: [],
   pendingPermissions: [],

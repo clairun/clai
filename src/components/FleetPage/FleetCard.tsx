@@ -14,6 +14,7 @@ import {
   type FleetFeed as Feed,
 } from '../../fleet/fleetModel';
 import { castFor } from './FleetFace';
+import { isUsageLimitError } from '../../assistant/runErrors';
 import FleetCrew from './FleetCrew';
 import FleetRequestPanel from './FleetRequestPanel';
 import FleetFeed from './FleetFeed';
@@ -92,6 +93,8 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect
   const attention = cardAttention(card);
   const request = useMemo(() => requestScene(card, live), [card, live]);
   const title = card.title || 'Workspace';
+  const runError = card.lastMainRun?.status === 'failed' ? card.lastMainRun.error?.trim() || 'The run failed.' : null;
+  const runErrorIsLimit = runError ? isUsageLimitError(runError) : false;
 
   return (
     <div className={styles.cardInner} onClick={() => onSelect(card.workspaceId)}>
@@ -125,6 +128,12 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect
         </button>
       </header>
       <FleetCrew crew={crew} cast={cast} />
+      {runError && (
+        <div className={styles.cardRunError} data-limit={runErrorIsLimit || undefined} role="alert">
+          <span aria-hidden="true">{runErrorIsLimit ? '⏳' : '⚠'}</span>
+          <span>{runError}</span>
+        </div>
+      )}
       {feed && <FleetFeed workspaceId={card.workspaceId} feed={feed} shouts={shouts} now={now} faces={cast} onOpen={onOpen} />}
       {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={cast} loud={loud === 'needs'} now={now} />}
     </div>

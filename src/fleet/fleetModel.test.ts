@@ -125,6 +125,40 @@ const said = (l: FleetLine) => {
 const feedOf = (state: FleetState, live = NO_LIVE, now = NOW) => cardFeed(card(state), live, now);
 const lines = (state: FleetState, live = NO_LIVE) => feedOf(state, live).lines.map(said);
 
+describe('main run failures', () => {
+  it('retains a failed send for the card and clears it on the next run', () => {
+    const failed = { ...run('r1'), status: 'failed' as const, startedAt: BigInt(NOW - 2000), completedAt: BigInt(NOW - 1000), error: 'Usage limit reached. Try again tomorrow.' };
+    const user = message('u1', 'user', 'Please continue');
+    const sent = applyUserSent(EMPTY_FLEET, WS, MAIN, user, NOW - 2000);
+    const state = apply(sent, env({ type: 'run_failed', payload: { run: failed } }, NOW - 1000));
+    expect(card(state).lastMainRun).toEqual(failed);
+    expect(lines(state)).toEqual(['You → Main: Please continue']);
+    const next = apply(state, env({ type: 'run_started', payload: { run: { ...run('r2'), startedAt: BigInt(NOW) } } }, NOW));
+    expect(card(next).lastMainRun?.status).toBe('running');
+    expect(lines(next)).toEqual(['You → Main: Please continue']);
+  });
+
+  it('recognizes the Main session from the sent message before its run fails', () => {
+    const user = message('u1', 'user', 'Please continue');
+    const failed = { ...run('r1'), status: 'failed' as const, error: 'Rate limit reached' };
+    const state = apply(EMPTY_FLEET,
+      created(user, NOW - 1000),
+      env({ type: 'run_failed', payload: { run: failed } }, NOW));
+    expect(card(state).mainSessionId).toBe(MAIN);
+    expect(card(state).lastMainRun).toEqual(failed);
+    expect(card(applyUserSent(state, WS, 'new-main', null, NOW + 1000)).lastMainRun).toBeNull();
+  });
+
+  it('ignores task failures and records Main cancellation without an error', () => {
+    const base = withMain();
+    const other = apply(base, env({ type: 'run_failed', payload: { run: { ...run('task'), status: 'failed', error: 'Task failed' } } }, NOW, 'task-session'));
+    const cancelled = apply(other, env({ type: 'run_cancelled', payload: { run: { ...run('r1'), status: 'cancelled', error: null } } }, NOW));
+    expect(card(other).lastMainRun).toBeNull();
+    expect(card(cancelled).lastMainRun?.status).toBe('cancelled');
+    expect(lines(cancelled)).toEqual([]);
+  });
+});
+
 describe('fleet reducer', () => {
   it('ignores deltas and tool calls, and an update with no new text, without producing a new state', () => {
     const base = apply(withMain(), env({ type: 'run_started', payload: { run: run('r1') } }, 1), updated(message('m', 'assistant', 'x'), 2));
@@ -254,6 +288,7 @@ describe('the highlight feed', () => {
         lastOpenedAt: 0n,
         agents: [],
         mainSessionId: MAIN,
+        lastMainRun: null,
         activeRunIds: [],
         tasks: [],
         pendingPermissions: [],
@@ -517,6 +552,7 @@ const snapshotOf = (patch: Partial<FleetWorkspace> = {}): FleetWorkspace => ({
   lastOpenedAt: 0n,
   agents: [],
   mainSessionId: MAIN,
+  lastMainRun: null,
   activeRunIds: [],
   tasks: [],
   pendingPermissions: [],
@@ -528,6 +564,14 @@ const snapshotOf = (patch: Partial<FleetWorkspace> = {}): FleetWorkspace => ({
 });
 
 describe('snapshot', () => {
+  it('restores the latest Main failure after Fleet reloads', () => {
+    const failed = { ...run('r1'), status: 'failed' as const, startedAt: BigInt(NOW - 1000), completedAt: BigInt(NOW), error: 'Quota exceeded' };
+    const seeded = seedFleet(EMPTY_FLEET, [snapshotOf({ lastMainRun: failed })]);
+    expect(card(seeded).lastMainRun).toEqual(failed);
+    const completed = { ...run('r2'), status: 'completed' as const, startedAt: BigInt(NOW + 1000), completedAt: BigInt(NOW + 2000) };
+    expect(card(seedFleet(seeded, [snapshotOf({ lastMainRun: completed })])).lastMainRun).toEqual(completed);
+    expect(card(seedFleet(seeded, [snapshotOf({ mainSessionId: 'new-main', lastMainRun: null })])).lastMainRun).toBeNull();
+  });
   it('takes the open requests of the snapshot, keeping the time of those already held', () => {
     let s = apply(EMPTY_FLEET, askEvent('stale', 2), askEvent('kept', 3));
     s = applyRequest(s, { kind: 'approval', request: approval('gone') }, 4);

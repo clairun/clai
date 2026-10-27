@@ -19,6 +19,7 @@ import { restorePendingAsk } from '../assistant/pendingAsks';
 import { hydrateSession, useSessionChatActions } from '../assistant/sessionChat';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
+import { isUsageLimitError } from '../assistant/runErrors';
 import { mainIdentity } from '../components/Agents/agentIdentity';
 import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
@@ -198,22 +199,6 @@ const getLastRunInfo = (runs: AssistantRun[] | null | undefined): AssistantRun |
     (a, b) => (toNumber(b.startedAt) || 0) - (toNumber(a.startedAt) || 0)
   )[0];
   return last ?? null;
-};
-
-// Mirrors the backend `is_usage_limit_error` classifier (local_agent.rs).
-// Used purely for presentation: a usage/rate limit is non-retryable until a
-// reset time the message already states, so we show it with a calmer style
-// (clock) rather than a hard error.
-const isUsageLimitError = (message: string): boolean => {
-  const m = message.toLowerCase();
-  return (
-    m.includes('usage limit') ||
-    m.includes('session limit') ||
-    m.includes('rate limit') ||
-    m.includes('rate_limit') ||
-    m.includes('quota') ||
-    (m.includes("you've hit your") && m.includes('limit'))
-  );
 };
 
 const RUN_STATUS_LABEL: Partial<Record<AssistantRun['status'], string>> = {

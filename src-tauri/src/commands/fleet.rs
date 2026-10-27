@@ -11,7 +11,9 @@ use ts_rs::TS;
 
 use crate::assistant::repository;
 use crate::assistant::tools::ask_user::{self, PendingAsk};
-use crate::assistant::types::{AgentRefSnapshot, AssistantMessage, MessageOrigin, MessageRole};
+use crate::assistant::types::{
+    AgentRefSnapshot, AssistantMessage, AssistantRun, MessageOrigin, MessageRole,
+};
 use crate::assistant::workspace_agents::{agent_display_names, load_workspace_agent_rows};
 use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskResponse};
 use crate::commands::path_grants::PathGrantRequest;
@@ -41,6 +43,8 @@ pub struct FleetWorkspace {
     pub last_opened_at: i64,
     /// The manager's conversation; `None` until someone talks to it.
     pub main_session_id: Option<String>,
+    /// The main session's newest run, including its failure when one occurred.
+    pub last_main_run: Option<AssistantRun>,
     /// Non-terminal runs (queued, running or waiting for a tool) in any
     /// session of the workspace, not only the main one; empty when nothing
     /// runs.
@@ -161,6 +165,13 @@ async fn workspace_snapshot(
     last_activity_at: i64,
 ) -> Result<FleetWorkspace, String> {
     let main_session = repository::find_manager_session(pool, &locator.default_agent_id).await?;
+    let last_main_run = match &main_session {
+        Some(session) => repository::current_runs(pool, &session.id)
+            .await?
+            .into_iter()
+            .next(),
+        None => None,
+    };
     let last_assistant_message = match &main_session {
         Some(session) => repository::last_completed_assistant_text(pool, &session.id)
             .await?
@@ -220,6 +231,7 @@ async fn workspace_snapshot(
         last_activity_at,
         last_opened_at: locator.last_opened_at,
         main_session_id: main_session.map(|session| session.id),
+        last_main_run,
         active_run_ids: repository::workspace_active_run_ids(pool).await?,
         tasks,
         last_assistant_message,
@@ -465,6 +477,10 @@ mod tests {
         );
         let busy = &snapshot[0];
         assert_eq!(busy.main_session_id.as_deref(), Some(session.id.as_str()));
+        assert_eq!(
+            busy.last_main_run.as_ref().map(|run| &run.id),
+            Some(&run.id)
+        );
         let mut run_ids = busy.active_run_ids.clone();
         run_ids.sort();
         let mut expected = vec![run.id.clone(), other_run.id.clone()];
@@ -504,6 +520,37 @@ mod tests {
             .expect("snapshot");
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].workspace_id, BUSY);
+    }
+
+    #[tokio::test]
+    async fn snapshot_restores_main_run_failure() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = state_with(&[BUSY], &temp);
+        let pool = state.workspace_db(BUSY).await.expect("db");
+        let session = repository::create_session(
+            &pool,
+            SessionContext {
+                automation_id: Some(MANAGER.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session");
+        let run = start_run(&pool, &session.id, RunStatus::Running).await;
+        repository::update_run_status(
+            &pool,
+            &run.id,
+            RunStatus::Failed,
+            Some("Usage limit reached"),
+        )
+        .await
+        .expect("fail run");
+
+        let workspaces = snapshot(&state, None, None).await.expect("snapshot");
+        let last = workspaces[0].last_main_run.as_ref().expect("last main run");
+        assert_eq!(last.id, run.id);
+        assert_eq!(last.status, RunStatus::Failed);
+        assert_eq!(last.error.as_deref(), Some("Usage limit reached"));
     }
 
     /// A CLI run stores one assistant row, then a row per tool result: the

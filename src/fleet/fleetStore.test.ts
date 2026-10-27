@@ -31,6 +31,7 @@ const snapshot: FleetWorkspace = {
   lastOpenedAt: 0n,
   agents: [],
   mainSessionId: 'main',
+  lastMainRun: null,
   activeRunIds: ['r1', 'task-run'],
   tasks: [task],
   pendingPermissions: [],

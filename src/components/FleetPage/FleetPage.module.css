@@ -179,6 +179,27 @@
   cursor: pointer;
 }
 
+.cardRunError {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+  max-height: 88px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--color-critical-border);
+  border-radius: var(--radius-md);
+  background: var(--color-critical-bg);
+  color: var(--color-critical);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.cardRunError[data-limit] {
+  border-color: var(--color-warning-border);
+  background: color-mix(in srgb, var(--color-warning-bg) 60%, var(--color-bg-elevated));
+  color: var(--color-text-primary);
+}
+
 .cardHeader {
   display: flex;
   align-items: center;
