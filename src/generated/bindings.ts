@@ -179,7 +179,7 @@ mainSessionId: string | null,
 /**
  * The main session's newest run, including its failure when one occurred.
  */
-lastMainRun: AssistantRun | null,
+lastMainRun: AssistantRun | null, 
 /**
  * Non-terminal runs (queued, running or waiting for a tool) in any
  * session of the workspace, not only the main one; empty when nothing
