@@ -538,12 +538,25 @@ describe('TerminalEmulator help button', () => {
 
     await user.click(screen.getByRole('button', { name: 'Help' }));
     const fromButton = screen.getByRole('dialog', { name: 'Available commands' }).innerHTML;
+    expect(screen.getByText('Ctrl/Cmd+Shift+F')).toBeInTheDocument();
+    expect(screen.getByText('Open Fleet; from Fleet, open the selected workspace (requires a selected card)')).toBeInTheDocument();
+    expect(screen.getByText('Ctrl+Tab / Ctrl+Shift+Tab')).toBeInTheDocument();
+    expect(screen.getByText('Ctrl/Cmd+Shift+Enter')).toBeInTheDocument();
+    expect(screen.getByText('Ctrl+C')).toBeInTheDocument();
     await user.keyboard('{Escape}');
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(input).toHaveFocus();
 
     await user.type(input, '/help{Enter}');
     expect(screen.getByRole('dialog', { name: 'Available commands' }).innerHTML).toBe(fromButton);
+  });
+
+  it('shows the same shortcut list in Workspace help', async () => {
+    const user = userEvent.setup();
+    renderAt('/workspace/ws-a');
+    await user.click(screen.getByRole('button', { name: 'Help' }));
+    expect(screen.getByRole('dialog', { name: 'Available commands' })).toBeInTheDocument();
+    expect(screen.getByText('Ctrl/Cmd+Shift+F')).toBeInTheDocument();
   });
 
   it('takes the keyboard when the Fleet switcher picks a workspace', () => {
