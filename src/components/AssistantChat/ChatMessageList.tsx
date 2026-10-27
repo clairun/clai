@@ -12,6 +12,8 @@ import StreamingMarkdown from '../Chat/StreamingMarkdown';
 import { WorkspaceFileContext, type WorkspaceFileLocation } from '../Chat/WorkspaceFileContext';
 import VirtualizedList from '../common/VirtualizedList';
 import { isRunMarkerText } from '../../assistant/runMarker';
+import type { RunFailure } from '../../assistant/runErrors';
+import RunFailureBanner from '../RunFailureBanner/RunFailureBanner';
 import type {
   AssistantMessage,
   ContentPart,
@@ -583,12 +585,10 @@ interface ChatMessageListProps {
   streamingText?: Record<string, string>;
   isStreaming?: boolean;
   toolCalls?: ToolInvocation[];
-  // Error message of the most recent run if it failed, shown inline at the
-  // end of the conversation (directly under the failed turn). Null when the
-  // last run didn't fail. `runErrorIsLimit` selects a calmer style for
-  // usage/rate limits, which resolve on their own at a stated reset time.
-  runError?: string | null;
-  runErrorIsLimit?: boolean;
+  // Failure of the most recent run, shown inline at the end of the
+  // conversation (directly under the failed turn). Null when the last run
+  // didn't fail.
+  runFailure?: RunFailure | null;
   // Epoch ms when the in-flight run started, for the running indicator's
   // elapsed-time readout.
   runStartedAt?: number | null;
@@ -628,8 +628,7 @@ const ChatMessageList = ({
   streamingText = EMPTY_STREAMING,
   isStreaming = false,
   toolCalls = EMPTY_TOOL_CALLS,
-  runError = null,
-  runErrorIsLimit = false,
+  runFailure = null,
   runStartedAt = null,
   runningIdentity = null,
   queuedMessageIds,
@@ -824,11 +823,8 @@ const ChatMessageList = ({
     runningIdentity ? (
       <RunningIndicator identity={runningIdentity} runStartedAt={runStartedAt} />
     ) : null
-  ) : runError ? (
-    <div className={runErrorIsLimit ? styles.runLimitBanner : styles.runErrorBanner} role="alert">
-      <span className={styles.runErrorIcon}>{runErrorIsLimit ? '⏳' : '⚠'}</span>
-      <span>{runError}</span>
-    </div>
+  ) : runFailure ? (
+    <RunFailureBanner failure={runFailure} className={styles.runFailure} />
   ) : null;
 
   return (

@@ -1,0 +1,24 @@
+.banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 14px;
+  border: 1px solid var(--color-critical-border);
+  border-radius: var(--radius-md);
+  background: var(--color-critical-bg);
+  color: var(--color-critical);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* Usage/rate limit — calmer than a hard error: it resolves on its own at the
+   stated reset time. */
+.banner[data-limit] {
+  border-color: var(--color-warning-border);
+  background: color-mix(in srgb, var(--color-warning-bg) 60%, var(--color-bg-elevated));
+  color: var(--color-text-primary);
+}
+
+.icon {
+  flex-shrink: 0;
+}

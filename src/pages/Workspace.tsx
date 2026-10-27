@@ -19,7 +19,7 @@ import { restorePendingAsk } from '../assistant/pendingAsks';
 import { hydrateSession, useSessionChatActions } from '../assistant/sessionChat';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
-import { isUsageLimitError } from '../assistant/runErrors';
+import { runFailure, type RunFailure } from '../assistant/runErrors';
 import { mainIdentity } from '../components/Agents/agentIdentity';
 import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
@@ -1383,8 +1383,7 @@ interface ChatFirstLayoutProps {
   isHydrating: boolean;
   toolCalls: ToolInvocation[];
   isStreaming: boolean;
-  runError: string | null;
-  runErrorIsLimit: boolean;
+  failure: RunFailure | null;
   runStartedAt: number | null;
   queuedMessageIds: string[];
   onDeleteQueuedMessage: (messageId: string) => void;
@@ -1405,8 +1404,7 @@ const ChatFirstLayout = ({
   isHydrating,
   toolCalls,
   isStreaming,
-  runError,
-  runErrorIsLimit,
+  failure,
   runStartedAt,
   queuedMessageIds,
   onDeleteQueuedMessage,
@@ -1492,8 +1490,7 @@ const ChatFirstLayout = ({
             toolCalls={toolCalls}
             streamingText={streamingText}
             isStreaming={isStreaming}
-            runError={runError}
-            runErrorIsLimit={runErrorIsLimit}
+            runFailure={failure}
             runStartedAt={runStartedAt}
             runningIdentity={mainFace}
             queuedMessageIds={queuedMessageIds}
@@ -2240,9 +2237,7 @@ const Workspace = () => {
   // Surface the most recent run's failure in the chat. Derived from the
   // newest run, so it clears automatically when the next run starts. Without
   // this, a failed turn (e.g. a provider usage/token limit) shows nothing.
-  const lastRun = getLastRunInfo(storeRuns || details?.runs);
-  const runError = lastRun?.status === 'failed' ? lastRun.error?.trim() || 'The run failed.' : null;
-  const runErrorIsLimit = runError ? isUsageLimitError(runError) : false;
+  const failure = runFailure(getLastRunInfo(storeRuns || details?.runs));
   // Tell the backend this workspace is being viewed so the rail clears its
   // "unread" indicator. Keyed on isStreaming too: a run that finishes while
   // the user is watching re-stamps last_opened_at past the completion, and
@@ -2389,8 +2384,7 @@ const Workspace = () => {
             isHydrating={isHydrating}
             toolCalls={toolCalls}
             isStreaming={isStreaming}
-            runError={runError}
-            runErrorIsLimit={runErrorIsLimit}
+            failure={failure}
             runStartedAt={runStartedAt}
             queuedMessageIds={queuedMessageIds}
             onDeleteQueuedMessage={handleDeleteQueuedMessage}

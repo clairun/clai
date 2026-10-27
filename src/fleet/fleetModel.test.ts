@@ -138,14 +138,22 @@ describe('main run failures', () => {
     expect(lines(next)).toEqual(['You → Main: Please continue']);
   });
 
-  it('recognizes the Main session from the sent message before its run fails', () => {
-    const user = message('u1', 'user', 'Please continue');
+  it("keeps a member's run off the card when its run marker arrives before Main is known", () => {
+    // A scheduled or manual automation run posts its marker into the member's own session as the user.
+    const marker = message('mk', 'user', 'New scheduled run', { kind: 'user' }, 'member');
+    const failed = { ...run('r1'), sessionId: 'member', status: 'failed' as const, error: 'Usage limit reached' };
+    const state = apply(EMPTY_FLEET, created(marker, NOW - 1000), env({ type: 'run_failed', payload: { run: failed } }, NOW, 'member'));
+    expect(card(state).mainSessionId).toBeNull();
+    expect(card(state).lastMainRun).toBeNull();
+    const seeded = seedFleet(state, [snapshotOf({ mainSessionId: MAIN, lastMainRun: null })]);
+    expect(card(seeded).mainSessionId).toBe(MAIN);
+    expect(card(seeded).lastMainRun).toBeNull();
+  });
+
+  it('forgets the old Main run when the user moves to a new Main session', () => {
     const failed = { ...run('r1'), status: 'failed' as const, error: 'Rate limit reached' };
-    const state = apply(EMPTY_FLEET,
-      created(user, NOW - 1000),
-      env({ type: 'run_failed', payload: { run: failed } }, NOW));
-    expect(card(state).mainSessionId).toBe(MAIN);
-    expect(card(state).lastMainRun).toEqual(failed);
+    const state = apply(withMain(), env({ type: 'run_failed', payload: { run: failed } }, NOW));
+    expect(card(applyUserSent(state, WS, MAIN, null, NOW + 1000)).lastMainRun).toEqual(failed);
     expect(card(applyUserSent(state, WS, 'new-main', null, NOW + 1000)).lastMainRun).toBeNull();
   });
 

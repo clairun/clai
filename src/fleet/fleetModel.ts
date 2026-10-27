@@ -89,6 +89,7 @@ export interface FleetCard {
   title: string;
   /** From the snapshot, or set when the user sends or clears from the terminal. */
   mainSessionId: string | null;
+  /** The main session's newest run: from the snapshot, then its run events. */
   lastMainRun: AssistantRun | null;
   lastActivityAt: number;
   /** When the user last opened the workspace (here or on its page); 0 = never. */
@@ -288,11 +289,7 @@ export const applyAssistantEvent = (
         // Every session's user messages: the user's, an agent's and a task's
         // report. An assistant message is heard as it is written.
         const { message } = event.payload;
-        if (message.role !== 'user') return card;
-        const main = message.origin.kind === 'user' && card.mainSessionId === null
-          ? { ...card, mainSessionId: sessionId, lastMainRun: null }
-          : card;
-        return addSaid(main, [userSaid(message, at, envelope.runId)], true);
+        return message.role === 'user' ? addSaid(card, [userSaid(message, at, envelope.runId)], true) : card;
       }
       case 'message_deleted': {
         const said = card.said.filter((s) => s.id !== event.payload.message_id);
@@ -307,14 +304,9 @@ export const applyAssistantEvent = (
       case 'run_started':
       case 'run_completed':
       case 'run_failed':
-      case 'run_cancelled': {
-        const run = event.payload.run;
-        if (sessionId !== card.mainSessionId) return card;
-        const held = card.lastMainRun;
-        return held && (held.startedAt > run.startedAt || (held.startedAt === run.startedAt && held.id > run.id))
-          ? card
-          : { ...card, lastMainRun: run };
-      }
+      case 'run_cancelled':
+        // A session's runs arrive in order: the latest event is its newest run.
+        return sessionId === card.mainSessionId ? { ...card, lastMainRun: event.payload.run } : card;
       case 'ask_user_requested':
         return {
           ...card,
@@ -445,9 +437,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
         ...card,
         title: ws.title || card.title,
         mainSessionId,
-        lastMainRun: card.mainSessionId === mainSessionId && card.lastMainRun &&
-          (!ws.lastMainRun || card.lastMainRun.startedAt > ws.lastMainRun.startedAt)
-          ? card.lastMainRun : ws.lastMainRun,
+        lastMainRun: ws.lastMainRun,
         lastActivityAt: Math.max(card.lastActivityAt, activity),
         lastOpenedAt: Math.max(card.lastOpenedAt, Number(ws.lastOpenedAt)),
         requests,

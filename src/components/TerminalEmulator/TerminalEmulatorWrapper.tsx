@@ -103,7 +103,7 @@ const NO_CONNECTION_ERROR =
 const openProviderSetup = () => openGlobalSettings({ tab: 'provider', providerAction: 'new' });
 
 /** Send `query` to `workspaceId`'s main session, binding it in the assistant store. */
-async function sendToWorkspace(
+export async function sendToWorkspace(
   workspaceId: string,
   query: string,
   images: ContentPart[]

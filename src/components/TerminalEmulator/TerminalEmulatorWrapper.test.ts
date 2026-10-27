@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { AssistantMessage, AssistantSession } from '../../generated/bindings';
+import type { AssistantMessage, AssistantRun, AssistantSession } from '../../generated/bindings';
 
 const createWorkspace = vi.fn<() => Promise<string>>();
 const getOrCreateWorkspaceSession = vi.fn();
@@ -26,9 +26,11 @@ vi.mock('../../assistant/client', () => ({
 vi.mock('../../utils/globalSettings', () => ({ openGlobalSettings: (d: unknown) => openGlobalSettings(d) }));
 vi.mock('@tauri-apps/plugin-clipboard-manager', () => ({ readImage: vi.fn() }));
 
-const { sendToNewWorkspace } = await import('./TerminalEmulatorWrapper');
+const { sendToNewWorkspace, sendToWorkspace } = await import('./TerminalEmulatorWrapper');
 const { useFleetStore } = await import('../../fleet/fleetStore');
 const { draftImagePart, newWorkspaceDraft } = await import('../../fleet/newWorkspaceDraft');
+const { EMPTY_FLEET } = await import('../../fleet/fleetModel');
+const { runFailure } = await import('../../assistant/runErrors');
 
 const message = { id: 'm1', content: [{ type: 'text', text: 'hi' }], role: 'user', origin: { kind: 'user' } } as unknown as AssistantMessage;
 
@@ -117,5 +119,23 @@ describe('sending from the Fleet with no card selected', () => {
     // Sent: the image is no longer held, so nothing is left to store.
     await sendToNewWorkspace('a', [draftImage]);
     expect(storeWorkspaceImage).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe('sending from a workspace', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    useFleetStore.setState({ fleet: EMPTY_FLEET, buffer: null });
+    getOrCreateWorkspaceSession.mockResolvedValue({ session: { id: 's' } as AssistantSession, providerConnectionId: 'c' });
+    sendMessage.mockResolvedValue({ message, queued: false });
+  });
+
+  it("shows the first send's credits failure on its Fleet card", async () => {
+    await sendToWorkspace('ws', 'hi', []);
+    const run = { id: 'r1', sessionId: 's', status: 'failed', error: 'Credit balance is too low' } as AssistantRun;
+    useFleetStore.getState().applyEvent({ sessionId: 's', runId: 'r1', workspaceId: 'ws', timestamp: 1n, event: { type: 'run_failed', payload: { run } } });
+    const card = useFleetStore.getState().fleet.cards.ws!;
+    expect(card.mainSessionId).toBe('s');
+    expect(runFailure(card.lastMainRun)).toEqual({ text: 'Credit balance is too low', isLimit: false });
   });
 });
