@@ -189,6 +189,7 @@ const expandable = (open: boolean, toggle: () => void) => ({
   'aria-expanded': open,
   onClick: (e: MouseEvent<HTMLElement>) => {
     e.stopPropagation();
+    if (e.target instanceof Element && e.target.closest('a, button')) return;
     toggle();
   },
   onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
@@ -499,6 +500,16 @@ const FleetFeed = ({
   const onChart = useCallback(() => onOpen(workspaceId), [onOpen, workspaceId]);
   const openKey = feed.lines.some((line) => line.key === expanded) ? expanded : null;
   const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines, openKey);
+  useEffect(() => {
+    const card = ref.current?.parentElement;
+    if (!card || !openKey) return undefined;
+    const closeOutside = (event: globalThis.MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest('[aria-expanded="true"]')) return;
+      setExpanded(null);
+    };
+    card.addEventListener('click', closeOutside, true);
+    return () => card.removeEventListener('click', closeOutside, true);
+  }, [openKey, ref]);
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const open = useCallback<Open>(
     (line, origin) =>

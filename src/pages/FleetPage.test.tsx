@@ -542,6 +542,49 @@ describe('FleetPage', () => {
     expect(terminal).not.toHaveFocus();
   });
 
+  it.each(['Older words.', 'Newest words.'])('closes %s when the card is clicked outside the bubble', async (text) => {
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(300);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(40);
+    fleetSnapshot.mockResolvedValue([{
+      ...workspace('a', 'Alpha'),
+      mainSessionId: 'main-a',
+      recentMessages: [
+        said('m1', 'Older words.', 3000, { role: 'assistant' }),
+        said('u1', 'One more question.', 2000),
+        said('m2', 'Newest words.', 1000, { role: 'assistant' }),
+      ],
+    }]);
+    renderFleet();
+    const bubble = (await screen.findByText(text)).closest<HTMLElement>('[aria-expanded]')!;
+    fireEvent.click(bubble);
+    expect(bubble).toHaveAttribute('aria-expanded', 'true');
+
+    const card = bubble.closest('article')!;
+    fireEvent.click(card.firstElementChild!);
+    expect(bubble).toHaveAttribute('aria-expanded', 'false');
+    expect(useFleetStore.getState().selectedId).toBe('a');
+    expect(screen.getByRole('textbox', { name: 'Terminal' })).toHaveFocus();
+  });
+
+  it('keeps an open Main bubble when its link is clicked without selecting the card', async () => {
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(300);
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(40);
+    fleetSnapshot.mockResolvedValue([{
+      ...workspace('a', 'Alpha'),
+      mainSessionId: 'main-a',
+      recentMessages: [said('m1', 'Read [the report](https://example.com/report).', 1000, { role: 'assistant' })],
+    }]);
+    renderFleet();
+    const bubble = (await screen.findByText('Read', { exact: false })).closest<HTMLElement>('[aria-expanded]')!;
+    fireEvent.click(bubble);
+    expect(bubble).toHaveAttribute('aria-expanded', 'true');
+
+    fireEvent.click(within(bubble).getByRole('link', { name: 'the report' }));
+    expect(bubble).toHaveAttribute('aria-expanded', 'true');
+    expect(useFleetStore.getState().selectedId).toBeNull();
+    expect(screen.getByRole('textbox', { name: 'Terminal' })).not.toHaveFocus();
+  });
+
   describe('opening a workspace', () => {
     const Opened = () => <p data-testid="opened">{useParams().workspaceId}</p>;
     const renderRoutes = () =>
