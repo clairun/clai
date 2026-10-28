@@ -769,7 +769,6 @@ button.crewButton {
   flex: none;
   width: var(--thumb);
   height: var(--thumb);
-  overflow: hidden;
   border-radius: var(--radius-sm);
 }
 
