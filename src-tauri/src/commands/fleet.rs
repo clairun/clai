@@ -32,7 +32,6 @@ const RECENT_MESSAGE_LIMIT: i64 = 12;
 pub struct FleetWorkspace {
     pub workspace_id: String,
     pub title: String,
-    pub starred: bool,
     /// When any session (main, task or other) was last touched; 0 when the
     /// workspace has no session yet.
     pub last_activity_at: i64,
@@ -205,7 +204,6 @@ async fn workspace_snapshot(
         pending_asks: ask_user::pending_for_workspace(&locator.id),
         workspace_id: locator.id,
         title: locator.title,
-        starred: locator.starred_at > 0,
         last_activity_at,
         last_opened_at: locator.last_opened_at,
         main_session_id: main_session.map(|session| session.id),

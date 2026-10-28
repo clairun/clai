@@ -26,7 +26,6 @@ const task = { id: 't1', workspaceId: 'ws', status: 'running', updatedAt: 3n } a
 const snapshot: FleetWorkspace = {
   workspaceId: 'ws',
   title: 'Infra',
-  starred: false,
   lastActivityAt: 5n,
   lastOpenedAt: 0n,
   agents: [],

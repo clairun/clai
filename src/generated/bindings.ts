@@ -158,7 +158,7 @@ origin?: GrantOrigin | null, };
  */
 export type FleetHighlight = { message: AssistantMessage, runId: string | null, };
 
-export type FleetWorkspace = { workspaceId: string, title: string, starred: boolean, 
+export type FleetWorkspace = { workspaceId: string, title: string, 
 /**
  * When any session (main, task or other) was last touched; 0 when the
  * workspace has no session yet.

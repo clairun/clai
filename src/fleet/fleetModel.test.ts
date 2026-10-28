@@ -292,7 +292,6 @@ describe('the highlight feed', () => {
       {
         workspaceId: WS,
         title: 'W',
-        starred: false,
         lastActivityAt: BigInt(NOW),
         lastOpenedAt: 0n,
         agents: [],
@@ -556,7 +555,6 @@ describe('firstSentence', () => {
 const snapshotOf = (patch: Partial<FleetWorkspace> = {}): FleetWorkspace => ({
   workspaceId: WS,
   title: 'Infra',
-  starred: false,
   lastActivityAt: 10n,
   lastOpenedAt: 0n,
   agents: [],

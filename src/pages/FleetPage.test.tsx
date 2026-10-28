@@ -23,7 +23,6 @@ const { fleetSnapshot } = vi.mocked(await import('../fleet/client'));
 const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspace => ({
   workspaceId,
   title,
-  starred: false,
   lastActivityAt: BigInt(Date.now() - ageMs),
   lastOpenedAt: 0n,
   agents: [],
