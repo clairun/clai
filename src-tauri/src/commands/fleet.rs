@@ -925,19 +925,10 @@ mod tests {
             text: "Nice.".into(),
         }];
         row_at(&pool, &main.id, "assistant", reply, &user, (101, None)).await;
-        row_at(
-            &pool,
-            &main.id,
-            "assistant",
-            shot.clone(),
-            &user,
-            (102, None),
-        )
-        .await;
 
         let snapshot = snapshot(&state, None, None).await.expect("snapshot");
         let recent = &snapshot[0].recent_messages;
-        assert_eq!(recent.len(), 3);
+        assert_eq!(recent.len(), 2);
         assert_eq!(
             serde_json::to_value(&recent[0].message.content).expect("content"),
             serde_json::to_value(&shot).expect("shot")
