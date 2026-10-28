@@ -138,7 +138,7 @@ export const PathGrantCard = ({ req, speaker, onDecided, ref }: PathGrantCardPro
       className={spoken ? `${styles.card} ${styles.spoken}` : styles.card}
       aria-label="Path grant requested"
     >
-      {!speaker && (
+      {!spoken && (
         <header className={styles.cardHeader}>
           <div className={styles.cardHeaderLeft}>
             <span className={styles.tag}>Path access requested</span>

@@ -145,7 +145,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
       className={spoken ? `${styles.card} ${styles.spoken}` : styles.card}
       aria-label="Permission requested"
     >
-      {!speaker && (
+      {!spoken && (
         <header className={styles.cardHeader}>
           <div className={styles.cardHeaderLeft}>
             <span className={styles.tag}>Permission requested</span>
