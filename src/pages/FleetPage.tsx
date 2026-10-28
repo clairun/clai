@@ -9,12 +9,12 @@ import { identityFor, type AgentIdentity } from '../components/Agents/agentIdent
 import {
   RECENT_WINDOW_MS,
   cardPhase,
-  mainRunning,
   eligibleCards,
   recentlyOpened,
   type FleetLive,
 } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
+import { useMainRunning } from '../fleet/useMainRunning';
 import { useMinute } from '../fleet/useMinute';
 import { useFleetToggle } from '../fleet/useFleetToggle';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
@@ -90,7 +90,7 @@ const FleetPage = () => {
 
   // Selected is seen: the rail's unread dot clears, as on the Workspace page
   // (see the same stamp there), and again on leaving while Main is working.
-  const selectedWorking = !!selectedId && !!cards[selectedId] && mainRunning(cards[selectedId], live);
+  const selectedWorking = useMainRunning(selectedId);
   useEffect(() => {
     if (!selectedId) return undefined;
     markWorkspaceOpened(selectedId).catch(() => {});

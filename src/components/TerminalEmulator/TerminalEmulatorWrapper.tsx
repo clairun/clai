@@ -9,13 +9,11 @@
  * included.
  */
 
-import { useCallback, useMemo } from 'react';
+import { useCallback } from 'react';
 import { useAssistantStore, assistantClient } from '../../assistant';
 import { readImage } from '@tauri-apps/plugin-clipboard-manager';
-import { mainRunning } from '../../fleet/fleetModel';
 import { useFleetStore } from '../../fleet/fleetStore';
-import { useFleetActivityStore } from '../../stores/fleetActivityStore';
-import { useTaskStore } from '../../workspace/taskStore';
+import { useMainRunning } from '../../fleet/useMainRunning';
 import {
   applyNewWorkspaceDraft,
   draftConnectionId,
@@ -207,18 +205,7 @@ const TerminalEmulatorWrapper = () => {
     }
   }, [workspaceSessionId]);
 
-  const fleetCard = useFleetStore((s) => (onFleet && targetWorkspaceId ? s.fleet.cards[targetWorkspaceId] : undefined));
-  const fleetRuns = useFleetActivityStore((s) => (fleetCard ? s.activeRunsByWorkspace[fleetCard.workspaceId] : undefined));
-  const fleetTasks = useTaskStore((s) => (fleetCard ? s.tasks[fleetCard.workspaceId] : undefined));
-  const fleetMainWorking = useMemo(
-    () =>
-      !!fleetCard &&
-      mainRunning(fleetCard, {
-        runs: { [fleetCard.workspaceId]: fleetRuns ?? [] },
-        tasks: { [fleetCard.workspaceId]: fleetTasks ?? {} },
-      }),
-    [fleetCard, fleetRuns, fleetTasks]
-  );
+  const fleetMainWorking = useMainRunning(onFleet ? targetWorkspaceId : null);
 
   const agentWorking = !!targetWorkspaceId && (workspaceIsStreaming || fleetMainWorking);
 
