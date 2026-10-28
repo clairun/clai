@@ -28,7 +28,7 @@ const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
  * A card's title is a button only to select the card, so Enter there opens.
  */
 const OWNS_ENTER = 'input, textarea, select, a, button:not([data-card-title]), [contenteditable="true"], [role="dialog"]';
-/** A zoom or a modal; an agent question sits inline in its card (see Escape above). */
+/** A zoom or a modal; an agent question sits inline in its card. */
 const OPEN_DIALOG = '[role="dialog"]:not([aria-label="Agent question"])';
 
 /**
@@ -81,8 +81,7 @@ const FleetPage = () => {
   // sit inline in the cards; they don't hold Escape.
   useEffect(() => {
     const onEscape = (e: KeyboardEvent) => {
-      const dialog = document.querySelector('[role="dialog"]:not([aria-label="Agent question"])');
-      if (e.key === 'Escape' && !e.defaultPrevented && !dialog) select(null);
+      if (e.key === 'Escape' && !e.defaultPrevented && !document.querySelector(OPEN_DIALOG)) select(null);
     };
     window.addEventListener('keydown', onEscape);
     return () => window.removeEventListener('keydown', onEscape);
@@ -135,7 +134,6 @@ const FleetPage = () => {
   }, [selectedId, openWorkspace]);
 
   const switcherOrder = useMemo(() => recentlyOpened(placed, cards), [placed, cards]);
-  const handleSelect = useCallback((id: string | null) => select(id), [select]);
 
   return (
     <div className={styles.page}>
@@ -157,7 +155,7 @@ const FleetPage = () => {
             live={live}
             faces={faces}
             now={clock}
-            onSelect={handleSelect}
+            onSelect={select}
             onOpen={openWorkspace}
           />
         ) : (
@@ -169,7 +167,7 @@ const FleetPage = () => {
           )
         )}
       </main>
-      <FleetSwitcher order={switcherOrder} cards={cards} selectedId={selectedId} live={live} faces={faces} onSelect={handleSelect} />
+      <FleetSwitcher order={switcherOrder} cards={cards} selectedId={selectedId} live={live} faces={faces} onSelect={select} />
     </div>
   );
 };

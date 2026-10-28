@@ -13,7 +13,7 @@ import {
 } from '../../fleet/fleetModel';
 import { boardSlots, hiddenActivity } from '../../fleet/boardSlots';
 import { useAppTheme } from '../../hooks/useAppTheme';
-import { workspaceLook } from '../../fleet/workspaceLook';
+import { workspaceHue } from '../../fleet/workspaceHue';
 import { dispatchFocusTerminal } from '../../utils/workspaceUiEvents';
 import FleetCard from './FleetCard';
 import { accentStyle } from './FleetFace';
@@ -77,7 +77,7 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
         const card = cards[id];
         if (!card) return [];
         const feed = openRequests(card).length > 0 ? null : cardFeed(card, live, now);
-        return [{ card, feed, selected: id === selectedId, look: workspaceLook(id) }];
+        return [{ card, feed, selected: id === selectedId, hue: workspaceHue(id) }];
       }),
     [visible, cards, live, now, selectedId]
   );
@@ -90,7 +90,7 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
     <>
     <div ref={gridRef} className={`${styles.board} ${fx.fx}`} onClick={deselect}>
       <div className={styles.cards} style={{ '--cols': shape.cols, '--rows': shape.rows } as CSSProperties} onClick={deselect}>
-        {panels.map(({ card, feed, selected, look }) => {
+        {panels.map(({ card, feed, selected, hue }) => {
           const cardLoud = loud.cards[card.workspaceId] ?? null;
           return (
             <article
@@ -99,7 +99,7 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
               aria-current={selected || undefined}
               data-loud={cardLoud ?? undefined}
               data-screentone
-              style={accentStyle(look.hue, theme)}
+              style={accentStyle(hue, theme)}
             >
               <FleetCard card={card} feed={feed} shouts={loud.rows} live={live} faces={faces} now={now} loud={cardLoud} onSelect={handleSelect} onOpen={onOpen} />
             </article>
