@@ -2,16 +2,15 @@ import { memo, useCallback, useMemo, useRef, useState, type CSSProperties } from
 import { Link } from 'react-router';
 import type { AgentIdentity } from '../Agents/agentIdentity';
 import {
-  boardShape,
-  cardFeed,
   cardPhase,
-  fleetLoudness,
   openRequests,
   type FleetCard as FleetCardModel,
   type FleetLive,
   type FleetPhase,
 } from '../../fleet/fleetModel';
-import { boardSlots, hiddenActivity } from '../../fleet/boardSlots';
+import { cardFeed } from '../../fleet/fleetFeed';
+import { fleetLoudness } from '../../fleet/fleetCrew';
+import { boardShape, boardSlots, hiddenActivity } from '../../fleet/boardSlots';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { workspaceHue } from '../../fleet/workspaceHue';
 import { dispatchFocusTerminal } from '../../utils/workspaceUiEvents';

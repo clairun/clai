@@ -1,6 +1,6 @@
 import { useCallback, useState, type MouseEvent } from 'react';
 import { faceOf } from '../Agents/agentIdentity';
-import type { FleetCrew as Crew, FleetCrewMember, FleetCrewStatus } from '../../fleet/fleetModel';
+import type { FleetCrew as Crew, FleetCrewMember, FleetCrewStatus } from '../../fleet/fleetCrew';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { MAIN_FACE, type Cast } from './FleetFace';
 import FleetZoom, { zoomStart, type ZoomStart } from './FleetZoom';

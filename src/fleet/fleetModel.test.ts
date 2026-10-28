@@ -10,12 +10,7 @@ import type {
 } from '../generated/bindings';
 import {
   EMPTY_FLEET,
-  FEED_LIMIT,
-  FRESH_MS,
   SAID_LIMIT,
-  MIN_BUBBLES,
-  ROWS,
-  STALE_MS,
   RECENT_WINDOW_MS,
   applyAssistantEvent,
   applyOpened,
@@ -23,32 +18,39 @@ import {
   applyRequestResolved,
   applyUserSent,
   cardAttention,
-  boardShape,
+  openRequests,
+  cardPhase,
+  emptyCard,
+  cardAgents,
+  fullMessageText,
+  seedFleet,
+  type FleetCard,
+  type FleetLive,
+  type FleetState,
+} from './fleetModel';
+import {
+  FEED_LIMIT,
+  FRESH_MS,
+  MIN_BUBBLES,
+  ROWS,
+  STALE_MS,
   cardFeed,
   captionText,
+  firstSentence,
+  plainText,
+  splitFeed,
+  type FleetLine,
+} from './fleetFeed';
+import {
   fleetLoudness,
   shoutLevel,
   requestScene,
-  firstSentence,
-  plainText,
-  openRequests,
-  splitFeed,
-  cardPhase,
-  emptyCard,
   MAX_CREW,
-  cardAgents,
   cardCrew,
   firstWords,
-  fullMessageText,
-  eligibleCards,
-  recentlyOpened,
-  seedFleet,
-  type FleetCard,
-  type FleetLine,
-  type FleetLive,
   type FleetPanel,
-  type FleetState,
-} from './fleetModel';
+} from './fleetCrew';
+import { boardShape, eligibleCards, recentlyOpened } from './boardSlots';
 
 const WS = 'ws-1';
 const MAIN = 'main-session';

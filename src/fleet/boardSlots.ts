@@ -1,4 +1,4 @@
-import { cardPhase, type FleetCard, type FleetLive } from './fleetModel';
+import { RECENT_WINDOW_MS, cardPhase, type FleetCard, type FleetLive } from './fleetModel';
 
 interface BoardSlots {
   /** The cards on the board, in slot order; at most the capacity. */
@@ -52,4 +52,52 @@ export const hiddenActivity = ({ working, waiting }: BoardSlots['hidden']): stri
   const needs = `${waiting === 1 ? 'needs' : 'need'} you`;
   if (working > 0) return waiting > 0 ? `${working} more working · ${waiting} ${needs}` : `${working} more working`;
   return waiting > 0 ? `${waiting} more ${needs}` : null;
+};
+
+// ── Which cards ─────────────────────────────────────────────────────────
+
+/**
+ * The cards the Fleet shows: the selected card, anything live, and
+ * workspaces active within `RECENT_WINDOW_MS`. Their order is the board's
+ * (`boardSlots`) and the switcher's (`recentlyOpened`).
+ */
+export const eligibleCards = (
+  cards: readonly FleetCard[],
+  options: { now: number; selectedId: string | null; live: FleetLive }
+): string[] => {
+  const { now, selectedId, live } = options;
+  return cards
+    .filter(
+      (card) =>
+        card.workspaceId === selectedId || cardPhase(card, live) !== 'stopped' || card.lastActivityAt >= now - RECENT_WINDOW_MS
+    )
+    .map((card) => card.workspaceId);
+};
+
+/**
+ * The switcher's order: most recently opened by the user first, so it doesn't
+ * reshuffle while agents work; never opened, or a tie, by latest activity.
+ */
+export const recentlyOpened = (ids: readonly string[], cards: Record<string, FleetCard>): string[] =>
+  ids
+    .filter((id) => cards[id])
+    .sort((a, b) => {
+      const ca = cards[a]!;
+      const cb = cards[b]!;
+      return cb.lastOpenedAt - ca.lastOpenedAt || cb.lastActivityAt - ca.lastActivityAt;
+    });
+
+/** The grid: columns and rows; the board never scrolls (`boardSlots`). */
+interface BoardShape {
+  cols: number;
+  rows: number;
+}
+
+/**
+ * Six cards 3 × 2, the rest off the board; with fewer, each grows. Never fewer than
+ * two columns, so a lone card's bubbles don't stretch into very long lines.
+ */
+export const boardShape = (count: number): BoardShape => {
+  if (count <= 3) return { cols: Math.max(2, count), rows: 1 };
+  return count === 4 ? { cols: 2, rows: 2 } : { cols: 3, rows: 2 };
 };

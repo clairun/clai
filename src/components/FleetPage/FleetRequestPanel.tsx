@@ -7,7 +7,8 @@ import {
 import AskUserPanel from '../AskUserPanel/AskUserPanel';
 import { ApprovalCard } from '../InlineApprovalCard';
 import { PathGrantCard } from '../InlinePathGrantCard';
-import type { FleetRequest, FleetRequestScene } from '../../fleet/fleetModel';
+import type { FleetRequest } from '../../fleet/fleetModel';
+import type { FleetRequestScene } from '../../fleet/fleetCrew';
 import fx, { Sfx } from './FleetEffects';
 import { Caption, MAIN_FACE, Who, type Cast } from './FleetFace';
 import { Tail } from './FleetZoom';

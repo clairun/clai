@@ -9,7 +9,8 @@ import WorkspacePicker from '../components/TerminalEmulator/WorkspacePicker';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
-import { EMPTY_FLEET, emptyCard, shortTime } from '../fleet/fleetModel';
+import { EMPTY_FLEET, emptyCard } from '../fleet/fleetModel';
+import { shortTime } from '../fleet/fleetFeed';
 import type { FleetHighlight, FleetWorkspace } from '../generated/bindings';
 
 const mockInvoke = vi.hoisted(() => vi.fn(async () => undefined));

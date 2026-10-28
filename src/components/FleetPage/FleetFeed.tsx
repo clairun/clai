@@ -13,16 +13,16 @@ import { getMessage } from '../../assistant/client';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { faceOf, identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
+import { fullMessageText } from '../../fleet/fleetModel';
 import {
-  fullMessageText,
   isSpeech,
   splitFeed,
   shortTime,
-  shoutLevel,
   type FleetFeed as Feed,
   type FleetLine,
   type FleetSpeaker,
-} from '../../fleet/fleetModel';
+} from '../../fleet/fleetFeed';
+import { shoutLevel } from '../../fleet/fleetCrew';
 import fx, { Sfx, SpeedLines, type Expression } from './FleetEffects';
 import AgentAvatar from '../Agents/AgentAvatar';
 import FleetMarkdown, { ChartOpen, MINIATURE } from './FleetMarkdown';

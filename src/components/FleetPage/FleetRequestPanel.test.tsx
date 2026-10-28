@@ -9,7 +9,8 @@ vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 
 import FleetRequestPanel from './FleetRequestPanel';
 import { castFor } from './FleetFace';
-import { emptyCard, requestScene, type FleetRequest } from '../../fleet/fleetModel';
+import { emptyCard, type FleetRequest } from '../../fleet/fleetModel';
+import { requestScene } from '../../fleet/fleetCrew';
 
 const ask: PendingAskUser = {
   pendingId: 'ask-1',

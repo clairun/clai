@@ -4,7 +4,7 @@
  * board's `.fx`.
  */
 import type { ReactElement } from 'react';
-import type { FleetShout } from '../../fleet/fleetModel';
+import type { FleetShout } from '../../fleet/fleetCrew';
 import fx from './FleetEffects.module.css';
 
 export type Expression = 'working' | 'asking' | 'done';

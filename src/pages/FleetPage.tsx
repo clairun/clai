@@ -6,13 +6,8 @@ import FleetSwitcher from '../components/FleetPage/FleetSwitcher';
 import styles from '../components/FleetPage/FleetPage.module.css';
 import { listAgentDefinitions } from '../api/client';
 import { identityFor, type AgentIdentity } from '../components/Agents/agentIdentity';
-import {
-  RECENT_WINDOW_MS,
-  cardPhase,
-  eligibleCards,
-  recentlyOpened,
-  type FleetLive,
-} from '../fleet/fleetModel';
+import { RECENT_WINDOW_MS, cardPhase, type FleetLive } from '../fleet/fleetModel';
+import { eligibleCards, recentlyOpened } from '../fleet/boardSlots';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useMainRunning } from '../fleet/useMainRunning';
 import { useMinute } from '../fleet/useMinute';

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
-import type { FleetCrewMember } from '../../fleet/fleetModel';
+import type { FleetCrewMember } from '../../fleet/fleetCrew';
 import { MAIN_AVATAR_HUE } from '../Agents/agentIdentity';
 import { agentAvatar } from '../Agents/avatarGenerator';
 import { castFor } from './FleetFace';

@@ -2,17 +2,14 @@ import { memo, useMemo } from 'react';
 import type { AgentIdentity } from '../Agents/agentIdentity';
 import {
   cardAttention,
-  cardCrew,
   cardPhase,
-  requestScene,
   type FleetAttention,
   type FleetCard as FleetCardModel,
   type FleetLive,
-  type FleetLoudness,
   type FleetPhase,
-  type FleetRequestScene,
-  type FleetFeed as Feed,
 } from '../../fleet/fleetModel';
+import type { FleetFeed as Feed } from '../../fleet/fleetFeed';
+import { cardCrew, requestScene, type FleetLoudness, type FleetRequestScene } from '../../fleet/fleetCrew';
 import { castFor } from './FleetFace';
 import { runFailure } from '../../assistant/runErrors';
 import RunFailureBanner from '../RunFailureBanner/RunFailureBanner';

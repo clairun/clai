@@ -3,7 +3,8 @@ import type { CSSProperties, ReactNode } from 'react';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { mainIdentity, type AgentActivity, type AgentIdentity } from '../Agents/agentIdentity';
 import { oklchToHex, paletteForHue, type AvatarTheme } from '../Agents/avatarGenerator';
-import { captionText, type FleetCaption, type FleetLine, type FleetMainRef } from '../../fleet/fleetModel';
+import type { FleetMainRef } from '../../fleet/fleetModel';
+import { captionText, type FleetCaption, type FleetLine } from '../../fleet/fleetFeed';
 import fx, { FaceExpression, type Expression } from './FleetEffects';
 import styles from './FleetPage.module.css';
 

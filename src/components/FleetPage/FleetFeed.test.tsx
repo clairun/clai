@@ -19,7 +19,8 @@ vi.mock('react-markdown', async (importOriginal) => {
 import { invoke } from '@tauri-apps/api/core';
 import FleetFeed from './FleetFeed';
 import { castFor } from './FleetFace';
-import { EMPTY_FLEET, applyAssistantEvent, applyUserSent, cardFeed, seedFleet, type FleetLive, type FleetState } from '../../fleet/fleetModel';
+import { EMPTY_FLEET, applyAssistantEvent, applyUserSent, seedFleet, type FleetLive, type FleetState } from '../../fleet/fleetModel';
+import { cardFeed } from '../../fleet/fleetFeed';
 
 const WS = 'ws-1';
 const MAIN = 'main-session';
