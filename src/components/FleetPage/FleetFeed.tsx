@@ -71,8 +71,11 @@ const statusOf = (line: FleetLine): 'failed' | 'stopped' | 'working' | 'next' | 
 type Open = (line: FleetLine, origin: HTMLElement) => void;
 
 /** A bubble pressed by a click, Enter or Space; the card under it is not selected, and a link or button in it is its own. */
+/** What a bubble leaves a click or key to: its links and buttons. */
+const OWNED = ':is(a, button)';
+
 const pressable = (onPress: (target: HTMLElement) => void) => {
-  const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest('a, button') !== null;
+  const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest(OWNED) !== null;
   return {
     role: 'button',
     tabIndex: 0,
@@ -444,7 +447,7 @@ const FleetFeed = ({
     const card = ref.current?.parentElement;
     if (!card || !openKey) return undefined;
     const closeOutside = (event: globalThis.MouseEvent) => {
-      if (event.target instanceof Element && event.target.closest('[aria-expanded="true"]')) return;
+      if (event.target instanceof Element && event.target.closest(`[aria-expanded="true"], [data-bubble] ${OWNED}`)) return;
       setExpanded(null);
     };
     card.addEventListener('click', closeOutside, true);

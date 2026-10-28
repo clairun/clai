@@ -347,6 +347,22 @@ describe('pictures in the feed', () => {
     expect([readsOf('kept-0'), readsOf('kept-1')]).toEqual([1, 2]);
   });
 
+  it("opens an older bubble's thumbnail while Main's is open, and leaves Main's open", async () => {
+    const restore = measured();
+    try {
+      const said = [created(yours('u0', [text('Two shots.'), picture('open-a')], NOW - 3000)), updated(message('m1', [text('First, the leaks.')]), NOW - 2000),
+        created(yours('u1', [text('Next.')], NOW - 1000)), created(yours('u2', [text('Last.')], NOW))];
+      render(<Feed state={fleet(...said)} />);
+      expect(screen.queryByAltText('open-a.png')).toBeNull();
+      fireEvent.click(mainBubble());
+      fireEvent.click(await screen.findByAltText('open-a.png'));
+      expect(screen.getByRole('dialog', { name: 'open-a.png' })).toBeInTheDocument();
+      expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+    } finally {
+      restore();
+    }
+  });
+
   it('marks an older row that has pictures, and its zoom shows them', async () => {
     const restore = measured();
     try {
