@@ -39,6 +39,7 @@ const snapshot: FleetWorkspace = {
   lastAssistantMessage: {
     message: { id: 'm', sessionId: 'main', role: 'assistant', content: [{ type: 'text', text: 'Done' }], createdAt: 4n, providerMetadata: null, origin: { kind: 'user' } },
     runId: null,
+    truncated: false,
   },
   recentMessages: [],
 };

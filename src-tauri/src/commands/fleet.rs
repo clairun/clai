@@ -9,11 +9,11 @@ use serde::Serialize;
 use tauri::State;
 use ts_rs::TS;
 
+use crate::assistant::repository;
 use crate::assistant::tools::ask_user::{self, PendingAsk};
-use crate::assistant::types::{AgentRefSnapshot, AssistantMessage, AssistantRun};
+use crate::assistant::types::{AgentRefSnapshot, AssistantMessage, AssistantRun, ContentPart};
 use crate::assistant::workspace_agents::{agent_display_names, load_workspace_agent_rows};
 use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskResponse};
-use crate::assistant::{display, repository};
 use crate::commands::path_grants::PathGrantRequest;
 use crate::commands::permissions::PermissionRequest;
 use crate::db::DbPool;
@@ -25,6 +25,9 @@ const MAX_WORKSPACE_LIMIT: u32 = 32;
 const OPEN_TASK_LIMIT: i64 = 20;
 const FINISHED_TASK_LIMIT: i64 = 10;
 const RECENT_MESSAGE_LIMIT: i64 = 12;
+/// How much of a message's text the snapshot carries; the Fleet fetches the
+/// rest (`assistant_get_message`) when it shows the message whole.
+const PREVIEW_CHARS: usize = 600;
 
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
@@ -59,22 +62,86 @@ pub struct FleetWorkspace {
     pub agents: Vec<AgentRefSnapshot>,
 }
 
-/// A message of the workspace's conversation, compacted like a live
-/// message event, with the run that wrote it.
+/// A message of the workspace's conversation, cut to a preview, with the
+/// run that wrote it.
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub struct FleetHighlight {
     pub message: AssistantMessage,
     pub run_id: Option<String>,
+    /// The message's text was cut: the whole message has to be fetched.
+    pub truncated: bool,
 }
 
 impl FleetHighlight {
-    fn new(message: AssistantMessage, run_id: Option<String>) -> Self {
+    fn new(mut message: AssistantMessage, run_id: Option<String>) -> Self {
+        let (content, truncated) = preview(message.content, PREVIEW_CHARS);
+        message.content = content;
         Self {
-            message: display::message(message),
+            message,
             run_id,
+            truncated,
         }
+    }
+}
+
+/// The text parts up to `budget` characters, and whether text was cut. The
+/// Fleet shows only text, so of the other parts (tool calls, thinking) each
+/// run between two kept text parts keeps its first, emptied: it still breaks
+/// the text where the message did.
+fn preview(parts: Vec<ContentPart>, mut budget: usize) -> (Vec<ContentPart>, bool) {
+    let mut kept = Vec::new();
+    let mut gap = None;
+    for part in parts {
+        match part {
+            ContentPart::Text { text } if text.is_empty() => {}
+            ContentPart::Text { mut text } => {
+                if budget == 0 {
+                    return (kept, true);
+                }
+                if let Some(gap) = gap.take().filter(|_| !kept.is_empty()) {
+                    kept.push(gap);
+                }
+                let cut = text.char_indices().nth(budget).map(|(at, _)| at);
+                if let Some(at) = cut {
+                    text.truncate(at);
+                    kept.push(ContentPart::Text { text });
+                    return (kept, true);
+                }
+                budget -= text.chars().count();
+                kept.push(ContentPart::Text { text });
+            }
+            other => {
+                gap.get_or_insert_with(|| emptied(other));
+            }
+        }
+    }
+    (kept, false)
+}
+
+fn emptied(part: ContentPart) -> ContentPart {
+    match part {
+        ContentPart::Thinking { .. } => ContentPart::Thinking {
+            text: String::new(),
+            signature: None,
+        },
+        ContentPart::ToolUse {
+            tool_call_id,
+            tool_name,
+            ..
+        } => ContentPart::ToolUse {
+            tool_call_id,
+            tool_name,
+            arguments: serde_json::Value::Null,
+        },
+        ContentPart::ToolResult { tool_call_id, .. } => ContentPart::ToolResult {
+            tool_call_id,
+            payload: serde_json::Value::Null,
+            started_at: None,
+            completed_at: None,
+        },
+        other => other,
     }
 }
 
@@ -411,13 +478,10 @@ mod tests {
         );
         assert_eq!(busy.tasks[0].assigned_agent_display_name, "Manager");
 
-        // Whole, but compacted like a live message event.
+        // A long reply travels as its first PREVIEW_CHARS characters, flagged.
         let last = &busy.last_assistant_message.as_ref().expect("last reply");
-        assert!(matches!(
-            &last.message.content[..],
-            [ContentPart::Text { text }, ContentPart::ToolUse { arguments, .. }]
-                if *text == long_reply && *arguments == serde_json::json!({ "command": "ls" })
-        ));
+        assert_eq!(only_text(last), "é".repeat(PREVIEW_CHARS));
+        assert!(last.truncated);
 
         let idle = &snapshot[1];
         assert_eq!((idle.last_activity_at, idle.last_opened_at), (0, 0));
@@ -429,6 +493,55 @@ mod tests {
             .expect("snapshot");
         assert_eq!(top.len(), 1);
         assert_eq!(top[0].workspace_id, BUSY);
+    }
+
+    #[test]
+    fn preview_keeps_text_and_one_emptied_break_per_run_of_other_parts() {
+        let text = |text: &str| ContentPart::Text { text: text.into() };
+        let call = |id: &str| ContentPart::ToolUse {
+            tool_call_id: id.into(),
+            tool_name: "bash_exec".into(),
+            arguments: serde_json::json!({ "command": "x".repeat(300) }),
+        };
+        let thinking = ContentPart::Thinking {
+            text: "hmm".repeat(1000),
+            signature: Some("sig".into()),
+        };
+        let parts = vec![
+            thinking.clone(),
+            call("c0"),
+            text("Before."),
+            text(""),
+            call("c1"),
+            thinking,
+            call("c2"),
+            text("After."),
+            call("c3"),
+        ];
+        // ContentPart has no PartialEq: compare as sent.
+        let sent = |(parts, cut): (Vec<ContentPart>, bool)| {
+            (serde_json::to_value(parts).expect("parts"), cut)
+        };
+        let empty_call = ContentPart::ToolUse {
+            tool_call_id: "c1".into(),
+            tool_name: "bash_exec".into(),
+            arguments: serde_json::Value::Null,
+        };
+        assert_eq!(
+            sent(preview(parts.clone(), PREVIEW_CHARS)),
+            sent((
+                vec![text("Before."), empty_call.clone(), text("After.")],
+                false
+            ))
+        );
+        assert_eq!(
+            sent(preview(parts.clone(), "Before.".len() + 2)),
+            sent((vec![text("Before."), empty_call, text("Af")], true))
+        );
+        assert_eq!(
+            sent(preview(parts, "Before.".len())),
+            sent((vec![text("Before.")], true))
+        );
     }
 
     #[tokio::test]

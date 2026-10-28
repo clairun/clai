@@ -41,6 +41,7 @@ const said = (id: string, text: string, ago: number, patch = {}) =>
   ({
     message: { id, sessionId: 'main-a', role: 'user', origin: { kind: 'user' }, content: [{ type: 'text', text }], createdAt: BigInt(Date.now() - ago), providerMetadata: null, ...patch },
     runId: null,
+    truncated: false,
   }) as FleetHighlight;
 
 /** The shared terminal's input, as far as the page sees it: it takes the keyboard when asked (`TerminalEmulator`). */

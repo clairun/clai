@@ -153,10 +153,14 @@ export type FilesystemPathGrant = { path: string, access: FilesystemPathAccess,
 origin?: GrantOrigin | null, };
 
 /**
- * A message of the workspace's conversation, compacted like a live
- * message event, with the run that wrote it.
+ * A message of the workspace's conversation, cut to a preview, with the
+ * run that wrote it.
  */
-export type FleetHighlight = { message: AssistantMessage, runId: string | null, };
+export type FleetHighlight = { message: AssistantMessage, runId: string | null, 
+/**
+ * The message's text was cut: the whole message has to be fetched.
+ */
+truncated: boolean, };
 
 export type FleetWorkspace = { workspaceId: string, title: string, 
 /**

@@ -304,7 +304,7 @@ describe('the highlight feed', () => {
         pendingAsks: [],
         lastAssistantMessage: null,
         recentMessages: [
-          { message: { ...message('seed-mark', 'user', '--- Manual run at 12:01 ---'), createdAt: BigInt(NOW - 10) }, runId: null },
+          { message: { ...message('seed-mark', 'user', '--- Manual run at 12:01 ---'), createdAt: BigInt(NOW - 10) }, runId: null, truncated: false },
         ],
       },
     ]);
@@ -600,7 +600,11 @@ describe('snapshot', () => {
     expect(Object.keys(s.cards)).toEqual([WS]);
   });
 
-  const highlight = (m: AssistantMessage, at: number, runId: string | null = null): FleetHighlight => ({ message: { ...m, createdAt: BigInt(at) }, runId });
+  const highlight = (m: AssistantMessage, at: number, runId: string | null = null, truncated = false): FleetHighlight => ({
+    message: { ...m, createdAt: BigInt(at) },
+    runId,
+    truncated,
+  });
   const broke = `It **broke**${' and broke'.repeat(60)}`;
 
   it('seeds the feed from the recent messages and the last reply; an event a seed repeats keeps its own words', () => {
@@ -639,7 +643,12 @@ describe('snapshot', () => {
   it('keeps which message a line says and whether it was cut, so the zoom can fetch it whole', () => {
     const s = seedFleet(EMPTY_FLEET, [
       snapshotOf({
-        recentMessages: [highlight(message('rep', 'user', broke, report('t', 'failed')), NOW - 30)],
+        recentMessages: [
+          highlight(message('rep', 'user', broke, report('t', 'failed')), NOW - 30),
+          // The snapshot cut these two short of the stored message.
+          highlight(message('u2', 'user', 'Ship it'), NOW - 25, null, true),
+          highlight(message('a0', 'assistant', 'Shipped to stag'), NOW - 22, null, true),
+        ],
         lastAssistantMessage: highlight(message('a1', 'assistant', 'All done.'), NOW - 20),
       }),
     ]);
@@ -647,6 +656,8 @@ describe('snapshot', () => {
     expect(feed.lines.map((l) => [l.key, l.markdown, l.message])).toEqual([
       ['task:t', 'Task t', null],
       ['rep', `${broke.slice(0, 599)}…`, { sessionId: MAIN, id: 'rep', truncated: true }],
+      ['u2', 'Ship it…', { sessionId: MAIN, id: 'u2', truncated: true }],
+      ['a0', 'Shipped to stag…', { sessionId: MAIN, id: 'a0', truncated: true }],
       ['a1', 'All done.', { sessionId: MAIN, id: 'a1', truncated: false }],
     ]);
   });

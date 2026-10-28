@@ -74,7 +74,7 @@ export interface FleetSaid {
   role: 'user' | 'assistant';
   /** Who sent a user message; `null` for an assistant message. */
   origin: MessageOrigin | null;
-  /** A user message clipped to `NOTE_CHARS`, ending in `…` when cut; an assistant message whole, as heard so far. */
+  /** A user message clipped to `NOTE_CHARS`, ending in `…` when cut; an assistant message whole as heard so far, or the snapshot's preview. */
   text: string;
   /** Cut short: the full message has to be fetched. */
   truncated: boolean;
@@ -153,11 +153,11 @@ const updateCard = (
 const bump = (card: FleetCard, at: number): FleetCard =>
   at > card.lastActivityAt ? { ...card, lastActivityAt: at } : card;
 
-const clip = (text: string): { text: string; truncated: boolean } => {
+/** `text` to at most `NOTE_CHARS`, ending in `…` when it, or the message it came from (`cut`), was cut. */
+const clip = (text: string, cut = false): { text: string; truncated: boolean } => {
   const trimmed = text.trim();
-  return trimmed.length > NOTE_CHARS
-    ? { text: `${trimmed.slice(0, NOTE_CHARS - 1)}…`, truncated: true }
-    : { text: trimmed, truncated: false };
+  if (trimmed.length > NOTE_CHARS) return { text: `${trimmed.slice(0, NOTE_CHARS - 1)}…`, truncated: true };
+  return cut ? { text: `${trimmed}…`, truncated: true } : { text: trimmed, truncated: false };
 };
 
 export const fullMessageText = (message: AssistantMessage): string => {
@@ -178,12 +178,12 @@ export const fullMessageText = (message: AssistantMessage): string => {
 export const isTaskLive = (status: TaskStatus): boolean =>
   status === 'queued' || status === 'running' || status === 'stopping';
 
-const userSaid = (message: AssistantMessage, at: number, runId: string | null): FleetSaid => ({
+const userSaid = (message: AssistantMessage, at: number, runId: string | null, cut = false): FleetSaid => ({
   id: message.id,
   sessionId: message.sessionId,
   role: 'user',
   origin: message.origin,
-  ...clip(fullMessageText(message)),
+  ...clip(fullMessageText(message), cut),
   at,
   runId,
   marks: [],
@@ -381,12 +381,12 @@ export const applyUserSent = (
 export const applyOpened = (state: FleetState, workspaceId: string, at: number): FleetState =>
   state.cards[workspaceId] ? updateCard(state, workspaceId, (card) => ({ ...card, lastOpenedAt: Math.max(card.lastOpenedAt, at) })) : state;
 
-/** A snapshot's message, as if heard when it was created: an assistant one is a single block. */
-const seedSaid = ({ message, runId }: FleetHighlight): FleetSaid => {
+/** A snapshot's message, as if heard when it was created: an assistant one is a single block, its preview when cut. */
+const seedSaid = ({ message, runId, truncated }: FleetHighlight): FleetSaid => {
   const at = Number(message.createdAt);
-  if (message.role !== 'assistant') return userSaid(message, at, runId);
-  const text = fullMessageText(message);
-  return assistantSaid(message, text, runId, [{ at, end: text.length }]);
+  if (message.role !== 'assistant') return userSaid(message, at, runId, truncated);
+  const text = truncated ? clip(fullMessageText(message), true).text : fullMessageText(message);
+  return { ...assistantSaid(message, text, runId, [{ at, end: text.length }]), truncated };
 };
 
 /**

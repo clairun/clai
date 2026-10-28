@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
-import type { AssistantEventEnvelope, AssistantMessage, AssistantUiEvent } from '../../generated/bindings';
+import type { AssistantEventEnvelope, AssistantMessage, AssistantUiEvent, FleetWorkspace } from '../../generated/bindings';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }));
 
@@ -19,7 +19,7 @@ vi.mock('react-markdown', async (importOriginal) => {
 import { invoke } from '@tauri-apps/api/core';
 import FleetFeed from './FleetFeed';
 import { castFor } from './FleetFace';
-import { EMPTY_FLEET, applyAssistantEvent, applyUserSent, cardFeed, type FleetLive, type FleetState } from '../../fleet/fleetModel';
+import { EMPTY_FLEET, applyAssistantEvent, applyUserSent, cardFeed, seedFleet, type FleetLive, type FleetState } from '../../fleet/fleetModel';
 
 const WS = 'ws-1';
 const MAIN = 'main-session';
@@ -81,19 +81,25 @@ describe("Main's bubble", () => {
     expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
   });
 
-  it('fetches a cut message once while it is open, not again on each recompute', () => {
-    const cut = () => {
-      const feed = cardFeed(saying('First, the leaks.').cards[WS]!, IDLE, NOW);
-      return { ...feed, lines: feed.lines.map((l) => ({ ...l, message: { ...l.message!, truncated: true } })) };
-    };
-    const fetches = () => vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'assistant_get_message').length;
+  it('fetches a reply the snapshot cut whole, once while it is open, not again on each recompute', async () => {
+    const preview = { message: { ...message('m1', [text('First, the')]), createdAt: BigInt(NOW - 1000) }, runId: 'r1', truncated: true };
+    const snapshot = { workspaceId: WS, mainSessionId: MAIN, lastActivityAt: 0n, lastOpenedAt: 0n, lastMainRun: null, lastAssistantMessage: null, recentMessages: [preview],
+      pendingAsks: [], pendingPermissions: [], pendingPathGrants: [], agents: [] } as unknown as FleetWorkspace;
+    const cut = () => cardFeed(seedFleet(EMPTY_FLEET, [snapshot]).cards[WS]!, IDLE, NOW);
+    const fetched = vi.mocked(invoke).mockImplementation(async (cmd) => (cmd === 'assistant_get_message' ? message('m1', [text('First, the leaks.')]) : undefined));
+    const fetches = () => fetched.mock.calls.filter(([cmd]) => cmd === 'assistant_get_message').length;
     const at = fetches();
-    const { rerender } = render(<FleetFeed workspaceId={WS} feed={cut()} shouts={new Set()} now={NOW} faces={castFor({}, null)} onOpen={() => {}} />);
-    fireEvent.click(mainBubble());
-    // Every Fleet event recomputes the feed: new lines, the same message.
-    rerender(<FleetFeed workspaceId={WS} feed={cut()} shouts={new Set()} now={NOW + 1} faces={castFor({}, null)} onOpen={() => {}} />);
-    expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
-    expect(fetches() - at).toBe(1);
+    try {
+      const { rerender } = render(<FleetFeed workspaceId={WS} feed={cut()} shouts={new Set()} now={NOW} faces={castFor({}, null)} onOpen={() => {}} />);
+      fireEvent.click(bubbleOf(/First, the…/));
+      expect(await screen.findByText('First, the leaks.')).toBeInTheDocument();
+      // Every Fleet event recomputes the feed: new lines, the same message.
+      rerender(<FleetFeed workspaceId={WS} feed={cut()} shouts={new Set()} now={NOW + 1} faces={castFor({}, null)} onOpen={() => {}} />);
+      expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+      expect(fetches() - at).toBe(1);
+    } finally {
+      fetched.mockImplementation(async () => undefined);
+    }
   });
 
   it('keeps an older Main bubble expanded and gives it the card space', () => {
