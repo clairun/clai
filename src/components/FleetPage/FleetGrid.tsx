@@ -17,7 +17,7 @@ import { workspaceLook } from '../../fleet/workspaceLook';
 import { dispatchFocusTerminal } from '../../utils/workspaceUiEvents';
 import FleetCard from './FleetCard';
 import { accentStyle } from './FleetFace';
-import fx, { FLEET_FX } from './FleetEffects';
+import fx from './FleetEffects';
 import { useThoughtBeat } from './useThoughtBeat';
 import styles from './FleetPage.module.css';
 
@@ -42,8 +42,9 @@ interface FleetGridProps {
  * The board: every card the same size (`boardShape`), never scrolling; when
  * there are more cards than fit, `boardSlots` picks the ones on it and a line
  * under it counts the active ones left off. The selected one is only
- * highlighted. Nothing animates: on WebKitGTK even a short transition blinks.
- * The drawn effects switch on here.
+ * highlighted. Nothing on the board animates (on WebKitGTK even a short
+ * transition blinks); only the zoom, a portal outside it, does. The drawn
+ * effects switch on here.
  */
 const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpen }: FleetGridProps) => {
   // Choosing a card readies the terminal for it, as the switcher does.
@@ -87,7 +88,7 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
 
   return (
     <>
-    <div ref={gridRef} className={`${styles.board} ${fx.fx}`} data-fx={FLEET_FX} onClick={deselect}>
+    <div ref={gridRef} className={`${styles.board} ${fx.fx}`} onClick={deselect}>
       <div className={styles.cards} style={{ '--cols': shape.cols, '--rows': shape.rows } as CSSProperties} onClick={deselect}>
         {panels.map(({ card, feed, selected, look }) => {
           const cardLoud = loud.cards[card.workspaceId] ?? null;

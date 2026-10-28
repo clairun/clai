@@ -1,16 +1,13 @@
 /**
  * The Fleet's drawn effects: decoration only, `aria-hidden`, every state is
- * also in words. They are styled in `FleetEffects.module.css` and shown only
- * under `data-fx="on"` (`FLEET_FX`), so turning them down is one change.
+ * also in words. They are styled in `FleetEffects.module.css`, under the
+ * board's `.fx`.
  */
 import type { ReactElement } from 'react';
 import type { FleetShout } from '../../fleet/fleetModel';
 import fx from './FleetEffects.module.css';
 
-/** `'off'` keeps the comic page and drops every drawn effect. */
-export const FLEET_FX: 'on' | 'off' = 'on';
-
-export type Expression = 'working' | 'asking' | 'done' | 'asleep';
+export type Expression = 'working' | 'asking' | 'done';
 
 const INK = 'var(--fx-ink)';
 const SWEAT = 'var(--color-info-light)';
@@ -32,16 +29,6 @@ const EXPRESSIONS: Record<Expression, ReactElement> = {
       <path d="M100 52l1.6 5 5 1.6-5 1.6-1.6 5-1.6-5-5-1.6 5-1.6z" fill={SPARKLE} stroke={INK} strokeWidth="1.2" />
     </>
   ),
-  asleep: (
-    <>
-      <text x="76" y="14" fontSize="18" fontWeight="900" fill="currentColor" opacity=".6">
-        z
-      </text>
-      <text x="88" y="0" fontSize="24" fontWeight="900" fill="currentColor" opacity=".45">
-        Z
-      </text>
-    </>
-  ),
 };
 
 export const FaceExpression = ({ kind, size }: { kind: Expression; size: number }) => (
@@ -51,9 +38,9 @@ export const FaceExpression = ({ kind, size }: { kind: Expression; size: number 
 );
 
 /** An outlined sound effect: "GO!", "DONE!", "!?". */
-export const Sfx = ({ word, tone, level = 'full', className = '' }: { word: string; tone: 'go' | 'done' | 'warn'; level?: FleetShout; className?: string }) =>
+export const Sfx = ({ word, tone, level = 'full' }: { word: string; tone: 'go' | 'done' | 'warn'; level?: FleetShout }) =>
   level ? (
-    <span className={`${fx.sfx} ${className}`} data-tone={tone} data-level={level} aria-hidden="true">
+    <span className={fx.sfx} data-tone={tone} data-level={level} aria-hidden="true">
       {word}
     </span>
   ) : null;
