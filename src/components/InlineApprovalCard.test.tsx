@@ -272,3 +272,27 @@ describe('ApprovalCard — spoken (the Fleet)', () => {
     expect(screen.getByText('complex').getAttribute('title')).toMatch(/Read it carefully before allowing/);
   });
 });
+
+describe('InlineApprovalCard — each card its own submit', () => {
+  it('shows a failed submit on that card only, and leaves the other card answerable', async () => {
+    let reject: (reason: unknown) => void = () => {};
+    mockInvoke.mockImplementation((cmd: string) =>
+      cmd === 'submit_permission_decision' ? new Promise((_, no) => { reject = no; }) : Promise.resolve([])
+    );
+    render(<InlineApprovalCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+    fireRequest(SINGLE_SEGMENT_REQUEST);
+    fireRequest({ ...SINGLE_SEGMENT_REQUEST, requestId: 'req-2', command: 'ls', segments: [{ text: 'ls', kind: 'simple', suggestedPrefix: 'ls' }] });
+    await screen.findByText('ls');
+    const [first, second] = screen.getAllByRole('article', { name: 'Permission requested' }).map((card) => within(card));
+
+    await userEvent.click(first!.getByRole('button', { name: /allow once/i }));
+    expect(first!.getByRole('button', { name: /allow once/i })).toBeDisabled();
+    expect(second!.getByRole('button', { name: /allow once/i })).toBeEnabled();
+
+    reject('Approval channel closed');
+    expect(await first!.findByText('Approval channel closed')).toBeInTheDocument();
+    expect(second!.queryByText('Approval channel closed')).not.toBeInTheDocument();
+    expect(second!.getByRole('button', { name: /allow once/i })).toBeEnabled();
+  });
+});
