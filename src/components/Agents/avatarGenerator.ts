@@ -36,8 +36,8 @@ export type MouthKind = 'none' | 'line' | 'smile' | 'o' | 'flat';
 export type MarkerKind = 'antenna' | 'fin' | 'tuft' | 'none';
 
 /** Worn by a workspace's Main only (`accessory` option), so members' faces never change. */
-export const ACCESSORIES = ['headband', 'glasses', 'cap', 'bow', 'scarf', 'earphones', 'scar', 'flower'] as const;
-export type AccessoryKind = (typeof ACCESSORIES)[number];
+const ACCESSORIES = ['headband', 'glasses', 'cap', 'bow', 'scarf', 'earphones', 'scar', 'flower'] as const;
+type AccessoryKind = (typeof ACCESSORIES)[number];
 
 // Repeated entries are weights: blobs and antennae are the "house look".
 const BODIES: readonly BodyKind[] = ['blob', 'blob', 'squircle', 'pill', 'tall'];
@@ -406,7 +406,7 @@ export const avatarParts = (seed: string): AvatarParts => {
 };
 
 /** The accessory a seed picks when it is worn. Its own bits of the hash: the parts' draws are untouched. */
-export const accessoryFor = (seed: string): AccessoryKind =>
+const accessoryFor = (seed: string): AccessoryKind =>
   ACCESSORIES[(rngFor(seed).hash >>> 16) % ACCESSORIES.length] as AccessoryKind;
 
 /**

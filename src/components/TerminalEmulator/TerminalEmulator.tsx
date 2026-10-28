@@ -19,6 +19,9 @@ import { computeTextareaSize } from '../../utils/composerTextarea';
 /** The composer's one-line height; it grows by this per line. */
 const INPUT_LINE_PX = 20;
 
+/** Input for the chat: neither a "/command" nor a "!shell" escape. */
+const isChatPrompt = (text: string) => !text.startsWith('/') && !text.startsWith('!');
+
 type OutputType = 'info' | 'success' | 'error' | 'warning';
 
 interface OutputMessage {
@@ -471,12 +474,9 @@ const TerminalEmulator = ({
       return;
     }
 
-    // Check if input starts with "/" - it's a command
-    const isSlashCommand = trimmed.startsWith('/');
-
-    // If NOT a slash command, send to chat. Workspace routes render the chat
-    // in the page; other routes reject with a hint to open a workspace.
-    if (!isSlashCommand) {
+    // Send a prompt to chat. Workspace routes render the chat in the page;
+    // other routes reject with a hint to open a workspace.
+    if (isChatPrompt(trimmed)) {
       if (onSendToChat) {
         const result = await onSendToChat(trimmed, pendingImages);
         if (result?.error) {
@@ -562,7 +562,7 @@ const TerminalEmulator = ({
       const createsWorkspace =
         isFleetRoute &&
         !useFleetStore.getState().selectedId &&
-        (attachments.length > 0 || (trimmed !== '' && !/^[/!]/.test(trimmed)));
+        (attachments.length > 0 || (trimmed !== '' && isChatPrompt(trimmed)));
       if (createsWorkspace && !confirmingCreate) {
         setConfirmingCreate(true);
         return;

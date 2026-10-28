@@ -54,7 +54,7 @@ describe('the Fleet terminal workspace picker', () => {
 
     const search = screen.getByRole('combobox', { name: 'Search workspaces' });
     expect(search).toHaveFocus();
-    expect(search).toHaveAttribute('placeholder', 'Search workspaces (Ctrl+K)');
+    expect(search).toHaveAttribute('placeholder', 'Search workspaces (Ctrl/Cmd+K)');
     await screen.findByText('Old report');
 
     await user.keyboard('old{Enter}');

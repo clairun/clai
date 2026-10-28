@@ -1,7 +1,6 @@
 /**
  * Loading a session's chat into the assistant store, and the chat's own
- * actions (older page, queued edit/delete). Shared by the workspace page and
- * the Fleet's selected card so a fix lands once.
+ * actions (older page, queued edit/delete).
  */
 import { useMemo } from 'react';
 import * as assistantClient from './client';

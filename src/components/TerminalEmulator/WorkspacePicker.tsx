@@ -18,7 +18,7 @@ interface PickerEntry {
 /** The create entry: no selection, so the next prompt creates a workspace. */
 const CREATE = null;
 
-export const PICKER_SHORTCUT = 'Ctrl+K';
+export const PICKER_SHORTCUT = 'Ctrl/Cmd+K';
 
 /**
  * Searchable list of every workspace, for the Fleet terminal's target:

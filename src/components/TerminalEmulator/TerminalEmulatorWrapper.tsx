@@ -148,14 +148,14 @@ async function imageAttachError(workspaceId: string | null): Promise<string | nu
 }
 
 /** A workspace being created from the Fleet; prompts sent meanwhile join it instead of creating another. */
-let creatingWorkspace: Promise<string> | null = null;
+let creatingWorkspace: Promise<string | null> | null = null;
 
-/** Checks for a provider first, so a first run without one leaves no empty workspace behind. */
-async function createFleetWorkspace(): Promise<string> {
+/** Checks for a provider first, so a first run without one leaves no empty workspace behind; `null` without one. */
+async function createFleetWorkspace(): Promise<string | null> {
   const connections = await assistantClient.listProviderConnections();
   if (!connections.some((c) => c.enabled)) {
     openProviderSetup();
-    throw NO_CONNECTION_ERROR;
+    return null;
   }
   const workspaceId = await createWorkspace();
   await applyNewWorkspaceDraft(workspaceId, connections);
@@ -167,6 +167,7 @@ export async function sendToNewWorkspace(query: string, images: ContentPart[]): 
   const creating = (creatingWorkspace ??= createFleetWorkspace());
   try {
     const workspaceId = await creating;
+    if (!workspaceId) return { error: NO_CONNECTION_ERROR };
     const result = await sendToWorkspace(workspaceId, query, await storeDraftImages(workspaceId, images));
     if (!result.error) dropDraftImages(images);
     const fleet = useFleetStore.getState();
@@ -219,7 +220,7 @@ const TerminalEmulatorWrapper = () => {
     [fleetCard, fleetRuns, fleetTasks]
   );
 
-  const inputDisabled = !!targetWorkspaceId && (workspaceIsStreaming || fleetMainWorking);
+  const agentWorking = !!targetWorkspaceId && (workspaceIsStreaming || fleetMainWorking);
 
   /**
    * Handle sending a query through the assistant engine.
@@ -299,8 +300,7 @@ const TerminalEmulatorWrapper = () => {
     async (command: string): Promise<{ error?: string; message?: string }> => {
       const [name] = command.trim().split(/\s+/, 1);
 
-      const currentWorkspaceId = targetWorkspaceId;
-      if (!currentWorkspaceId) {
+      if (!targetWorkspaceId) {
         return { error: OPEN_WORKSPACE_ERROR };
       }
 
@@ -310,14 +310,14 @@ const TerminalEmulatorWrapper = () => {
       // run is active. A fresh empty session is bound immediately.
       if (name === 'clear') {
         try {
-          const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
+          const binding = await getOrCreateWorkspaceSession(targetWorkspaceId);
           const store = useAssistantStore.getState();
-          await assistantClient.deleteSession(currentWorkspaceId, binding.session.id);
+          await assistantClient.deleteSession(targetWorkspaceId, binding.session.id);
           store.removeSession(binding.session.id);
-          const fresh = await getOrCreateWorkspaceSession(currentWorkspaceId);
+          const fresh = await getOrCreateWorkspaceSession(targetWorkspaceId);
           store.initSession(fresh.session);
-          store.setActiveSessionForTab(`workspace:${currentWorkspaceId}`, fresh.session.id);
-          useFleetStore.getState().noteUserSent(currentWorkspaceId, fresh.session.id, null);
+          store.setActiveSessionForTab(`workspace:${targetWorkspaceId}`, fresh.session.id);
+          useFleetStore.getState().noteUserSent(targetWorkspaceId, fresh.session.id, null);
           return { message: 'Conversation history cleared.' };
         } catch (err) {
           console.error('[TerminalEmulatorWrapper] Workspace clear error:', err);
@@ -330,7 +330,7 @@ const TerminalEmulatorWrapper = () => {
       }
 
       try {
-        const binding = await getOrCreateWorkspaceSession(currentWorkspaceId);
+        const binding = await getOrCreateWorkspaceSession(targetWorkspaceId);
         const connectionId = binding.providerConnectionId;
         if (!connectionId) {
           return {
@@ -339,8 +339,8 @@ const TerminalEmulatorWrapper = () => {
         }
         const store = useAssistantStore.getState();
         store.initSession(binding.session);
-        store.setActiveSessionForTab(`workspace:${currentWorkspaceId}`, binding.session.id);
-        const result = await assistantClient.compactSession(currentWorkspaceId, binding.session.id, connectionId);
+        store.setActiveSessionForTab(`workspace:${targetWorkspaceId}`, binding.session.id);
+        const result = await assistantClient.compactSession(targetWorkspaceId, binding.session.id, connectionId);
         if (result.summaryMessage) {
           store.addMessage(binding.session.id, result.summaryMessage);
         }
@@ -368,7 +368,7 @@ const TerminalEmulatorWrapper = () => {
       onAttachImage={handleAttachImage}
       onPickImage={handlePickImage}
       onReadClipboardImage={readClipboardImageAsFile}
-      agentWorking={inputDisabled}
+      agentWorking={agentWorking}
       recoverablePrompt={recoverablePrompt}
       onRecoverablePromptConsumed={handleRecoverablePromptConsumed}
     />

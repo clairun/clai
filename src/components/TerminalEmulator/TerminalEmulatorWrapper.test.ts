@@ -93,7 +93,7 @@ describe('sending from the Fleet with no card selected', () => {
 
   it('with no provider, opens Settings and creates nothing', async () => {
     listProviderConnections.mockResolvedValue([{ id: 'c', enabled: false }]);
-    await expect(sendToNewWorkspace('a', [])).rejects.toMatch(/provider connection/);
+    expect((await sendToNewWorkspace('a', [])).error).toMatch(/provider connection/);
     expect(createWorkspace).not.toHaveBeenCalled();
     expect(openGlobalSettings).toHaveBeenCalledWith({ tab: 'provider', providerAction: 'new' });
   });
