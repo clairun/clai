@@ -155,32 +155,22 @@ fn forget(pending_id: &str) {
     }
 }
 
-/// A `PENDING` entry that is removed when this is dropped, however the
-/// waiting tool future ends.
-struct PendingRegistration(String);
-
-impl PendingRegistration {
-    fn insert(entry: PendingEntry) -> Result<Self, String> {
-        let id = entry.ask.pending_id.clone();
-        pending_map()
-            .lock()
-            .map_err(|e| format!("ask_user pending map poisoned: {}", e))?
-            .insert(id.clone(), entry);
-        Ok(Self(id))
-    }
-}
-
-impl Drop for PendingRegistration {
-    fn drop(&mut self) {
-        forget(&self.0);
-    }
-}
-
 /// Keeps `ask` pending until the returned guard is dropped.
 #[cfg(test)]
-pub(crate) fn register_for_test(ask: PendingAsk) -> impl Drop {
-    let (tx, _rx) = oneshot::channel();
-    PendingRegistration::insert(PendingEntry { ask, tx }).expect("register ask")
+pub(crate) fn register_for_test(ask: PendingAsk) -> (impl Drop, oneshot::Receiver<AskUserOutcome>) {
+    struct Registered(String);
+    impl Drop for Registered {
+        fn drop(&mut self) {
+            forget(&self.0);
+        }
+    }
+    let (tx, rx) = oneshot::channel();
+    let id = ask.pending_id.clone();
+    pending_map()
+        .lock()
+        .expect("pending map")
+        .insert(id.clone(), PendingEntry { ask, tx });
+    (Registered(id), rx)
 }
 
 /// Deliver an answer to a waiting `ask_user` invocation. Called from the
@@ -231,7 +221,7 @@ pub fn take_for_session(session_id: &str) -> Vec<String> {
 /// run rather than letting the model continue without the requested
 /// human answer (a no-op when the run already ended).
 struct PendingGuard {
-    registration: PendingRegistration,
+    id: String,
     app: tauri::AppHandle,
     workspace_id: String,
     session: crate::assistant::types::AssistantSession,
@@ -246,14 +236,14 @@ impl PendingGuard {
     }
 
     async fn abandon_and_stop<T>(&mut self) -> T {
-        forget(&self.registration.0);
+        forget(&self.id);
         let _ = emit_event(
             &self.app,
             &self.workspace_id,
             &self.session,
             Some(self.run_id.as_str()),
             AssistantUiEvent::AskUserResolved {
-                pending_id: self.registration.0.clone(),
+                pending_id: self.id.clone(),
             },
         );
         self.armed = false;
@@ -268,12 +258,12 @@ impl Drop for PendingGuard {
         }
         self.cancel_token.cancel();
         // Removed before `AskUserResolved` is emitted, not after the fields drop.
-        forget(&self.registration.0);
+        forget(&self.id);
         let app = self.app.clone();
         let workspace_id = self.workspace_id.clone();
         let session = self.session.clone();
         let run_id = self.run_id.clone();
-        let pending_id = self.registration.0.clone();
+        let pending_id = self.id.clone();
         tauri::async_runtime::spawn(async move {
             let _ = emit_event(
                 &app,
@@ -341,8 +331,12 @@ pub async fn execute(
         extra_context: ask.extra_context.clone(),
     };
     let (tx, rx) = oneshot::channel::<AskUserOutcome>();
+    pending_map()
+        .lock()
+        .map_err(|e| format!("ask_user pending map poisoned: {}", e))?
+        .insert(pending_id.clone(), PendingEntry { ask, tx });
     let mut guard = PendingGuard {
-        registration: PendingRegistration::insert(PendingEntry { ask, tx })?,
+        id: pending_id.clone(),
         app: deps.app.clone(),
         workspace_id: deps.workspace_id.clone(),
         session: session.clone(),
@@ -470,23 +464,8 @@ mod tests {
         workspace_id: &str,
         session_id: &str,
         requested_at: i64,
-    ) -> oneshot::Receiver<AskUserOutcome> {
-        let (entry, rx) = pending_entry(pending_id, workspace_id, session_id, requested_at);
-        pending_map()
-            .lock()
-            .unwrap()
-            .insert(pending_id.to_string(), entry);
-        rx
-    }
-
-    fn pending_entry(
-        pending_id: &str,
-        workspace_id: &str,
-        session_id: &str,
-        requested_at: i64,
-    ) -> (PendingEntry, oneshot::Receiver<AskUserOutcome>) {
-        let (tx, rx) = oneshot::channel::<AskUserOutcome>();
-        let ask = PendingAsk {
+    ) -> (impl Drop, oneshot::Receiver<AskUserOutcome>) {
+        register_for_test(PendingAsk {
             pending_id: pending_id.to_string(),
             workspace_id: workspace_id.to_string(),
             session_id: session_id.to_string(),
@@ -495,8 +474,7 @@ mod tests {
             multi_select: false,
             extra_context: None,
             requested_at,
-        };
-        (PendingEntry { ask, tx }, rx)
+        })
     }
 
     fn answer(text: &str) -> AskUserAnswer {
@@ -515,38 +493,33 @@ mod tests {
     }
 
     #[test]
-    fn pending_asks_are_readable_until_answered_superseded_or_cancelled() {
-        let _rx_answered = register("pfw-answered", "pfw-ws", "pfw-s1", 3);
-        let _rx_superseded = register("pfw-superseded", "pfw-ws", "pfw-s2", 1);
-        let (cancelled, _rx_cancelled) = pending_entry("pfw-cancelled", "pfw-ws", "pfw-s3", 2);
-        let cancelled = PendingRegistration::insert(cancelled).unwrap();
-        let _rx_other = register("pfw-other", "pfw-other-ws", "pfw-s4", 0);
+    fn pending_asks_are_readable_until_answered_or_superseded() {
+        let _answered = register("pfw-answered", "pfw-ws", "pfw-s1", 3);
+        let _superseded = register("pfw-superseded", "pfw-ws", "pfw-s2", 1);
+        let _other = register("pfw-other", "pfw-other-ws", "pfw-s4", 0);
 
         let asks = pending_for_workspace("pfw-ws");
         assert_eq!(
             asks.iter()
                 .map(|a| a.pending_id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["pfw-superseded", "pfw-cancelled", "pfw-answered"],
+            vec!["pfw-superseded", "pfw-answered"],
             "only this workspace's asks, oldest first"
         );
-        assert_eq!(asks[2].question, "question pfw-answered");
-        assert_eq!(asks[2].session_id, "pfw-s1");
+        assert_eq!(asks[1].question, "question pfw-answered");
+        assert_eq!(asks[1].session_id, "pfw-s1");
 
         submit_answer("pfw-answered", answer("yes")).unwrap();
         take_for_session("pfw-s2");
-        // A cancelled run drops the waiting future and with it the registration.
-        drop(cancelled);
 
         assert!(pending_ids("pfw-ws").is_empty());
         assert_eq!(pending_ids("pfw-other-ws"), vec!["pfw-other".to_string()]);
-        forget("pfw-other");
     }
 
     #[test]
     fn take_for_session_removes_only_that_sessions_asks_and_closes_channels() {
-        let rx_a = register("tfs-pending-a", "tfs-ws", "tfs-session-a", 0);
-        let mut rx_b = register("tfs-pending-b", "tfs-ws", "tfs-session-b", 0);
+        let (_a, rx_a) = register("tfs-pending-a", "tfs-ws", "tfs-session-a", 0);
+        let (_b, mut rx_b) = register("tfs-pending-b", "tfs-ws", "tfs-session-b", 0);
 
         let removed = take_for_session("tfs-session-a");
         assert_eq!(removed, vec!["tfs-pending-a".to_string()]);
@@ -563,14 +536,11 @@ mod tests {
             rx_b.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
-
-        // Cleanup so other tests see an empty map for these ids.
-        take_for_session("tfs-session-b");
     }
 
     #[test]
     fn submit_answer_fails_for_superseded_pending_id() {
-        let _rx = register("sup-pending", "sup-ws", "sup-session", 0);
+        let _sup = register("sup-pending", "sup-ws", "sup-session", 0);
         take_for_session("sup-session");
 
         let result = submit_answer("sup-pending", answer("late"));
