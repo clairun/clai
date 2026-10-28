@@ -238,6 +238,164 @@ describe("Main's bubble", () => {
   });
 });
 
+/**
+ * Main's newest bubble as a 100px scroller over `tall()` px of words (the card
+ * roomy around it), sliding text in with `glide` unless motion is reduced.
+ */
+const scrolling = (tall: () => number, { reduce = false } = {}) => {
+  const glide = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, 'animate', { value: glide, configurable: true });
+  vi.stubGlobal('matchMedia', (query: string) => ({ matches: reduce && query.includes('reduce') }));
+  const spies = [
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.matches('[data-newest], [data-open]') ? 100 : 1000;
+    }),
+    vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.parentElement?.matches('[data-newest], [data-open]') ? tall() : 0;
+    }),
+    // A slide's transform stretches what scrolls past the words' own height.
+    vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.matches('[data-newest], [data-open]') ? tall() + (glide.mock.calls.length > 0 ? 60 : 0) : 0;
+    }),
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(200),
+  ];
+  return {
+    glide,
+    restore: () => {
+      spies.forEach((spy) => spy.mockRestore());
+      delete (HTMLElement.prototype as Partial<HTMLElement>).animate;
+      vi.unstubAllGlobals();
+    },
+  };
+};
+
+describe("Main's newest bubble, scrolling", () => {
+  const writing = (...more: string[]) => <Feed state={twoBlocks(['After that, the fix.', ...more].join(' '))} live={RUNNING} />;
+
+  it('follows its end, sliding new lines in; stays where the reader scrolled up; follows again once back at the end', () => {
+    let tall = 200;
+    const { glide, restore } = scrolling(() => tall);
+    try {
+      const { rerender } = render(writing());
+      expect(words().scrollTop).toBe(100);
+      expect(glide).not.toHaveBeenCalled();
+
+      tall = 260;
+      rerender(writing('Then the docs.'));
+      expect(words().scrollTop).toBe(160);
+      expect(glide).toHaveBeenCalledTimes(1);
+      expect(glide.mock.calls[0]![0]).toEqual([{ transform: 'translateY(60px)' }, { transform: 'none' }]);
+      expect(glide.mock.calls[0]![1]).toMatchObject({ composite: 'add' });
+
+      words().scrollTop = 50;
+      tall = 320;
+      rerender(writing('Then the docs.', 'Then the tests.'));
+      expect(words().scrollTop).toBe(50);
+      expect(glide).toHaveBeenCalledTimes(1);
+
+      words().scrollTop = 219.5;
+      tall = 530;
+      rerender(writing('Then the docs.', 'Then the tests.', 'Done.'));
+      expect(words().scrollTop).toBe(430);
+      expect(glide).toHaveBeenCalledTimes(2);
+      // A slide starts at most a bubble's height below.
+      expect(glide.mock.calls[1]![0][0]).toEqual({ transform: 'translateY(100px)' });
+    } finally {
+      restore();
+    }
+  });
+
+  it('follows without sliding under reduced motion', () => {
+    let tall = 200;
+    const { glide, restore } = scrolling(() => tall, { reduce: true });
+    try {
+      const { rerender } = render(writing());
+      tall = 260;
+      rerender(writing('Then the docs.'));
+      expect(words().scrollTop).toBe(160);
+      expect(glide).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it('shows its start once another bubble follows or while open, and its end again once closed', () => {
+    const { restore } = scrolling(() => 200);
+    try {
+      const { rerender } = render(writing());
+      expect(words().scrollTop).toBe(100);
+      fireEvent.click(mainBubble());
+      expect(words().scrollTop).toBe(0);
+      fireEvent.click(mainBubble());
+      expect(words().scrollTop).toBe(100);
+
+      rerender(<Feed state={applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW)} now={NOW + 2000} />);
+      expect(words()).not.toHaveAttribute('data-newest');
+      expect(words().scrollTop).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps its end in view through a new size, unless the reader scrolled up', () => {
+    let tall = 200;
+    const { restore } = scrolling(() => tall);
+    const observers: { targets: Element[]; resized: () => void }[] = [];
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        targets: Element[] = [];
+        constructor(public resized: () => void) {
+          observers.push(this);
+        }
+        observe(target: Element) {
+          this.targets.push(target);
+        }
+        disconnect() {}
+      }
+    );
+    const resize = (newTall: number) => {
+      tall = newTall;
+      observers.filter((o) => o.targets.includes(words())).forEach((o) => o.resized());
+    };
+    try {
+      const { rerender } = render(writing());
+      expect(words().scrollTop).toBe(100);
+      resize(260);
+      expect(words().scrollTop).toBe(160);
+      tall = 300;
+      rerender(writing('Then the docs.'));
+      expect(words().scrollTop).toBe(200);
+      // Mid-slide: the same size, the scroll range stretched by the slide.
+      resize(300);
+      expect(words().scrollTop).toBe(200);
+      tall = 340;
+      rerender(writing('Then the docs.', 'Then the tests.'));
+      expect(words().scrollTop).toBe(240);
+      words().scrollTop = 40;
+      resize(400);
+      expect(words().scrollTop).toBe(40);
+    } finally {
+      restore();
+    }
+  });
+
+  it('leaves a click on its scrollbar to the scrollbar, closed or open', () => {
+    const { restore } = scrolling(() => 200);
+    try {
+      render(writing());
+      fireEvent.click(words(), { clientX: 203 });
+      expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
+      fireEvent.click(words(), { clientX: 120 });
+      expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+      fireEvent.click(words(), { clientX: 203 });
+      expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+    } finally {
+      restore();
+    }
+  });
+});
+
 describe('a task in the feed', () => {
   const queued = { id: 't1', workspaceId: WS, title: 'Draft the release notes', status: 'queued', sessionId: 'task-session', parentTaskId: null, cycleNo: 1n,
     assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w', assignedToWorkspaceAgentId: 'wa-w', createdAt: BigInt(NOW - 1000), updatedAt: BigInt(NOW - 1000) } as unknown as WorkspaceTaskResponse;

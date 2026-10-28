@@ -31,6 +31,7 @@ import AgentAvatar from '../Agents/AgentAvatar';
 import FleetMarkdown, { ChartOpen, MINIATURE } from './FleetMarkdown';
 import { Caption, MAIN_FACE, OutcomeIcon, ThoughtCloud, Who, type Cast } from './FleetFace';
 import FleetZoom, { Tail, zoomStart, type ZoomStart } from './FleetZoom';
+import { useFollowEnd } from './useFollowEnd';
 import styles from './FleetPage.module.css';
 
 /** A row has no bubble to copy: the user's words still take the user's bubble. */
@@ -71,15 +72,20 @@ const statusOf = (line: FleetLine): 'failed' | 'stopped' | 'working' | 'next' | 
 
 type Open = (line: FleetLine, origin: HTMLElement) => void;
 
-/** A bubble pressed by a click, Enter or Space; the card under it is not selected, and a link or button in it is its own. */
+/**
+ * A bubble pressed by a click, Enter or Space; the card under it is not
+ * selected, and a link or button in it, or its vertical scrollbar, is its own.
+ */
 const pressable = (onPress: (target: HTMLElement) => void) => {
   const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest('a, button') !== null;
+  const onScrollbar = (e: MouseEvent<HTMLElement>) =>
+    e.target instanceof HTMLElement && e.target.scrollHeight > e.target.clientHeight && e.nativeEvent.offsetX >= e.target.clientWidth;
   return {
     role: 'button',
     tabIndex: 0,
     onClick: (e: MouseEvent<HTMLElement>) => {
       e.stopPropagation();
-      if (!ownedInside(e)) onPress(e.currentTarget);
+      if (!ownedInside(e) && !onScrollbar(e)) onPress(e.currentTarget);
     },
     onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
       if (e.key !== 'Enter' && e.key !== ' ') return;
@@ -224,7 +230,7 @@ const Said = ({
   now: number;
   faces: Cast;
   open: Open;
-  /** The card's last bubble: Main's shows how it ends; once another follows, how it starts. */
+  /** The card's last bubble: Main's follows how it ends (`useFollowEnd`); once another follows, it shows how it starts. */
   newest: boolean;
   /** Main's bubble, open in place. */
   expanded: boolean;
@@ -235,6 +241,8 @@ const Said = ({
   const thinking = line.live === 'running';
   const style = useAuthorColor(from);
   const time = shortTime(line.at, now);
+  const following = newest && !expanded;
+  const scroller = useFollowEnd(following, line.markdown);
   if (!from) {
     // No faces: a word to Main goes without saying, one to a task names it.
     return (
@@ -269,7 +277,7 @@ const Said = ({
         <div className={styles.bubble} data-bubble>
           <Tail />
           {speech ? (
-            <div className={`${styles.bubbleText} ${styles.speech}`} data-newest={(newest && !expanded) || undefined} data-open={expanded || undefined}>
+            <div ref={scroller} className={`${styles.bubbleText} ${styles.speech}`} data-newest={following || undefined} data-open={expanded || undefined}>
               <div>
                 <Stamp line={line} time={time} />
                 <div className={styles.speechText}>

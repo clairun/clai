@@ -555,25 +555,36 @@ button.crewButton {
   overflow: hidden;
 }
 
-/* Main's words, as markdown: clipped by height, at its start or (`data-newest`) its end. */
+/* Main's words, as markdown: clipped by height at its start, unless it scrolls. */
 .speech {
   display: block;
   -webkit-line-clamp: none;
   max-height: calc(var(--lines) * 1lh);
 }
 
-/* The card's newest: its last lines, following each block as it lands; at its
- * full height the oldest lines leave at the top. */
-.speech[data-newest] {
-  display: flex;
-  flex-direction: column;
-  justify-content: flex-end;
+/* The card's newest, following its end (`useFollowEnd`), or one opened in place. */
+.speech:is([data-newest], [data-open]) {
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
-/* Opened in place: all of it, scrolling inside. */
+/* A thin classic scrollbar beside the words, not WebKitGTK's overlay one over them. */
+.speech::-webkit-scrollbar {
+  width: 6px;
+}
+
+.speech::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.speech::-webkit-scrollbar-thumb {
+  background: var(--color-overlay-14);
+  border-radius: var(--radius-full);
+}
+
+/* Opened in place: all of it. */
 .speech[data-open] {
   max-height: 50cqh;
-  overflow-y: auto;
 }
 
 /* Leave room for the caption, row gap, and bubble chrome, including the

@@ -16,7 +16,7 @@ import styles from './FleetPage.module.css';
 /** The zoom's transition, `--zoom-ms` in the CSS; the two move together. */
 const CLOSE_MS = 220;
 
-const moves = () =>
+export const moves = () =>
   typeof window.matchMedia === 'function' && !window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 /** Viewport margin; widest zoom; face to bubble, as on the card; a made-up bubble for a row or a face. */
