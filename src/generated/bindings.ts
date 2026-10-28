@@ -84,7 +84,7 @@ export type AssistantUiEvent = { "type": "session_created", "payload": { session
 /**
  * When true the user may pick any number of options.
  */
-multi_select: boolean, extra_context?: string | null, } } | { "type": "ask_user_resolved", "payload": { pending_id: string, } } | { "type": "task_updated", "payload": { task: WorkspaceTaskResponse, } } | { "type": "run_skipped", "payload": { reason: RunSkipReason, activeRunId: string | null, } };
+multi_select: boolean, extra_context: string | null, } } | { "type": "ask_user_resolved", "payload": { pending_id: string, } } | { "type": "task_updated", "payload": { task: WorkspaceTaskResponse, } } | { "type": "run_skipped", "payload": { reason: RunSkipReason, activeRunId: string | null, } };
 
 export type AttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
