@@ -246,15 +246,19 @@ describe('fleet reducer', () => {
     expect(cardPhase(asking, { runs: { [WS]: ['r'] }, tasks: {} })).toBe('waiting');
   });
 
-  it('says a request through whoever asked: a subtask\'s agent, a named agent, or Main', () => {
+  it('says a request through whoever asked: a subtask\'s agent, a roster agent by name, or Main', () => {
     expect(requestScene(emptyCard(WS), NO_LIVE)).toBeNull();
     const live = withTasks(task('sub', 'running', NOW, { sessionId: 'sub-session', assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w' }));
     let s = apply(EMPTY_FLEET, askEvent('q1', NOW - 120_000));
     expect(requestScene(card(s), live)).toMatchObject({ count: 1, asker: null, caption: { kind: 'waiting', at: NOW - 120_000 } });
     s = apply(s, env({ type: 'ask_user_requested', payload: { pending_id: 'q2', question: 'Which?', options: null, multi_select: false } } as AssistantUiEvent, NOW - 200_000, 'sub-session'));
     expect(requestScene(card(s), live)).toMatchObject({ count: 2, asker: { name: 'Writer', seed: 'def-w' }, request: { text: 'Which?' } });
-    const named = applyRequest(EMPTY_FLEET, { kind: 'approval', request: { ...(approval('a1') as object), agentName: 'Committer' } as never }, 5);
-    expect(requestScene(card(named), NO_LIVE)?.asker).toEqual({ name: 'Committer', seed: 'Committer' });
+    const roster = seedFleet(EMPTY_FLEET, [{ ...snapshotOf(), agents: [MANAGER, WRITER] }]);
+    const by = (agentName: string) =>
+      requestScene(card(applyRequest(roster, { kind: 'approval', request: { ...(approval('a1') as object), agentName } as never }, 5)), NO_LIVE)?.asker;
+    // The same face as the crew strip draws for it.
+    expect(by('Writer')).toEqual({ name: 'Writer', seed: 'def-w' });
+    expect(by('Manager')).toBeNull();
   });
 
 });

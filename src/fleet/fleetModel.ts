@@ -894,22 +894,22 @@ export interface FleetRequestScene {
 }
 
 /**
- * A card that needs the user: its oldest open request, said by the agent that
- * asked it. A question names its session, which is a task's or the Main's; an
- * approval or a grant names its agent, and Main's name is no agent's.
+ * Who made a request; `null` for Main. A question names its session, which is
+ * a task's or the Main's; an approval or a grant names its agent, found in the
+ * roster, and Main's name is no agent's.
  */
+const askerOf = (card: FleetCard, tasks: readonly WorkspaceTaskResponse[], request: FleetRequest): FleetAgentRef | null => {
+  if (request.kind !== 'ask') return card.agents.find((a) => a.name === request.agentName) ?? null;
+  const task = tasks.find((t) => t.sessionId === request.ask.sessionId);
+  return task ? assigneeOf(card, task) : null;
+};
+
+/** A card that needs the user: its oldest open request, said by whoever asked it. */
 export const requestScene = (card: FleetCard, live: FleetLive): FleetRequestScene | null => {
   const open = openRequests(card);
   const request = open[0];
   if (!request) return null;
-  let asker: FleetAgentRef | null = null;
-  if (request.kind === 'ask') {
-    const task = workspaceTasks(card, live).find((t) => t.sessionId === request.ask.sessionId);
-    asker = task ? assigneeOf(card, task) : null;
-  } else if (request.agentName) {
-    asker = { name: request.agentName, seed: request.agentName };
-  }
-  return { request, count: open.length, caption: { kind: 'waiting', at: request.at }, asker };
+  return { request, count: open.length, caption: { kind: 'waiting', at: request.at }, asker: askerOf(card, workspaceTasks(card, live), request) };
 };
 
 /** Who a crew member is and what it is up to, as the strip under a card's title draws it. */
@@ -970,11 +970,7 @@ export const cardCrew = (card: FleetCard, live: FleetLive, now: number): FleetCr
   const say = (seed: string, status: FleetCrewStatus, doing: string, level: FleetShout = null) => {
     if (!says.has(seed)) says.set(seed, { status, doing, level });
   };
-  for (const request of openRequests(card)) {
-    const task = request.kind === 'ask' ? tasks.find((t) => t.sessionId === request.ask.sessionId) : undefined;
-    const named = request.kind === 'ask' ? undefined : [...members.values()].find((m) => !m.main && m.name === request.agentName);
-    say(task ? join(assigneeOf(card, task)) : (named?.seed ?? MAIN_SEED), 'needs', request.text);
-  }
+  for (const request of openRequests(card)) say(join(askerOf(card, tasks, request)), 'needs', request.text);
   if (mainRunning(card, live)) {
     const asked = [...card.said].reverse().find((s) => s.sessionId === card.mainSessionId && s.origin?.kind === 'user');
     say(MAIN_SEED, 'running', asked ? `Answering: ${firstSentence(asked.text)}` : 'Answering in the chat');
