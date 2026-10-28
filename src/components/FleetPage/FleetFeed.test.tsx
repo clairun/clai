@@ -204,8 +204,19 @@ describe("Main's bubble", () => {
     expect(chip.closest('li')).toHaveTextContent('by day: Leaks by day, worst on Monday');
     expect(mainBubble().querySelector('img, canvas, svg[role=graphics-document]')).toBeNull();
     fireEvent.click(chip);
-    fireEvent.keyDown(chip, { key: 'Enter' });
     expect(onOpen).toHaveBeenCalledWith(WS);
+    expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('leaves Enter and Space on a chip or link in it to that chip or link', () => {
+    render(<Feed state={saying('First, the leaks: ![Leaks by day](charts/leaks.vl.json), see [the issue](https://example.com/1)')} />);
+    const chip = within(mainBubble()).getByRole('button', { name: /Leaks by day/ });
+    const link = within(mainBubble()).getByRole('link', { name: 'the issue' });
+    for (const inner of [chip, link]) {
+      // Not prevented: the chip or link activates itself.
+      expect(fireEvent.keyDown(inner, { key: 'Enter' })).toBe(true);
+      expect(fireEvent.keyDown(inner, { key: ' ' })).toBe(true);
+    }
     expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
   });
 });

@@ -7,6 +7,7 @@ import {
   type CSSProperties,
   type KeyboardEvent,
   type MouseEvent,
+  type SyntheticEvent,
 } from 'react';
 import { flushSync } from 'react-dom';
 import { getMessage } from '../../assistant/client';
@@ -69,21 +70,24 @@ const statusOf = (line: FleetLine): 'failed' | 'stopped' | 'working' | 'next' | 
 type Open = (line: FleetLine, origin: HTMLElement) => void;
 
 /** A bubble pressed by a click, Enter or Space; the card under it is not selected, and a link or button in it is its own. */
-const pressable = (onPress: (target: HTMLElement) => void) => ({
-  role: 'button',
-  tabIndex: 0,
-  onClick: (e: MouseEvent<HTMLElement>) => {
+const pressable = (onPress: (target: HTMLElement) => void) => {
+  const pressesBubble = (e: SyntheticEvent<HTMLElement>) => {
     e.stopPropagation();
-    if (e.target instanceof Element && e.target.closest('a, button')) return;
-    onPress(e.currentTarget);
-  },
-  onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    e.preventDefault();
-    e.stopPropagation();
-    onPress(e.currentTarget);
-  },
-});
+    return !(e.target instanceof Element && e.target.closest('a, button'));
+  };
+  return {
+    role: 'button',
+    tabIndex: 0,
+    onClick: (e: MouseEvent<HTMLElement>) => {
+      if (pressesBubble(e)) onPress(e.currentTarget);
+    },
+    onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
+      if ((e.key !== 'Enter' && e.key !== ' ') || !pressesBubble(e)) return;
+      e.preventDefault();
+      onPress(e.currentTarget);
+    },
+  };
+};
 
 /** A date and time, for the zoomed message. */
 const fullTime = (at: number): string =>
