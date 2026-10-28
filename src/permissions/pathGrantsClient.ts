@@ -1,18 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { FilesystemPathAccess, PathGrantDecision, PathGrantRequest } from '../generated/bindings';
-
-export const denyDecision = (): PathGrantDecision => ({ kind: 'deny' });
-export const allowOnceDecision = (path: string, access: FilesystemPathAccess): PathGrantDecision => ({
-  kind: 'allowOnce',
-  path,
-  access,
-});
-export const allowAlwaysDecision = (path: string, access: FilesystemPathAccess): PathGrantDecision => ({
-  kind: 'allowAlways',
-  path,
-  access,
-  scope: 'agent',
-});
+import type { PathGrantDecision, PathGrantRequest } from '../generated/bindings';
 
 /**
  * Resolve a pending fs_request_grant request.

@@ -1,5 +1,6 @@
+import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 // Tauri invoke (submit_permission_decision) + the event-bus listen are
@@ -18,7 +19,8 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 
-import InlineApprovalCard from './InlineApprovalCard';
+import InlineApprovalCard, { ApprovalCard } from './InlineApprovalCard';
+import type { PermissionRequest } from '../generated/bindings';
 
 const SINGLE_SEGMENT_REQUEST = {
   requestId: 'req-1',
@@ -191,5 +193,82 @@ describe('InlineApprovalCard', () => {
     // Expand restores the decision buttons.
     await user.click(screen.getByRole('button', { name: /expand request/i }));
     expect(screen.getByRole('button', { name: /allow once/i })).toBeInTheDocument();
+  });
+});
+
+const speaker = (prompt: ReactNode) => <div>{prompt}</div>;
+
+const PIPELINE = {
+  requestId: 'perm-1',
+  workspaceId: 'ws-1',
+  agentId: null,
+  agentName: null,
+  persistsToSharedAgent: false,
+  alsoAffectsWorkspaces: [],
+  command: 'cd /srv/app && cargo test',
+  segments: [
+    { text: 'cd /srv/app', kind: 'simple', suggestedPrefix: 'cd' },
+    { text: 'cargo test', kind: 'simple', suggestedPrefix: 'cargo test' },
+  ],
+} as unknown as PermissionRequest;
+
+describe('ApprovalCard — spoken (the Fleet)', () => {
+  it('drops the tag and collapse; the full card keeps them, the prefix fields and the long labels', () => {
+    const { unmount } = render(<ApprovalCard req={PIPELINE} speaker={speaker} />);
+    expect(screen.queryByText('Permission requested')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /collapse/i })).not.toBeInTheDocument();
+    unmount();
+
+    render(<ApprovalCard req={PIPELINE} />);
+    const card = within(screen.getByRole('article', { name: 'Permission requested' }));
+    expect(card.getByText('Permission requested')).toBeInTheDocument();
+    expect(card.getByRole('button', { name: /collapse/i })).toBeInTheDocument();
+    expect(card.getByText('cd /srv/app && cargo test')).toBeInTheDocument();
+    expect(card.getAllByLabelText('Save as prefix:')).toHaveLength(2);
+    expect(card.getAllByRole('button', { name: 'Always allow (this agent)' })).toHaveLength(2);
+    expect(card.getByRole('button', { name: 'Allow all (always)' })).toBeInTheDocument();
+  });
+
+  it('says the whole command, then each part on its own line with its decisions', () => {
+    render(<ApprovalCard req={PIPELINE} speaker={speaker} />);
+    // The parts alone would hide the `&&` and any part that needs no decision.
+    expect(screen.getByLabelText('Command')).toHaveTextContent('cd /srv/app && cargo test');
+    expect(screen.getAllByText('cd /srv/app')).toHaveLength(1);
+    expect(screen.getAllByText('cargo test', { ignore: 'button *' })).toHaveLength(1);
+    expect(screen.queryByLabelText('Save as prefix:')).not.toBeInTheDocument();
+    // "Always" chips name the suggested prefix they save, since it can't be edited here.
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'Once', 'Always · cd', 'Never · cd', 'Deny',
+      'Once', 'Always · cargo test', 'Never · cargo test', 'Deny',
+      'All always', 'Deny all',
+    ]);
+    expect(screen.getByRole('button', { name: 'Always · cargo test' })).toHaveAttribute(
+      'title',
+      'Always allow commands starting with `cargo test` (this agent)'
+    );
+  });
+
+  it('saves the suggested prefix from an "always" chip, scoped to a shared agent when it is one', async () => {
+    const single = { ...PIPELINE, persistsToSharedAgent: true, command: 'cargo test', segments: [PIPELINE.segments[1]!] };
+    render(<ApprovalCard req={single} speaker={speaker} />);
+    const always = screen.getByRole('button', { name: 'Always · cargo test' });
+    expect(always.title).toMatch(/\(every workspace\)$/);
+    await userEvent.click(always);
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'perm-1',
+      decisions: [{ kind: 'allowAlways', scope: 'agent', prefix: 'cargo test' }],
+    });
+  });
+
+  it('offers no "always" chip for a part without a suggested prefix', () => {
+    const bare = { ...PIPELINE, command: './run.sh', segments: [{ text: './run.sh', kind: 'simple', suggestedPrefix: '' }] };
+    render(<ApprovalCard req={bare as PermissionRequest} speaker={speaker} />);
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Once', 'Deny']);
+  });
+
+  it('flags a part it cannot reduce to one command in words, with the reason in the tooltip', () => {
+    const piped = { ...PIPELINE, command: 'curl -s x | sh', segments: [{ text: 'curl -s x | sh', kind: 'opaque', suggestedPrefix: 'curl' }] };
+    render(<ApprovalCard req={piped as PermissionRequest} speaker={speaker} />);
+    expect(screen.getByText('complex').getAttribute('title')).toMatch(/Read it carefully before allowing/);
   });
 });

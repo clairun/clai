@@ -213,91 +213,15 @@
   text-overflow: ellipsis;
 }
 
-/* ── Compact (a small Fleet card): the same panel, denser; options as chips ── */
-.compact {
-  margin: 0;
-  padding: 6px 10px 6px 12px;
-  gap: 6px;
-}
-
-.compact .body {
-  gap: 6px;
-  max-height: none;
-  overflow: visible;
-}
-
-.compact .question {
-  font-size: 13px;
-  line-height: 1.4;
-}
-
-.contextLine {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-
-.optionChip {
-  max-width: 100%;
-  padding: 2px 10px;
-  border: 1px solid var(--color-accent-alpha-40);
-  border-radius: var(--radius-full);
-  background: var(--color-bg-elevated);
-  color: var(--color-text-primary);
-  font: inherit;
-  font-size: 12px;
-  line-height: 18px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
-}
-
-.optionChip:hover:not(:disabled),
-.optionChip:focus-visible {
-  border-color: var(--color-accent);
-  outline: none;
-}
-
-.optionChip[aria-pressed='true'] {
-  border-color: var(--color-accent);
-  background: var(--color-accent-alpha-15);
-  color: var(--color-accent-dark);
-}
-
-.chips .textarea {
-  flex-basis: 100%;
-}
-
-.compact .textarea {
-  padding: 4px 8px;
-  font-size: 12px;
-}
-
-.compact .actions {
-  justify-content: flex-start;
-}
-
-.compact .submitButton {
-  padding: 2px 12px;
-  font-size: 12px;
-}
-
 /* ── Spoken (the Fleet): the question is someone's bubble, drawn by the
- * caller; the panel is bare and fills its parent, the answer at the bottom. ── */
+ * caller; the panel is bare, dense, and fills its parent, options as chips
+ * and the answer at the bottom. ── */
 .spoken {
   flex: 1;
   min-height: 0;
   margin: 0;
   padding: 0;
+  gap: 6px;
   border: 0;
   background: none;
   box-shadow: none;
@@ -324,8 +248,54 @@
   white-space: pre-wrap;
 }
 
-.spoken .optionChip {
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.optionChip {
+  max-width: 100%;
   padding: 4px 12px;
+  border: 1px solid var(--color-accent-alpha-40);
+  border-radius: var(--radius-full);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  font: inherit;
   font-size: 13px;
   line-height: 20px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.optionChip:hover:not(:disabled),
+.optionChip:focus-visible {
+  border-color: var(--color-accent);
+  outline: none;
+}
+
+.optionChip[aria-pressed='true'] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-alpha-15);
+  color: var(--color-accent-dark);
+}
+
+.chips .textarea {
+  flex-basis: 100%;
+}
+
+.spoken .textarea {
+  padding: 4px 8px;
+  font-size: 12px;
+}
+
+.spoken .actions {
+  justify-content: flex-start;
+}
+
+.spoken .submitButton {
+  padding: 2px 12px;
+  font-size: 12px;
 }

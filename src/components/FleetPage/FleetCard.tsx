@@ -130,7 +130,7 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect
       <FleetCrew crew={crew} cast={cast} />
       {failure && <RunFailureBanner failure={failure} className={styles.cardRunError} />}
       {feed && <FleetFeed workspaceId={card.workspaceId} feed={feed} shouts={shouts} now={now} faces={cast} onOpen={onOpen} />}
-      {request && <FleetRequestPanel scene={request} workspaceId={card.workspaceId} faces={cast} loud={loud === 'needs'} now={now} />}
+      {request && <FleetRequestPanel scene={request} faces={cast} loud={loud === 'needs'} now={now} />}
     </div>
   );
 };

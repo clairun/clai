@@ -18,22 +18,31 @@ interface AskUserPanelProps {
   /** Answer this question, held by the caller, instead of the session's; the panel doesn't take focus. */
   ask?: PendingAskUser;
   /**
-   * For a small Fleet card: no badge or collapse (the card header says it),
-   * the context on one line, options as chips (a single-select chip answers).
-   */
-  compact?: boolean;
-  /**
    * Draw the question as someone saying it (the Fleet's asking face and
-   * bubble): no chip or collapse, and the answer fills the space below.
+   * bubble): no chip or collapse, options as chips (a single-select chip
+   * answers), and the answer fills the space below.
    */
   speaker?: (prompt: ReactNode) => ReactNode;
 }
 
-const AskUserPanel = ({ sessionId = null, ask, compact = false, speaker }: AskUserPanelProps) => {
+const AskUserPanel = ({ sessionId = null, ask, speaker }: AskUserPanelProps) => {
   const sessionPending = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId]?.pendingAskUser || null : null
   );
   const pending = ask ?? sessionPending;
+  // Keyed by question: a new one starts with a fresh draft and expanded.
+  return pending ? <AskQuestion key={pending.pendingId} pending={pending} takeFocus={!ask} speaker={speaker} /> : null;
+};
+
+const AskQuestion = ({
+  pending,
+  takeFocus,
+  speaker,
+}: {
+  pending: PendingAskUser;
+  takeFocus: boolean;
+  speaker?: (prompt: ReactNode) => ReactNode;
+}) => {
   const {
     options,
     hasOptions,
@@ -53,26 +62,17 @@ const AskUserPanel = ({ sessionId = null, ask, compact = false, speaker }: AskUs
     submitOption,
   } = useAskAnswer(pending);
   // Collapse the body to a one-line summary so a long question can't swallow
-  // the conversation; the user expands to answer. Resets per new request.
+  // the conversation; the user expands to answer.
   const [collapsed, setCollapsed] = useState(false);
   const containerRef = useRef<HTMLElement | null>(null);
-  const previousPendingIdRef = useRef<string | null>(null);
-
-  useEffect(() => {
-    if (pending?.pendingId === previousPendingIdRef.current) return;
-    previousPendingIdRef.current = pending?.pendingId || null;
-    setCollapsed(false);
-  }, [pending?.pendingId]);
 
   // Focus the panel when a request appears so keyboard users land
   // directly on the prompt without having to tab through the chat.
   useEffect(() => {
-    if (pending && !ask && containerRef.current) {
+    if (takeFocus && containerRef.current) {
       containerRef.current.focus({ preventScroll: false });
     }
-  }, [pending, ask]);
-
-  if (!pending) return null;
+  }, [pending, takeFocus]);
 
   const toggleIndex = (index: number) =>
     setSelectedIndexes((current) => {
@@ -132,7 +132,7 @@ const AskUserPanel = ({ sessionId = null, ask, compact = false, speaker }: AskUs
   return (
     <section
       ref={containerRef}
-      className={[styles.panel, compact ? styles.compact : '', speaker ? styles.spoken : ''].filter(Boolean).join(' ')}
+      className={speaker ? `${styles.panel} ${styles.spoken}` : styles.panel}
       role="dialog"
       aria-label="Agent question"
       tabIndex={-1}
@@ -141,22 +141,20 @@ const AskUserPanel = ({ sessionId = null, ask, compact = false, speaker }: AskUs
       {!speaker && (
       <header className={styles.header}>
         <span className={styles.chip}>AGENT IS ASKING</span>
-        {!compact && (
-          <button
-            type="button"
-            className={styles.collapseBtn}
-            onClick={() => setCollapsed((c) => !c)}
-            aria-expanded={!collapsed}
-            aria-label={collapsed ? 'Expand question' : 'Collapse question'}
-            title={collapsed ? 'Expand' : 'Collapse'}
-          >
-            {collapsed ? '▸' : '▾'}
-          </button>
-        )}
+        <button
+          type="button"
+          className={styles.collapseBtn}
+          onClick={() => setCollapsed((c) => !c)}
+          aria-expanded={!collapsed}
+          aria-label={collapsed ? 'Expand question' : 'Collapse question'}
+          title={collapsed ? 'Expand' : 'Collapse'}
+        >
+          {collapsed ? '▸' : '▾'}
+        </button>
       </header>
       )}
 
-      {collapsed && !compact && !speaker ? (
+      {collapsed ? (
         <div className={styles.collapsedSummary}>{pending.question}</div>
       ) : (
         <div className={styles.body}>
@@ -171,18 +169,11 @@ const AskUserPanel = ({ sessionId = null, ask, compact = false, speaker }: AskUs
         <>
       <div className={styles.question}>{pending.question}</div>
 
-      {pending.extraContext && (
-        <div
-          className={compact ? styles.contextLine : styles.context}
-          title={compact ? pending.extraContext : undefined}
-        >
-          {pending.extraContext}
-        </div>
-      )}
+      {pending.extraContext && <div className={styles.context}>{pending.extraContext}</div>}
         </>
       )}
 
-      {hasOptions && compact ? (
+      {hasOptions && speaker ? (
         <div className={styles.chips}>
           {options.map((option, index) => (
             <button
@@ -251,13 +242,13 @@ const AskUserPanel = ({ sessionId = null, ask, compact = false, speaker }: AskUs
           {otherOn && otherTextarea(3)}
         </div>
       ) : (
-        otherTextarea(compact ? 2 : 4)
+        otherTextarea(speaker ? 2 : 4)
       )}
 
       {error && <div className={styles.error}>{error}</div>}
 
-      {/* A compact single-select chip answers by itself. */}
-      {!(compact && hasOptions && !isMultiSelect && !otherOn) && (
+      {/* A single-select chip answers by itself. */}
+      {!(speaker && hasOptions && !isMultiSelect && !otherOn) && (
       <div className={styles.actions}>
         <button
           type="button"

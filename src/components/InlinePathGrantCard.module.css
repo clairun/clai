@@ -296,82 +296,14 @@
   text-overflow: ellipsis;
 }
 
-/* ── Compact (a small Fleet card): the same card, denser; warnings kept ── */
-.stackCompact {
-  padding: 0;
-  gap: 6px;
-}
-
-.compact {
-  padding: 6px 10px 6px 12px;
-  gap: 6px;
-}
-
-.compact .cardBody {
-  gap: 6px;
-  max-height: none;
-  overflow: visible;
-}
-
-.compactTarget {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  min-width: 0;
-  font-size: 12px;
-  color: var(--color-text-secondary);
-}
-
-.compactTarget code {
-  min-width: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
-  color: var(--color-text-primary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.compactTarget span {
-  flex-shrink: 0;
-}
-
-.compactReason {
-  font-size: 12px;
-  color: var(--color-text-tertiary);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.compact .warning {
-  padding: 4px 8px;
-  font-size: 11px;
-  line-height: 1.35;
-}
-
-.compact .buttonRow {
-  gap: 4px;
-}
-
-.compact .btn {
-  padding: 1px 8px;
-  border-radius: var(--radius-full);
-  font-size: 11px;
-  line-height: 18px;
-}
-
 /* ── Spoken (the Fleet): the request is the agent's bubble, drawn by the
- * caller; the card is bare and fills its parent, the decision at the bottom. ── */
-.stackSpoken {
-  flex: 1;
-  min-height: 0;
-  padding: 0;
-}
-
+ * caller; the card is bare, dense, and fills its parent, the decision at the
+ * bottom; warnings kept. ── */
 .spoken {
   flex: 1;
   min-height: 0;
   padding: 0;
+  gap: 6px;
   border: 0;
   background: none;
   box-shadow: none;
@@ -380,6 +312,7 @@
 .spoken .cardBody {
   flex: 1;
   min-height: 0;
+  gap: 6px;
   max-height: none;
   overflow: visible;
 }
@@ -402,6 +335,19 @@
   color: var(--color-text-secondary);
 }
 
+.spoken .warning {
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.spoken .buttonRow {
+  gap: 4px;
+}
+
 .spoken .btn {
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
   font-size: 13px;
+  line-height: 18px;
 }

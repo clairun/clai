@@ -5,8 +5,8 @@ import {
   identityRingColor,
 } from '../Agents/agentIdentity';
 import AskUserPanel from '../AskUserPanel/AskUserPanel';
-import InlineApprovalCard from '../InlineApprovalCard';
-import InlinePathGrantCard from '../InlinePathGrantCard';
+import { ApprovalCard } from '../InlineApprovalCard';
+import { PathGrantCard } from '../InlinePathGrantCard';
 import type { FleetRequest, FleetRequestScene } from '../../fleet/fleetModel';
 import fx, { Sfx } from './FleetEffects';
 import { MAIN_FACE, type Cast } from './FleetFace';
@@ -18,49 +18,21 @@ import styles from './FleetPage.module.css';
 const stop = (e: MouseEvent) => e.stopPropagation();
 
 /** The request, answered with the workspace chat's own UI; `speaker` draws its words. */
-const RequestAnswer = ({
-  request,
-  workspaceId,
-  compact,
-  speaker,
-}: {
-  request: FleetRequest;
-  workspaceId: string;
-  compact: boolean;
-  speaker: (prompt: ReactNode) => ReactNode;
-}) =>
+const RequestAnswer = ({ request, speaker }: { request: FleetRequest; speaker: (prompt: ReactNode) => ReactNode }) =>
   request.kind === 'ask' ? (
-    <AskUserPanel
-      key={request.ask.pendingId}
-      ask={request.ask}
-      compact={compact}
-      speaker={speaker}
-    />
+    <AskUserPanel ask={request.ask} speaker={speaker} />
   ) : request.kind === 'approval' ? (
-    <InlineApprovalCard
-      key={request.request.requestId}
-      workspaceId={workspaceId}
-      request={request.request}
-      compact={compact}
-      speaker={speaker}
-    />
+    <ApprovalCard key={request.request.requestId} req={request.request} speaker={speaker} />
   ) : (
-    <InlinePathGrantCard
-      key={request.request.requestId}
-      workspaceId={workspaceId}
-      request={request.request}
-      compact={compact}
-      speaker={speaker}
-    />
+    <PathGrantCard key={request.request.requestId} req={request.request} speaker={speaker} />
   );
 
 interface FleetRequestPanelProps {
   scene: FleetRequestScene;
-  workspaceId: string;
   faces: Cast;
   /** Draw it loud: the amber burst, and "!?" or "!!". Never on the selected card. */
-  loud?: boolean;
-  /** The time of the last Fleet event. */
+  loud: boolean;
+  /** The page's clock: the last Fleet event or the minute tick, whichever is later. */
   now: number;
 }
 
@@ -71,9 +43,8 @@ interface FleetRequestPanelProps {
  */
 const FleetRequestPanel = ({
   scene,
-  workspaceId,
   faces,
-  loud = false,
+  loud,
   now,
 }: FleetRequestPanelProps) => {
   const theme = useAppTheme();
@@ -109,12 +80,7 @@ const FleetRequestPanel = ({
           {count > 1 && <span className={styles.requestCount}>1 of {count}</span>}
           {loud && <Sfx word={request.kind === 'ask' ? '!?' : '!!'} tone="warn" />}
         </p>
-        <RequestAnswer
-          request={request}
-          workspaceId={workspaceId}
-          compact
-          speaker={speaker}
-        />
+        <RequestAnswer request={request} speaker={speaker} />
       </section>
     </div>
   );

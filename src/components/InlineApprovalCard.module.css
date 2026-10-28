@@ -267,43 +267,48 @@
   word-break: normal;
 }
 
-/* ── Compact (a small Fleet card): the same card, denser ── */
-.stackCompact {
+/* ── Spoken (the Fleet): the command is the agent's bubble, drawn by the
+ * caller; the card is bare, dense, and fills its parent, decisions at the
+ * bottom. ── */
+.spoken {
+  flex: 1;
+  min-height: 0;
   padding: 0;
   gap: 6px;
+  border: 0;
+  background: none;
+  box-shadow: none;
 }
 
-.compact {
-  padding: 6px 10px 6px 12px;
-  gap: 6px;
-}
-
-.compact .cardBody {
-  gap: 6px;
+.spoken .cardBody {
+  flex: 1;
+  min-height: 0;
+  gap: 4px;
   max-height: none;
   overflow: visible;
 }
 
-.compact .segments {
-  gap: 4px;
+.spoken .cardBody > :nth-child(2) {
+  margin-top: auto;
 }
 
-.compact .command {
-  padding: 2px 6px;
-  font-size: 12px;
+.spoken .segments {
+  gap: 2px;
 }
 
-/* Commands wrap, up to 4 lines each; past that the request area scrolls. */
-.compact .command,
-.compact .segmentText code {
+/* Each part on one line (its tooltip has it whole). */
+.spoken .segmentText code {
   display: -webkit-box;
   -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
+  -webkit-line-clamp: 1;
   overflow: hidden;
+  min-width: 0;
+  border: none;
   line-height: 1.35;
+  word-break: break-all;
 }
 
-.compact .segmentRow {
+.spoken .segmentRow {
   flex-direction: row;
   flex-wrap: wrap;
   align-items: flex-start;
@@ -313,42 +318,37 @@
   background: transparent;
 }
 
-.compact .segmentText {
+.spoken .segmentText {
   flex: 1 1 10ch;
   min-width: 0;
   align-items: flex-start;
 }
 
-.compact .segmentText code {
-  min-width: 0;
-  border: none;
-}
-
 /* The decisions stay on one row: an "always" chip's prefix gives way first. */
-.compact .segmentButtons {
+.spoken .segmentButtons {
   flex-wrap: nowrap;
   gap: 4px;
   min-width: 0;
   max-width: 100%;
 }
 
-.compact .btn {
+.spoken .btn {
   flex: none;
   padding: 1px 8px;
   border-radius: var(--radius-full);
-  font-size: 11px;
+  font-size: 13px;
   line-height: 18px;
   white-space: nowrap;
 }
 
-.compact .btn:has(code) {
+.spoken .btn:has(code) {
   display: inline-flex;
   flex: 0 1 auto;
   min-width: 0;
 }
 
 /* The prefix an "always" chip saves; whole in its tooltip. */
-.compact .btn code {
+.spoken .btn code {
   display: inline-block;
   min-width: 2ch;
   max-width: 14ch;
@@ -362,41 +362,12 @@
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
 }
 
-.compact .cardFooter {
+.spoken .cardFooter {
   justify-content: flex-start;
   gap: 4px;
 }
 
-/* ── Spoken (the Fleet): the command is the agent's bubble, drawn by the
- * caller; the card is bare and fills its parent, decisions at the bottom. ── */
-.stackSpoken {
-  flex: 1;
-  min-height: 0;
-  padding: 0;
-}
-
-.spoken {
-  flex: 1;
-  min-height: 0;
-  padding: 0;
-  border: 0;
-  background: none;
-  box-shadow: none;
-}
-
-.spoken .cardBody {
-  flex: 1;
-  min-height: 0;
-  max-height: none;
-  overflow: visible;
-}
-
-.spoken .cardBody > :nth-child(2) {
-  margin-top: auto;
-}
-
 /* Long commands wrap anywhere and scroll inside the bubble once it is out of room. */
-.compact .spokenCommand,
 .spokenCommand {
   display: block;
   min-height: 0;
@@ -409,51 +380,4 @@
   white-space: pre-wrap;
   word-break: normal;
   overflow-wrap: anywhere;
-  -webkit-line-clamp: none;
-}
-
-.spoken .btn {
-  font-size: 13px;
-}
-
-/* A small card: each part on one line (its tooltip has it whole). */
-.spoken.compact .segmentText code {
-  -webkit-line-clamp: 1;
-  word-break: break-all;
-}
-
-.spoken.compact .cardBody {
-  gap: 4px;
-}
-
-.spoken.compact .segments {
-  gap: 2px;
-}
-
-/* The stage: each part's prefix and decisions on as few lines as fit. */
-.spoken:not(.compact) .segmentRow {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 10px;
-  padding: 6px 10px;
-}
-
-.spoken:not(.compact) .segmentText {
-  flex-basis: 100%;
-}
-
-.spoken:not(.compact) .prefixField {
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-}
-
-.spoken:not(.compact) .prefixField input {
-  width: 14ch;
-  padding: 3px 8px;
-}
-
-.spoken:not(.compact) .btn {
-  padding: 4px 10px;
 }
