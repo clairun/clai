@@ -57,8 +57,9 @@ pub struct FleetWorkspace {
     pub pending_asks: Vec<PendingAsk>,
     /// The main session's newest assistant reply with text.
     pub last_assistant_message: Option<FleetHighlight>,
-    /// The newest user and assistant messages with text across every
-    /// session, oldest first; tool rows and tool-only replies are left out.
+    /// The newest user and assistant messages with text or an image across
+    /// every session, oldest first; tool rows and tool-only replies are left
+    /// out.
     pub recent_messages: Vec<FleetHighlight>,
     /// The enabled agents, Main first, then teammates in roster order.
     pub agents: Vec<AgentRefSnapshot>,
@@ -88,38 +89,43 @@ impl FleetHighlight {
     }
 }
 
-/// The text parts up to `budget` characters, and whether text was cut. The
-/// Fleet shows only text, so of the other parts (tool calls, thinking) each
-/// run between two kept text parts keeps its first, emptied: it still breaks
-/// the text where the message did.
+/// The text parts up to `budget` characters, every image part, and whether
+/// text was cut. An image part is a reference (its bytes stay on disk), so
+/// all are kept, past the cut too. Of the other parts (tool calls, thinking),
+/// which the Fleet doesn't show, each run between two kept parts keeps its
+/// first, emptied: it still breaks the text where the message did.
 fn preview(parts: Vec<ContentPart>, mut budget: usize) -> (Vec<ContentPart>, bool) {
     let mut kept = Vec::new();
     let mut gap = None;
+    let mut cut = false;
     for part in parts {
-        match part {
-            ContentPart::Text { text } if text.is_empty() => {}
-            ContentPart::Text { mut text } => {
-                if budget == 0 {
-                    return (kept, true);
-                }
-                if let Some(gap) = gap.take().filter(|_| !kept.is_empty()) {
-                    kept.push(gap);
-                }
-                let cut = text.char_indices().nth(budget).map(|(at, _)| at);
-                if let Some(at) = cut {
-                    text.truncate(at);
-                    kept.push(ContentPart::Text { text });
-                    return (kept, true);
-                }
-                budget -= text.chars().count();
-                kept.push(ContentPart::Text { text });
+        let part = match part {
+            ContentPart::Text { text } if text.is_empty() => continue,
+            ContentPart::Text { .. } if cut || budget == 0 => {
+                cut = true;
+                continue;
             }
+            ContentPart::Text { mut text } => {
+                if let Some((at, _)) = text.char_indices().nth(budget) {
+                    text.truncate(at);
+                    cut = true;
+                } else {
+                    budget -= text.chars().count();
+                }
+                ContentPart::Text { text }
+            }
+            image @ ContentPart::Image { .. } => image,
             other => {
                 gap.get_or_insert_with(|| emptied(other));
+                continue;
             }
+        };
+        if let Some(gap) = gap.take().filter(|_| !kept.is_empty()) {
+            kept.push(gap);
         }
+        kept.push(part);
     }
-    (kept, false)
+    (kept, cut)
 }
 
 fn emptied(part: ContentPart) -> ContentPart {
@@ -846,6 +852,75 @@ mod tests {
         assert_eq!(delegated.session_id, task.id);
         assert_eq!(delegated.origin, manager);
         assert_eq!(recent[kept_old + 2].message.role, MessageRole::Assistant);
+    }
+
+    fn image(id: &str) -> ContentPart {
+        ContentPart::Image {
+            id: id.to_string(),
+            path: format!(".clai/images/{id}.png"),
+            media_type: "image/png".to_string(),
+            filename: None,
+            width: None,
+            height: None,
+        }
+    }
+
+    #[test]
+    fn preview_keeps_every_image_in_place_past_the_cut() {
+        let text = |text: &str| ContentPart::Text { text: text.into() };
+        let parts = vec![
+            image("a"),
+            text("Look at this."),
+            image("b"),
+            text("More."),
+            image("c"),
+        ];
+        let sent = |(parts, cut): (Vec<ContentPart>, bool)| {
+            (serde_json::to_value(parts).expect("parts"), cut)
+        };
+        assert_eq!(
+            sent(preview(parts.clone(), PREVIEW_CHARS)),
+            sent((parts.clone(), false))
+        );
+        assert_eq!(
+            sent(preview(parts, "Look".len())),
+            sent((vec![image("a"), text("Look"), image("b"), image("c")], true))
+        );
+    }
+
+    #[tokio::test]
+    async fn recent_messages_keep_an_image_only_message_and_its_references() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = state_with(&[BUSY], &temp);
+        let pool = state.workspace_db(BUSY).await.expect("db");
+        let main = repository::create_session(
+            &pool,
+            SessionContext {
+                automation_id: Some(MANAGER.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("session");
+        let shot = vec![image("shot")];
+        row_at(
+            &pool,
+            &main.id,
+            "user",
+            shot.clone(),
+            &MessageOrigin::User,
+            (100, None),
+        )
+        .await;
+
+        let snapshot = snapshot(&state, None, None).await.expect("snapshot");
+        let recent = &snapshot[0].recent_messages;
+        assert_eq!(recent.len(), 1);
+        assert_eq!(
+            serde_json::to_value(&recent[0].message.content).expect("content"),
+            serde_json::to_value(&shot).expect("shot")
+        );
+        assert!(!recent[0].truncated);
     }
 
     #[tokio::test]
