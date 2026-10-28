@@ -36,12 +36,12 @@ const NOTE_CHARS = 600;
 /** Messages a card keeps; a miniature shows fewer. */
 export const SAID_LIMIT = 24;
 
-export type FleetRequestKind = 'approval' | 'grant';
-
 /** A command approval or a path grant, as it arrives. */
 export type FleetPendingRequest =
   | { kind: 'approval'; request: PermissionRequest }
   | { kind: 'grant'; request: PathGrantRequest };
+
+export type FleetRequestKind = FleetPendingRequest['kind'];
 
 /** An `ask_user` question, with the session that asked it. */
 export type FleetAsk = PendingAskUser & { sessionId: string };
@@ -54,20 +54,16 @@ export type FleetRequest = {
   text: string;
   agentName: string | null;
   at: number;
-} & (
-  | { kind: 'ask'; ask: FleetAsk }
-  | { kind: 'approval'; request: PermissionRequest }
-  | { kind: 'grant'; request: PathGrantRequest }
-);
+} & ({ kind: 'ask'; ask: FleetAsk } | FleetPendingRequest);
 
 /** How far an assistant message's text had got (`end`, in characters) at `at`. */
-export interface FleetMark {
+interface FleetMark {
   at: number;
   end: number;
 }
 
 /** A message said in the workspace, as the feed needs it. */
-export interface FleetSaid {
+interface FleetSaid {
   id: string;
   sessionId: string;
   role: 'user' | 'assistant';
@@ -102,7 +98,7 @@ export interface FleetCard {
   asked: number[];
   /** The workspace's enabled members, Main excluded, in roster order (from the snapshot). */
   agents: FleetAgentRef[];
-  /** The workspace's Main, for its face (from the snapshot); `null` until one says. */
+  /** The workspace's Main, for its face (from the snapshot); `null` until a snapshot names it. */
   main: FleetMainRef | null;
 }
 
@@ -174,7 +170,7 @@ export const fullMessageText = (message: AssistantMessage): string => {
   return blocks.join(message.role === 'assistant' ? '\n\n' : '').trim();
 };
 
-export const isTaskLive = (status: TaskStatus): boolean =>
+const isTaskLive = (status: TaskStatus): boolean =>
   status === 'queued' || status === 'running' || status === 'stopping';
 
 const userSaid = (message: AssistantMessage, at: number, runId: string | null, cut = false): FleetSaid => ({
@@ -328,7 +324,7 @@ export const applyAssistantEvent = (
       case 'ask_user_resolved':
         return resolve(card, requestKey('ask', event.payload.pending_id));
       default:
-        // Run and task lifecycle: activity; the tasks themselves come from the task store.
+        // `task_updated`: activity only; tasks come from the task store.
         return card;
     }
   });
@@ -510,14 +506,14 @@ const SENTENCE_CHARS = 200;
  */
 const ASSIGNMENT_PREFIX = 'You have been assigned a workspace-local task';
 
-export interface FleetAgentRef {
+interface FleetAgentRef {
   name: string;
   seed: string;
 }
 
 export type FleetSpeaker = { kind: 'you' } | { kind: 'main' } | { kind: 'agent'; agent: FleetAgentRef };
 
-export type FleetOutcome = 'done' | 'failed' | 'stopped';
+type FleetOutcome = 'done' | 'failed' | 'stopped';
 
 /** One thing said in the workspace: who to whom, what, and how a task ended. */
 export interface FleetLine {
@@ -541,7 +537,7 @@ export interface FleetLine {
   writing: boolean;
 }
 
-export type FleetMood = 'working' | 'fresh' | 'idle' | 'stale';
+type FleetMood = 'working' | 'fresh' | 'idle' | 'stale';
 
 /**
  * What a miniature says: the caption says when, the lines say what, oldest
@@ -589,27 +585,25 @@ export type FleetCaption =
 
 const MINUTE_MS = 60_000;
 
-/** `just now`, `12 min ago`, `3 h ago`, `yesterday`, `3 days ago`. */
-export const ago = (at: number, clock: number): string => {
+/** The time since `at`, in whole minutes, hours or days: `12 min`, `3 h`, `1 day`, `2 days`. */
+const span = (at: number, clock: number): string => {
   const minutes = Math.floor((clock - at) / MINUTE_MS);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes} min ago`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours} h ago`;
-  const days = Math.floor(hours / 24);
-  return days === 1 ? 'yesterday' : `${days} days ago`;
-};
-
-/** How long something has waited: `under a minute`, `12 min`, `3 h`, `2 days`. */
-const waited = (at: number, clock: number): string => {
-  const minutes = Math.floor((clock - at) / MINUTE_MS);
-  if (minutes < 1) return 'under a minute';
   if (minutes < 60) return `${minutes} min`;
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return `${hours} h`;
   const days = Math.floor(hours / 24);
   return days === 1 ? '1 day' : `${days} days`;
 };
+
+/** `just now`, `12 min ago`, `3 h ago`, `yesterday`, `3 days ago`. */
+export const ago = (at: number, clock: number): string => {
+  if (clock - at < MINUTE_MS) return 'just now';
+  const since = span(at, clock);
+  return since === '1 day' ? 'yesterday' : `${since} ago`;
+};
+
+/** How long something has waited: `under a minute`, `12 min`, `3 h`, `2 days`. */
+const waited = (at: number, clock: number): string => (clock - at < MINUTE_MS ? 'under a minute' : span(at, clock));
 
 const capitalize = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
@@ -657,21 +651,24 @@ const resultOf = (task: WorkspaceTaskResponse): string =>
   (task.status === 'failed' ? task.error : task.resultSummary)?.trim() ||
   (task.status === 'failed' ? taskDisplayStatus(task).label : task.title);
 
-const line = (
-  key: string,
-  at: number,
-  from: FleetSpeaker,
-  to: FleetSpeaker,
-  text: string,
-  outcome: FleetOutcome | null = null,
-  live: FleetLine['live'] = null,
-  message: FleetLine['message'] = null
-): FleetLine => ({ key, at, from, to, text: plainText(text), markdown: text, message, headline: firstSentence(text), outcome, live, writing: false });
+type LineParts = Pick<FleetLine, 'key' | 'at' | 'from' | 'to' | 'markdown'> &
+  Partial<Pick<FleetLine, 'outcome' | 'live' | 'message' | 'writing'>>;
+
+const line = ({ markdown, outcome = null, live = null, message = null, writing = false, ...said }: LineParts): FleetLine => ({
+  ...said,
+  text: plainText(markdown),
+  markdown,
+  message,
+  headline: firstSentence(markdown),
+  outcome,
+  live,
+  writing,
+});
 
 const messageOf = (said: FleetSaid): FleetLine['message'] => ({ sessionId: said.sessionId, id: said.id, truncated: said.truncated });
 
 const fromSaid = (said: FleetSaid, from: FleetSpeaker, to: FleetSpeaker, outcome: FleetOutcome | null = null) =>
-  line(said.id, said.at, from, to, said.text, outcome, null, messageOf(said));
+  line({ key: said.id, at: said.at, from, to, markdown: said.text, outcome, message: messageOf(said) });
 
 /** A block of Main's words to you, before `speak` joins it into a bubble. */
 interface Stretch {
@@ -705,7 +702,8 @@ const speak = (items: readonly (FleetLine | Stretch)[], asked: readonly number[]
     if (!first) return;
     const message = bubble.every((s) => s.message?.id === first.message?.id) ? first.message : null;
     const markdown = bubble.map((s) => s.markdown).join('\n\n');
-    lines.push({ ...line(first.key, bubble.at(-1)!.at, MAIN, YOU, markdown, null, null, message), writing: first.run !== null && running.has(first.run) });
+    const writing = first.run !== null && running.has(first.run);
+    lines.push(line({ key: first.key, at: bubble.at(-1)!.at, from: MAIN, to: YOU, markdown, message, writing }));
     bubble = [];
   };
   for (const item of items) {
@@ -763,10 +761,10 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
     const parent = task.parentTaskId ? byId.get(task.parentTaskId) : undefined;
     const boss = parent ? speaker(assigneeOf(card, parent)) : MAIN;
     const state = task.status === 'queued' ? 'queued' : isTaskLive(task.status) ? 'running' : null;
-    lines.push(line(`task:${task.id}`, Number(task.createdAt), boss, agent, task.title, null, state));
+    lines.push(line({ key: `task:${task.id}`, at: Number(task.createdAt), from: boss, to: agent, markdown: task.title, live: state }));
     const outcome = OUTCOMES[task.status];
     if (outcome && !reported.has(`${task.id}:${task.cycleNo}`)) {
-      lines.push(line(`ended:${task.id}`, Number(task.completedAt ?? task.updatedAt), agent, boss, resultOf(task), outcome));
+      lines.push(line({ key: `ended:${task.id}`, at: Number(task.completedAt ?? task.updatedAt), from: agent, to: boss, markdown: resultOf(task), outcome }));
     }
   }
   lines.sort((a, b) => a.at - b.at);
@@ -850,7 +848,7 @@ export interface FleetPanel {
   selected: boolean;
 }
 
-export interface FleetLoud {
+interface FleetLoud {
   /** Loudness by workspace id; a card missing here is quiet. */
   cards: Record<string, FleetLoudness>;
   /** Keys of the lines that shout: the newest running task, the loud card's newest result. */
@@ -936,7 +934,7 @@ export interface FleetCrew {
 /** Faces a strip draws before it keeps only Main and the busy ones and counts the rest. */
 export const MAX_CREW = 6;
 const WORDS_CHARS = 22;
-export const MAIN_SEED = 'main';
+const MAIN_SEED = 'main';
 
 /** The first words of a text, cut at a word boundary. */
 export const firstWords = (text: string, max = WORDS_CHARS): string => {
@@ -1017,13 +1015,6 @@ export const eligibleCards = (
     .map((card) => card.workspaceId);
 };
 
-export const cycleCard = (order: readonly string[], selectedId: string | null, step: 1 | -1): string | null => {
-  if (order.length === 0) return null;
-  const at = selectedId ? order.indexOf(selectedId) : -1;
-  if (at < 0) return step > 0 ? order[0]! : order[order.length - 1]!;
-  return order[(at + step + order.length) % order.length]!;
-};
-
 /**
  * The switcher's order: most recently opened by the user first, so it doesn't
  * reshuffle while agents work; never opened, or a tie, by latest activity.
@@ -1038,7 +1029,7 @@ export const recentlyOpened = (ids: readonly string[], cards: Record<string, Fle
     });
 
 /** The grid: columns and rows; the board never scrolls (`boardSlots`). */
-export interface BoardShape {
+interface BoardShape {
   cols: number;
   rows: number;
 }

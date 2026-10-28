@@ -5,7 +5,6 @@ import {
   cardAttention,
   cardAgents,
   cardPhase,
-  cycleCard,
   type FleetCard,
   type FleetLive,
 } from '../../fleet/fleetModel';
@@ -26,6 +25,13 @@ interface FleetSwitcherProps {
 
 /** The last entry: deselects, so the terminal starts a new workspace. */
 const NEW_WORKSPACE = 'fleet:new-workspace';
+
+/** The entry `step` away from `current`, wrapping; from an unknown one, the first or the last. */
+const cycleCard = (entries: readonly string[], current: string, step: 1 | -1): string => {
+  const at = entries.indexOf(current);
+  if (at < 0) return step > 0 ? entries[0]! : entries[entries.length - 1]!;
+  return entries[(at + step + entries.length) % entries.length]!;
+};
 
 /**
  * The OS-style switcher, from anywhere on the page, the terminal included

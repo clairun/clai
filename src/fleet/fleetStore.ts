@@ -27,8 +27,8 @@ import {
 
 type Reducer = (state: FleetState) => FleetState;
 
-/** Snapshot size: enough to fill the largest grid (4 × 3) with room to spare. */
-export const SNAPSHOT_LIMIT = 16;
+/** Snapshot size: the six-card board plus the cards a full board leaves off. */
+const SNAPSHOT_LIMIT = 16;
 
 interface FleetStoreState {
   fleet: FleetState;

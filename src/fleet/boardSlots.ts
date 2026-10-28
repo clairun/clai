@@ -1,6 +1,6 @@
 import { cardPhase, type FleetCard, type FleetLive } from './fleetModel';
 
-export interface BoardSlots {
+interface BoardSlots {
   /** The cards on the board, in slot order; at most the capacity. */
   visible: string[];
   /** Cards off the board that are still active. */

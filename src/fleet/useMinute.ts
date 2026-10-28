@@ -5,7 +5,7 @@
  */
 import { useSyncExternalStore } from 'react';
 
-export const MINUTE_TICK_MS = 60_000;
+const MINUTE_TICK_MS = 60_000;
 
 let clock = Date.now();
 const listeners = new Set<() => void>();
