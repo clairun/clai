@@ -6,8 +6,7 @@ import styles from './ImageLightbox.module.css';
  * Full-screen zoom overlay for a transcript image. Portals to <body> so it
  * escapes the virtualized list's transformed/overflow ancestors; closes on
  * Escape, backdrop click, or the × button. Reuses the already-loaded data URL
- * (no re-fetch). A click in it is its own: React would otherwise carry it,
- * through the portal, to whatever holds the image.
+ * (no re-fetch).
  */
 const ImageLightbox = ({
   src,
@@ -27,16 +26,13 @@ const ImageLightbox = ({
   }, [onClose]);
 
   return ReactDOM.createPortal(
-    <div
-      className={styles.backdrop}
-      onClick={(event) => {
-        event.stopPropagation();
-        if (event.target === event.currentTarget) onClose();
-      }}
-      role="dialog"
-      aria-label={alt}
-    >
-      <img className={styles.image} src={src} alt={alt} />
+    <div className={styles.backdrop} onClick={onClose} role="dialog" aria-label={alt}>
+      <img
+        className={styles.image}
+        src={src}
+        alt={alt}
+        onClick={(event) => event.stopPropagation()}
+      />
       <button
         type="button"
         className={styles.close}

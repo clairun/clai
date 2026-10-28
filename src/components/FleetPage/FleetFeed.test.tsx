@@ -273,18 +273,6 @@ describe('pictures in the feed', () => {
     expect(bubble).toHaveTextContent('+2');
   });
 
-  it('opens a thumbnail as the chat does, and neither it nor its viewer zooms the bubble', async () => {
-    render(<Feed state={fleet(created(yours('u1', [text('See this.'), picture('shot')])))} />);
-    const thumb = await screen.findByAltText('shot.png');
-    expect(fireEvent.keyDown(thumb.closest('button')!, { key: 'Enter' })).toBe(true);
-    expect(screen.queryByRole('dialog')).toBeNull();
-    fireEvent.click(thumb);
-    const viewer = screen.getByRole('dialog', { name: 'shot.png' });
-    expect(screen.getAllByRole('dialog')).toHaveLength(1);
-    fireEvent.click(viewer);
-    expect(screen.queryByRole('dialog')).toBeNull();
-  });
-
   /** Room for three bubbles, so the oldest of four, with pictures `ids`, is a row. */
   const fourSaid = (ids: string[], last = 'Last.') =>
     fleet(...[yours('u0', [text('Two shots.'), ...ids.map(picture)], NOW - 3000), yours('u1', [text('Next.')], NOW - 2000),
@@ -347,17 +335,18 @@ describe('pictures in the feed', () => {
     expect([readsOf('kept-0'), readsOf('kept-1')]).toEqual([1, 2]);
   });
 
-  it("opens an older bubble's thumbnail while Main's is open, and leaves Main's open", async () => {
+  it('zooms a bubble from its thumbnail, and keeps the zoom open when its line becomes a row', async () => {
     const restore = measured();
     try {
-      const said = [created(yours('u0', [text('Two shots.'), picture('open-a')], NOW - 3000)), updated(message('m1', [text('First, the leaks.')]), NOW - 2000),
-        created(yours('u1', [text('Next.')], NOW - 1000)), created(yours('u2', [text('Last.')], NOW))];
-      render(<Feed state={fleet(...said)} />);
-      expect(screen.queryByAltText('open-a.png')).toBeNull();
-      fireEvent.click(mainBubble());
-      fireEvent.click(await screen.findByAltText('open-a.png'));
-      expect(screen.getByRole('dialog', { name: 'open-a.png' })).toBeInTheDocument();
-      expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+      const said = [yours('u0', [text('Two shots.'), picture('fit-a')], NOW - 3000), yours('u1', [text('Next.')], NOW - 2000),
+        yours('u2', [text('Then.')], NOW - 1000)].map(created);
+      const { rerender } = render(<Feed state={fleet(...said)} />);
+      fireEvent.click(await screen.findByAltText('fit-a.png'));
+      const zoom = screen.getByRole('dialog', { name: 'Message from You' });
+      expect(within(zoom).getByAltText('fit-a.png')).toHaveAttribute('src', 'data:image/png;base64,QUJD');
+      rerender(<Feed state={fleet(...said, created(yours('u3', [text('Last.')], NOW)))} />);
+      expect(within(screen.getByRole('list', { name: 'Earlier' })).getByText(/Two shots/)).toBeInTheDocument();
+      expect(screen.getByRole('dialog')).toBe(zoom);
     } finally {
       restore();
     }

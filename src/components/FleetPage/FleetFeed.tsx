@@ -12,7 +12,7 @@ import {
 import { flushSync } from 'react-dom';
 import { getMessage } from '../../assistant/client';
 import MarkdownMessage from '../Chat/MarkdownMessage';
-import ImageAttachment, { useImageSrc } from '../AssistantChat/ImageAttachment';
+import { useImageSrc } from '../AssistantChat/ImageAttachment';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { faceOf, identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
 import { fullMessageText, type FleetImage } from '../../fleet/fleetModel';
@@ -71,11 +71,8 @@ const statusOf = (line: FleetLine): 'failed' | 'stopped' | 'working' | 'next' | 
 type Open = (line: FleetLine, origin: HTMLElement) => void;
 
 /** A bubble pressed by a click, Enter or Space; the card under it is not selected, and a link or button in it is its own. */
-/** What a bubble leaves a click or key to: its links and buttons. */
-const OWNED = ':is(a, button)';
-
 const pressable = (onPress: (target: HTMLElement) => void) => {
-  const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest(OWNED) !== null;
+  const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest('a, button') !== null;
   return {
     role: 'button',
     tabIndex: 0,
@@ -134,18 +131,22 @@ const Outcome = ({ line, time }: { line: FleetLine; time: string }) => {
 /** Pictures a bubble shows; past them, how many more. */
 const THUMBS = 3;
 
-/**
- * A bubble's pictures, as the chat draws them: each a thumbnail that opens
- * the image (a button, so the bubble leaves the click to it). The boxes have
- * a fixed size, so the bubble is as tall before they load as after (`useFit`).
- */
+/** A picture in a box of a fixed size, so what holds it is as tall before it loads as after (`useFit`, the zoom's measure). */
+const Picture = ({ workspaceId, part, className }: { workspaceId: string; part: FleetImage; className?: string }) => {
+  const src = useImageSrc(workspaceId, part.path);
+  return (
+    <span className={className}>
+      {src ? <img src={src} alt={part.filename ?? 'attached image'} /> : src === false && 'Image unavailable'}
+    </span>
+  );
+};
+
+/** A bubble's pictures, small; a click on one is the bubble's, and its zoom shows them larger. */
 const Thumbs = ({ workspaceId, images }: { workspaceId: string; images: readonly FleetImage[] }) =>
   images.length > 0 && (
     <div className={styles.thumbs}>
       {images.slice(0, THUMBS).map((part) => (
-        <span key={part.id} className={styles.thumb}>
-          <ImageAttachment workspaceId={workspaceId} part={part} />
-        </span>
+        <Picture key={part.id} workspaceId={workspaceId} part={part} className={styles.thumb} />
       ))}
       {images.length > THUMBS && <span className={styles.thumbMore}>+{images.length - THUMBS}</span>}
     </div>
@@ -382,16 +383,6 @@ const FullSpeech = ({ workspaceId, line }: { workspaceId: string; line: FleetLin
   <FleetMarkdown content={useFullText(workspaceId, line)} />
 );
 
-/** A picture in the zoom, larger, in a box as tall loaded as not, so the zoom's measured height holds. */
-const ZoomImage = ({ workspaceId, part }: { workspaceId: string; part: FleetImage }) => {
-  const src = useImageSrc(workspaceId, part.path);
-  return (
-    <span className={styles.zoomImage}>
-      {src ? <img src={src} alt={part.filename ?? 'attached image'} /> : src === false && 'Image unavailable'}
-    </span>
-  );
-};
-
 /** The zoomed highlight: who said it to whom and when, then the whole message as markdown and its pictures; Main's charts as its bubble draws them. */
 const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine }) => {
   const text = useFullText(workspaceId, line);
@@ -402,7 +393,7 @@ const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine })
       </p>
       <MarkdownMessage content={text} components={isSpeech(line) ? MINIATURE : undefined} />
       {line.images.map((part) => (
-        <ZoomImage key={part.id} workspaceId={workspaceId} part={part} />
+        <Picture key={part.id} workspaceId={workspaceId} part={part} className={styles.zoomImage} />
       ))}
     </div>
   );
@@ -447,7 +438,7 @@ const FleetFeed = ({
     const card = ref.current?.parentElement;
     if (!card || !openKey) return undefined;
     const closeOutside = (event: globalThis.MouseEvent) => {
-      if (event.target instanceof Element && event.target.closest(`[aria-expanded="true"], [data-bubble] ${OWNED}`)) return;
+      if (event.target instanceof Element && event.target.closest('[aria-expanded="true"]')) return;
       setExpanded(null);
     };
     card.addEventListener('click', closeOutside, true);

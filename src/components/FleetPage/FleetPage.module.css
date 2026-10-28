@@ -766,31 +766,23 @@ button.crewButton {
 }
 
 .thumb {
+  display: flex;
+  align-items: center;
   flex: none;
   width: var(--thumb);
   height: var(--thumb);
+  overflow: hidden;
   border-radius: var(--radius-sm);
+  background: var(--color-overlay-02);
+  font-size: 9px;
+  color: var(--color-text-secondary);
+  text-align: center;
 }
 
-.thumb > div,
-.thumb > button,
 .thumb img {
-  box-sizing: border-box;
   width: 100%;
   height: 100%;
-  max-width: none;
-  max-height: none;
-  border-radius: inherit;
-}
-
-.thumb img {
   object-fit: cover;
-}
-
-.thumb > div {
-  padding: 2px;
-  overflow: hidden;
-  font-size: 9px;
 }
 
 .thumbMore {
