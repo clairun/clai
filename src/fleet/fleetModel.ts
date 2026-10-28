@@ -31,6 +31,7 @@ import type { PendingAskUser } from '../assistant/sessionStore';
 
 /** A workspace with no event in this window and nothing live gets no card. */
 export const RECENT_WINDOW_MS = 12 * 60 * 60 * 1000;
+/** At most the snapshot's `PREVIEW_CHARS` (commands/fleet.rs). */
 const NOTE_CHARS = 600;
 /** Messages a card keeps; a miniature shows fewer. */
 export const SAID_LIMIT = 24;

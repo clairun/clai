@@ -26,7 +26,9 @@ const OPEN_TASK_LIMIT: i64 = 20;
 const FINISHED_TASK_LIMIT: i64 = 10;
 const RECENT_MESSAGE_LIMIT: i64 = 12;
 /// How much of a message's text the snapshot carries; the Fleet fetches the
-/// rest (`assistant_get_message`) when it shows the message whole.
+/// rest (`assistant_get_message`) when it shows the message whole. At least
+/// the Fleet's `NOTE_CHARS` (fleetModel.ts), so a seeded preview isn't
+/// clipped shorter than a live one.
 const PREVIEW_CHARS: usize = 600;
 
 #[derive(Debug, Clone, Serialize, TS)]
