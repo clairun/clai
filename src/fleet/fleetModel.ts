@@ -1,10 +1,9 @@
 /**
  * The Fleet's state: one card per workspace, built by a pure reducer over
  * the app-global event streams (assistant, approvals, path grants) and a
- * startup snapshot. Streaming variants (deltas, tool calls, message updates)
- * return the state untouched, so they never reach React. Runs and tasks are
- * not copied here: they come from `fleetActivityStore` and `taskStore`
- * (`FleetLive`).
+ * startup snapshot. Streaming variants (deltas, tool calls) return the state
+ * untouched, so they never reach React. Runs and tasks are not copied here:
+ * they come from `fleetActivityStore` and `taskStore` (`FleetLive`).
  *
  * A card keeps the messages said in the workspace (`said`): what the user,
  * Main and the agents told each other. Main's words are heard a block of
@@ -146,7 +145,7 @@ const updateCard = (
 ): FleetState => {
   const current = state.cards[workspaceId] ?? emptyCard(workspaceId);
   const next = update(current);
-  if (next === current && state.cards[workspaceId]) return state;
+  if (next === current) return state;
   return { cards: { ...state.cards, [workspaceId]: next } };
 };
 

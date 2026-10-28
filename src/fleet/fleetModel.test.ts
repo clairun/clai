@@ -182,6 +182,8 @@ describe('fleet reducer', () => {
     for (const event of streaming) {
       expect(applyAssistantEvent(base, env(event, 99))).toBe(base);
     }
+    // Nor does an update start a card for a workspace that has none.
+    expect(applyAssistantEvent(base, env(streaming[3]!, 99, MAIN, 'elsewhere'))).toBe(base);
     // A task's words reach Main as its report.
     expect(applyAssistantEvent(base, updated(message('t', 'assistant', 'Working', { kind: 'user' }, 'task-session-t'), 99))).toBe(base);
   });
