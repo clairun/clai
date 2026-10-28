@@ -1040,7 +1040,22 @@
   margin-top: 6px;
 }
 
+.imageAttachmentButton {
+  display: block;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  background: none;
+  font: inherit;
+}
+
+.imageAttachmentButton:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
 .imageAttachment {
+  display: block;
   max-width: 240px;
   max-height: 240px;
   width: auto;
