@@ -1,4 +1,5 @@
 import type { TaskStatus, WorkspaceTaskResponse } from '../generated/bindings';
+import type { ImagePart } from '../assistant/imageParts';
 import { taskDisplayStatus } from '../utils/taskDisplay';
 import {
   agentRef,
@@ -8,7 +9,6 @@ import {
   workspaceTasks,
   type FleetAgentRef,
   type FleetCard,
-  type FleetImage,
   type FleetLive,
   type FleetSaid,
 } from './fleetModel';
@@ -46,7 +46,7 @@ export interface FleetLine {
   /** As said, in markdown, for Main's bubble and the zoom. */
   markdown: string;
   /** The pictures attached to the message. */
-  images: readonly FleetImage[];
+  images: readonly ImagePart[];
   /** The message said, to fetch in full when `truncated`; `null` for a task's own line. */
   message: { sessionId: string; id: string; truncated: boolean } | null;
   /** The first sentence, for a one-line row. */

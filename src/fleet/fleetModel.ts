@@ -18,7 +18,6 @@ import type {
   AssistantMessage,
   AssistantRun,
   AssistantUiEvent,
-  ContentPart,
   FleetHighlight,
   FleetWorkspace,
   MessageOrigin,
@@ -27,6 +26,7 @@ import type {
   TaskStatus,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
+import { imageParts, type ImagePart } from '../assistant/imageParts';
 import { isRunMarkerText } from '../assistant/runMarker';
 import type { PendingAskUser } from '../assistant/sessionStore';
 
@@ -63,9 +63,6 @@ interface FleetMark {
   end: number;
 }
 
-/** A picture attached to a message: a reference to the workspace image store. */
-export type FleetImage = Extract<ContentPart, { type: 'image' }>;
-
 /** A message said in the workspace, as the feed needs it. */
 export interface FleetSaid {
   id: string;
@@ -78,7 +75,7 @@ export interface FleetSaid {
   /** Cut short: the full message has to be fetched. */
   truncated: boolean;
   /** A user message's pictures, which the chat draws too; none for an assistant message. */
-  images: readonly FleetImage[];
+  images: readonly ImagePart[];
   /** When last heard. */
   at: number;
   runId: string | null;
@@ -190,7 +187,7 @@ const userSaid = (message: AssistantMessage, at: number, runId: string | null, c
   role: 'user',
   origin: message.origin,
   ...clip(fullMessageText(message), cut),
-  images: message.content.filter((part): part is FleetImage => part.type === 'image'),
+  images: imageParts(message.content),
   at,
   runId,
   marks: [],

@@ -15,7 +15,8 @@ import MarkdownMessage from '../Chat/MarkdownMessage';
 import { useImageSrc } from '../AssistantChat/ImageAttachment';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { faceOf, identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
-import { fullMessageText, type FleetImage } from '../../fleet/fleetModel';
+import { fullMessageText } from '../../fleet/fleetModel';
+import type { ImagePart } from '../../assistant/imageParts';
 import {
   isSpeech,
   splitFeed,
@@ -132,7 +133,7 @@ const Outcome = ({ line, time }: { line: FleetLine; time: string }) => {
 const THUMBS = 3;
 
 /** A picture in a box of a fixed size, so what holds it is as tall before it loads as after (`useFit`, the zoom's measure). */
-const Picture = ({ workspaceId, part, className }: { workspaceId: string; part: FleetImage; className?: string }) => {
+const Picture = ({ workspaceId, part, className }: { workspaceId: string; part: ImagePart; className?: string }) => {
   const src = useImageSrc(workspaceId, part.path);
   return (
     <span className={className}>
@@ -142,7 +143,7 @@ const Picture = ({ workspaceId, part, className }: { workspaceId: string; part: 
 };
 
 /** A bubble's pictures, small; a click on one is the bubble's, and its zoom shows them larger. */
-const Thumbs = ({ workspaceId, images }: { workspaceId: string; images: readonly FleetImage[] }) =>
+const Thumbs = ({ workspaceId, images }: { workspaceId: string; images: readonly ImagePart[] }) =>
   images.length > 0 && (
     <div className={styles.thumbs}>
       {images.slice(0, THUMBS).map((part) => (

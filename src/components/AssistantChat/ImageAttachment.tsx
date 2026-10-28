@@ -1,10 +1,8 @@
 import { memo, useEffect, useState } from 'react';
-import type { ContentPart } from '../../generated/bindings';
+import type { ImagePart } from '../../assistant/imageParts';
 import { readWorkspaceFileBase64 } from '../../workspace/client';
 import ImageLightbox from '../Chat/ImageLightbox';
 import styles from './AssistantChat.module.css';
-
-export type ImagePart = Extract<ContentPart, { type: 'image' }>;
 
 /** How much read image data stays kept, in data-URL characters; a part's file never changes, so a hit is current. */
 const KEPT_CHARS = 64 * 1024 * 1024;

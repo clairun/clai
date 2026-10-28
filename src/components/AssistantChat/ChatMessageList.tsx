@@ -47,7 +47,8 @@ import { TaskCardContext, useTaskCardSurface, type TaskCardSurface } from './tas
 import { useTask } from '../../workspace/taskStore';
 import styles from './AssistantChat.module.css';
 import { onScrollChatToBottom } from '../../utils/workspaceUiEvents';
-import ImageAttachment, { type ImagePart } from './ImageAttachment';
+import ImageAttachment from './ImageAttachment';
+import { imageParts, type ImagePart } from '../../assistant/imageParts';
 import { useToolCallInput, useToolCallResult } from '../../assistant/toolCallResult';
 
 // Tools beyond this count collapse behind a "show N earlier" toggle so a turn
@@ -115,7 +116,7 @@ const getToolUses = (message: AssistantMessage): ToolUsePart[] => {
 
 const getImageContent = (message: AssistantMessage): ImagePart[] => {
   if (!message.content || !Array.isArray(message.content)) return [];
-  return message.content.filter((part): part is ImagePart => part.type === 'image');
+  return imageParts(message.content);
 };
 
 /**
