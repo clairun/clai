@@ -66,6 +66,7 @@ const FleetPage = () => {
     return () => window.removeEventListener('focus', load);
   }, []);
 
+  // The store's clock, not `clock`: a card leaves the board on an event, not on the minute tick.
   const placed = useMemo(
     () => eligibleCards(Object.values(cards), { now, selectedId, live }),
     [cards, now, selectedId, live]
