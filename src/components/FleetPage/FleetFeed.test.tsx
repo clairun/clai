@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
-import type { AssistantEventEnvelope, AssistantMessage, AssistantUiEvent, FleetWorkspace } from '../../generated/bindings';
+import type { AssistantEventEnvelope, AssistantMessage, AssistantUiEvent, FleetWorkspace, WorkspaceTaskResponse } from '../../generated/bindings';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }));
 
@@ -218,5 +218,15 @@ describe("Main's bubble", () => {
       expect(fireEvent.keyDown(inner, { key: ' ' })).toBe(true);
     }
     expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
+  });
+});
+
+describe('a task in the feed', () => {
+  const queued = { id: 't1', workspaceId: WS, title: 'Draft the release notes', status: 'queued', sessionId: 'task-session', parentTaskId: null, cycleNo: 1n,
+    assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w', assignedToWorkspaceAgentId: 'wa-w', createdAt: BigInt(NOW - 1000), updatedAt: BigInt(NOW - 1000) } as unknown as WorkspaceTaskResponse;
+
+  it('says a queued task is next', () => {
+    render(<Feed state={saying('First, the leaks.')} live={{ runs: {}, tasks: { [WS]: { t1: queued } } }} />);
+    expect(bubbleOf(/Draft the release notes/)).toHaveTextContent(/· next ·/);
   });
 });
