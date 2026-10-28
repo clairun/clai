@@ -4,10 +4,10 @@ import { useRef } from 'react';
 import { BEAT_MS, useThoughtBeat } from './useThoughtBeat';
 import styles from './FleetPage.module.css';
 
-beforeEach(() => vi.useFakeTimers({ now: Date.UTC(2026, 9, 18, 12) }));
+beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 
-describe('Fleet ticks', () => {
+describe('useThoughtBeat', () => {
   const Clouds = ({ active }: { active: boolean }) => {
     const ref = useRef<HTMLDivElement | null>(null);
     useThoughtBeat(ref, active);
