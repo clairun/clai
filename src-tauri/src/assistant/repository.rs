@@ -785,10 +785,9 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
         .ok_or_else(|| format!("Assistant session {session_id} already has an active run"))
 }
 
-/// At most two rows, newest first: the newest run and, if different, the
-/// newest non-terminal run. Older history is never returned.
-pub async fn current_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantRun>, String> {
-    let latest = sqlx::query(
+/// The session's newest run, whatever its status.
+pub async fn latest_run(pool: &DbPool, session_id: &str) -> Result<Option<AssistantRun>, String> {
+    let row = sqlx::query(
         r#"
         SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
@@ -801,7 +800,13 @@ pub async fn current_runs(pool: &DbPool, session_id: &str) -> Result<Vec<Assista
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("Failed to load latest assistant run: {}", e))?;
-    let Some(latest) = latest.as_ref().map(map_run_row).transpose()? else {
+    row.as_ref().map(map_run_row).transpose()
+}
+
+/// At most two rows, newest first: the newest run and, if different, the
+/// newest non-terminal run. Older history is never returned.
+pub async fn current_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantRun>, String> {
+    let Some(latest) = latest_run(pool, session_id).await? else {
         return Ok(Vec::new());
     };
 

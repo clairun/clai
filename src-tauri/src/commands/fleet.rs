@@ -108,12 +108,12 @@ async fn snapshot(
     // broken workspace doesn't blank the whole page.
     let mut ranked = Vec::with_capacity(locators.len());
     for locator in locators {
-        let activity = match state.workspace_db(&locator.id).await {
-            Ok(pool) => repository::last_session_activity(&pool)
-                .await
-                .map(|at| (at.unwrap_or(0), pool)),
-            Err(e) => Err(e),
-        };
+        let activity = async {
+            let pool = state.workspace_db(&locator.id).await?;
+            let at = repository::last_session_activity(&pool).await?;
+            Ok::<_, String>((at.unwrap_or(0), pool))
+        }
+        .await;
         match activity {
             Ok((last_activity_at, pool)) => ranked.push((last_activity_at, locator, pool)),
             Err(e) => {
@@ -127,15 +127,17 @@ async fn snapshot(
     // surface the request. So does the selected one, however old.
     let approvals = state.pending_approvals.counts_snapshot().await;
     let path_grants = state.pending_path_grants.counts_snapshot().await;
-    let mut rank = 0;
-    ranked.retain(|(_, locator, _)| {
-        rank += 1;
-        rank <= limit
-            || keep == Some(locator.id.as_str())
-            || approvals.contains_key(&locator.id)
-            || path_grants.contains_key(&locator.id)
-            || !ask_user::pending_for_workspace(&locator.id).is_empty()
-    });
+    let waits = |id: &str| {
+        approvals.contains_key(id)
+            || path_grants.contains_key(id)
+            || !ask_user::pending_for_workspace(id).is_empty()
+    };
+    let older = ranked.split_off(limit.min(ranked.len()));
+    ranked.extend(
+        older
+            .into_iter()
+            .filter(|(_, locator, _)| keep == Some(locator.id.as_str()) || waits(&locator.id)),
+    );
 
     let mut workspaces = Vec::with_capacity(ranked.len());
     for (last_activity_at, locator, pool) in ranked {
@@ -156,10 +158,7 @@ async fn workspace_snapshot(
 ) -> Result<FleetWorkspace, String> {
     let main_session = repository::find_manager_session(pool, &locator.default_agent_id).await?;
     let last_main_run = match &main_session {
-        Some(session) => repository::current_runs(pool, &session.id)
-            .await?
-            .into_iter()
-            .next(),
+        Some(session) => repository::latest_run(pool, &session.id).await?,
         None => None,
     };
     let last_assistant_message = match &main_session {
