@@ -12,9 +12,10 @@ import {
 import { flushSync } from 'react-dom';
 import { getMessage } from '../../assistant/client';
 import MarkdownMessage from '../Chat/MarkdownMessage';
+import ImageAttachment, { useImageSrc } from '../AssistantChat/ImageAttachment';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { faceOf, identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
-import { fullMessageText } from '../../fleet/fleetModel';
+import { fullMessageText, type FleetImage } from '../../fleet/fleetModel';
 import {
   isSpeech,
   splitFeed,
@@ -127,6 +128,37 @@ const Outcome = ({ line, time }: { line: FleetLine; time: string }) => {
   );
 };
 
+/** Pictures a bubble shows; past them, how many more. */
+const THUMBS = 3;
+
+/**
+ * A bubble's pictures, as the chat draws them: each a thumbnail that opens
+ * the image (a button, so the bubble leaves the click to it). The boxes have
+ * a fixed size, so the bubble is as tall before they load as after (`useFit`).
+ */
+const Thumbs = ({ workspaceId, images }: { workspaceId: string; images: readonly FleetImage[] }) =>
+  images.length > 0 && (
+    <div className={styles.thumbs}>
+      {images.slice(0, THUMBS).map((part) => (
+        <span key={part.id} className={styles.thumb}>
+          <ImageAttachment workspaceId={workspaceId} part={part} />
+        </span>
+      ))}
+      {images.length > THUMBS && <span className={styles.thumbMore}>+{images.length - THUMBS}</span>}
+    </div>
+  );
+
+const ImageMark = ({ count }: { count: number }) => (
+  <span className={styles.imageMark} role="img" aria-label={count === 1 ? '1 image' : `${count} images`}>
+    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="16" rx="2" />
+      <circle cx="9" cy="10" r="2" />
+      <path d="M21 17l-5-5-9 8" />
+    </svg>
+    {count > 1 && count}
+  </span>
+);
+
 /** An older highlight, collapsed to one line. A task in flight is in the crew strip, thinking. */
 const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: Cast; open: Open }) => {
   const from = faceFor(line.from, faces);
@@ -155,7 +187,8 @@ const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: 
           )}
         </span>
         <span className={styles.rowText} title={line.text}>
-          <Route line={line} /> {line.headline}
+          <Route line={line} /> {line.images.length > 0 && <ImageMark count={line.images.length} />}
+          {line.headline}
         </span>
         <Outcome line={line} time={shortTime(line.at, now)} />
       </button>
@@ -204,6 +237,7 @@ const Said = ({
             <Stamp line={line} time={time} route={line.to.kind === 'agent'} />
             <span>{line.text}</span>
           </span>
+          <Thumbs workspaceId={workspaceId} images={line.images} />
         </div>
       </div>
     );
@@ -237,10 +271,13 @@ const Said = ({
               </div>
             </div>
           ) : (
-            <span className={styles.bubbleText} title={line.text}>
-              <Stamp line={line} time={time} />
-              <span>{line.text}</span>
-            </span>
+            <>
+              <span className={styles.bubbleText} title={line.text}>
+                <Stamp line={line} time={time} />
+                <span>{line.text}</span>
+              </span>
+              <Thumbs workspaceId={workspaceId} images={line.images} />
+            </>
           )}
         </div>
       </div>
@@ -282,7 +319,7 @@ interface Fit {
  */
 const useFit = (lines: readonly FleetLine[], expanded: string | null) => {
   const ref = useRef<HTMLDivElement | null>(null);
-  const signature = `${expanded}\n${lines.map((l) => `${l.key}|${l.live}|${l.outcome}|${l.writing}|${l.text}`).join('\n')}`;
+  const signature = `${expanded}\n${lines.map((l) => `${l.key}|${l.live}|${l.outcome}|${l.writing}|${l.images.length}|${l.text}`).join('\n')}`;
   const [fit, setFit] = useState<Fit | null>(null);
   const fitRef = useRef(fit);
   const measuring = fit?.signature !== signature;
@@ -342,7 +379,17 @@ const FullSpeech = ({ workspaceId, line }: { workspaceId: string; line: FleetLin
   <FleetMarkdown content={useFullText(workspaceId, line)} />
 );
 
-/** The zoomed highlight: who said it to whom and when, then the whole message as markdown; Main's charts as its bubble draws them. */
+/** A picture in the zoom, larger, in a box as tall loaded as not, so the zoom's measured height holds. */
+const ZoomImage = ({ workspaceId, part }: { workspaceId: string; part: FleetImage }) => {
+  const src = useImageSrc(workspaceId, part.path);
+  return (
+    <span className={styles.zoomImage}>
+      {src ? <img src={src} alt={part.filename ?? 'attached image'} /> : src === false && 'Image unavailable'}
+    </span>
+  );
+};
+
+/** The zoomed highlight: who said it to whom and when, then the whole message as markdown and its pictures; Main's charts as its bubble draws them. */
 const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine }) => {
   const text = useFullText(workspaceId, line);
   return (
@@ -351,6 +398,9 @@ const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine })
         <Route line={line} /> · <Outcome line={line} time={fullTime(line.at)} />
       </p>
       <MarkdownMessage content={text} components={isSpeech(line) ? MINIATURE : undefined} />
+      {line.images.map((part) => (
+        <ZoomImage key={part.id} workspaceId={workspaceId} part={part} />
+      ))}
     </div>
   );
 };

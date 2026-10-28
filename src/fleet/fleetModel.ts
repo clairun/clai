@@ -18,6 +18,7 @@ import type {
   AssistantMessage,
   AssistantRun,
   AssistantUiEvent,
+  ContentPart,
   FleetHighlight,
   FleetWorkspace,
   MessageOrigin,
@@ -62,6 +63,9 @@ interface FleetMark {
   end: number;
 }
 
+/** A picture attached to a message: a reference to the workspace image store. */
+export type FleetImage = Extract<ContentPart, { type: 'image' }>;
+
 /** A message said in the workspace, as the feed needs it. */
 export interface FleetSaid {
   id: string;
@@ -73,6 +77,8 @@ export interface FleetSaid {
   text: string;
   /** Cut short: the full message has to be fetched. */
   truncated: boolean;
+  /** A user message's pictures, which the chat draws too; none for an assistant message. */
+  images: readonly FleetImage[];
   /** When last heard. */
   at: number;
   runId: string | null;
@@ -184,6 +190,7 @@ const userSaid = (message: AssistantMessage, at: number, runId: string | null, c
   role: 'user',
   origin: message.origin,
   ...clip(fullMessageText(message), cut),
+  images: message.content.filter((part): part is FleetImage => part.type === 'image'),
   at,
   runId,
   marks: [],
@@ -196,6 +203,7 @@ const assistantSaid = (message: AssistantMessage, text: string, runId: string | 
   origin: null,
   text,
   truncated: false,
+  images: [],
   at: marks.at(-1)!.at,
   runId,
   marks,
@@ -203,12 +211,13 @@ const assistantSaid = (message: AssistantMessage, text: string, runId: string | 
 
 /**
  * Keeps `said` in time order and at most `SAID_LIMIT` long; an event replaces
- * what a seed said. An automation's run marker is never said.
+ * what a seed said. A message with neither words nor pictures, or an
+ * automation's run marker, is never said.
  */
 const addSaid = (card: FleetCard, said: readonly FleetSaid[], replace: boolean): FleetCard => {
   const held = new Set(card.said.map((s) => s.id));
   const incoming = said.filter(
-    (s) => s.text && !(s.role === 'user' && isRunMarkerText(s.text)) && (replace || !held.has(s.id))
+    (s) => (s.text || s.images.length > 0) && !(s.role === 'user' && isRunMarkerText(s.text)) && (replace || !held.has(s.id))
   );
   if (incoming.length === 0) return card;
   const ids = new Set(incoming.map((s) => s.id));

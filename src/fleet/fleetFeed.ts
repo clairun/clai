@@ -8,6 +8,7 @@ import {
   workspaceTasks,
   type FleetAgentRef,
   type FleetCard,
+  type FleetImage,
   type FleetLive,
   type FleetSaid,
 } from './fleetModel';
@@ -44,6 +45,8 @@ export interface FleetLine {
   text: string;
   /** As said, in markdown, for Main's bubble and the zoom. */
   markdown: string;
+  /** The pictures attached to the message. */
+  images: readonly FleetImage[];
   /** The message said, to fetch in full when `truncated`; `null` for a task's own line. */
   message: { sessionId: string; id: string; truncated: boolean } | null;
   /** The first sentence, for a one-line row. */
@@ -164,12 +167,13 @@ const resultOf = (task: WorkspaceTaskResponse): string =>
   (task.status === 'failed' ? taskDisplayStatus(task).label : task.title);
 
 type LineParts = Pick<FleetLine, 'key' | 'at' | 'from' | 'to' | 'markdown'> &
-  Partial<Pick<FleetLine, 'outcome' | 'live' | 'message' | 'writing'>>;
+  Partial<Pick<FleetLine, 'images' | 'outcome' | 'live' | 'message' | 'writing'>>;
 
-const line = ({ markdown, outcome = null, live = null, message = null, writing = false, ...said }: LineParts): FleetLine => ({
+const line = ({ markdown, images = [], outcome = null, live = null, message = null, writing = false, ...said }: LineParts): FleetLine => ({
   ...said,
   text: plainText(markdown),
   markdown,
+  images,
   message,
   headline: firstSentence(markdown),
   outcome,
@@ -180,7 +184,7 @@ const line = ({ markdown, outcome = null, live = null, message = null, writing =
 const messageOf = (said: FleetSaid): FleetLine['message'] => ({ sessionId: said.sessionId, id: said.id, truncated: said.truncated });
 
 const fromSaid = (said: FleetSaid, from: FleetSpeaker, to: FleetSpeaker, outcome: FleetOutcome | null = null) =>
-  line({ key: said.id, at: said.at, from, to, markdown: said.text, outcome, message: messageOf(said) });
+  line({ key: said.id, at: said.at, from, to, markdown: said.text, images: said.images, outcome, message: messageOf(said) });
 
 /** A block of Main's words to you, before `speak` joins it into a bubble. */
 interface Stretch {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { AssistantEventEnvelope, AssistantMessage, AssistantUiEvent, FleetWorkspace, WorkspaceTaskResponse } from '../../generated/bindings';
 
@@ -230,5 +230,80 @@ describe('a task in the feed', () => {
   it('says a queued task is next', () => {
     render(<Feed state={saying('First, the leaks.')} live={{ runs: {}, tasks: { [WS]: { t1: queued } } }} />);
     expect(bubbleOf(/Draft the release notes/)).toHaveTextContent(/· next ·/);
+  });
+});
+
+describe('pictures in the feed', () => {
+  const picture = (id: string) =>
+    ({ type: 'image', id, path: `.clai/images/${id}.png`, media_type: 'image/png', filename: `${id}.png` }) as AssistantMessage['content'][number];
+  const yours = (id: string, content: AssistantMessage['content'], at = NOW) =>
+    ({ ...message(id, content), role: 'user', createdAt: BigInt(at) }) as AssistantMessage;
+  const created = (m: AssistantMessage) => event({ type: 'message_created', payload: { message: m } } as AssistantUiEvent, Number(m.createdAt));
+  const seeded = (...messages: AssistantMessage[]) =>
+    seedFleet(EMPTY_FLEET, [
+      { workspaceId: WS, mainSessionId: MAIN, lastActivityAt: 0n, lastOpenedAt: 0n, lastMainRun: null, lastAssistantMessage: null,
+        recentMessages: messages.map((m) => ({ message: m, runId: null, truncated: false })),
+        pendingAsks: [], pendingPermissions: [], pendingPathGrants: [], agents: [] } as unknown as FleetWorkspace,
+    ]);
+
+  beforeEach(() => {
+    vi.mocked(invoke).mockImplementation(async (cmd) =>
+      cmd === 'workspace_read_file_base64' ? { path: '', mime: 'image/png', base64: 'QUJD' } : undefined
+    );
+  });
+  afterEach(() => {
+    vi.mocked(invoke).mockImplementation(async () => undefined);
+  });
+
+  it('makes a bubble of a message that is only a picture, heard live or seeded, with its thumbnail', async () => {
+    const shot = yours('u1', [picture('shot')]);
+    for (const state of [fleet(created(shot)), seeded(shot)]) {
+      const { unmount } = render(<Feed state={state} />);
+      const thumb = await screen.findByAltText('shot.png');
+      expect(thumb).toHaveAttribute('src', 'data:image/png;base64,QUJD');
+      expect(thumb.closest('[data-bubble]')).not.toBeNull();
+      unmount();
+    }
+  });
+
+  it('shows three thumbnails, then how many more', async () => {
+    render(<Feed state={fleet(created(yours('u1', [text('Five shots.'), ...['a', 'b', 'c', 'd', 'e'].map(picture)])))} />);
+    const bubble = bubbleOf(/Five shots/);
+    expect(await within(bubble).findAllByRole('img')).toHaveLength(3);
+    expect(bubble).toHaveTextContent('+2');
+  });
+
+  it('opens a thumbnail as the chat does, and neither it nor its viewer zooms the bubble', async () => {
+    render(<Feed state={fleet(created(yours('u1', [text('See this.'), picture('shot')])))} />);
+    const thumb = await screen.findByAltText('shot.png');
+    expect(fireEvent.keyDown(thumb.closest('button')!, { key: 'Enter' })).toBe(true);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    fireEvent.click(thumb);
+    const viewer = screen.getByRole('dialog', { name: 'shot.png' });
+    expect(screen.getAllByRole('dialog')).toHaveLength(1);
+    fireEvent.click(viewer);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('marks an older row that has pictures, and its zoom shows them', async () => {
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
+    const rowHeight = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      return this.tagName === 'P' ? 20 : 40;
+    });
+    try {
+      const said = [yours('u0', [text('Two shots.'), picture('a'), picture('b')], NOW - 3000), yours('u1', [text('Next.')], NOW - 2000),
+        yours('u2', [text('Then.')], NOW - 1000), yours('u3', [text('Last.')], NOW)];
+      render(<Feed state={fleet(...said.map(created))} />);
+      const row = within(screen.getByRole('list', { name: 'Earlier' })).getByText(/Two shots/).closest('button')!;
+      expect(within(row).getByRole('img', { name: '2 images' })).toBeInTheDocument();
+      expect(within(row).queryByAltText('a.png')).toBeNull();
+      fireEvent.click(row);
+      const zoom = screen.getByRole('dialog');
+      expect(await within(zoom).findByAltText('a.png')).toHaveAttribute('src', 'data:image/png;base64,QUJD');
+      expect(within(zoom).getByAltText('b.png')).toBeInTheDocument();
+    } finally {
+      height.mockRestore();
+      rowHeight.mockRestore();
+    }
   });
 });
