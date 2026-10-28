@@ -80,6 +80,8 @@ describe("Main's bubble", () => {
     expect(words()).not.toHaveAttribute('data-open');
     fireEvent.keyDown(mainBubble(), { key: 'Enter' });
     expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+    fireEvent.keyDown(mainBubble(), { key: ' ' });
+    expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
   });
 
   it('fetches a reply the snapshot cut whole, once while it is open, not again on each recompute', async () => {
