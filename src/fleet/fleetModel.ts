@@ -19,6 +19,7 @@ import type {
   AssistantMessage,
   AssistantRun,
   AssistantUiEvent,
+  FleetHighlight,
   FleetWorkspace,
   MessageOrigin,
   PathGrantRequest,
@@ -159,8 +160,6 @@ const clip = (text: string): { text: string; truncated: boolean } => {
     : { text: trimmed, truncated: false };
 };
 
-// Keep this aligned with fleet_content_text in commands/fleet.rs so a
-// snapshot preview remains a prefix of the next live update for hear().
 export const fullMessageText = (message: AssistantMessage): string => {
   const blocks: string[] = [];
   let current = '';
@@ -190,6 +189,18 @@ const userSaid = (message: AssistantMessage, at: number, runId: string | null): 
   marks: [],
 });
 
+const assistantSaid = (message: AssistantMessage, text: string, runId: string | null, marks: readonly FleetMark[]): FleetSaid => ({
+  id: message.id,
+  sessionId: message.sessionId,
+  role: 'assistant',
+  origin: null,
+  text,
+  truncated: false,
+  at: marks.at(-1)!.at,
+  runId,
+  marks,
+});
+
 /**
  * Keeps `said` in time order and at most `SAID_LIMIT` long; an event replaces
  * what a seed said. An automation's run marker is never said.
@@ -208,8 +219,8 @@ const addSaid = (card: FleetCard, said: readonly FleetSaid[], replace: boolean):
 /**
  * Main's `message` as heard now: mid-run at a tool call, or complete. The
  * text past what was heard is the next block, heard at `at`; nothing new
- * changes nothing. Text that doesn't continue what was heard (a seed's
- * preview, an edit) restates the message as one block.
+ * changes nothing. Text that doesn't continue what was heard (an edit)
+ * restates the message as one block.
  */
 const hear = (card: FleetCard, message: AssistantMessage, runId: string | null, at: number): FleetCard => {
   if (message.role !== 'assistant') return card;
@@ -218,18 +229,7 @@ const hear = (card: FleetCard, message: AssistantMessage, runId: string | null, 
   if (!text || text === held?.text) return card;
   const marks =
     held && text.startsWith(held.text) ? [...held.marks, { at, end: text.length }] : [{ at: held?.marks[0]?.at ?? at, end: text.length }];
-  const said: FleetSaid = {
-    id: message.id,
-    sessionId: message.sessionId,
-    role: 'assistant',
-    origin: null,
-    text,
-    truncated: false,
-    at: marks.at(-1)!.at,
-    runId: runId ?? held?.runId ?? null,
-    marks,
-  };
-  return addSaid(card, [said], true);
+  return addSaid(card, [assistantSaid(message, text, runId ?? held?.runId ?? null, marks)], true);
 };
 
 const requestKey = (kind: FleetRequest['kind'], id: string) => `${kind}:${id}`;
@@ -381,27 +381,12 @@ export const applyUserSent = (
 export const applyOpened = (state: FleetState, workspaceId: string, at: number): FleetState =>
   state.cards[workspaceId] ? updateCard(state, workspaceId, (card) => ({ ...card, lastOpenedAt: Math.max(card.lastOpenedAt, at) })) : state;
 
-/** A snapshot's message: an assistant one is a single block, heard when it was created. */
-const seedSaid = (
-  id: string,
-  sessionId: string,
-  origin: MessageOrigin | null,
-  preview: { text: string; truncated: boolean; createdAt: bigint },
-  runId: string | null
-): FleetSaid => {
-  const text = preview.truncated ? `${preview.text}…` : preview.text;
-  const at = Number(preview.createdAt);
-  return {
-    id,
-    sessionId,
-    role: origin ? 'user' : 'assistant',
-    origin,
-    text,
-    truncated: preview.truncated,
-    at,
-    runId,
-    marks: origin ? [] : [{ at, end: text.length }],
-  };
+/** A snapshot's message, as if heard when it was created: an assistant one is a single block. */
+const seedSaid = ({ message, runId }: FleetHighlight): FleetSaid => {
+  const at = Number(message.createdAt);
+  if (message.role !== 'assistant') return userSaid(message, at, runId);
+  const text = fullMessageText(message);
+  return assistantSaid(message, text, runId, [{ at, end: text.length }]);
 };
 
 /**
@@ -417,14 +402,9 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
   for (const ws of snapshot) {
     const card = state.cards[ws.workspaceId] ?? emptyCard(ws.workspaceId);
     const activity = Number(ws.lastActivityAt);
-    const mainSessionId = ws.mainSessionId ?? card.mainSessionId;
-    const seed: FleetSaid[] = ws.recentMessages.map((m) =>
-      seedSaid(m.messageId, m.sessionId, m.role === 'assistant' ? null : m.origin, m, m.runId)
-    );
-    const preview = ws.lastAssistantMessage;
-    if (preview && mainSessionId && !seed.some((m) => m.id === preview.messageId)) {
-      seed.push(seedSaid(preview.messageId, mainSessionId, null, preview, null));
-    }
+    const last = ws.lastAssistantMessage;
+    const seen = last && ws.recentMessages.some((h) => h.message.id === last.message.id);
+    const seed = (last && !seen ? [...ws.recentMessages, last] : ws.recentMessages).map(seedSaid);
     // Approvals and grants carry no timestamp; the workspace's activity orders them among waiting cards.
     const requests: Record<string, FleetRequest> = {};
     for (const a of ws.pendingAsks) requests[requestKey('ask', a.pendingId)] = askRequest(a, Number(a.requestedAt));
@@ -436,7 +416,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
       {
         ...card,
         title: ws.title || card.title,
-        mainSessionId,
+        mainSessionId: ws.mainSessionId ?? card.mainSessionId,
         lastMainRun: ws.lastMainRun,
         lastActivityAt: Math.max(card.lastActivityAt, activity),
         lastOpenedAt: Math.max(card.lastOpenedAt, Number(ws.lastOpenedAt)),

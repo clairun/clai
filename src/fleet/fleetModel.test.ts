@@ -4,6 +4,7 @@ import type {
   AssistantMessage,
   AssistantRun,
   AssistantUiEvent,
+  FleetHighlight,
   FleetWorkspace,
   WorkspaceTaskResponse,
 } from '../generated/bindings';
@@ -304,7 +305,7 @@ describe('the highlight feed', () => {
         pendingAsks: [],
         lastAssistantMessage: null,
         recentMessages: [
-          { messageId: 'seed-mark', sessionId: MAIN, role: 'user', origin: { kind: 'user' }, text: '--- Manual run at 12:01 ---', truncated: false, createdAt: BigInt(NOW - 10), runId: null },
+          { message: { ...message('seed-mark', 'user', '--- Manual run at 12:01 ---'), createdAt: BigInt(NOW - 10) }, runId: null },
         ],
       },
     ]);
@@ -601,36 +602,27 @@ describe('snapshot', () => {
     expect(Object.keys(s.cards)).toEqual([WS]);
   });
 
-  const highlight = (messageId: string, at: number, patch: Partial<FleetWorkspace['recentMessages'][number]> = {}): FleetWorkspace['recentMessages'][number] => ({
-    messageId,
-    sessionId: MAIN,
-    role: 'user',
-    origin: { kind: 'user' },
-    text: messageId,
-    truncated: false,
-    createdAt: BigInt(at),
-    runId: null,
-    ...patch,
-  });
+  const highlight = (m: AssistantMessage, at: number, runId: string | null = null): FleetHighlight => ({ message: { ...m, createdAt: BigInt(at) }, runId });
+  const broke = `It **broke**${' and broke'.repeat(60)}`;
 
   it('seeds the feed from the recent messages and the last reply; an event a seed repeats keeps its own words', () => {
     let s = apply(withMain(), created(message('u1', 'user', 'Live words'), NOW - 50));
     s = seedFleet(s, [
       snapshotOf({
         recentMessages: [
-          highlight('u1', NOW - 50, { text: 'Seed words' }),
-          highlight('m2t', NOW - 40, { sessionId: 'task-session-t', origin: fromAgent() }),
-          highlight('rep', NOW - 30, { origin: report('t', 'failed'), text: 'It broke', truncated: true }),
-          highlight('a1', NOW - 20, { role: 'assistant', text: 'All done.' }),
+          highlight(message('u1', 'user', 'Seed words'), NOW - 50),
+          highlight(message('m2t', 'user', 'm2t', fromAgent(), 'task-session-t'), NOW - 40),
+          highlight(message('rep', 'user', 'It broke.', report('t', 'failed')), NOW - 30),
+          highlight(message('a1', 'assistant', 'All done.'), NOW - 20),
         ],
-        lastAssistantMessage: { messageId: 'a1', text: 'All done.', truncated: false, createdAt: BigInt(NOW - 20) },
+        lastAssistantMessage: highlight(message('a1', 'assistant', 'All done.'), NOW - 20),
       }),
     ]);
     expect(lines(s, withTasks(task('t', 'failed', NOW - 100)))).toEqual([
       'Main → Researcher: Task t',
       'You → Main: Live words',
       'Main → Researcher: m2t',
-      'Researcher → Main: It broke… [failed]',
+      'Researcher → Main: It broke. [failed]',
       'Main → You: All done.',
     ]);
     expect(card(s).said.filter((m) => m.id === 'a1')).toHaveLength(1);
@@ -639,7 +631,7 @@ describe('snapshot', () => {
   it('continues a tool-separated reply after a reload at the new update time', () => {
     const started = NOW - 1000;
     const seeded = seedFleet(EMPTY_FLEET, [snapshotOf({
-      recentMessages: [highlight('m', started, { role: 'assistant', text: 'Before.\n\nAfter.', runId: 'r1' })],
+      recentMessages: [highlight(withParts('m', text('Before.'), tool('c1'), text('After.')), started, 'r1')],
     })]);
     const continued = apply(seeded, updated(withParts('m', text('Before.'), tool('c1'), text('After.'), tool('c2'), text('More.')), NOW));
     expect(card(continued).said[0]!.marks).toEqual([{ at: started, end: 'Before.\n\nAfter.'.length }, { at: NOW, end: 'Before.\n\nAfter.\n\nMore.'.length }]);
@@ -649,22 +641,22 @@ describe('snapshot', () => {
   it('keeps which message a line says and whether it was cut, so the zoom can fetch it whole', () => {
     const s = seedFleet(EMPTY_FLEET, [
       snapshotOf({
-        recentMessages: [highlight('rep', NOW - 30, { origin: report('t', 'failed'), text: 'It **broke**', truncated: true })],
-        lastAssistantMessage: { messageId: 'a1', text: 'All done.', truncated: false, createdAt: BigInt(NOW - 20) },
+        recentMessages: [highlight(message('rep', 'user', broke, report('t', 'failed')), NOW - 30)],
+        lastAssistantMessage: highlight(message('a1', 'assistant', 'All done.'), NOW - 20),
       }),
     ]);
     const feed = feedOf(s, withTasks(task('t', 'failed', NOW - 100)));
     expect(feed.lines.map((l) => [l.key, l.markdown, l.message])).toEqual([
       ['task:t', 'Task t', null],
-      ['rep', 'It **broke**…', { sessionId: MAIN, id: 'rep', truncated: true }],
+      ['rep', `${broke.slice(0, 599)}…`, { sessionId: MAIN, id: 'rep', truncated: true }],
       ['a1', 'All done.', { sessionId: MAIN, id: 'a1', truncated: false }],
     ]);
   });
 
   it('seeds the last reply alone when the recent messages miss it', () => {
-    const preview = { messageId: 'p', text: 'from snapshot', truncated: true, createdAt: 5n };
-    const s = seedFleet(EMPTY_FLEET, [snapshotOf({ lastAssistantMessage: preview })]);
-    expect(lines(s)).toEqual(['Main → You: from snapshot…']);
+    const last = highlight(message('p', 'assistant', 'from snapshot'), 5);
+    const s = seedFleet(EMPTY_FLEET, [snapshotOf({ lastAssistantMessage: last })]);
+    expect(lines(s)).toEqual(['Main → You: from snapshot']);
   });
 
   it("takes the snapshot's main session over the held one, and keeps the held one when the snapshot has none", () => {

@@ -153,14 +153,10 @@ export type FilesystemPathGrant = { path: string, access: FilesystemPathAccess,
 origin?: GrantOrigin | null, };
 
 /**
- * One message of the workspace's recent conversation, cut to a preview.
+ * A message of the workspace's conversation, compacted like a live
+ * message event, with the run that wrote it.
  */
-export type FleetHighlight = { messageId: string, sessionId: string, role: MessageRole, origin: MessageOrigin, text: string, truncated: boolean, createdAt: bigint, runId: string | null, };
-
-/**
- * The text of the main session's newest assistant reply, cut to a preview.
- */
-export type FleetMessagePreview = { messageId: string, text: string, truncated: boolean, createdAt: bigint, };
+export type FleetHighlight = { message: AssistantMessage, runId: string | null, };
 
 export type FleetWorkspace = { workspaceId: string, title: string, starred: boolean, 
 /**
@@ -189,10 +185,14 @@ activeRunIds: Array<string>,
 /**
  * Unfinished tasks plus the most recently finished ones, newest first.
  */
-tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingAsks: Array<PendingAsk>, lastAssistantMessage: FleetMessagePreview | null, 
+tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingAsks: Array<PendingAsk>, 
+/**
+ * The main session's newest assistant reply with text.
+ */
+lastAssistantMessage: FleetHighlight | null, 
 /**
  * The newest user and assistant messages with text across every
- * session, oldest first; tool calls and results are left out.
+ * session, oldest first; tool rows and tool-only replies are left out.
  */
 recentMessages: Array<FleetHighlight>, 
 /**

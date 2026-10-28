@@ -10,7 +10,7 @@ import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
 import { EMPTY_FLEET, emptyCard, shortTime } from '../fleet/fleetModel';
-import type { FleetWorkspace } from '../generated/bindings';
+import type { FleetHighlight, FleetWorkspace } from '../generated/bindings';
 
 const mockInvoke = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
@@ -38,8 +38,11 @@ const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspac
   recentMessages: [],
 });
 
-const said = (messageId: string, text: string, ago: number, patch = {}) =>
-  ({ messageId, sessionId: 'main-a', role: 'user', origin: { kind: 'user' }, text, truncated: false, createdAt: BigInt(Date.now() - ago), runId: null, ...patch }) as FleetWorkspace['recentMessages'][number];
+const said = (id: string, text: string, ago: number, patch = {}) =>
+  ({
+    message: { id, sessionId: 'main-a', role: 'user', origin: { kind: 'user' }, content: [{ type: 'text', text }], createdAt: BigInt(Date.now() - ago), providerMetadata: null, ...patch },
+    runId: null,
+  }) as FleetHighlight;
 
 /** The shared terminal's input, as far as the page sees it: it takes the keyboard when asked (`TerminalEmulator`). */
 const FakeTerminal = () => {
@@ -363,12 +366,14 @@ describe('FleetPage', () => {
   describe('zoom', () => {
     // An agent's word to Main: Main's own bubbles open in place instead (`FleetFeed.test`).
     const scout = { kind: 'agent', agent: { workspaceAgentId: 'wa-s', agentDefinitionId: 'def-s', displayName: 'Scout', isDefault: false }, sessionId: 'task-s', runId: null, replyAddress: null };
-    const seed = (patch: Partial<FleetWorkspace['recentMessages'][number]> = {}) =>
+    const seed = (text = 'Shipped **v2** to staging') =>
       fleetSnapshot.mockResolvedValue([
         workspace('s', 'Staged'),
-        { ...workspace('a', 'Alpha', 1000), mainSessionId: 'main-a', recentMessages: [said('u1', 'Ship it.', 20 * 60_000), said('a2', 'Shipped **v2** to staging', 10 * 60_000, { origin: scout, ...patch })] },
+        { ...workspace('a', 'Alpha', 1000), mainSessionId: 'main-a', recentMessages: [said('u1', 'Ship it.', 20 * 60_000), said('a2', text, 10 * 60_000, { origin: scout })] },
       ]);
     const bubble = async (text: RegExp) => (await screen.findByText(text)).closest<HTMLElement>('[role=button]')!;
+    // Past what a card holds: the snapshot's word is cut and the zoom fetches it whole.
+    const cut = `Shipped **v2** to\n\n${'staging and prod, '.repeat(40)}`;
 
     it('zooms a bubble out to the whole message as markdown; Esc zooms back and focus returns to it', async () => {
       seed();
@@ -489,26 +494,26 @@ describe('FleetPage', () => {
     });
 
     it('shows a cut message at once and swaps in the whole one when it arrives', async () => {
-      seed({ text: 'Shipped **v2** to', truncated: true });
+      seed(cut);
       let resolve: (m: unknown) => void = () => {};
       mockInvoke.mockImplementation(((cmd: string) => (cmd === 'assistant_get_message' ? new Promise((r) => (resolve = r)) : Promise.resolve(undefined))) as never);
       renderFleet();
-      fireEvent.click(await bubble(/^Shipped v2 to…/));
+      fireEvent.click(await bubble(/^Shipped v2 to/));
       const dialog = screen.getByRole('dialog', { name: 'Message from Scout' });
-      expect(dialog).toHaveTextContent('Shipped v2 to…');
+      expect(dialog).toHaveTextContent(/Shipped v2 to\s*staging and prod, .*…/);
       expect(mockInvoke).toHaveBeenCalledWith('assistant_get_message', { workspaceId: 'a', sessionId: 'main-a', messageId: 'a2' });
       await act(async () => resolve({ id: 'a2', sessionId: 'main-a', role: 'assistant', content: [{ type: 'text', text: 'Shipped **v2** to staging and prod.' }] }));
       expect(dialog).toHaveTextContent('Shipped v2 to staging and prod.');
     });
 
     it('keeps the cut message when the whole one cannot be fetched', async () => {
-      seed({ text: 'Shipped **v2** to', truncated: true });
+      seed(cut);
       mockInvoke.mockImplementation(((cmd: string) => (cmd === 'assistant_get_message' ? Promise.reject(new Error('Assistant message not found: a2')) : Promise.resolve(undefined))) as never);
       renderFleet();
-      fireEvent.click(await bubble(/^Shipped v2 to…/));
+      fireEvent.click(await bubble(/^Shipped v2 to/));
       await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('assistant_get_message', expect.anything()));
       await act(async () => {});
-      expect(screen.getByRole('dialog', { name: 'Message from Scout' })).toHaveTextContent('Shipped v2 to…');
+      expect(screen.getByRole('dialog', { name: 'Message from Scout' })).toHaveTextContent(/Shipped v2 to\s*staging and prod, .*…/);
     });
   });
 

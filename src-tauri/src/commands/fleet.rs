@@ -9,13 +9,11 @@ use serde::Serialize;
 use tauri::State;
 use ts_rs::TS;
 
-use crate::assistant::repository;
 use crate::assistant::tools::ask_user::{self, PendingAsk};
-use crate::assistant::types::{
-    AgentRefSnapshot, AssistantMessage, AssistantRun, MessageOrigin, MessageRole,
-};
+use crate::assistant::types::{AgentRefSnapshot, AssistantMessage, AssistantRun};
 use crate::assistant::workspace_agents::{agent_display_names, load_workspace_agent_rows};
 use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskResponse};
+use crate::assistant::{display, repository};
 use crate::commands::path_grants::PathGrantRequest;
 use crate::commands::permissions::PermissionRequest;
 use crate::db::DbPool;
@@ -26,7 +24,6 @@ const DEFAULT_WORKSPACE_LIMIT: u32 = 8;
 const MAX_WORKSPACE_LIMIT: u32 = 32;
 const OPEN_TASK_LIMIT: i64 = 20;
 const FINISHED_TASK_LIMIT: i64 = 10;
-const LAST_MESSAGE_MAX_CHARS: usize = 600;
 const RECENT_MESSAGE_LIMIT: i64 = 12;
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -54,38 +51,32 @@ pub struct FleetWorkspace {
     pub pending_permissions: Vec<PermissionRequest>,
     pub pending_path_grants: Vec<PathGrantRequest>,
     pub pending_asks: Vec<PendingAsk>,
-    pub last_assistant_message: Option<FleetMessagePreview>,
+    /// The main session's newest assistant reply with text.
+    pub last_assistant_message: Option<FleetHighlight>,
     /// The newest user and assistant messages with text across every
-    /// session, oldest first; tool calls and results are left out.
+    /// session, oldest first; tool rows and tool-only replies are left out.
     pub recent_messages: Vec<FleetHighlight>,
     /// The enabled agents, Main first, then teammates in roster order.
     pub agents: Vec<AgentRefSnapshot>,
 }
 
-/// The text of the main session's newest assistant reply, cut to a preview.
-#[derive(Debug, Clone, Serialize, TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
-pub struct FleetMessagePreview {
-    pub message_id: String,
-    pub text: String,
-    pub truncated: bool,
-    pub created_at: i64,
-}
-
-/// One message of the workspace's recent conversation, cut to a preview.
+/// A message of the workspace's conversation, compacted like a live
+/// message event, with the run that wrote it.
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub struct FleetHighlight {
-    pub message_id: String,
-    pub session_id: String,
-    pub role: MessageRole,
-    pub origin: MessageOrigin,
-    pub text: String,
-    pub truncated: bool,
-    pub created_at: i64,
+    pub message: AssistantMessage,
     pub run_id: Option<String>,
+}
+
+impl FleetHighlight {
+    fn new(message: AssistantMessage, run_id: Option<String>) -> Self {
+        Self {
+            message: display::message(message),
+            run_id,
+        }
+    }
 }
 
 /// The `limit` most recently active workspaces (default 8, max 32), most
@@ -175,26 +166,13 @@ async fn workspace_snapshot(
     let last_assistant_message = match &main_session {
         Some(session) => repository::last_completed_assistant_text(pool, &session.id)
             .await?
-            .as_ref()
-            .and_then(preview),
+            .map(|message| FleetHighlight::new(message, None)),
         None => None,
     };
     let recent_messages = repository::recent_conversation_messages(pool, RECENT_MESSAGE_LIMIT)
         .await?
         .into_iter()
-        .filter_map(|(message, run_id)| {
-            let (text, truncated) = preview_text(&message)?;
-            Some(FleetHighlight {
-                message_id: message.id,
-                session_id: message.session_id,
-                role: message.role,
-                origin: message.origin,
-                text,
-                truncated,
-                created_at: message.created_at,
-                run_id,
-            })
-        })
+        .map(|(message, run_id)| FleetHighlight::new(message, run_id))
         .collect();
 
     let rows = workspace_tasks_repo::list_open_and_recent_tasks(
@@ -240,58 +218,12 @@ async fn workspace_snapshot(
     })
 }
 
-fn preview(message: &AssistantMessage) -> Option<FleetMessagePreview> {
-    let (text, truncated) = preview_text(message)?;
-    Some(FleetMessagePreview {
-        message_id: message.id.clone(),
-        text,
-        truncated,
-        created_at: message.created_at,
-    })
-}
-
-// Keep this aligned with fleetModel.ts fullMessageText: a seeded preview
-// must be a prefix of the next live update for hear() to preserve its marks.
-fn fleet_content_text(message: &AssistantMessage) -> String {
-    let mut blocks = Vec::new();
-    let mut current = String::new();
-    for part in &message.content {
-        if let crate::assistant::types::ContentPart::Text { text } = part {
-            current.push_str(text);
-        } else if !current.is_empty() {
-            blocks.push(std::mem::take(&mut current));
-        }
-    }
-    if !current.is_empty() {
-        blocks.push(current);
-    }
-    blocks.join(if message.role == MessageRole::Assistant {
-        "\n\n"
-    } else {
-        ""
-    })
-}
-
-/// The trimmed text cut to `LAST_MESSAGE_MAX_CHARS`, and whether it was cut;
-/// `None` for a message with no text (tool calls or thinking only).
-fn preview_text(message: &AssistantMessage) -> Option<(String, bool)> {
-    let text = fleet_content_text(message);
-    let text = text.trim();
-    if text.is_empty() {
-        return None;
-    }
-    let truncated = text.chars().count() > LAST_MESSAGE_MAX_CHARS;
-    Some((
-        text.chars().take(LAST_MESSAGE_MAX_CHARS).collect(),
-        truncated,
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::assistant::types::{
-        AssistantRun, ContentPart, MessageRole, RunStatus, RunTrigger, SessionContext,
+        AssistantRun, ContentPart, MessageOrigin, MessageRole, RunStatus, RunTrigger,
+        SessionContext,
     };
     use crate::config::{workspace_config, AppConfig, WorkspaceConfig};
     use crate::workspace_index::WorkspaceIndex;
@@ -346,6 +278,13 @@ mod tests {
         .expect("insert task");
     }
 
+    fn only_text(highlight: &FleetHighlight) -> &str {
+        match &highlight.message.content[..] {
+            [ContentPart::Text { text }] => text,
+            other => panic!("expected one text part, got {other:?}"),
+        }
+    }
+
     async fn assistant_message(pool: &DbPool, session_id: &str, content: Vec<ContentPart>) {
         message(pool, session_id, MessageRole::Assistant, content, None).await;
     }
@@ -388,43 +327,6 @@ mod tests {
         .expect("run")
     }
 
-    #[test]
-    fn preview_separates_tool_interleaved_text_like_fleet_events() {
-        let message = AssistantMessage {
-            id: "m".to_string(),
-            session_id: "s".to_string(),
-            role: MessageRole::Assistant,
-            content: vec![
-                ContentPart::Text {
-                    text: "Before".into(),
-                },
-                ContentPart::Text { text: ".".into() },
-                ContentPart::ToolUse {
-                    tool_call_id: "c".into(),
-                    tool_name: "bash".into(),
-                    arguments: serde_json::Value::Null,
-                },
-                ContentPart::Text {
-                    text: "After.".into(),
-                },
-            ],
-            created_at: 0,
-            provider_metadata: None,
-            origin: MessageOrigin::User,
-        };
-        assert_eq!(
-            preview_text(&message),
-            Some(("Before.\n\nAfter.".into(), false))
-        );
-        assert_eq!(
-            preview_text(&AssistantMessage {
-                role: MessageRole::User,
-                ..message
-            }),
-            Some(("Before.After.".into(), false))
-        );
-    }
-
     #[tokio::test]
     async fn snapshot_ranks_by_session_activity_and_bounds_its_payload() {
         let temp = tempfile::tempdir().expect("temp dir");
@@ -443,16 +345,23 @@ mod tests {
         )
         .await
         .expect("session");
-        let long_reply = "é".repeat(LAST_MESSAGE_MAX_CHARS + 5);
+        let long_reply = "é".repeat(1000);
         assistant_message(
             &pool,
             &session.id,
-            vec![ContentPart::Text {
-                text: format!("  {long_reply}\n"),
-            }],
+            vec![
+                ContentPart::Text {
+                    text: long_reply.clone(),
+                },
+                ContentPart::ToolUse {
+                    tool_call_id: "c".into(),
+                    tool_name: "bash_exec".into(),
+                    arguments: serde_json::json!({ "command": "ls", "stdin": long_reply }),
+                },
+            ],
         )
         .await;
-        // A newer text-less reply is skipped, not shown as an empty preview.
+        // A newer text-less reply is skipped, not shown as an empty message.
         assistant_message(&pool, &session.id, Vec::new()).await;
         let run = start_run(&pool, &session.id, RunStatus::Running).await;
         let other_session = repository::create_session(&pool, SessionContext::default())
@@ -505,10 +414,13 @@ mod tests {
         );
         assert_eq!(busy.tasks[0].assigned_agent_display_name, "Manager");
 
-        let preview = busy.last_assistant_message.as_ref().expect("preview");
-        assert!(preview.truncated);
-        assert_eq!(preview.text.chars().count(), LAST_MESSAGE_MAX_CHARS);
-        assert!(preview.text.starts_with('é'));
+        // Whole, but compacted like a live message event.
+        let last = &busy.last_assistant_message.as_ref().expect("last reply");
+        assert!(matches!(
+            &last.message.content[..],
+            [ContentPart::Text { text }, ContentPart::ToolUse { arguments, .. }]
+                if *text == long_reply && *arguments == serde_json::json!({ "command": "ls" })
+        ));
 
         let idle = &snapshot[1];
         assert_eq!((idle.last_activity_at, idle.last_opened_at), (0, 0));
@@ -590,11 +502,11 @@ mod tests {
         .await;
 
         let snapshot = snapshot(&state, None, None).await.expect("snapshot");
-        let preview = snapshot[0]
+        let last = snapshot[0]
             .last_assistant_message
             .as_ref()
-            .expect("preview");
-        assert_eq!(preview.text, "Done.");
+            .expect("last reply");
+        assert_eq!(only_text(last), "Done.");
     }
 
     /// A state where BUSY has session activity and `waiting` has none, so
@@ -802,7 +714,7 @@ mod tests {
 
         let snapshot = snapshot(&state, None, None).await.expect("snapshot");
         let recent = &snapshot[0].recent_messages;
-        let texts: Vec<_> = recent.iter().map(|m| m.text.as_str()).collect();
+        let texts: Vec<_> = recent.iter().map(only_text).collect();
         let kept_old = RECENT_MESSAGE_LIMIT as usize - 3;
         assert_eq!(texts.len(), RECENT_MESSAGE_LIMIT as usize);
         assert_eq!(
@@ -810,10 +722,10 @@ mod tests {
             format!("old {}", RECENT_MESSAGE_LIMIT as usize - kept_old)
         );
         assert_eq!(texts[kept_old..], ["hello", "do X", "hi there"]);
-        let delegated = &recent[kept_old + 1];
+        let delegated = &recent[kept_old + 1].message;
         assert_eq!(delegated.session_id, task.id);
         assert_eq!(delegated.origin, manager);
-        assert_eq!(recent[kept_old + 2].role, MessageRole::Assistant);
+        assert_eq!(recent[kept_old + 2].message.role, MessageRole::Assistant);
     }
 
     #[tokio::test]
