@@ -231,7 +231,7 @@ async fn workspace_snapshot(
     let last_assistant_message = match &main_session {
         Some(session) => repository::last_completed_assistant_text(pool, &session.id)
             .await?
-            .map(|message| FleetHighlight::new(message, None)),
+            .map(|(message, run_id)| FleetHighlight::new(message, run_id)),
         None => None,
     };
     let recent_messages = repository::recent_conversation_messages(pool, RECENT_MESSAGE_LIMIT)
@@ -596,7 +596,15 @@ mod tests {
                 text: text.to_string(),
             }]
         };
-        assistant_message(&pool, &session.id, text("Done.")).await;
+        let done = start_run(&pool, &session.id, RunStatus::Completed).await;
+        message(
+            &pool,
+            &session.id,
+            MessageRole::Assistant,
+            text("Done."),
+            Some(done.id.clone()),
+        )
+        .await;
         for _ in 0..30 {
             message(&pool, &session.id, MessageRole::Tool, Vec::new(), None).await;
         }
@@ -617,6 +625,7 @@ mod tests {
             .as_ref()
             .expect("last reply");
         assert_eq!(only_text(last), "Done.");
+        assert_eq!(last.run_id, Some(done.id));
     }
 
     /// A state where BUSY has session activity and `waiting` has none, so

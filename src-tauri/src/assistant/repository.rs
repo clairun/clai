@@ -467,15 +467,16 @@ fn completed_text_filter() -> String {
     )
 }
 
-/// The session's newest assistant message with non-blank text, skipping
-/// rows of a run still in flight.
+/// The session's newest assistant message with non-blank text and the run
+/// that wrote it, skipping rows of a run still in flight.
 pub async fn last_completed_assistant_text(
     pool: &DbPool,
     session_id: &str,
-) -> Result<Option<AssistantMessage>, String> {
+) -> Result<Option<(AssistantMessage, Option<String>)>, String> {
     let row = sqlx::query(&format!(
         r#"
-        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json, created_at
+        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json,
+               created_at, run_id
         FROM assistant_messages AS m
         WHERE session_id = ?
           AND role = 'assistant'
@@ -490,7 +491,8 @@ pub async fn last_completed_assistant_text(
     .await
     .map_err(|e| format!("Failed to load the last assistant message: {}", e))?;
 
-    row.as_ref().map(map_message_row).transpose()
+    row.map(|row| Ok((map_message_row(&row)?, row.get("run_id"))))
+        .transpose()
 }
 
 /// The newest `limit` user and assistant messages with text across every
