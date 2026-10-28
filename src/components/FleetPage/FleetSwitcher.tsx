@@ -13,7 +13,7 @@ import { phaseLabel } from './FleetCard';
 import styles from './FleetPage.module.css';
 
 interface FleetSwitcherProps {
-  /** Card ids, most recently opened first (`recentlyOpened`). */
+  /** Card ids, most recently opened first (`recentlyOpened`), each one in `cards`. */
   order: string[];
   cards: Record<string, FleetCard>;
   selectedId: string | null;
@@ -90,8 +90,7 @@ const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: Flee
     <div className={styles.switcherBackdrop}>
       <ul className={styles.switcher} role="listbox" aria-label="Switch workspace">
         {order.map((id) => {
-          const card = cards[id];
-          if (!card) return null;
+          const card = cards[id]!;
           const agents = cardAgents(card, live);
           const phase = cardPhase(card, live);
           return (

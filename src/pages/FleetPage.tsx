@@ -96,7 +96,7 @@ const FleetPage = () => {
 
   // Cards born from live events (or a workspace just created here) have no
   // title yet: the snapshot has it, once per new set of untitled cards.
-  const untitled = placed.filter((id) => !cards[id]?.title).join(',');
+  const untitled = placed.filter((id) => !cards[id]!.title).join(',');
   useEffect(() => {
     if (untitled) void useFleetStore.getState().loadSnapshot();
   }, [untitled]);
