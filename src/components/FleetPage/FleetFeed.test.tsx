@@ -285,15 +285,72 @@ describe('pictures in the feed', () => {
     expect(screen.queryByRole('dialog')).toBeNull();
   });
 
-  it('marks an older row that has pictures, and its zoom shows them', async () => {
+  /** Room for three bubbles, so the oldest of four, with pictures `ids`, is a row. */
+  const fourSaid = (ids: string[], last = 'Last.') =>
+    fleet(...[yours('u0', [text('Two shots.'), ...ids.map(picture)], NOW - 3000), yours('u1', [text('Next.')], NOW - 2000),
+      yours('u2', [text('Then.')], NOW - 1000), yours('u3', [text(last)], NOW)].map(created));
+  const measured = () => {
     const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
     const rowHeight = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
       return this.tagName === 'P' ? 20 : 40;
     });
+    return () => {
+      height.mockRestore();
+      rowHeight.mockRestore();
+    };
+  };
+
+  it('reads a row\'s pictures once while the feed re-measures around it', () => {
+    const restore = measured();
     try {
-      const said = [yours('u0', [text('Two shots.'), picture('a'), picture('b')], NOW - 3000), yours('u1', [text('Next.')], NOW - 2000),
-        yours('u2', [text('Then.')], NOW - 1000), yours('u3', [text('Last.')], NOW)];
-      render(<Feed state={fleet(...said.map(created))} />);
+      const ids = ['once-a', 'once-b'];
+      const reads = () => vi.mocked(invoke).mock.calls.filter(([cmd, args]) =>
+        cmd === 'workspace_read_file_base64' && ids.some((id) => JSON.stringify(args).includes(id))).length;
+      const { rerender } = render(<Feed state={fourSaid(ids)} />);
+      expect(within(screen.getByRole('list', { name: 'Earlier' })).getByText(/Two shots/)).toBeInTheDocument();
+      for (const last of ['Last, a', 'Last, and b', 'Last, and then c']) rerender(<Feed state={fourSaid(ids, last)} />);
+      expect(reads()).toBe(ids.length);
+    } finally {
+      restore();
+    }
+  });
+
+  const readsOf = (id: string) =>
+    vi.mocked(invoke).mock.calls.filter(([cmd, args]) => cmd === 'workspace_read_file_base64' && JSON.stringify(args).includes(`/${id}.png`)).length;
+  const shown = async (id: string) => {
+    const { unmount } = render(<Feed state={fleet(created(yours('u1', [picture(id)])))} />);
+    await screen.findByAltText(`${id}.png`);
+    unmount();
+  };
+
+  it('shows a picture it already read at once', async () => {
+    await shown('again');
+    render(<Feed state={fleet(created(yours('u1', [picture('again')])))} />);
+    expect(screen.getByAltText('again.png')).toHaveAttribute('src', 'data:image/png;base64,QUJD');
+  });
+
+  it('reads a picture again after a read that failed', async () => {
+    vi.mocked(invoke).mockRejectedValueOnce(new Error('gone'));
+    const { unmount } = render(<Feed state={fleet(created(yours('u1', [picture('retry')])))} />);
+    expect(await screen.findByText('Image unavailable')).toBeInTheDocument();
+    unmount();
+    await shown('retry');
+    expect(readsOf('retry')).toBe(2);
+  });
+
+  it('keeps the 32 pictures shown last', async () => {
+    for (let n = 0; n < 32; n += 1) await shown(`kept-${n}`);
+    await shown('kept-0');
+    await shown('kept-32');
+    await shown('kept-0');
+    await shown('kept-1');
+    expect([readsOf('kept-0'), readsOf('kept-1')]).toEqual([1, 2]);
+  });
+
+  it('marks an older row that has pictures, and its zoom shows them', async () => {
+    const restore = measured();
+    try {
+      render(<Feed state={fourSaid(['a', 'b'])} />);
       const row = within(screen.getByRole('list', { name: 'Earlier' })).getByText(/Two shots/).closest('button')!;
       expect(within(row).getByRole('img', { name: '2 images' })).toBeInTheDocument();
       expect(within(row).queryByAltText('a.png')).toBeNull();
@@ -302,8 +359,7 @@ describe('pictures in the feed', () => {
       expect(await within(zoom).findByAltText('a.png')).toHaveAttribute('src', 'data:image/png;base64,QUJD');
       expect(within(zoom).getByAltText('b.png')).toBeInTheDocument();
     } finally {
-      height.mockRestore();
-      rowHeight.mockRestore();
+      restore();
     }
   });
 });
