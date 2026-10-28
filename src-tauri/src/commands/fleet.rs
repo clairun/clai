@@ -866,7 +866,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_keeps_every_image_in_place_past_the_cut() {
+    fn preview_keeps_every_image_and_its_gap_in_place_past_the_cut() {
         let text = |text: &str| ContentPart::Text { text: text.into() };
         let parts = vec![
             image("a"),
@@ -885,6 +885,22 @@ mod tests {
         assert_eq!(
             sent(preview(parts, "Look".len())),
             sent((vec![image("a"), text("Look"), image("b"), image("c")], true))
+        );
+        let call = || ContentPart::ToolUse {
+            tool_call_id: "call".into(),
+            tool_name: "bash".into(),
+            arguments: serde_json::Value::Null,
+        };
+        let parts = vec![
+            call(),
+            image("a"),
+            text("Look at this."),
+            call(),
+            image("b"),
+        ];
+        assert_eq!(
+            sent(preview(parts, "Look".len())),
+            sent((vec![image("a"), text("Look"), call(), image("b")], true))
         );
     }
 
