@@ -642,10 +642,6 @@ button.crewButton {
   margin-top: 0.5em;
 }
 
-.scene [aria-expanded='true'] {
-  cursor: zoom-out;
-}
-
 /* A chart in Main's words: a chip that opens the workspace, where it is drawn. */
 .chartChip {
   display: inline-flex;
@@ -830,9 +826,13 @@ button.crewButton {
   cursor: zoom-in;
 }
 
-/* A bubble or a row zooms out to the whole message. */
+/* A bubble or a row zooms out to the whole message; an open bubble closes. */
 .scene [role='button'] {
   cursor: zoom-in;
+}
+
+.scene [aria-expanded='true'] {
+  cursor: zoom-out;
 }
 
 .scene [role='button']:focus-visible,

@@ -16,6 +16,7 @@ vi.mock('react-markdown', async (importOriginal) => {
   return { ...actual, default: Counted };
 });
 
+import { invoke } from '@tauri-apps/api/core';
 import FleetFeed from './FleetFeed';
 import { castFor } from './FleetFace';
 import { EMPTY_FLEET, applyAssistantEvent, applyUserSent, cardFeed, type FleetLive, type FleetState } from '../../fleet/fleetModel';
@@ -78,6 +79,21 @@ describe("Main's bubble", () => {
     expect(words()).not.toHaveAttribute('data-open');
     fireEvent.keyDown(mainBubble(), { key: 'Enter' });
     expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('fetches a cut message once while it is open, not again on each recompute', () => {
+    const cut = () => {
+      const feed = cardFeed(saying('First, the leaks.').cards[WS]!, IDLE, NOW);
+      return { ...feed, lines: feed.lines.map((l) => ({ ...l, message: { ...l.message!, truncated: true } })) };
+    };
+    const fetches = () => vi.mocked(invoke).mock.calls.filter(([cmd]) => cmd === 'assistant_get_message').length;
+    const at = fetches();
+    const { rerender } = render(<FleetFeed workspaceId={WS} feed={cut()} shouts={new Set()} now={NOW} faces={castFor({}, null)} onOpen={() => {}} />);
+    fireEvent.click(mainBubble());
+    // Every Fleet event recomputes the feed: new lines, the same message.
+    rerender(<FleetFeed workspaceId={WS} feed={cut()} shouts={new Set()} now={NOW + 1} faces={castFor({}, null)} onOpen={() => {}} />);
+    expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+    expect(fetches() - at).toBe(1);
   });
 
   it('keeps an older Main bubble expanded and gives it the card space', () => {

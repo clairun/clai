@@ -432,19 +432,22 @@ const useFit = (lines: readonly FleetLine[], expanded: string | null) => {
 
 /** A truncated message's full text, once fetched; the preview until then, or if it can't be. */
 const useFullText = (workspaceId: string, line: FleetLine): string => {
-  const [full, setFull] = useState<string | null>(null);
+  // Only a cut message is fetched, and it can't grow: a live update replaces it whole.
+  const cut = line.message?.truncated ? line.message : null;
+  const sessionId = cut?.sessionId;
+  const messageId = cut?.id;
+  const [full, setFull] = useState<{ id: string; text: string } | null>(null);
   useEffect(() => {
-    const message = line.message;
-    if (!message?.truncated) return undefined;
+    if (!sessionId || !messageId) return undefined;
     let current = true;
-    getMessage(workspaceId, message.sessionId, message.id)
-      .then((m) => current && setFull(fullMessageText(m)))
+    getMessage(workspaceId, sessionId, messageId)
+      .then((m) => current && setFull({ id: messageId, text: fullMessageText(m) }))
       .catch(() => undefined);
     return () => {
       current = false;
     };
-  }, [workspaceId, line]);
-  return full || line.markdown;
+  }, [workspaceId, sessionId, messageId]);
+  return full && full.id === messageId ? full.text : line.markdown;
 };
 
 /** Main's whole bubble, fetched when its text was cut. */
