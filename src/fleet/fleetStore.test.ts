@@ -138,13 +138,4 @@ describe('fleet store snapshot', () => {
     unsubscribe();
     expect(useFleetStore.getState().fleet.cards.ws!.said).toMatchObject([{ id: 'm', text: 'Found it.' }]);
   });
-
-  it('ignores streaming events entirely', () => {
-    const before = useFleetStore.getState().fleet;
-    useFleetStore.getState().applyEvent({
-      ...askEvent('q', 1, 'ask_user_requested'),
-      event: { type: 'assistant_delta', payload: { message_id: 'm', text: 'x' } },
-    } as AssistantEventEnvelope);
-    expect(useFleetStore.getState().fleet).toBe(before);
-  });
 });

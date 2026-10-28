@@ -229,35 +229,7 @@ describe('FleetPage', () => {
     expect(card('Beta').className).not.toMatch(/cardWaiting/);
   });
 
-  it('draws loud only the card that needs you, never the selected one: burst, sticker and "!?"', async () => {
-    const ask = (workspaceId: string) => ({
-      pendingId: `q-${workspaceId}`, workspaceId, sessionId: 'main', question: 'Ship it?',
-      options: null, multiSelect: false, extraContext: null, requestedAt: 4n,
-    });
-    const running = { id: 't', title: 'Crawl', status: 'running', parentTaskId: null, createdAt: BigInt(Date.now()), updatedAt: BigInt(Date.now()), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never;
-    fleetSnapshot.mockResolvedValue([
-      workspace('s', 'Staged'),
-      { ...workspace('a', 'Alpha', 10), pendingAsks: [ask('a')] },
-      { ...workspace('w', 'Worker', 20), tasks: [running] },
-    ]);
-    renderFleet();
-    await screen.findByRole('button', { name: 'Select Alpha' });
-    const card = (name: string) => screen.getByRole('button', { name: `Select ${name}` }).closest('article')!;
-    await waitFor(() => expect(card('Alpha')).toHaveAttribute('data-loud', 'needs'));
-    expect(within(card('Alpha')).getByText('!?')).toHaveAttribute('aria-hidden', 'true');
-    // The sticker is decoration; the phase still reads in full.
-    expect(within(card('Alpha')).getByText('Needs you')).toHaveAttribute('aria-hidden', 'true');
-    expect(within(card('Alpha')).getByText('Needs you · 1 question')).toBeInTheDocument();
-    // A running card tilts and shouts "GO!", but is not the loud one.
-    expect(card('Worker')).not.toHaveAttribute('data-loud');
-    expect(within(card('Worker')).getByText('GO!')).toBeInTheDocument();
-    expect(document.querySelectorAll('[data-loud]')).toHaveLength(1);
-
-    act(() => useFleetStore.getState().select('a'));
-    expect(card('Alpha')).not.toHaveAttribute('data-loud');
-  });
-
-  it('draws loud every card that needs you and nothing else; only the newest running task rushes in with "GO!"', async () => {
+  it('draws loud every card that needs you, never the selected one, and nothing else; only the newest running task rushes in with "GO!"', async () => {
     const ask = { pendingId: 'q', workspaceId: 'a', sessionId: 'main', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
     const task = (id: string, status: string, ago: number) =>
       ({ id, title: `Task ${id}`, status, resultSummary: `Result ${id}.`, parentTaskId: null, createdAt: BigInt(Date.now() - ago), updatedAt: BigInt(Date.now() - ago), completedAt: status === 'running' ? null : BigInt(Date.now() - ago), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never;
@@ -277,6 +249,13 @@ describe('FleetPage', () => {
     expect(screen.queryByText('DONE!')).not.toBeInTheDocument();
     // Every running card still thinks.
     for (const name of ['Run one', 'Run two', 'Run three']) expect(within(card(name)).getByRole('img', { name: 'Scout is working' })).toBeInTheDocument();
+    expect(within(card('Asking')).getByText('!?')).toHaveAttribute('aria-hidden', 'true');
+    // The sticker is decoration; the phase still reads in full.
+    expect(within(card('Asking')).getByText('Needs you')).toHaveAttribute('aria-hidden', 'true');
+    expect(within(card('Asking')).getByText('Needs you · 1 question')).toBeInTheDocument();
+
+    act(() => useFleetStore.getState().select('a'));
+    expect(card('Asking')).not.toHaveAttribute('data-loud');
   });
 
   it('lets a finished task stop cheering on the clock, with no further events', async () => {
