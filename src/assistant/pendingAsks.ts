@@ -20,9 +20,9 @@ export async function restorePendingAsk(workspaceId: string, sessionId: string):
     store.setAskUserPending(sessionId, {
       pendingId: ask.pendingId,
       question: ask.question,
-      options: ask.options ?? null,
+      options: ask.options,
       multiSelect: ask.multiSelect,
-      extraContext: ask.extraContext ?? null,
+      extraContext: ask.extraContext,
     });
     if ((await pendingFor(workspaceId, sessionId))?.pendingId !== ask.pendingId) {
       useAssistantStore.getState().clearAskUserPending(sessionId, ask.pendingId);

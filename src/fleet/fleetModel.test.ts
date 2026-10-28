@@ -582,7 +582,7 @@ describe('snapshot', () => {
   it('takes the open requests of the snapshot, keeping the time of those already held', () => {
     let s = apply(EMPTY_FLEET, askEvent('stale', 2), askEvent('kept', 3));
     s = applyRequest(s, { kind: 'approval', request: approval('gone') }, 4);
-    const pendingAsk = (pendingId: string) => ({ pendingId, workspaceId: WS, sessionId: MAIN, runId: 'r', question: '?', options: null, multiSelect: false, extraContext: null, requestedAt: 7n });
+    const pendingAsk = (pendingId: string) => ({ pendingId, workspaceId: WS, sessionId: MAIN, question: '?', options: null, multiSelect: false, extraContext: null, requestedAt: 7n });
     s = seedFleet(s, [snapshotOf({ pendingAsks: [pendingAsk('kept'), pendingAsk('new')], pendingPathGrants: [approval('g1')] })]);
     const c = card(s);
     expect(c.title).toBe('Infra');

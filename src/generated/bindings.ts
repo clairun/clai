@@ -324,7 +324,7 @@ export type PathGrantRequest = { requestId: string, workspaceId: string | null, 
  * A question awaiting the human: the `AskUserRequested` payload plus where
  * it was asked. Kept so a reloaded webview can re-render the answer panel.
  */
-export type PendingAsk = { pendingId: string, workspaceId: string, sessionId: string, runId: string, question: string, options: Array<AskUserOption> | null, multiSelect: boolean, extraContext: string | null, requestedAt: bigint, };
+export type PendingAsk = { pendingId: string, workspaceId: string, sessionId: string, question: string, options: Array<AskUserOption> | null, multiSelect: boolean, extraContext: string | null, requestedAt: bigint, };
 
 export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, segments: Array<SegmentApproval>, 
 /**

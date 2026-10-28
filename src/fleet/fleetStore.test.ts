@@ -35,7 +35,7 @@ const snapshot: FleetWorkspace = {
   tasks: [task],
   pendingPermissions: [],
   pendingPathGrants: [],
-  pendingAsks: [{ pendingId: 'q1', workspaceId: 'ws', sessionId: 'main', runId: 'r1', question: '?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n }],
+  pendingAsks: [{ pendingId: 'q1', workspaceId: 'ws', sessionId: 'main', question: '?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n }],
   lastAssistantMessage: {
     message: { id: 'm', sessionId: 'main', role: 'assistant', content: [{ type: 'text', text: 'Done' }], createdAt: 4n, providerMetadata: null, origin: { kind: 'user' } },
     runId: null,

@@ -11,7 +11,6 @@ const ask = (pendingId: string): PendingAsk => ({
   pendingId,
   workspaceId: 'ws',
   sessionId: 's',
-  runId: 'r',
   question: `Question ${pendingId}?`,
   options: null,
   multiSelect: false,

@@ -209,7 +209,7 @@ describe('FleetPage', () => {
 
   it('colours the border of a card that needs the user, but the selected one wins', async () => {
     const ask = (workspaceId: string) => ({
-      pendingId: `q-${workspaceId}`, workspaceId, sessionId: 'main', runId: 'r', question: 'Ship it?',
+      pendingId: `q-${workspaceId}`, workspaceId, sessionId: 'main', question: 'Ship it?',
       options: null, multiSelect: false, extraContext: null, requestedAt: 4n,
     });
     fleetSnapshot.mockResolvedValue([
@@ -230,7 +230,7 @@ describe('FleetPage', () => {
 
   it('draws loud only the card that needs you, never the selected one: burst, sticker and "!?"', async () => {
     const ask = (workspaceId: string) => ({
-      pendingId: `q-${workspaceId}`, workspaceId, sessionId: 'main', runId: 'r', question: 'Ship it?',
+      pendingId: `q-${workspaceId}`, workspaceId, sessionId: 'main', question: 'Ship it?',
       options: null, multiSelect: false, extraContext: null, requestedAt: 4n,
     });
     const running = { id: 't', title: 'Crawl', status: 'running', parentTaskId: null, createdAt: BigInt(Date.now()), updatedAt: BigInt(Date.now()), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never;
@@ -257,7 +257,7 @@ describe('FleetPage', () => {
   });
 
   it('draws loud every card that needs you and nothing else; only the newest running task rushes in with "GO!"', async () => {
-    const ask = { pendingId: 'q', workspaceId: 'a', sessionId: 'main', runId: 'r', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
+    const ask = { pendingId: 'q', workspaceId: 'a', sessionId: 'main', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
     const task = (id: string, status: string, ago: number) =>
       ({ id, title: `Task ${id}`, status, resultSummary: `Result ${id}.`, parentTaskId: null, createdAt: BigInt(Date.now() - ago), updatedAt: BigInt(Date.now() - ago), completedAt: status === 'running' ? null : BigInt(Date.now() - ago), assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' }) as never;
     fleetSnapshot.mockResolvedValue([
@@ -683,7 +683,7 @@ describe('FleetPage', () => {
 
   it('brings an active card onto a full board in the least pressing slot, and counts the active ones left off', async () => {
     const running = { id: 't', title: 'Task', status: 'running', parentTaskId: null, createdAt: BigInt(Date.now()), updatedAt: BigInt(Date.now()), completedAt: null, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never;
-    const ask = { pendingId: 'q', workspaceId: 'w7', sessionId: 'main', runId: 'r', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
+    const ask = { pendingId: 'q', workspaceId: 'w7', sessionId: 'main', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
     fleetSnapshot.mockResolvedValue([
       ...Array.from({ length: 7 }, (_, i) => ({ ...workspace(`w${i}`, `W${i}`, i * 1000), tasks: [{ ...(running as object), id: `t${i}` }] as never })),
       { ...workspace('w7', 'W7', 7000), pendingAsks: [ask] },
@@ -703,7 +703,7 @@ describe('FleetPage', () => {
   });
 
   it('counts one waiting workspace as "1 needs you", and an unselected card never marks a workspace seen', async () => {
-    const ask = { pendingId: 'q', workspaceId: 'b', sessionId: 'main', runId: 'r', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
+    const ask = { pendingId: 'q', workspaceId: 'b', sessionId: 'main', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 4n };
     fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha'), { ...workspace('b', 'Beta'), pendingAsks: [ask] }]);
     renderFleet();
     await screen.findByRole('button', { name: 'Select Beta' });
@@ -724,7 +724,6 @@ describe('FleetPage', () => {
       pendingId,
       workspaceId: 'b',
       sessionId: 'session-b',
-      runId: 'run-b',
       question,
       options,
       multiSelect: false,

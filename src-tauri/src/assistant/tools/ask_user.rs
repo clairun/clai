@@ -106,12 +106,9 @@ pub struct PendingAsk {
     pub pending_id: String,
     pub workspace_id: String,
     pub session_id: String,
-    pub run_id: String,
     pub question: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub options: Option<Vec<AskUserOption>>,
     pub multi_select: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub extra_context: Option<String>,
     pub requested_at: i64,
 }
@@ -330,7 +327,6 @@ pub async fn execute(
         pending_id: pending_id.clone(),
         workspace_id: deps.workspace_id.clone(),
         session_id: session.id.clone(),
-        run_id: context.run_id.clone(),
         question,
         options: sanitize_options(params.options),
         multi_select: params.multi_select.unwrap_or(false),
@@ -494,7 +490,6 @@ mod tests {
             pending_id: pending_id.to_string(),
             workspace_id: workspace_id.to_string(),
             session_id: session_id.to_string(),
-            run_id: "run".to_string(),
             question: format!("question {pending_id}"),
             options: Some(vec![opt("Yes")]),
             multi_select: false,

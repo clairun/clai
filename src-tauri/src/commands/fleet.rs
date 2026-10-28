@@ -556,7 +556,6 @@ mod tests {
             pending_id: "fleet-ask".to_string(),
             workspace_id: WAITING.to_string(),
             session_id: "session".to_string(),
-            run_id: "run".to_string(),
             question: "?".to_string(),
             options: None,
             multi_select: false,
