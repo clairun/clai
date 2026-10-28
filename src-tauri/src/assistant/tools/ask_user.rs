@@ -257,7 +257,6 @@ impl Drop for PendingGuard {
             return;
         }
         self.cancel_token.cancel();
-        // Removed before `AskUserResolved` is emitted, not after the fields drop.
         forget(&self.id);
         let app = self.app.clone();
         let workspace_id = self.workspace_id.clone();
