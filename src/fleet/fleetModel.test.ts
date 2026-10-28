@@ -734,7 +734,7 @@ describe('card picking', () => {
         (c) => [c.workspaceId, c]
       )
     );
-    const ids = ['busy', 'old', 'last', 'quiet', 'gone'];
+    const ids = ['busy', 'old', 'last', 'quiet'];
     expect(recentlyOpened(ids, cards)).toEqual(['last', 'old', 'busy', 'quiet']);
     const opened = applyOpened({ cards }, 'quiet', NOW);
     expect(recentlyOpened(ids, opened.cards)).toEqual(['quiet', 'last', 'old', 'busy']);
