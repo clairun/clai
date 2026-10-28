@@ -151,7 +151,6 @@ export const shortTime = (at: number, now: number): string => {
     : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
 };
 
-
 const YOU: FleetSpeaker = { kind: 'you' };
 const MAIN: FleetSpeaker = { kind: 'main' };
 /** Main's words to you: a bubble that opens in place and grows while Main writes. */

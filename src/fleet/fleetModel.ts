@@ -102,6 +102,11 @@ export interface FleetCard {
   main: FleetMainRef | null;
 }
 
+export interface FleetAgentRef {
+  name: string;
+  seed: string;
+}
+
 /** What Main's face is drawn from (`mainIdentity`). */
 export interface FleetMainRef {
   id: string;
@@ -492,8 +497,3 @@ export const mainRunning = (card: FleetCard, live: FleetLive): boolean => {
   const taskRuns = new Set(workspaceTasks(card, live).map((t) => t.runId));
   return (live.runs[card.workspaceId] ?? []).some((id) => !taskRuns.has(id));
 };
-
-export interface FleetAgentRef {
-  name: string;
-  seed: string;
-}
