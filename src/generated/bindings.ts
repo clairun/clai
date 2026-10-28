@@ -195,8 +195,9 @@ tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest
  */
 lastAssistantMessage: FleetHighlight | null, 
 /**
- * The newest user and assistant messages with text across every
- * session, oldest first; tool rows and tool-only replies are left out.
+ * The newest user and assistant messages with text or an image across
+ * every session, oldest first; tool rows and tool-only replies are left
+ * out.
  */
 recentMessages: Array<FleetHighlight>, 
 /**
