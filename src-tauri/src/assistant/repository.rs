@@ -451,16 +451,18 @@ pub async fn list_messages_before(
     rows.iter().map(map_message_row).collect()
 }
 
-/// Rows with non-blank text or an image that no run in flight is still
+/// A content part with non-blank text, for `completed_filter`.
+const TEXT_PART: &str = "json_extract(part.value, '$.type') = 'text'
+    AND trim(json_extract(part.value, '$.text'), char(32, 9, 10, 13)) <> ''";
+
+/// Rows with a part matching `part` that no run in flight is still
 /// writing: an active run's text is partial. Expects the message table
 /// aliased `m`.
-fn completed_content_filter() -> String {
+fn completed_filter(part: &str) -> String {
     format!(
         r#"EXISTS (
               SELECT 1 FROM json_each(m.content_json) AS part
-              WHERE json_extract(part.value, '$.type') = 'image'
-                 OR (json_extract(part.value, '$.type') = 'text'
-                     AND trim(json_extract(part.value, '$.text'), char(32, 9, 10, 13)) <> '')
+              WHERE {part}
           )
           AND NOT EXISTS (
               SELECT 1 FROM assistant_runs AS r
@@ -486,7 +488,7 @@ pub async fn last_completed_assistant_text(
         ORDER BY created_at DESC, id DESC
         LIMIT 1
         "#,
-        completed_content_filter()
+        completed_filter(TEXT_PART)
     ))
     .bind(session_id)
     .fetch_optional(pool)
@@ -517,7 +519,9 @@ pub async fn recent_conversation_messages(
         ORDER BY created_at DESC, id DESC
         LIMIT ?
         "#,
-        completed_content_filter()
+        completed_filter(&format!(
+            "json_extract(part.value, '$.type') = 'image' OR ({TEXT_PART})"
+        ))
     ))
     .bind(limit)
     .fetch_all(pool)

@@ -889,7 +889,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn recent_messages_keep_an_image_only_message_and_its_references() {
+    async fn an_image_only_message_seeds_the_feed_not_the_last_reply() {
         let temp = tempfile::tempdir().expect("temp dir");
         let state = state_with(&[BUSY], &temp);
         let pool = state.workspace_db(BUSY).await.expect("db");
@@ -903,24 +903,35 @@ mod tests {
         .await
         .expect("session");
         let shot = vec![image("shot")];
+        let user = MessageOrigin::User;
+        row_at(&pool, &main.id, "user", shot.clone(), &user, (100, None)).await;
+        let reply = vec![ContentPart::Text {
+            text: "Nice.".into(),
+        }];
+        row_at(&pool, &main.id, "assistant", reply, &user, (101, None)).await;
         row_at(
             &pool,
             &main.id,
-            "user",
+            "assistant",
             shot.clone(),
-            &MessageOrigin::User,
-            (100, None),
+            &user,
+            (102, None),
         )
         .await;
 
         let snapshot = snapshot(&state, None, None).await.expect("snapshot");
         let recent = &snapshot[0].recent_messages;
-        assert_eq!(recent.len(), 1);
+        assert_eq!(recent.len(), 3);
         assert_eq!(
             serde_json::to_value(&recent[0].message.content).expect("content"),
             serde_json::to_value(&shot).expect("shot")
         );
         assert!(!recent[0].truncated);
+        let last = snapshot[0]
+            .last_assistant_message
+            .as_ref()
+            .expect("last reply");
+        assert_eq!(only_text(last), "Nice.");
     }
 
     #[tokio::test]
