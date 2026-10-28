@@ -55,8 +55,6 @@ export interface FleetLine {
   outcome: FleetOutcome | null;
   /** A task handed over and not ended yet: its agent is (or will be) working. */
   live: 'running' | 'queued' | null;
-  /** Main's words in a run still going: the bubble may grow. */
-  writing: boolean;
 }
 
 type FleetMood = 'working' | 'fresh' | 'idle' | 'stale';
@@ -167,9 +165,9 @@ const resultOf = (task: WorkspaceTaskResponse): string =>
   (task.status === 'failed' ? taskDisplayStatus(task).label : task.title);
 
 type LineParts = Pick<FleetLine, 'key' | 'at' | 'from' | 'to' | 'markdown'> &
-  Partial<Pick<FleetLine, 'images' | 'outcome' | 'live' | 'message' | 'writing'>>;
+  Partial<Pick<FleetLine, 'images' | 'outcome' | 'live' | 'message'>>;
 
-const line = ({ markdown, images = [], outcome = null, live = null, message = null, writing = false, ...said }: LineParts): FleetLine => ({
+const line = ({ markdown, images = [], outcome = null, live = null, message = null, ...said }: LineParts): FleetLine => ({
   ...said,
   text: plainText(markdown),
   markdown,
@@ -178,7 +176,6 @@ const line = ({ markdown, images = [], outcome = null, live = null, message = nu
   headline: firstSentence(markdown),
   outcome,
   live,
-  writing,
 });
 
 const messageOf = (said: FleetSaid): FleetLine['message'] => ({ sessionId: said.sessionId, id: said.id, truncated: said.truncated });
@@ -210,7 +207,7 @@ const stretches = (said: FleetSaid): Stretch[] =>
  * question is asked between them. A bubble is keyed by its first block, so
  * it keeps its key as it grows, and is timed by its last.
  */
-const speak = (items: readonly (FleetLine | Stretch)[], asked: readonly number[], running: ReadonlySet<string>): FleetLine[] => {
+const speak = (items: readonly (FleetLine | Stretch)[], asked: readonly number[]): FleetLine[] => {
   const lines: FleetLine[] = [];
   let bubble: Stretch[] = [];
   const close = () => {
@@ -218,8 +215,7 @@ const speak = (items: readonly (FleetLine | Stretch)[], asked: readonly number[]
     if (!first) return;
     const message = bubble.every((s) => s.message?.id === first.message?.id) ? first.message : null;
     const markdown = bubble.map((s) => s.markdown).join('\n\n');
-    const writing = first.run !== null && running.has(first.run);
-    lines.push(line({ key: first.key, at: bubble.at(-1)!.at, from: MAIN, to: YOU, markdown, message, writing }));
+    lines.push(line({ key: first.key, at: bubble.at(-1)!.at, from: MAIN, to: YOU, markdown, message }));
     bubble = [];
   };
   for (const item of items) {
@@ -284,7 +280,7 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
     }
   }
   lines.sort((a, b) => a.at - b.at);
-  const shown = speak(lines, card.asked, new Set(live.runs[card.workspaceId])).slice(-FEED_LIMIT);
+  const shown = speak(lines, card.asked).slice(-FEED_LIMIT);
 
   const working = tasks.filter((t) => isTaskLive(t.status)).length;
   const ended = [...shown].reverse().find((l) => l.outcome === 'done' || l.outcome === 'failed');

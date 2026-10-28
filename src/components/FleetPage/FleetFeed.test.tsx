@@ -52,13 +52,28 @@ const mainBubble = () => bubbleOf(/First, the leaks/);
 const words = () => mainBubble().querySelector<HTMLElement>('[data-bubble] > div')!;
 
 describe("Main's bubble", () => {
-  it('shows its newest lines while its run goes on, and its first once the run is done', () => {
-    const { rerender } = render(<Feed state={twoBlocks()} live={RUNNING} />);
-    expect(words()).toHaveAttribute('data-newest');
-    expect(words()).toHaveTextContent('First, the leaks.');
-    expect(words()).toHaveTextContent('After that, the fix.');
-    rerender(<Feed state={twoBlocks()} live={IDLE} />);
-    expect(words()).not.toHaveAttribute('data-newest');
+  it('shows its newest lines while it is the last bubble, run done or not, and its first once another follows', () => {
+    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(1000);
+    try {
+      const { rerender } = render(<Feed state={twoBlocks()} live={RUNNING} />);
+      expect(words()).toHaveAttribute('data-newest');
+      expect(words()).toHaveTextContent('First, the leaks.');
+      expect(words()).toHaveTextContent('After that, the fix.');
+      rerender(<Feed state={twoBlocks()} live={IDLE} />);
+      expect(words()).toHaveAttribute('data-newest');
+
+      const asked = applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW);
+      rerender(<Feed state={asked} now={NOW + 2000} />);
+      expect(words()).not.toHaveAttribute('data-newest');
+
+      const answered = applyAssistantEvent(asked, updated(message('m2', [text('Docs next.'), tool('c3')]), NOW + 1000));
+      rerender(<Feed state={answered} now={NOW + 2000} />);
+      const reply = bubbleOf(/Docs next/).querySelector('[data-bubble] > div');
+      expect(reply).toHaveAttribute('data-newest');
+      expect(words()).not.toHaveAttribute('data-newest');
+    } finally {
+      height.mockRestore();
+    }
   });
 
   it('opens in place on a click, keeps growing open, and closes on the next click; it never zooms', () => {

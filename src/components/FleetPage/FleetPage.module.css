@@ -562,7 +562,8 @@ button.crewButton {
   max-height: calc(var(--lines) * 1lh);
 }
 
-/* Still being written: its newest lines, following each block as it lands. */
+/* The card's newest: its last lines, following each block as it lands; at its
+ * full height the oldest lines leave at the top. */
 .speech[data-newest] {
   display: flex;
   flex-direction: column;

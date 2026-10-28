@@ -499,13 +499,6 @@ describe("Main's bubbles", () => {
     const s = apply(withMain(), updated(first, T), askEvent('q1', between), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, between + 1), updated(both, T + 10));
     expect(lines(s)).toEqual(['Main → You: Before.', 'Main → You: After.']);
   });
-
-  it('is still being written while its run goes on', () => {
-    const s = apply(withMain(), updated(first, T));
-    expect(bubbles(s, { runs: { [WS]: ['r1'] }, tasks: {} })[0]!.writing).toBe(true);
-    expect(bubbles(s, { runs: { [WS]: ['r2'] }, tasks: {} })[0]!.writing).toBe(false);
-    expect(bubbles(s)[0]!.writing).toBe(false);
-  });
 });
 
 describe('splitFeed', () => {

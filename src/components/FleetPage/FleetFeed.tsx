@@ -214,6 +214,7 @@ const Said = ({
   now,
   faces,
   open,
+  newest,
   expanded,
   onToggle,
 }: {
@@ -223,6 +224,8 @@ const Said = ({
   now: number;
   faces: Cast;
   open: Open;
+  /** The card's last bubble: Main's shows how it ends; once another follows, how it starts. */
+  newest: boolean;
   /** Main's bubble, open in place. */
   expanded: boolean;
   onToggle: (key: string) => void;
@@ -266,8 +269,7 @@ const Said = ({
         <div className={styles.bubble} data-bubble>
           <Tail />
           {speech ? (
-            // Still being written, it shows its newest lines; done, its first.
-            <div className={`${styles.bubbleText} ${styles.speech}`} data-newest={(line.writing && !expanded) || undefined} data-open={expanded || undefined}>
+            <div className={`${styles.bubbleText} ${styles.speech}`} data-newest={(newest && !expanded) || undefined} data-open={expanded || undefined}>
               <div>
                 <Stamp line={line} time={time} />
                 <div className={styles.speechText}>
@@ -324,7 +326,7 @@ interface Fit {
  */
 const useFit = (lines: readonly FleetLine[], expanded: string | null) => {
   const ref = useRef<HTMLDivElement | null>(null);
-  const signature = `${expanded}\n${lines.map((l) => `${l.key}|${l.live}|${l.outcome}|${l.writing}|${l.images.length}|${l.text}`).join('\n')}`;
+  const signature = `${expanded}\n${lines.map((l) => `${l.key}|${l.live}|${l.outcome}|${l.images.length}|${l.text}`).join('\n')}`;
   const [fit, setFit] = useState<Fit | null>(null);
   const fitRef = useRef(fit);
   const measuring = fit?.signature !== signature;
@@ -472,7 +474,7 @@ const FleetFeed = ({
             ))}
           </ul>
         )}
-        {bubbles.map((line) => (
+        {bubbles.map((line, i) => (
           <Said
             key={line.key}
             workspaceId={workspaceId}
@@ -481,6 +483,7 @@ const FleetFeed = ({
             now={now}
             faces={faces}
             open={open}
+            newest={i === bubbles.length - 1}
             expanded={openKey === line.key}
             onToggle={toggle}
           />
