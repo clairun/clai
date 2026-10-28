@@ -1,19 +1,10 @@
 /*
  * The Fleet. Static by design: on WebKitGTK any animation repaints the
  * whole window every frame, and even a short transition blinks, so nothing
- * here moves. Flat surfaces, no gradients, no backdrop-filter. Every card
+ * on the board animates; only the zoom, which is a portal outside `.page`,
+ * does. Flat surfaces, no gradients, no backdrop-filter. Every card
  * has the same border width; only the selected and working cards colour it.
  */
-
-/* Coloured small text on a card. The light theme's own green, amber, red
- * and indigo are under 4.5:1 on white, so it takes their darker steps. */
-.page {
-  --fleet-run-text: var(--color-primary);
-  --fleet-ok-text: var(--color-success);
-  --fleet-warn-text: var(--color-warning);
-  --fleet-bad-text: var(--color-critical-light);
-  --fleet-stale-fade: 0.62;
-}
 
 /* Bubbles in two neutrals, the user's and every agent's: the face says who speaks.
  * The zoom is outside the page, so it gets them too. */
@@ -33,6 +24,13 @@
 }
 
 .page {
+  /* Coloured small text on a card. The light theme's own green, amber, red
+   * and indigo are under 4.5:1 on white, so it takes their darker steps. */
+  --fleet-run-text: var(--color-primary);
+  --fleet-ok-text: var(--color-success);
+  --fleet-warn-text: var(--color-warning);
+  --fleet-bad-text: var(--color-critical-light);
+  --fleet-stale-fade: 0.62;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -110,7 +108,7 @@
   z-index: 2;
   padding: 6px 10px;
   border-radius: var(--radius-sm);
-  background: var(--color-critical-bg, rgba(248, 81, 73, 0.12));
+  background: var(--color-critical-bg);
   color: var(--color-critical);
   font-size: 12px;
 }
@@ -346,7 +344,7 @@ button.crewButton {
   padding: 0 2px;
   border: 1px solid var(--color-bg-elevated);
   border-radius: 7px;
-  background: var(--color-bg-tertiary, var(--color-bg-primary));
+  background: var(--color-bg-tertiary);
   color: var(--color-text-secondary);
   font-size: 8px;
   font-weight: 800;
@@ -355,28 +353,24 @@ button.crewButton {
 }
 
 .crewMember[data-status='running'] .crewSticker {
-  background: var(--ws-sticker, var(--color-primary));
-  color: var(--ws-sticker-ink, #0a0e14);
+  background: var(--ws-accent-text);
+  color: var(--ws-sticker-ink);
 }
 
 .crewMember[data-status='needs'] .crewSticker {
   background: var(--color-warning);
   /* Ink on amber: 6:1 in both themes. */
-  color: var(--fx-ink, #0a0e14);
+  color: var(--fx-ink);
   font-size: 10px;
 }
 
 .crewMember[data-status='done'] .crewSticker {
   background: var(--color-success);
-  color: var(--fx-ink, #0a0e14);
+  color: var(--fx-ink);
 }
 
 .crewSticker[data-level='half'] {
   opacity: 0.55;
-}
-
-.crewMember[data-status='idle'] .crewSticker {
-  color: var(--color-text-secondary);
 }
 
 .crewWords {
@@ -442,8 +436,8 @@ button.crewButton {
 }
 
 .caption[data-mood='working'] {
-  border-color: var(--ws-accent, var(--color-primary-alpha-40));
-  color: var(--ws-accent-text, var(--fleet-run-text));
+  border-color: var(--ws-accent);
+  color: var(--ws-accent-text);
 }
 
 .caption[data-mood='fresh'] {
@@ -554,7 +548,7 @@ button.crewButton {
 
 /* `--lines`: how many lines a bubble shows. */
 .bubbleText {
-  --lines: 3;
+  --lines: 2;
   display: -webkit-box;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: var(--lines);
@@ -666,7 +660,7 @@ button.crewButton {
 }
 
 .chartChip:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-border-focus);
   outline-offset: 1px;
 }
 
@@ -706,10 +700,6 @@ button.crewButton {
 /* Room above the face for the thought cloud of the agent a task went to. */
 .said[data-thinking] {
   padding-top: 16px;
-}
-
-.said .bubbleText {
-  --lines: 2;
 }
 
 /* The newest says more where the panel has room. */
@@ -752,10 +742,6 @@ button.crewButton {
 }
 
 /* The user's own words, on the right. */
-.fromYou .bubble {
-  --bubble-border: var(--fleet-you-bubble);
-}
-
 .fromYou {
   display: flex;
   flex-direction: column;
@@ -764,13 +750,10 @@ button.crewButton {
 }
 
 .fromYou .bubble {
+  --bubble-border: var(--fleet-you-bubble);
   max-width: 85%;
   font-size: 14px;
   line-height: 1.45;
-}
-
-.fromYou .bubbleText {
-  --lines: 2;
 }
 
 .nothing {
@@ -837,7 +820,7 @@ button.crewButton {
 
 .scene [role='button']:focus-visible,
 .rowButton:focus-visible {
-  outline: 2px solid var(--color-primary);
+  outline: 2px solid var(--color-border-focus);
   outline-offset: 2px;
 }
 
@@ -1030,9 +1013,10 @@ button.crewButton {
 
 /* ── A highlight zoomed out of its card ──────────────────────────────────
  * A page-level layer: the speaker's face stays put over the dimmed Fleet and
- * the bubble grows out of it (`FleetZoom` places it and sets its origin at
- * the tail's tip) with a slight overshoot, then shrinks back into it. */
+ * the bubble grows out of it (`FleetZoom` places it), then shrinks back into
+ * it. `--zoom-ms` is `CLOSE_MS` in `FleetZoom`; the two move together. */
 .zoomLayer {
+  --zoom-ms: 220ms;
   position: fixed;
   inset: 0;
   z-index: 1000;
@@ -1063,16 +1047,16 @@ button.crewButton {
   margin: 0;
   box-shadow: 0 8px 28px color-mix(in srgb, #000 22%, transparent);
   transition:
-    left 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    top 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    width 220ms cubic-bezier(0.2, 0.8, 0.2, 1),
-    height 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+    left var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1),
+    top var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1),
+    width var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1),
+    height var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1);
   cursor: zoom-out;
 }
 
 /* The tail moves inside the bubble as the bubble grows past it, so it stays on the face. */
 .zoomPanel > .tail {
-  transition: top 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  transition: top var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .zoomPanel:focus {
@@ -1108,6 +1092,7 @@ button.crewButton {
 
 @media (prefers-reduced-motion: reduce) {
   .zoomPanel,
+  .zoomPanel > .tail,
   .zoomScrim {
     transition: none;
   }

@@ -9,8 +9,11 @@ import {
   type ReactNode,
 } from 'react';
 import { createPortal } from 'react-dom';
+import AgentAvatar from '../Agents/AgentAvatar';
+import type { AgentIdentity } from '../Agents/agentIdentity';
 import styles from './FleetPage.module.css';
 
+/** The zoom's transition, `--zoom-ms` in the CSS; the two move together. */
 const CLOSE_MS = 220;
 
 const moves = () =>
@@ -32,7 +35,7 @@ export const Tail = ({ right = false }: { right?: boolean }) => (
   </svg>
 );
 
-export interface Box {
+interface Box {
   left: number;
   top: number;
   width: number;
@@ -148,21 +151,22 @@ const FOCUSABLE = 'a[href], button, input, textarea, select, [tabindex]:not([tab
  * A highlight zoomed out of its card, in a page-level layer over the dimmed
  * Fleet. It starts as the card bubble and grows (`zoomGeometry`) with its
  * tail on the speaker's face, which is drawn over the scrim where it is on
- * the card (`face`). The card bubble hides from opening until the zoom has
+ * the card (`faceIdentity`). The card bubble hides from opening until the zoom has
  * shrunk back, so only one bubble ever shows. Esc, a click outside or on the
  * bubble shrinks it back; focus returns to `origin`.
  */
 const FleetZoom = ({
   origin,
   start,
-  face,
+  faceIdentity,
   label,
   onClosed,
   children,
 }: {
   origin: HTMLElement;
   start: ZoomStart;
-  face?: ReactNode;
+  /** The speaker's face; none for the user. */
+  faceIdentity?: AgentIdentity | null;
   label: string;
   onClosed: () => void;
   children: ReactNode;
@@ -196,13 +200,9 @@ const FleetZoom = ({
     panel.dataset.phase = scrim.dataset.phase = 'from';
     place(panel, tail, start.rect, start.tailY - start.rect.top);
     void panel.offsetWidth;
-    if (moves()) {
-      delete panel.dataset.phase;
-      delete scrim.dataset.phase;
-    }
-    place(panel, tail, end, end.tailAt);
     delete panel.dataset.phase;
     delete scrim.dataset.phase;
+    place(panel, tail, end, end.tailAt);
     panel.focus({ preventScroll: true });
   }, [start]);
 
@@ -215,7 +215,6 @@ const FleetZoom = ({
       onClosed();
     };
     if (!moves()) return done();
-    panel.dataset.phase = 'closing';
     scrimRef.current!.dataset.phase = 'closing';
     place(panel, tailOf(panel), start.rect, start.tailY - start.rect.top);
     window.setTimeout(done, CLOSE_MS);
@@ -251,13 +250,13 @@ const FleetZoom = ({
   return createPortal(
     <div className={styles.zoomLayer}>
       <div ref={scrimRef} className={styles.zoomScrim} onClick={close} aria-hidden="true" />
-      {face && start.face && (
+      {faceIdentity && start.face && (
         <span
           className={styles.zoomFace}
           style={{ left: start.face.left, top: start.face.top, width: start.face.width, height: start.face.height }}
           aria-hidden="true"
         >
-          {face}
+          <AgentAvatar identity={faceIdentity} size={Math.round(start.face.width)} ring={false} />
         </span>
       )}
       <div

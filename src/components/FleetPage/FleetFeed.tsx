@@ -7,149 +7,43 @@ import {
   type CSSProperties,
   type KeyboardEvent,
   type MouseEvent,
-  type ReactNode,
 } from 'react';
 import { flushSync } from 'react-dom';
 import { getMessage } from '../../assistant/client';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import { useAppTheme } from '../../hooks/useAppTheme';
+import { faceOf, identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
 import {
-  faceOf,
-  identityRingColor,
-  type AgentActivity,
-  type AgentIdentity,
-} from '../Agents/agentIdentity';
-import {
-  captionText,
   fullMessageText,
   isSpeech,
   splitFeed,
   shortTime,
   shoutLevel,
-  type FleetCaption,
   type FleetFeed as Feed,
   type FleetLine,
   type FleetSpeaker,
 } from '../../fleet/fleetModel';
-import fx, { FaceExpression, Sfx, SpeedLines, type Expression } from './FleetEffects';
+import fx, { Sfx, SpeedLines, type Expression } from './FleetEffects';
 import AgentAvatar from '../Agents/AgentAvatar';
 import FleetMarkdown, { ChartOpen, MINIATURE } from './FleetMarkdown';
-import { MAIN_FACE, type Cast } from './FleetFace';
+import { Caption, MAIN_FACE, OutcomeIcon, ThoughtCloud, Who, type Cast } from './FleetFace';
 import FleetZoom, { Tail, zoomStart, type ZoomStart } from './FleetZoom';
 import styles from './FleetPage.module.css';
 
-type Faces = Cast;
-
-/** The caption box: when, worded against the page's clock. */
-export const Caption = ({ caption, mood, now }: { caption: FleetCaption; mood: string; now: number }) => (
-  <span className={styles.caption} data-mood={mood}>
-    {captionText(caption, now)}
-  </span>
-);
-
-/** A scalloped ellipse: eight arcs around the cloud's centre. */
-const CLOUD = (() => {
-  const points = Array.from({ length: 8 }, (_, i) => {
-    const a = (i / 8) * Math.PI * 2 + 0.3;
-    return [34 + Math.cos(a) * 29, 18 + Math.sin(a) * 13] as const;
-  });
-  let d = `M${points[0]![0].toFixed(1)} ${points[0]![1].toFixed(1)}`;
-  for (let i = 1; i <= 8; i++) {
-    const [x, y] = points[i % 8]!;
-    const [px, py] = points[i - 1]!;
-    const r = (Math.hypot(x - px, y - py) * 0.62).toFixed(1);
-    d += ` A${r} ${r} 0 0 1 ${x.toFixed(1)} ${y.toFixed(1)}`;
-  }
-  return `${d}Z`;
-})();
-
-const ThoughtCloud = ({ name }: { name: string }) => (
-  <svg className={styles.think} width="54" height="26" viewBox="0 0 96 40" role="img" aria-label={`${name} is working`}>
-    <path d={CLOUD} className={styles.thinkCloud} />
-    <circle cx="24" cy="18" r="3.2" className={styles.thinkDot} />
-    <circle cx="34" cy="18" r="3.2" className={styles.thinkDot} />
-    <circle cx="44" cy="18" r="3.2" className={styles.thinkDot} />
-    <circle cx="74" cy="27" r="4.2" className={styles.thinkCloud} />
-    <circle cx="86" cy="33" r="2.6" className={styles.thinkCloud} />
-  </svg>
-);
-
-export const Who = ({
-  identity,
-  name,
-  size,
-  activity = 'none',
-  label,
-  expression,
-  ghosts = false,
-  children,
-}: {
-  identity: AgentIdentity;
-  name: string;
-  size: number;
-  activity?: AgentActivity;
-  /** What the face is doing, for a tooltip. */
-  label?: string;
-  /** A reaction drawn over the face. */
-  expression?: Expression;
-  /** Afterimages: the face rushing in. */
-  ghosts?: boolean;
-  children?: ReactNode;
-}) => (
-  <figure className={styles.who} title={label}>
-    <span className={`${fx.actor} ${styles.face}`} style={{ width: size, height: size }} data-anchor>
-      {ghosts &&
-        [0, 1].map((i) => (
-          <span key={i} className={fx.ghost} aria-hidden="true">
-            <AgentAvatar identity={identity} size={size} activity={activity} ring={false} />
-          </span>
-        ))}
-      <AgentAvatar identity={identity} size={size} activity={activity} ring={false} />
-      {expression && <FaceExpression kind={expression} size={size} />}
-    </span>
-    {children}
-    <figcaption>{name}</figcaption>
-  </figure>
-);
-
-/** The effects drawn over an agent's line (speed lines, GO!, the tilted frame) take its colour; its bubble does not. */
+/** A row has no bubble to copy: the user's words still take the user's bubble. */
 const YOU_LOOK = { '--bubble-border': 'var(--fleet-you-bubble)' } as CSSProperties;
 
+/** The effects drawn over an agent's line (speed lines, GO!, the tilted frame) take its colour; its bubble does not. */
 const useAuthorColor = (author: AgentIdentity | null) => {
   const theme = useAppTheme();
   return author ? ({ '--agent-color': identityRingColor(author, theme) } as CSSProperties) : undefined;
 };
 
-/** A tick; with a `label` it is the only word for the outcome, so it says it. */
-const Check = ({ label }: { label?: string }) => (
-  <svg
-    width="11"
-    height="11"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="currentColor"
-    strokeWidth="3"
-    {...(label ? { role: 'img', 'aria-label': label } : { 'aria-hidden': true })}
-  >
-    <path d="M5 12.5l4.5 4.5L19 7" />
-  </svg>
-);
-
-const Cross = () => (
-  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden="true">
-    <path d="M6 6l12 12M18 6L6 18" />
-  </svg>
-);
-
-
 const nameOf = (s: FleetSpeaker): string => (s.kind === 'you' ? 'You' : s.kind === 'main' ? 'Main' : s.agent.name);
-const faceFor = (s: FleetSpeaker, faces: Faces): AgentIdentity | null =>
+const faceFor = (s: FleetSpeaker, faces: Cast): AgentIdentity | null =>
   s.kind === 'agent' ? faceOf(faces, s.agent.seed) : s.kind === 'main' ? faces[MAIN_FACE] : null;
 
-/**
- * `Main → Researcher`, with how a task ended or that it waits its turn. Main's
- * word to you names only Main: the face and the tail already say it's yours.
- */
+/** `Main → Researcher`. Main's word to you names only Main: the face and the tail already say it's yours. */
 const Route = ({ line }: { line: FleetLine }) => (
   <>
     <b>{nameOf(line.from)}</b>
@@ -159,44 +53,35 @@ const Route = ({ line }: { line: FleetLine }) => (
         <b>{nameOf(line.to)}</b>
       </>
     )}
-    {line.live === 'queued' && ' · next'}
   </>
 );
 
+/** How a task ended, or that it is working or waits its turn. */
+const statusOf = (line: FleetLine): 'failed' | 'stopped' | 'working' | 'next' | null =>
+  line.outcome === 'failed' || line.outcome === 'stopped'
+    ? line.outcome
+    : line.live === 'running'
+      ? 'working'
+      : line.live === 'queued'
+        ? 'next'
+        : null;
+
 type Open = (line: FleetLine, origin: HTMLElement) => void;
 
-/** A bubble zooms on a click, Enter or Space; the card under it is not selected. */
-const zoomable = (line: FleetLine, open: Open) => ({
+/** A bubble pressed by a click, Enter or Space; the card under it is not selected, and a link or button in it is its own. */
+const pressable = (onPress: (target: HTMLElement) => void) => ({
   role: 'button',
   tabIndex: 0,
-  'aria-haspopup': 'dialog' as const,
-  onClick: (e: MouseEvent<HTMLElement>) => {
-    e.stopPropagation();
-    open(line, e.currentTarget);
-  },
-  onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
-    if (e.key !== 'Enter' && e.key !== ' ') return;
-    e.preventDefault();
-    e.stopPropagation();
-    open(line, e.currentTarget);
-  },
-});
-
-/** Main's bubble opens in place on a click, Enter or Space, and closes the same way. */
-const expandable = (open: boolean, toggle: () => void) => ({
-  role: 'button',
-  tabIndex: 0,
-  'aria-expanded': open,
   onClick: (e: MouseEvent<HTMLElement>) => {
     e.stopPropagation();
     if (e.target instanceof Element && e.target.closest('a, button')) return;
-    toggle();
+    onPress(e.currentTarget);
   },
   onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
     if (e.key !== 'Enter' && e.key !== ' ') return;
     e.preventDefault();
     e.stopPropagation();
-    toggle();
+    onPress(e.currentTarget);
   },
 });
 
@@ -210,17 +95,10 @@ const fullTime = (at: number): string =>
  * the only names a bubble shows.
  */
 const Stamp = ({ line, time, route = false }: { line: FleetLine; time: string; route?: boolean }) => {
-  const status =
-    line.outcome === 'failed' || line.outcome === 'stopped'
-      ? line.outcome
-      : line.live === 'running'
-        ? 'working'
-        : line.live === 'queued'
-          ? 'next'
-          : null;
+  const status = statusOf(line);
   return (
     <span className={styles.stamp} data-outcome={line.outcome ?? undefined} data-live={line.live ?? undefined}>
-      {line.outcome === 'failed' ? <Cross /> : line.outcome === 'done' ? <Check /> : null}
+      <OutcomeIcon line={line} />
       {time}
       {route && line.to.kind !== 'you' && (
         <>
@@ -234,20 +112,23 @@ const Stamp = ({ line, time, route = false }: { line: FleetLine; time: string; r
   );
 };
 
-const Outcome = ({ line, time }: { line: FleetLine; time: string }) => (
-  <span className={styles.lineStatus} data-outcome={line.outcome ?? undefined} data-live={line.live ?? undefined}>
-    {line.outcome === 'failed' ? <Cross /> : line.outcome === 'done' ? <Check /> : null}
-    {line.outcome === 'failed' ? 'failed · ' : line.outcome === 'stopped' ? 'stopped · ' : line.live === 'running' ? 'working · ' : ''}
-    {time}
-  </span>
-);
+const Outcome = ({ line, time }: { line: FleetLine; time: string }) => {
+  const status = statusOf(line);
+  return (
+    <span className={styles.lineStatus} data-outcome={line.outcome ?? undefined} data-live={line.live ?? undefined}>
+      <OutcomeIcon line={line} />
+      {status && `${status} · `}
+      {time}
+    </span>
+  );
+};
 
 /** An older highlight, collapsed to one line. A task in flight is in the crew strip, thinking. */
-const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: Faces; open: Open }) => {
+const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: Cast; open: Open }) => {
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
   return (
-    <li className={styles.row} data-row>
+    <li className={styles.row}>
       <button
         type="button"
         className={styles.rowButton}
@@ -298,7 +179,7 @@ const Said = ({
   line: FleetLine;
   shout: boolean;
   now: number;
-  faces: Faces;
+  faces: Cast;
   open: Open;
   /** Main's bubble, open in place. */
   expanded: boolean;
@@ -312,7 +193,7 @@ const Said = ({
   if (!from) {
     // No faces: a word to Main goes without saying, one to a task names it.
     return (
-      <div className={styles.fromYou} data-row {...zoomable(line, open)}>
+      <div className={styles.fromYou} data-row aria-haspopup="dialog" {...pressable((target) => open(line, target))}>
         <div className={styles.bubble} data-bubble>
           <Tail right />
           <span className={styles.bubbleText} title={line.text}>
@@ -331,7 +212,9 @@ const Said = ({
       data-thinking={thinking || undefined}
       data-row
       style={style}
-      {...(speech ? expandable(expanded, () => onToggle(line.key)) : zoomable(line, open))}
+      {...(speech
+        ? { 'aria-expanded': expanded, ...pressable(() => onToggle(line.key)) }
+        : { 'aria-haspopup': 'dialog' as const, ...pressable((target) => open(line, target)) })}
     >
       {shout && thinking && <SpeedLines />}
       {shout && <Sfx word={thinking ? 'GO!' : 'DONE!'} tone={thinking ? 'go' : 'done'} level={shoutLevel(line.at, now)} />}
@@ -495,7 +378,7 @@ const FleetFeed = ({
   /** Keys of the lines that shout (`fleetLoudness`). */
   shouts: ReadonlySet<string>;
   now: number;
-  faces: Faces;
+  faces: Cast;
   onOpen: (workspaceId: string) => void;
 }) => {
   const [expanded, setExpanded] = useState<string | null>(null);
@@ -519,7 +402,6 @@ const FleetFeed = ({
       setZoom((z) => {
         if (z) return z;
         const start = zoomStart(origin);
-        // A row has no bubble to copy: the user's words still take the user's bubble.
         return faceFor(line.from, faces) ? { line, origin, start } : { line, origin, start: { ...start, look: { ...YOU_LOOK, ...start.look } } };
       }),
     [faces]
@@ -528,7 +410,6 @@ const FleetFeed = ({
   const split = feed.lines.length - count;
   const rows = feed.lines.slice(Math.max(0, split - rowCount), split);
   const bubbles = feed.lines.slice(split);
-  const zoomFace = zoom && faceFor(zoom.line.from, faces);
   return (
     <ChartOpen.Provider value={onChart}>
       <div ref={ref} className={styles.scene} data-mood={feed.mood} data-expanded={!!openKey || undefined}>
@@ -560,7 +441,7 @@ const FleetFeed = ({
           <FleetZoom
             origin={zoom.origin}
             start={zoom.start}
-            face={zoomFace && zoom.start.face && <AgentAvatar identity={zoomFace} size={Math.round(zoom.start.face.width)} ring={false} />}
+            faceIdentity={faceFor(zoom.line.from, faces)}
             label={`Message from ${nameOf(zoom.line.from)}`}
             onClosed={closed}
           >

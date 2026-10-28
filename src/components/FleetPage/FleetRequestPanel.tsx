@@ -9,8 +9,7 @@ import { ApprovalCard } from '../InlineApprovalCard';
 import { PathGrantCard } from '../InlinePathGrantCard';
 import type { FleetRequest, FleetRequestScene } from '../../fleet/fleetModel';
 import fx, { Sfx } from './FleetEffects';
-import { MAIN_FACE, type Cast } from './FleetFace';
-import { Caption, Who } from './FleetFeed';
+import { Caption, MAIN_FACE, Who, type Cast } from './FleetFace';
 import { Tail } from './FleetZoom';
 import styles from './FleetPage.module.css';
 

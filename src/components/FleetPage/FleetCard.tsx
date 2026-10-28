@@ -24,7 +24,7 @@ import styles from './FleetPage.module.css';
 
 const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
 
-export const attentionLabel = (a: FleetAttention): string =>
+const attentionLabel = (a: FleetAttention): string =>
   [
     a.asks ? plural(a.asks, 'question', 'questions') : '',
     a.approvals ? plural(a.approvals, 'approval', 'approvals') : '',
@@ -40,7 +40,7 @@ export const phaseLabel = (phase: FleetPhase, attention: FleetAttention): string
  * The header's phase. On the card that needs you it is also a skewed amber
  * sticker in two words; the full label stays for screen readers.
  */
-export const PhaseLabel = ({ phase, attention, sticker }: { phase: FleetPhase; attention: FleetAttention; sticker: string | null }) => {
+const PhaseLabel = ({ phase, attention, sticker }: { phase: FleetPhase; attention: FleetAttention; sticker: string | null }) => {
   const label = phaseLabel(phase, attention);
   return (
     <span className={styles.phase} data-phase={phase}>
@@ -66,7 +66,7 @@ export const PhaseLabel = ({ phase, attention, sticker }: { phase: FleetPhase; a
 };
 
 /** The sticker of a loud card that needs you, by what its first request asks. */
-export const stickerFor = (loud: FleetLoudness, request: FleetRequestScene | null): string | null =>
+const stickerFor = (loud: FleetLoudness, request: FleetRequestScene | null): string | null =>
   loud === 'needs' && request ? (request.request.kind === 'approval' ? 'Approve?' : 'Needs you') : null;
 
 interface FleetCardProps {

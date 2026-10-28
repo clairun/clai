@@ -1,6 +1,5 @@
-import { useCallback, useState, type CSSProperties, type MouseEvent } from 'react';
-import { useAppTheme } from '../../hooks/useAppTheme';
-import { faceOf, identityRingColor } from '../Agents/agentIdentity';
+import { useCallback, useState, type MouseEvent } from 'react';
+import { faceOf } from '../Agents/agentIdentity';
 import type { FleetCrew as Crew, FleetCrewMember, FleetCrewStatus } from '../../fleet/fleetModel';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { MAIN_FACE, type Cast } from './FleetFace';
@@ -51,16 +50,13 @@ interface Zoom {
  * the card. Quiet by design: no effects. A busy face zooms out to its task.
  */
 const FleetCrew = ({ crew, cast }: { crew: Crew; cast: Cast }) => {
-  const theme = useAppTheme();
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const closed = useCallback(() => setZoom(null), []);
   const faceFor = (m: FleetCrewMember) => (m.main ? cast[MAIN_FACE] : faceOf(cast, m.seed));
   const open = (member: FleetCrewMember) => (e: MouseEvent<HTMLButtonElement>) => {
     e.stopPropagation();
     const origin = e.currentTarget;
-    const start = zoomStart(origin);
-    const look = { ...start.look, '--agent-color': identityRingColor(faceFor(member), theme) } as CSSProperties;
-    setZoom((z) => z ?? { member, origin, start: { ...start, look } });
+    setZoom((z) => z ?? { member, origin, start: zoomStart(origin) });
   };
 
   return (
@@ -98,7 +94,7 @@ const FleetCrew = ({ crew, cast }: { crew: Crew; cast: Cast }) => {
         <FleetZoom
           origin={zoom.origin}
           start={zoom.start}
-          face={zoom.start.face && <AgentAvatar identity={faceFor(zoom.member)} size={Math.round(zoom.start.face.width)} ring={false} />}
+          faceIdentity={faceFor(zoom.member)}
           label={describe(zoom.member)}
           onClosed={closed}
         >

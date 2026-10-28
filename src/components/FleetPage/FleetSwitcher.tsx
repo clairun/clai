@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import AgentAvatar from '../Agents/AgentAvatar';
-import { GENERATOR_VERSION, type AgentIdentity } from '../Agents/agentIdentity';
+import { faceOf, type AgentIdentity } from '../Agents/agentIdentity';
 import {
   cardAttention,
   cardAgents,
@@ -100,9 +100,7 @@ const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: Flee
                 {agents.slice(0, 4).map((agent) => (
                   <AgentAvatar
                     key={agent.seed}
-                    identity={
-                      faces[agent.seed] ?? { seed: agent.seed, generatorVersion: GENERATOR_VERSION }
-                    }
+                    identity={faceOf(faces, agent.seed)}
                     size={20}
                     ring={false}
                     label={agent.name}
