@@ -326,13 +326,12 @@ describe('pictures in the feed', () => {
     expect(readsOf('retry')).toBe(2);
   });
 
-  it('keeps the 32 pictures shown last', async () => {
-    for (let n = 0; n < 32; n += 1) await shown(`kept-${n}`);
-    await shown('kept-0');
-    await shown('kept-32');
-    await shown('kept-0');
-    await shown('kept-1');
-    expect([readsOf('kept-0'), readsOf('kept-1')]).toEqual([1, 2]);
+  it('keeps the pictures shown last while they fit in 64 MiB, and reads an older one again', async () => {
+    // Each is 25 million characters: two fit, a third does not.
+    const big = 'A'.repeat(25_000_000);
+    vi.mocked(invoke).mockImplementation(async (cmd) => (cmd === 'workspace_read_file_base64' ? { path: '', mime: 'image/png', base64: big } : undefined));
+    for (const id of ['big-a', 'big-b', 'big-c', 'big-b', 'big-a']) await shown(id);
+    expect([readsOf('big-a'), readsOf('big-b'), readsOf('big-c')]).toEqual([2, 1, 1]);
   });
 
   it('zooms a bubble from its thumbnail, and keeps the zoom open when its line becomes a row', async () => {
