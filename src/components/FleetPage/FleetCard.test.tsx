@@ -12,7 +12,7 @@ const run = (status: AssistantRun['status'], error: string | null = null): Assis
 });
 const renderCard = (lastMainRun: AssistantRun | null) => render(
   <FleetCard card={{ ...base, lastMainRun }} feed={null} shouts={new Set()} live={live}
-    faces={{}} now={3} onSelect={() => {}} onOpen={() => {}} />
+    faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} />
 );
 
 describe('Fleet card run failure', () => {
@@ -27,10 +27,10 @@ describe('Fleet card run failure', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Provider unavailable');
     expect(screen.getByRole('alert')).not.toHaveAttribute('data-limit');
     view.rerender(<FleetCard card={{ ...base, lastMainRun: run('completed') }} feed={null} shouts={new Set()} live={live}
-      faces={{}} now={3} onSelect={() => {}} onOpen={() => {}} />);
+      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     view.rerender(<FleetCard card={{ ...base, lastMainRun: run('completed_with_warnings', 'One tool failed') }} feed={null} shouts={new Set()} live={live}
-      faces={{}} now={3} onSelect={() => {}} onOpen={() => {}} />);
+      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

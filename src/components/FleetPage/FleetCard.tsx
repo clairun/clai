@@ -78,13 +78,13 @@ interface FleetCardProps {
   /** The page's clock: the last Fleet event or the minute tick, whichever is later. */
   now: number;
   /** Drawn loud: it needs you, or a task on it just finished. */
-  loud?: FleetLoudness;
+  loud: FleetLoudness;
   onSelect: (workspaceId: string) => void;
   onOpen: (workspaceId: string) => void;
 }
 
 /** A miniature: the workspace's conversation as highlights, or its open request, answerable in place. */
-const FleetCard = ({ card, feed, shouts, live, faces, now, loud = null, onSelect, onOpen }: FleetCardProps) => {
+const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpen }: FleetCardProps) => {
   const cast = useMemo(() => castFor(faces, card.main), [faces, card.main]);
   const crew = useMemo(() => cardCrew(card, live, now), [card, live, now]);
   const phase = cardPhase(card, live);
