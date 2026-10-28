@@ -1,7 +1,7 @@
 import { memo, useEffect, useState } from 'react';
-import { createPortal } from 'react-dom';
 import type { ContentPart } from '../../generated/bindings';
 import { readWorkspaceFileBase64 } from '../../workspace/client';
+import ImageLightbox from '../Chat/ImageLightbox';
 import styles from './AssistantChat.module.css';
 
 export type ImagePart = Extract<ContentPart, { type: 'image' }>;
@@ -59,41 +59,6 @@ export const useImageSrc = (workspaceId: string, path: string): string | null | 
     };
   }, [workspaceId, path]);
   return src;
-};
-
-/**
- * Full-screen zoom overlay for a transcript image. Portals to <body> so it
- * escapes the virtualized list's transformed/overflow ancestors; closes on
- * Escape, backdrop click, or the × button. Reuses the already-loaded data URL
- * (no re-fetch). A click in it is its own: React would otherwise carry it,
- * through the portal, to whatever holds the thumbnail.
- */
-const ImageLightbox = ({ src, alt, onClose }: { src: string; alt: string; onClose: () => void }) => {
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [onClose]);
-
-  return createPortal(
-    <div
-      className={styles.imageLightboxBackdrop}
-      onClick={(event) => {
-        event.stopPropagation();
-        if (event.target === event.currentTarget) onClose();
-      }}
-      role="dialog"
-      aria-label={alt}
-    >
-      <img className={styles.imageLightboxImage} src={src} alt={alt} />
-      <button type="button" className={styles.imageLightboxClose} onClick={onClose} aria-label="Close">
-        ×
-      </button>
-    </div>,
-    document.body
-  );
 };
 
 /** A thumbnail of an image part that opens the lightbox. */

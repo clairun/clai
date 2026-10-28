@@ -18,6 +18,7 @@ import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
 import { restorePendingAsk } from '../assistant/pendingAsks';
 import { hydrateSession, useSessionChatActions } from '../assistant/sessionChat';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
+import { WorkspaceFileContext, type WorkspaceFileLocation } from '../components/Chat/WorkspaceFileContext';
 import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
 import { runFailure, type RunFailure } from '../assistant/runErrors';
 import { mainIdentity } from '../components/Agents/agentIdentity';
@@ -2049,11 +2050,36 @@ const Workspace = () => {
     },
     [memories]
   );
+  // Also opens files linked from chat, where no drawer may be open: the
+  // preview only shows under the memories/artifacts drawer, so open the one
+  // that owns the file unless one of them already is.
   const navigatePreviewFile = useCallback(
     (path: string) => {
-      patchWorkspaceUi({ previewEntry: previewEntryForPath(path), viewingTask: null });
+      const next = previewEntryForPath(path);
+      setUiByWorkspace((prev) => {
+        const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
+        const showsPreview = current.activePanel === 'memories' || current.activePanel === 'artifacts';
+        return {
+          ...prev,
+          [workspaceId]: {
+            ...current,
+            activePanel: showsPreview ? current.activePanel : next.kind === 'memory' ? 'memories' : 'artifacts',
+            previewEntry: next,
+            viewingTask: null,
+            previousTasks: EMPTY_TASKS,
+            crewPickerOpen: false,
+          },
+        };
+      });
     },
-    [previewEntryForPath, patchWorkspaceUi]
+    [previewEntryForPath, workspaceId]
+  );
+  // Lets markdown anywhere on the page (chat, task logs, previews) open
+  // workspace files and resolve absolute paths inside the workspace.
+  const rootPath = details?.rootPath ?? undefined;
+  const workspaceFiles = useMemo<WorkspaceFileLocation>(
+    () => ({ workspaceId, basePath: '', rootPath, openFile: navigatePreviewFile }),
+    [workspaceId, rootPath, navigatePreviewFile]
   );
 
   const messages = storeMessages || EMPTY_MESSAGES;
@@ -2337,7 +2363,7 @@ const Workspace = () => {
     ]
   );
 
-  return (
+  const page = (
     <div className={styles.workspacePage}>
       <WorkspaceHeader
         details={details}
@@ -2676,6 +2702,8 @@ const Workspace = () => {
       />
     </div>
   );
+
+  return <WorkspaceFileContext.Provider value={workspaceFiles}>{page}</WorkspaceFileContext.Provider>;
 };
 
 export default Workspace;

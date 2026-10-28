@@ -1,10 +1,11 @@
 import React, { memo, useMemo } from 'react';
 import ReactMarkdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import CodeBlock from './CodeBlock';
 import MermaidDiagram from './MermaidDiagram';
 import VegaChart, { isVegaLiteSpecPath } from './VegaChart';
+import WorkspaceImage from './WorkspaceImage';
+import { resolveWorkspaceHref, useWorkspaceFileLocation } from './WorkspaceFileContext';
 import { isWorkspaceRelativeHref } from '../../utils/htmlBundle';
 import styles from './MarkdownMessage.module.css';
 
@@ -19,27 +20,13 @@ interface MarkdownMessageProps {
   components?: Components;
 }
 
-// Memoized code block styles to prevent recreation
-const codeBlockStyle: React.CSSProperties = {
-  margin: '12px 0',
-  padding: '12px 16px',
-  background: 'rgba(0, 0, 0, 0.04)',
-  border: '1px solid rgba(0, 0, 0, 0.1)',
-  borderRadius: '6px',
-  fontSize: '14px',
-  lineHeight: '1.5',
-};
-
-const codeTagStyle: React.CSSProperties = {
-  fontFamily: "'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace",
-};
-
 // Memoized remark plugins array to prevent recreation
 const remarkPlugins = [remarkGfm];
 
 // `![title](charts/q3.vl.json)` embeds a Vega-Lite spec file as a live chart
-// (resolved relative to the enclosing document, see WorkspaceFileContext);
-// any other image renders as usual.
+// and `![shot](screens/1.png)` a workspace image, both resolved relative to
+// the enclosing document (see WorkspaceFileContext); `http(s):`/`data:`
+// images render as usual.
 const isVegaLiteSpecLink = (src: string | undefined): src is string =>
   !!src && isWorkspaceRelativeHref(src) && isVegaLiteSpecPath(src);
 
@@ -66,6 +53,32 @@ const containsChartLink = (node: HastNodeLike | undefined): boolean =>
       containsChartLink(child),
   );
 
+// A link to a workspace file opens it in the app's preview panel. It must
+// never reach the WebView, which would resolve it against the app origin.
+// Without an opener (no workspace UI around) it renders as plain text.
+const WorkspaceLink = ({ href, children }: { href: string; children: React.ReactNode }) => {
+  const location = useWorkspaceFileLocation();
+  const path = resolveWorkspaceHref(location, href);
+  const openFile = location?.openFile;
+  if (!openFile || !path) {
+    return <span title={href}>{children}</span>;
+  }
+  return (
+    <a
+      href={href}
+      className={styles.link}
+      title={path}
+      onClick={(event) => {
+        event.preventDefault();
+        openFile(path);
+      }}
+      onAuxClick={(event) => event.preventDefault()}
+    >
+      {children}
+    </a>
+  );
+};
+
 /**
  * MarkdownMessage Component
  *
@@ -87,13 +100,11 @@ const containsChartLink = (node: HastNodeLike | undefined): boolean =>
  */
 const useMarkdownComponents = (isStreaming: boolean, overrides?: Components): Components =>
   useMemo<Components>(() => ({
-    // Customize rendering of specific elements. react-markdown v10 dropped
-    // `inline` from the official code-renderer prop type, but still passes
-    // it at runtime; read it through a widened local type.
     code: ({ className, children, ...props }) => {
-      const { inline } = props as { inline?: boolean };
-      // More reliable check: inline code doesn't have className and children is simple text
-      const isInline = inline !== false && !className;
+      // react-markdown v10 no longer tells inline and block code apart. Block
+      // code (fenced or indented) always ends in a newline; inline code never
+      // does, since CommonMark turns its line endings into spaces.
+      const isInline = !className && !String(children).endsWith('\n');
       // `[\w-]+`: fence languages like `vega-lite` carry a hyphen.
       const match = /language-([\w-]+)/.exec(className || '');
       const language = match ? match[1] : '';
@@ -128,18 +139,7 @@ const useMarkdownComponents = (isStreaming: boolean, overrides?: Components): Co
         );
       }
 
-      // Code block with syntax highlighting
-      return (
-        <SyntaxHighlighter
-          language={language || 'text'}
-          style={oneLight}
-          customStyle={codeBlockStyle}
-          codeTagProps={{ style: codeTagStyle }}
-          PreTag="div"
-        >
-          {String(children).replace(/\n$/, '')}
-        </SyntaxHighlighter>
-      );
+      return <CodeBlock code={String(children).replace(/\n$/, '')} language={language} />;
     },
     p: ({ children, node }) =>
       containsChartLink(node) ? (
@@ -162,16 +162,22 @@ const useMarkdownComponents = (isStreaming: boolean, overrides?: Components): Co
       if (isVegaLiteSpecLink(source)) {
         return <VegaChart specPath={source} />;
       }
-      return <img src={source} alt={alt} title={title} />;
+      if (source && isWorkspaceRelativeHref(source)) {
+        return <WorkspaceImage path={source} alt={alt} title={title} />;
+      }
+      return <img className={styles.image} src={source} alt={alt} title={title} />;
     },
-    a: ({ href, children, node }) =>
-      containsChartLink(node) ? (
-        <>{children}</>
-      ) : (
+    a: ({ href, children, node }) => {
+      if (containsChartLink(node)) return <>{children}</>;
+      if (href && isWorkspaceRelativeHref(href)) {
+        return <WorkspaceLink href={href}>{children}</WorkspaceLink>;
+      }
+      return (
         <a href={href} className={styles.link} target="_blank" rel="noopener noreferrer">
           {children}
         </a>
-      ),
+      );
+    },
     table: ({ children }) => (
       <div className={styles.tableWrapper}>
         <table className={styles.table}>{children}</table>

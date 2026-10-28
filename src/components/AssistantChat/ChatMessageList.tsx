@@ -8,7 +8,7 @@
 import React, { useState, useCallback, useEffect, useMemo, memo } from 'react';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
-import { WorkspaceFileContext, type WorkspaceFileLocation } from '../Chat/WorkspaceFileContext';
+import { WorkspaceFileContext, useDocumentLocation } from '../Chat/WorkspaceFileContext';
 import VirtualizedList from '../common/VirtualizedList';
 import { isRunMarkerText } from '../../assistant/runMarker';
 import type { RunFailure } from '../../assistant/runErrors';
@@ -555,11 +555,9 @@ const ChatMessageList = ({
   }, [toolCalls]);
 
   // Lets markdown in messages resolve workspace-relative references (a
-  // `.vl.json` chart link, a spec's `data.url`) against the workspace root.
-  const fileLocation = useMemo<WorkspaceFileLocation>(
-    () => ({ workspaceId, basePath: '' }),
-    [workspaceId]
-  );
+  // `.vl.json` chart link, a spec's `data.url`, an image, a file link)
+  // against the workspace root.
+  const fileLocation = useDocumentLocation(workspaceId, '');
 
   // External scroll-to-bottom nudges (e.g. entering terminal mode shrinks the
   // conversation viewport). Folded into scrollToBottomSignal below with a wide
