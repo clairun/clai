@@ -40,7 +40,7 @@ import {
   cardCrew,
   firstWords,
   fullMessageText,
-  pickCards,
+  eligibleCards,
   recentlyOpened,
   seedFleet,
   type FleetCard,
@@ -206,9 +206,9 @@ describe('fleet reducer', () => {
     let s = applyRequest(EMPTY_FLEET, { kind: 'approval', request: approval('a1') }, 1);
     s = applyRequest(s, { kind: 'approval', request: approval('a2') }, 2);
     s = applyRequest(s, { kind: 'grant', request: approval('a1') }, 3);
-    expect(cardAttention(card(s))).toMatchObject({ approvals: 2, grants: 1, total: 3, since: 1 });
+    expect(cardAttention(card(s))).toMatchObject({ approvals: 2, grants: 1, total: 3 });
     s = applyRequestResolved(s, 'approval', 'a1');
-    expect(cardAttention(card(s))).toMatchObject({ approvals: 1, grants: 1, total: 2, since: 2 });
+    expect(cardAttention(card(s))).toMatchObject({ approvals: 1, grants: 1, total: 2 });
     expect(card(s).requests['approval:a1']).toBeUndefined();
     expect(applyRequestResolved(s, 'approval', 'a1')).toBe(s);
     s = apply(s, askEvent('q1', 4), env({ type: 'ask_user_resolved', payload: { pending_id: 'q1' } } as AssistantUiEvent, 5));
@@ -694,27 +694,18 @@ describe('card picking', () => {
         },
       },
     });
-  const pick = (cards: FleetCard[], selectedId: string | null = null, prevOrder: string[] = [], live = NO_LIVE) =>
-    pickCards(cards, { now: NOW, selectedId, prevOrder, live });
+  const pick = (cards: FleetCard[], selectedId: string | null = null, live = NO_LIVE) =>
+    eligibleCards(cards, { now: NOW, selectedId, live });
 
   it('never shows old idle workspaces, but always shows live and selected ones', () => {
     const old = NOW - RECENT_WINDOW_MS - 1;
     const cards = [mk('recent', NOW - 1000), mk('old', old), mk('old-but-running', old), waitingCard('old-waiting', old), mk('old-selected', old)];
-    const picked = pick(cards, 'old-selected', [], { runs: { 'old-but-running': ['r'] }, tasks: {} });
+    const picked = pick(cards, 'old-selected', { runs: { 'old-but-running': ['r'] }, tasks: {} });
     expect([...picked].sort()).toEqual(['old-but-running', 'old-selected', 'old-waiting', 'recent']);
   });
 
-  it('shows every eligible card: waiting ones first, oldest first, then the most recent', () => {
+  it('shows every eligible card', () => {
     expect(pick(Array.from({ length: 12 }, (_, i) => mk(`c${i}`, NOW - i)))).toHaveLength(12);
-    expect(pick([mk('a', NOW - 3), waitingCard('w2', NOW - 1), mk('b', NOW - 1), waitingCard('w1', NOW - 9)])).toEqual(['w1', 'w2', 'b', 'a']);
-  });
-
-  it('moves nothing on select or deselect; newcomers follow, and a leaving card leaves no gap', () => {
-    const cards = [mk('s', NOW - 1), mk('a', NOW - 2), mk('b', NOW - 3)];
-    const prev = ['s', 'a', 'b'];
-    expect(pick(cards, 'b', prev)).toEqual(prev);
-    expect(pick(cards, null, prev)).toEqual(prev);
-    expect(pick([mk('a', NOW - 1), mk('b', NOW - 3), mk('new', NOW)], null, prev)).toEqual(['a', 'b', 'new']);
   });
 
   it('lays at most six cards 3 × 2; fewer grow, but never past half the width', () => {

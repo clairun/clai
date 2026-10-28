@@ -405,7 +405,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
     const last = ws.lastAssistantMessage;
     const seen = last && ws.recentMessages.some((h) => h.message.id === last.message.id);
     const seed = (last && !seen ? [...ws.recentMessages, last] : ws.recentMessages).map(seedSaid);
-    // Approvals and grants carry no timestamp; the workspace's activity orders them among waiting cards.
+    // Approvals and grants carry no timestamp; the workspace's activity stands in.
     const requests: Record<string, FleetRequest> = {};
     for (const a of ws.pendingAsks) requests[requestKey('ask', a.pendingId)] = askRequest(a, Number(a.requestedAt));
     for (const r of ws.pendingPermissions) requests[requestKey('approval', r.requestId)] = toRequest({ kind: 'approval', request: r }, activity);
@@ -441,8 +441,6 @@ export interface FleetAttention {
   approvals: number;
   grants: number;
   total: number;
-  /** When the oldest open item appeared; orders waiting cards. */
-  since: number | null;
 }
 
 /** The card's open requests, oldest first: the order they are answered in. */
@@ -457,7 +455,6 @@ export const cardAttention = (card: FleetCard): FleetAttention => {
     approvals: count('approval'),
     grants: count('grant'),
     total: open.length,
-    since: open.length ? Math.min(...open.map((r) => r.at)) : null,
   };
 };
 
@@ -1005,36 +1002,24 @@ export const cardCrew = (card: FleetCard, live: FleetLive, now: number): FleetCr
 };
 
 
-// ── Which cards, in which order ─────────────────────────────────────────
+// ── Which cards ─────────────────────────────────────────────────────────
 
 /**
- * The cards, in order. Eligible: the selected card, anything live, and
- * workspaces active within `RECENT_WINDOW_MS`. Cards already shown keep
- * their place (`prevOrder`); newcomers follow, waiting ones first (oldest
- * first), then the most recent. Selecting a card moves nothing: it is only
- * highlighted.
+ * The cards the Fleet shows: the selected card, anything live, and
+ * workspaces active within `RECENT_WINDOW_MS`. Their order is the board's
+ * (`boardSlots`) and the switcher's (`recentlyOpened`).
  */
-export const pickCards = (
+export const eligibleCards = (
   cards: readonly FleetCard[],
-  options: { now: number; selectedId: string | null; prevOrder: readonly string[]; live: FleetLive }
+  options: { now: number; selectedId: string | null; live: FleetLive }
 ): string[] => {
-  const { now, selectedId, prevOrder, live } = options;
-  const meta = cards
-    .map((card) => ({ id: card.workspaceId, card, phase: cardPhase(card, live), since: cardAttention(card).since ?? 0 }))
+  const { now, selectedId, live } = options;
+  return cards
     .filter(
-      (m) => m.id === selectedId || m.phase !== 'stopped' || m.card.lastActivityAt >= now - RECENT_WINDOW_MS
-    );
-  const rank = (m: (typeof meta)[number]): [number, number] =>
-    m.phase === 'waiting' ? [0, m.since] : [1, -m.card.lastActivityAt];
-  const chosen = meta.sort((a, b) => {
-    const [ra, ka] = rank(a);
-    const [rb, kb] = rank(b);
-    return ra - rb || ka - kb;
-  });
-  const ids = new Set(chosen.map((m) => m.id));
-  const order = prevOrder.filter((id) => ids.has(id));
-  order.push(...chosen.filter((m) => !order.includes(m.id)).map((m) => m.id));
-  return order;
+      (card) =>
+        card.workspaceId === selectedId || cardPhase(card, live) !== 'stopped' || card.lastActivityAt >= now - RECENT_WINDOW_MS
+    )
+    .map((card) => card.workspaceId);
 };
 
 export const cycleCard = (order: readonly string[], selectedId: string | null, step: 1 | -1): string | null => {

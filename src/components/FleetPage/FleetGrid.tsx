@@ -58,8 +58,8 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
   const gridRef = useRef<HTMLDivElement | null>(null);
   const theme = useAppTheme();
   const shape = boardShape(order.length);
-  // The previous slots, so cards on the board keep them (derived state, as
-  // FleetPage keeps its order; the slots are a fixed point of themselves).
+  // The previous slots, so cards on the board keep them (derived state;
+  // the slots are a fixed point of themselves).
   const [slots, setSlots] = useState<string[]>([]);
   const capacity = shape.cols * shape.rows;
   const board = useMemo(

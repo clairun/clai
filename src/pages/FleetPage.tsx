@@ -10,7 +10,7 @@ import {
   RECENT_WINDOW_MS,
   cardPhase,
   mainRunning,
-  pickCards,
+  eligibleCards,
   recentlyOpened,
   type FleetLive,
 } from '../fleet/fleetModel';
@@ -71,15 +71,10 @@ const FleetPage = () => {
     return () => window.removeEventListener('focus', load);
   }, []);
 
-  // The previous order, so cards already on screen keep their slots.
-  // Updated during render (React's derived-state pattern); picking is a
-  // fixed point of its own order, so this settles in one extra pass.
-  const [order, setOrder] = useState<string[]>([]);
   const placed = useMemo(
-    () => pickCards(Object.values(cards), { now, selectedId, prevOrder: order, live }),
-    [cards, now, selectedId, order, live]
+    () => eligibleCards(Object.values(cards), { now, selectedId, live }),
+    [cards, now, selectedId, live]
   );
-  if (placed.join(',') !== order.join(',')) setOrder(placed);
 
   // Escape deselects, unless something else used it first (the switcher,
   // the terminal clearing its output, or an open dialog). Agent questions
