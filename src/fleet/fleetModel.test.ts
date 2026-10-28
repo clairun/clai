@@ -670,6 +670,16 @@ describe('snapshot', () => {
     ]);
   });
 
+  it('takes the last reply whole over its cut copy among the recent messages, so its bubble ends as it does', () => {
+    const s = seedFleet(EMPTY_FLEET, [
+      snapshotOf({
+        recentMessages: [highlight(message('a1', 'assistant', 'All do'), NOW - 20, null, true)],
+        lastAssistantMessage: highlight(message('a1', 'assistant', 'All done. Ship it.'), NOW - 20),
+      }),
+    ]);
+    expect(feedOf(s).lines.map((l) => [l.markdown, l.message?.truncated])).toEqual([['All done. Ship it.', false]]);
+  });
+
   it('seeds the last reply alone when the recent messages miss it', () => {
     const last = highlight(message('p', 'assistant', 'from snapshot'), 5);
     const s = seedFleet(EMPTY_FLEET, [snapshotOf({ lastAssistantMessage: last })]);

@@ -153,8 +153,8 @@ export type FilesystemPathGrant = { path: string, access: FilesystemPathAccess,
 origin?: GrantOrigin | null, };
 
 /**
- * A message of the workspace's conversation, cut to a preview, with the
- * run that wrote it.
+ * A message of the workspace's conversation, its text cut to a budget,
+ * with the run that wrote it.
  */
 export type FleetHighlight = { message: AssistantMessage, runId: string | null, 
 /**
@@ -191,7 +191,8 @@ activeRunIds: Array<string>,
  */
 tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingAsks: Array<PendingAsk>, 
 /**
- * The main session's newest assistant reply with text.
+ * The main session's newest assistant reply with text, its text whole:
+ * the Fleet's newest bubble shows how it ends.
  */
 lastAssistantMessage: FleetHighlight | null, 
 /**

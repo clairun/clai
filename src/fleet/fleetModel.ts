@@ -408,9 +408,9 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
   for (const ws of snapshot) {
     const card = state.cards[ws.workspaceId] ?? emptyCard(ws.workspaceId);
     const activity = Number(ws.lastActivityAt);
+    // Main's last reply comes whole: it replaces its cut copy among the recent messages.
     const last = ws.lastAssistantMessage;
-    const seen = last && ws.recentMessages.some((h) => h.message.id === last.message.id);
-    const seed = (last && !seen ? [...ws.recentMessages, last] : ws.recentMessages).map(seedSaid);
+    const seed = (last ? [...ws.recentMessages.filter((h) => h.message.id !== last.message.id), last] : ws.recentMessages).map(seedSaid);
     // Approvals and grants carry no timestamp; the workspace's activity stands in.
     const requests: Record<string, FleetRequest> = {};
     for (const a of ws.pendingAsks) requests[requestKey('ask', a.pendingId)] = askRequest(a, Number(a.requestedAt));
