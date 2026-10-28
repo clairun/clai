@@ -71,18 +71,18 @@ type Open = (line: FleetLine, origin: HTMLElement) => void;
 
 /** A bubble pressed by a click, Enter or Space; the card under it is not selected, and a link or button in it is its own. */
 const pressable = (onPress: (target: HTMLElement) => void) => {
-  const pressesBubble = (e: SyntheticEvent<HTMLElement>) => {
-    e.stopPropagation();
-    return !(e.target instanceof Element && e.target.closest('a, button'));
-  };
+  const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest('a, button') !== null;
   return {
     role: 'button',
     tabIndex: 0,
     onClick: (e: MouseEvent<HTMLElement>) => {
-      if (pressesBubble(e)) onPress(e.currentTarget);
+      e.stopPropagation();
+      if (!ownedInside(e)) onPress(e.currentTarget);
     },
     onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
-      if ((e.key !== 'Enter' && e.key !== ' ') || !pressesBubble(e)) return;
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      e.stopPropagation();
+      if (ownedInside(e)) return;
       e.preventDefault();
       onPress(e.currentTarget);
     },
