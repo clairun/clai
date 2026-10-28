@@ -24,7 +24,7 @@ import styles from './FleetPage.module.css';
 const PHASE_BORDER: Partial<Record<FleetPhase, string>> = { working: styles.cardWorking, waiting: styles.cardWaiting };
 
 interface FleetGridProps {
-  /** Card ids in order. */
+  /** Card ids in order, each one in `cards` (`eligibleCards`). */
   order: string[];
   cards: Record<string, FleetCardModel>;
   selectedId: string | null;
@@ -68,15 +68,14 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
   if (board.visible.join(',') !== slots.join(',')) setSlots(board.visible);
   const { visible } = board;
   const more = hiddenActivity(board.hidden);
-  useThoughtBeat(gridRef, visible.some((id) => cards[id] && cardPhase(cards[id], live) === 'working'));
+  useThoughtBeat(gridRef, visible.some((id) => cardPhase(cards[id]!, live) === 'working'));
   // Each card's feed, once. A card with an open request shows that instead.
   const panels = useMemo(
     () =>
-      visible.flatMap((id) => {
-        const card = cards[id];
-        if (!card) return [];
+      visible.map((id) => {
+        const card = cards[id]!;
         const feed = openRequests(card).length > 0 ? null : cardFeed(card, live, now);
-        return [{ card, feed, selected: id === selectedId, hue: workspaceHue(id) }];
+        return { card, feed, selected: id === selectedId, hue: workspaceHue(id) };
       }),
     [visible, cards, live, now, selectedId]
   );

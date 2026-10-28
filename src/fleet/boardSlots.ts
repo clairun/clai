@@ -20,8 +20,7 @@ export const boardSlots = (
   options: { live: FleetLive; selectedId: string | null; prev: readonly string[]; capacity: number }
 ): BoardSlots => {
   const { live, selectedId, prev, capacity } = options;
-  const ids = order.filter((id) => cards[id]);
-  const phase = new Map(ids.map((id) => [id, cardPhase(cards[id]!, live)]));
+  const phase = new Map(order.map((id) => [id, cardPhase(cards[id]!, live)]));
   const rank = (id: string) => (id === selectedId ? 0 : { waiting: 1, working: 2, stopped: 3 }[phase.get(id)!]);
   // Most pressing first.
   const byPressing = (a: string, b: string) => rank(a) - rank(b) || cards[b]!.lastActivityAt - cards[a]!.lastActivityAt;
@@ -29,7 +28,7 @@ export const boardSlots = (
 
   let visible = prev.filter((id) => phase.has(id));
   while (visible.length > capacity) visible = visible.filter((id) => id !== least(visible));
-  const off = ids.filter((id) => !visible.includes(id)).sort(byPressing);
+  const off = order.filter((id) => !visible.includes(id)).sort(byPressing);
   while (visible.length < capacity && off.length > 0) visible.push(off.shift()!);
   while (off.length > 0 && visible.length > 0) {
     const low = least(visible);
@@ -79,13 +78,11 @@ export const eligibleCards = (
  * reshuffle while agents work; never opened, or a tie, by latest activity.
  */
 export const recentlyOpened = (ids: readonly string[], cards: Record<string, FleetCard>): string[] =>
-  ids
-    .filter((id) => cards[id])
-    .sort((a, b) => {
-      const ca = cards[a]!;
-      const cb = cards[b]!;
-      return cb.lastOpenedAt - ca.lastOpenedAt || cb.lastActivityAt - ca.lastActivityAt;
-    });
+  [...ids].sort((a, b) => {
+    const ca = cards[a]!;
+    const cb = cards[b]!;
+    return cb.lastOpenedAt - ca.lastOpenedAt || cb.lastActivityAt - ca.lastActivityAt;
+  });
 
 /** The grid: columns and rows; the board never scrolls (`boardSlots`). */
 interface BoardShape {
