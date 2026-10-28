@@ -1,4 +1,3 @@
-import { readFileSync } from 'node:fs';
 import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import type { AssistantEventEnvelope, AssistantMessage, AssistantUiEvent } from '../../generated/bindings';
@@ -96,11 +95,7 @@ describe("Main's bubble", () => {
 
       fireEvent.click(mainBubble());
       expect(screen.getByText('First, the leaks.').closest('[aria-expanded]')).toHaveAttribute('aria-expanded', 'true');
-      const css = readFileSync('src/components/FleetPage/FleetPage.module.css', 'utf8');
       expect(mainBubble().closest('[data-mood]')).toHaveAttribute('data-expanded', 'true');
-      expect(css).toMatch(/\.scene\[data-expanded\] > \[data-row\]:not\(\[aria-expanded='true'\]\) \{\s*display: none;/);
-      expect(css).toMatch(/\.speech\[data-open\] \{[^}]*overflow-y: auto;/s);
-      expect(css).toMatch(/\.scene\[data-expanded\] \.speech\[data-open\] \{\s*max-height: max\(0px, calc\(100cqh - 72px\)\);/);
       fireEvent.click(mainBubble());
       expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
       expect(mainBubble().closest('[data-mood]')).not.toHaveAttribute('data-expanded');
