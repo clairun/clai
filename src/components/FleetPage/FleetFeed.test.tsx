@@ -224,6 +224,28 @@ const scrolling = (tall: () => number, { reduce = false } = {}) => {
   };
 };
 
+describe("a bubble's time", () => {
+  const DAY_MS = 86_400_000;
+  const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  const stampOf = (bubble: HTMLElement) => bubble.querySelector<HTMLElement>('[data-bubble] [class*=stamp]')!;
+
+  it('shows when its message was said, on the frame, outside the words that scroll', () => {
+    render(<Feed state={saying('Shipped.')} />);
+    const stamp = stampOf(bubbleOf(/Shipped/));
+    expect(stamp).toHaveTextContent(new RegExp(`^${clock(NOW - 1000)}$`));
+    expect(stamp.closest('[class*=bubbleText]')).toBeNull();
+    expect(bubbleOf(/Shipped/).querySelector('[class*=bubbleText]')).not.toContainElement(stamp);
+  });
+
+  it('adds the date to a message from an earlier day', () => {
+    const at = NOW - 2 * DAY_MS;
+    render(<Feed state={fleet(updated(message('m1', [text('Old news.'), tool('c1')]), at))} />);
+    const stamp = stampOf(bubbleOf(/Old news/));
+    expect(stamp).toHaveTextContent(new Date(at).toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    expect(stamp).toHaveTextContent(clock(at));
+  });
+});
+
 describe('a bubble, scrolling', () => {
   const writing = (...more: string[]) => <Feed state={twoBlocks(['After that, the fix.', ...more].join(' '))} live={RUNNING} />;
 
@@ -605,7 +627,7 @@ describe('a task in the feed', () => {
 
   it('says a queued task is next', () => {
     render(<Feed state={saying('First, the leaks.')} live={{ runs: {}, tasks: { [WS]: { t1: queued } } }} />);
-    expect(bubbleOf(/Draft the release notes/)).toHaveTextContent(/· next ·/);
+    expect(bubbleOf(/Draft the release notes/)).toHaveTextContent(/· next/);
   });
 });
 

@@ -103,14 +103,10 @@ const pressable = (onPress: (target: HTMLElement) => void) => {
   };
 };
 
-/** A date and time, for the zoomed message. */
-const fullTime = (at: number): string =>
-  new Date(at).toLocaleString([], { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' });
-
 /**
- * A bubble's first words, small: when, how a task ended or that it waits its
+ * On a bubble's frame, small: when, how a task ended or that it waits its
  * turn, and whom it is for when no face there says so. The faces' names are
- * the only names a bubble shows.
+ * the only names a bubble shows. It stays put while the words scroll.
  */
 const Stamp = ({ line, time, route = false }: { line: FleetLine; time: string; route?: boolean }) => {
   const status = statusOf(line);
@@ -125,7 +121,6 @@ const Stamp = ({ line, time, route = false }: { line: FleetLine; time: string; r
         </>
       )}
       {status && ` · ${status}`}
-      {' · '}
     </span>
   );
 };
@@ -234,12 +229,10 @@ const Words = ({ workspaceId, line, now, route, newest }: { workspaceId: string;
   useWheelLines(scroller, true);
   return (
     <>
+      <Stamp line={line} time={shortTime(line.at, now)} route={route} />
       <div ref={scroller} className={styles.bubbleText}>
-        <div>
-          <Stamp line={line} time={shortTime(line.at, now)} route={route} />
-          <div className={styles.speechText}>
-            <FleetMarkdown content={line.markdown} />
-          </div>
+        <div className={styles.speechText}>
+          <FleetMarkdown content={line.markdown} />
         </div>
       </div>
       <Thumbs workspaceId={workspaceId} images={line.images} />
@@ -378,12 +371,12 @@ const useFit = (lines: readonly FleetLine[]) => {
 };
 
 /** The zoomed highlight: who said it to whom and when, then the whole message as markdown and its pictures; charts as its bubble draws them. */
-const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine }) => {
+const Zoomed = ({ workspaceId, line, now }: { workspaceId: string; line: FleetLine; now: number }) => {
   useWhole(workspaceId, line);
   return (
     <div className={styles.zoomText}>
       <p className={styles.zoomStamp}>
-        <Route line={line} /> · <Outcome line={line} time={fullTime(line.at)} />
+        <Route line={line} /> · <Outcome line={line} time={shortTime(line.at, now)} />
       </p>
       <MarkdownMessage content={line.markdown} components={MINIATURE} />
       {line.images.map((part) => (
@@ -475,7 +468,7 @@ const FleetFeed = ({
             label={`Message from ${nameOf(zoomed.line.from)}`}
             onClosed={closed}
           >
-            <Zoomed workspaceId={workspaceId} line={zoomed.line} />
+            <Zoomed workspaceId={workspaceId} line={zoomed.line} now={now} />
           </FleetZoom>
         )}
       </div>

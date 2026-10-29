@@ -146,12 +146,11 @@ export const captionText = (caption: FleetCaption, clock: number): string => {
   }
 };
 
-/** `14:05` on `now`'s day, `Oct 16` before. */
+/** When a line was said: `14:05` on `now`'s day, `Oct 16, 14:05` before. */
 export const shortTime = (at: number, now: number): string => {
   const date = new Date(at);
-  return date.toDateString() === new Date(now).toDateString()
-    ? date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-    : date.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  const today = date.toDateString() === new Date(now).toDateString();
+  return date.toLocaleString([], { ...(today ? {} : { month: 'short', day: 'numeric' }), hour: '2-digit', minute: '2-digit' });
 };
 
 const YOU: FleetSpeaker = { kind: 'you' };

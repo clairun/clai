@@ -567,15 +567,6 @@ button.crewButton {
   border-radius: var(--radius-full);
 }
 
-/* The time leads the first line: a first paragraph or heading runs on after it. */
-.speechText {
-  display: contents;
-}
-
-.speechText > :is(p, h1, h2, h3, h4, h5, h6):first-child {
-  display: inline;
-}
-
 /* Every block on the bubble's line grid, so the clip falls between lines. */
 .speechText :is(p, ul, ol, li, blockquote, pre, div, h1, h2, h3, h4, h5, h6) {
   margin: 0;
@@ -646,11 +637,28 @@ button.crewButton {
   outline-offset: 1px;
 }
 
+/* On the bubble's top frame, in the padding: no line of its own, and still there as the words scroll. */
 .stamp {
+  position: absolute;
+  top: -8px;
+  left: 14px;
+  max-width: calc(100% - 28px);
+  padding: 0 4px;
+  /* The card above the frame's centre, the bubble below it. */
+  background: linear-gradient(var(--color-bg-elevated) 7px, var(--color-bg-primary) 7px);
   font-size: 12px;
   font-weight: 500;
+  line-height: 14px;
   color: var(--color-text-past);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.fromYou .stamp {
+  left: auto;
+  right: 14px;
 }
 
 .stamp b {
@@ -672,6 +680,12 @@ button.crewButton {
   gap: 16px;
   padding: 6px 4px 2px;
   border-radius: var(--radius-md);
+}
+
+/* Room on the frame for a date and time (`.stamp`), however short the words, within a narrow card. */
+.said .bubble,
+.fromYou .bubble {
+  min-width: min(120px, 100%);
 }
 
 .said .bubble {

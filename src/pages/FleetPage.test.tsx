@@ -324,7 +324,7 @@ describe('FleetPage', () => {
     // Each bubble starts with its time; no line under it. Main is named once,
     // under its face; your word to Main needs no label at all.
     const now = Date.now();
-    expect(bubbles.map(stamp)).toEqual([30, 20, 10].map((min) => `${shortTime(now - min * 60_000, now)} · `));
+    expect(bubbles.map(stamp)).toEqual([30, 20, 10].map((min) => shortTime(now - min * 60_000, now)));
     expect(card.queryByText('you')).not.toBeInTheDocument();
     expect(bubbles[0]!.textContent!.match(/Main/g)).toHaveLength(1);
     expect(bubbles[0]!.querySelector('figcaption')).toHaveTextContent('Main');
@@ -340,7 +340,7 @@ describe('FleetPage', () => {
     ]);
     renderFleet();
     const bubble = (await screen.findByText('Faster, please.')).closest<HTMLElement>('[role=button]')!;
-    expect(bubble.querySelector('[data-bubble] > div > div > span:first-child')).toHaveTextContent(/^\S+( \S+)? → Scout ·$/);
+    expect(bubble.querySelector('[data-bubble] > [class*=stamp]')).toHaveTextContent(/^\S+( \S+)? → Scout$/);
   });
 
   describe('zoom', () => {
