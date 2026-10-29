@@ -247,9 +247,9 @@ const Said = ({
   const thinking = line.live === 'running';
   const style = useAuthorColor(from);
   const time = shortTime(line.at, now);
-  const following = newest && !expanded;
-  const scroller = useFollowEnd(following, line.markdown);
-  useWheelLines(scroller, following || expanded);
+  const anchor = expanded ? 'reader' : newest ? 'end' : 'start';
+  const scroller = useFollowEnd(anchor, line.markdown);
+  useWheelLines(scroller, anchor !== 'start');
   if (!from) {
     // No faces: a word to Main goes without saying, one to a task names it.
     return (
@@ -284,7 +284,7 @@ const Said = ({
         <div className={styles.bubble} data-bubble>
           <Tail />
           {speech ? (
-            <div ref={scroller} className={`${styles.bubbleText} ${styles.speech}`} data-newest={following || undefined} data-open={expanded || undefined}>
+            <div ref={scroller} className={`${styles.bubbleText} ${styles.speech}`} data-newest={anchor === 'end' || undefined} data-open={expanded || undefined}>
               <div>
                 <Stamp line={line} time={time} />
                 <div className={styles.speechText}>
@@ -417,6 +417,16 @@ const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine })
   );
 };
 
+/** Main's bubble open in place, and when you last spoke as it opened. */
+interface Opened {
+  key: string;
+  since: number;
+}
+
+/** When you last spoke on the card: a word since a bubble opened closes it, so it shows. */
+const yourLast = (lines: readonly FleetLine[]): number =>
+  Math.max(...lines.filter((line) => line.from.kind === 'you').map((line) => line.at));
+
 interface Zoom {
   line: FleetLine;
   origin: HTMLElement;
@@ -430,7 +440,8 @@ interface Zoom {
  * A row, or a bubble of anyone but Main, zooms out to the whole message;
  * Main's bubble opens in place, one at a time; as in a zoom, a click in it is
  * then the reader's, and a press outside it or Esc closes it, as Enter or
- * Space on it does. A chart in Main's words opens the workspace (`onOpen`).
+ * Space on it does, or a word of yours after it opened. A chart in Main's
+ * words opens the workspace (`onOpen`).
  */
 const FleetFeed = ({
   workspaceId,
@@ -448,22 +459,24 @@ const FleetFeed = ({
   faces: Cast;
   onOpen: (workspaceId: string) => void;
 }) => {
-  const [expanded, setExpanded] = useState<string | null>(null);
+  const [opened, setOpened] = useState<Opened | null>(null);
   const onChart = useCallback(() => onOpen(workspaceId), [onOpen, workspaceId]);
-  const openKey = feed.lines.some((line) => line.key === expanded) ? expanded : null;
+  const since = yourLast(feed.lines);
+  const openKey = opened && opened.since >= since && feed.lines.some((line) => line.key === opened.key) ? opened.key : null;
+  const expand = (key: string | null) => setOpened(key === null ? null : { key, since });
   const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines, openKey);
   useEffect(() => {
     const card = ref.current?.parentElement;
     if (!card || !openKey) return undefined;
     // A press, not a click: a selection dragged out of the bubble ends in a click outside it.
     const pressOutside = (event: Event) => {
-      if (!(event.target instanceof Element && event.target.closest('[aria-expanded="true"]'))) setExpanded(null);
+      if (!(event.target instanceof Element && event.target.closest('[aria-expanded="true"]'))) setOpened(null);
     };
     // Prevented, so the page keeps the card selected (`FleetPage`).
     const escape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape') return;
       event.preventDefault();
-      setExpanded(null);
+      setOpened(null);
     };
     card.addEventListener('pointerdown', pressOutside, true);
     card.addEventListener('keydown', escape);
@@ -510,7 +523,7 @@ const FleetFeed = ({
             open={open}
             newest={i === bubbles.length - 1}
             expanded={openKey === line.key}
-            onExpand={setExpanded}
+            onExpand={expand}
           />
         ))}
         {feed.lines.length === 0 && <p className={styles.nothing}>No messages yet.</p>}
