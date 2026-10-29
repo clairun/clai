@@ -152,8 +152,9 @@ const FOCUSABLE = 'a[href], button, input, textarea, select, [tabindex]:not([tab
  * Fleet. It starts as the card bubble and grows (`zoomGeometry`) with its
  * tail on the speaker's face, which is drawn over the scrim where it is on
  * the card (`faceIdentity`). The card bubble hides from opening until the zoom has
- * shrunk back, so only one bubble ever shows. Esc, a click outside or on the
- * bubble shrinks it back; focus returns to `origin`.
+ * shrunk back, so only one bubble ever shows. A click in it is the reader's,
+ * to select its words or follow a link; Esc or a click outside shrinks it
+ * back, and focus returns to `origin`.
  */
 const FleetZoom = ({
   origin,
@@ -233,13 +234,6 @@ const FleetZoom = ({
 
   // Focus stays in the panel while it is open.
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
-    if (e.key === 'Enter' || e.key === ' ') {
-      if (e.target === e.currentTarget) {
-        e.preventDefault();
-        close();
-      }
-      return;
-    }
     if (e.code !== 'Tab') return;
     const order = [e.currentTarget, ...e.currentTarget.querySelectorAll<HTMLElement>(FOCUSABLE)];
     const at = Math.max(0, order.indexOf(document.activeElement as HTMLElement));
@@ -269,11 +263,6 @@ const FleetZoom = ({
         aria-label={label}
         tabIndex={-1}
         onKeyDown={onKeyDown}
-        onClick={(e) => {
-          // Links and selected text are the panel's; any other click zooms back.
-          if ((e.target as HTMLElement).closest('a') || window.getSelection()?.toString()) return;
-          close();
-        }}
       >
         <Tail right={side === 'right'} />
         {children}

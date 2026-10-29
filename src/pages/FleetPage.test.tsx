@@ -373,9 +373,15 @@ describe('FleetPage', () => {
       expect(screen.queryByRole('dialog', { name: 'Message from Scout' })).not.toBeInTheDocument();
       expect(origin).toHaveFocus();
 
-      // From the keyboard too; a click on the panel zooms back.
+      // From the keyboard too. A click or Enter in the panel is the reader's,
+      // a drag out of it too; a click outside zooms back.
       fireEvent.keyDown(origin, { key: 'Enter' });
-      fireEvent.click(screen.getByRole('dialog', { name: 'Message from Scout' }));
+      const zoom = screen.getByRole('dialog', { name: 'Message from Scout' });
+      fireEvent.click(within(zoom).getByText('v2'));
+      fireEvent.keyDown(zoom, { key: 'Enter' });
+      fireEvent.click(zoom.parentElement!);
+      expect(zoom).toBeInTheDocument();
+      fireEvent.click(zoom.parentElement!.firstElementChild!);
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
 
@@ -546,6 +552,7 @@ describe('FleetPage', () => {
     expect(bubble).toHaveAttribute('aria-expanded', 'true');
 
     const card = bubble.closest('article')!;
+    fireEvent.pointerDown(card.firstElementChild!);
     fireEvent.click(card.firstElementChild!);
     expect(bubble).toHaveAttribute('aria-expanded', 'false');
     expect(useFleetStore.getState().selectedId).toBe('a');

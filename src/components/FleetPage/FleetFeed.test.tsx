@@ -76,7 +76,7 @@ describe("Main's bubble", () => {
     }
   });
 
-  it('opens in place on a click, keeps growing open, and closes on the next click; it never zooms', () => {
+  it('opens in place on a click, and keeps growing open; it never zooms', () => {
     const { rerender } = render(<Feed state={twoBlocks()} live={RUNNING} />);
     expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
     fireEvent.click(mainBubble());
@@ -89,14 +89,37 @@ describe("Main's bubble", () => {
     rerender(<Feed state={twoBlocks('After that, the fix. Then the docs.')} live={RUNNING} />);
     expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
     expect(words()).toHaveTextContent('Then the docs.');
+  });
+
+  it('leaves clicks in it open to the reader; a press outside or Esc closes it', () => {
+    render(<Feed state={twoBlocks()} />);
+    const open = () => mainBubble().getAttribute('aria-expanded');
+    fireEvent.keyDown(mainBubble(), { key: 'Enter' });
+    expect(open()).toBe('true');
+    // A click in it: its words are the reader's to select.
+    fireEvent.click(words());
+    expect(open()).toBe('true');
+    // A selection dragged out of it starts inside and ends in a click on what holds it both.
+    const scene = mainBubble().closest<HTMLElement>('[data-mood]')!;
+    fireEvent.pointerDown(words());
+    fireEvent.click(scene);
+    expect(open()).toBe('true');
+
+    // Esc closes it, and is its alone: the page keeps the card selected.
+    expect(fireEvent.keyDown(words(), { key: 'Escape' })).toBe(false);
+    expect(open()).toBe('false');
 
     fireEvent.click(mainBubble());
-    expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
+    expect(open()).toBe('true');
+    fireEvent.pointerDown(scene);
+    expect(open()).toBe('false');
     expect(words()).not.toHaveAttribute('data-open');
-    fireEvent.keyDown(mainBubble(), { key: 'Enter' });
-    expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+
+    // Enter or Space opens and closes it, as a disclosure.
     fireEvent.keyDown(mainBubble(), { key: ' ' });
-    expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
+    expect(open()).toBe('true');
+    fireEvent.keyDown(mainBubble(), { key: 'Enter' });
+    expect(open()).toBe('false');
   });
 
   it('fetches a reply the snapshot cut whole, once while it is open, not again on each recompute', async () => {
@@ -136,7 +159,7 @@ describe("Main's bubble", () => {
       fireEvent.click(mainBubble());
       expect(screen.getByText('First, the leaks.').closest('[aria-expanded]')).toHaveAttribute('aria-expanded', 'true');
       expect(mainBubble().closest('[data-mood]')).toHaveAttribute('data-expanded', 'true');
-      fireEvent.click(mainBubble());
+      fireEvent.keyDown(mainBubble(), { key: 'Escape' });
       expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
       expect(mainBubble().closest('[data-mood]')).not.toHaveAttribute('data-expanded');
       expect(screen.getByRole('list', { name: 'Earlier' })).toBeInTheDocument();
@@ -326,7 +349,7 @@ describe("Main's newest bubble, scrolling", () => {
       expect(words().scrollTop).toBe(100);
       fireEvent.click(mainBubble());
       expect(words().scrollTop).toBe(0);
-      fireEvent.click(mainBubble());
+      fireEvent.keyDown(mainBubble(), { key: 'Escape' });
       expect(words().scrollTop).toBe(100);
 
       rerender(<Feed state={applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW)} now={NOW + 2000} />);
@@ -380,15 +403,13 @@ describe("Main's newest bubble, scrolling", () => {
     }
   });
 
-  it('leaves a click on its scrollbar to the scrollbar, closed or open', () => {
+  it('leaves a click on its scrollbar to the scrollbar', () => {
     const { restore } = scrolling(() => 200);
     try {
       render(writing());
       fireEvent.click(words(), { clientX: 203 });
       expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
       fireEvent.click(words(), { clientX: 120 });
-      expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
-      fireEvent.click(words(), { clientX: 203 });
       expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
     } finally {
       restore();

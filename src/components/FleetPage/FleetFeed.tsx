@@ -73,10 +73,11 @@ const statusOf = (line: FleetLine): 'failed' | 'stopped' | 'working' | 'next' | 
 type Open = (line: FleetLine, origin: HTMLElement) => void;
 
 /**
- * A bubble pressed by a click, Enter or Space; the card under it is not
- * selected, and a link or button in it, or its vertical scrollbar, is its own.
+ * A bubble pressed by a click, Enter or Space (`onKey`, if they do otherwise);
+ * the card under it is not selected, and a link or button in it, or its
+ * vertical scrollbar, is its own.
  */
-const pressable = (onPress: (target: HTMLElement) => void) => {
+const pressable = (onPress: (target: HTMLElement) => void, onKey = onPress) => {
   const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest('a, button') !== null;
   const onScrollbar = (e: MouseEvent<HTMLElement>) =>
     e.target instanceof HTMLElement && e.target.scrollHeight > e.target.clientHeight && e.nativeEvent.offsetX >= e.target.clientWidth;
@@ -92,7 +93,7 @@ const pressable = (onPress: (target: HTMLElement) => void) => {
       e.stopPropagation();
       if (ownedInside(e)) return;
       e.preventDefault();
-      onPress(e.currentTarget);
+      onKey(e.currentTarget);
     },
   };
 };
@@ -222,7 +223,7 @@ const Said = ({
   open,
   newest,
   expanded,
-  onToggle,
+  onExpand,
 }: {
   workspaceId: string;
   line: FleetLine;
@@ -234,7 +235,7 @@ const Said = ({
   newest: boolean;
   /** Main's bubble, open in place. */
   expanded: boolean;
-  onToggle: (key: string) => void;
+  onExpand: (key: string | null) => void;
 }) => {
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
@@ -267,7 +268,7 @@ const Said = ({
       data-row
       style={style}
       {...(speech
-        ? { 'aria-expanded': expanded, ...pressable(() => onToggle(line.key)) }
+        ? { 'aria-expanded': expanded, ...pressable(() => onExpand(line.key), () => onExpand(expanded ? null : line.key)) }
         : { 'aria-haspopup': 'dialog' as const, ...pressable((target) => open(line, target)) })}
     >
       {shout && thinking && <SpeedLines />}
@@ -421,8 +422,9 @@ interface Zoom {
  * happened. The newest are bubbles, as many as fit; up to `ROWS` older ones
  * collapse to one-line rows above them, the newest row nearest the bubbles.
  * A row, or a bubble of anyone but Main, zooms out to the whole message;
- * Main's bubble opens in place, one at a time. A chart in Main's words opens
- * the workspace (`onOpen`).
+ * Main's bubble opens in place, one at a time; as in a zoom, a click in it is
+ * then the reader's, and a press outside it or Esc closes it, as Enter or
+ * Space on it does. A chart in Main's words opens the workspace (`onOpen`).
  */
 const FleetFeed = ({
   workspaceId,
@@ -441,19 +443,28 @@ const FleetFeed = ({
   onOpen: (workspaceId: string) => void;
 }) => {
   const [expanded, setExpanded] = useState<string | null>(null);
-  const toggle = useCallback((key: string) => setExpanded((k) => (k === key ? null : key)), []);
   const onChart = useCallback(() => onOpen(workspaceId), [onOpen, workspaceId]);
   const openKey = feed.lines.some((line) => line.key === expanded) ? expanded : null;
   const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines, openKey);
   useEffect(() => {
     const card = ref.current?.parentElement;
     if (!card || !openKey) return undefined;
-    const closeOutside = (event: globalThis.MouseEvent) => {
-      if (event.target instanceof Element && event.target.closest('[aria-expanded="true"]')) return;
+    // A press, not a click: a selection dragged out of the bubble ends in a click outside it.
+    const pressOutside = (event: Event) => {
+      if (!(event.target instanceof Element && event.target.closest('[aria-expanded="true"]'))) setExpanded(null);
+    };
+    // Prevented, so the page keeps the card selected (`FleetPage`).
+    const escape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
       setExpanded(null);
     };
-    card.addEventListener('click', closeOutside, true);
-    return () => card.removeEventListener('click', closeOutside, true);
+    card.addEventListener('pointerdown', pressOutside, true);
+    card.addEventListener('keydown', escape);
+    return () => {
+      card.removeEventListener('pointerdown', pressOutside, true);
+      card.removeEventListener('keydown', escape);
+    };
   }, [openKey, ref]);
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const open = useCallback<Open>(
@@ -493,7 +504,7 @@ const FleetFeed = ({
             open={open}
             newest={i === bubbles.length - 1}
             expanded={openKey === line.key}
-            onToggle={toggle}
+            onExpand={setExpanded}
           />
         ))}
         {feed.lines.length === 0 && <p className={styles.nothing}>No messages yet.</p>}

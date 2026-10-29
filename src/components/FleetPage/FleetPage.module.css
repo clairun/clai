@@ -877,13 +877,13 @@ button.crewButton {
   cursor: zoom-in;
 }
 
-/* A bubble or a row zooms out to the whole message; an open bubble closes. */
+/* A bubble or a row zooms out to the whole message; an open bubble's words are the reader's. */
 .scene [role='button'] {
   cursor: zoom-in;
 }
 
 .scene [aria-expanded='true'] {
-  cursor: zoom-out;
+  cursor: auto;
 }
 
 .scene [role='button']:focus-visible,
@@ -1095,6 +1095,7 @@ button.crewButton {
   inset: 0;
   background: color-mix(in srgb, #000 22%, transparent);
   transition: opacity 200ms ease-out;
+  cursor: zoom-out;
 }
 
 .zoomScrim[data-phase] {
@@ -1119,7 +1120,6 @@ button.crewButton {
     top var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1),
     width var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1),
     height var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1);
-  cursor: zoom-out;
 }
 
 /* The tail moves inside the bubble as the bubble grows past it, so it stays on the face. */
@@ -1141,7 +1141,6 @@ button.crewButton {
   min-height: 0;
   min-width: 0;
   overflow-y: auto;
-  cursor: auto;
 }
 
 /* A picture in the zoom, larger: a fixed box, so the zoom's measured height holds as it loads. */
