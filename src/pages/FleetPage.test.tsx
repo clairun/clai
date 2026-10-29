@@ -65,7 +65,7 @@ const renderFleet = () =>
   );
 
 beforeEach(() => {
-  useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null, loadedAt: null, loadError: null, buffer: null });
+  useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null, dismissed: {}, loadedAt: null, loadError: null, buffer: null });
   useFleetActivityStore.setState({ activeRunsByWorkspace: {} });
   useTaskStore.setState({ tasks: {}, seeded: {} });
   // A 4 × 3 grid.
@@ -662,6 +662,68 @@ describe('FleetPage', () => {
     act(() => useFleetStore.getState().select('w6'));
     expect(shown()).toEqual(['W7', 'W0', 'W1', 'W2', 'W3', 'W6']);
     expect(line).toHaveTextContent('2 more working');
+  });
+
+  describe('dismissing a card', () => {
+    const shown = () => screen.getAllByRole('button', { name: /^Select / }).map((b) => b.textContent);
+    const news = (workspaceId: string, at: number) =>
+      act(() =>
+        useFleetStore.getState().applyEvent({
+          sessionId: 'main',
+          runId: null,
+          workspaceId,
+          timestamp: BigInt(at),
+          event: { type: 'message_created', payload: { message: { id: `m${at}`, sessionId: 'main', role: 'user', origin: { kind: 'user' }, content: [{ type: 'text', text: 'Hi' }], createdAt: BigInt(at), providerMetadata: null } } },
+        } as never)
+      );
+
+    it('takes it off the board without selecting it or zooming, and the next card takes the slot', async () => {
+      fleetSnapshot.mockResolvedValue([
+        { ...workspace('w0', 'W0'), recentMessages: [said('s1', 'Ship the release notes', 0)] },
+        ...Array.from({ length: 6 }, (_, i) => workspace(`w${i + 1}`, `W${i + 1}`, (i + 1) * 1000)),
+      ]);
+      renderFleet();
+      await screen.findByRole('button', { name: 'Select W5' });
+      expect(shown()).toEqual(['W0', 'W1', 'W2', 'W3', 'W4', 'W5']);
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss W0' }));
+      expect(shown()).toEqual(['W1', 'W2', 'W3', 'W4', 'W5', 'W6']);
+      expect(useFleetStore.getState().selectedId).toBeNull();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(screen.getByRole('textbox', { name: 'Terminal' })).toHaveFocus();
+    });
+
+    it('brings it back on news after the dismissal, not on news from before it', async () => {
+      fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha'), workspace('b', 'Beta', 60_000)]);
+      renderFleet();
+      fireEvent.click(await screen.findByRole('button', { name: 'Dismiss Beta' }));
+      await waitFor(() => expect(useFleetStore.getState().buffer).toBeNull());
+      expect(shown()).toEqual(['Alpha']);
+      const dismissedAt = useFleetStore.getState().dismissed.b!;
+      // A reload says nothing newer than the dismissal.
+      fireEvent.focus(window);
+      await waitFor(() => expect(fleetSnapshot).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(useFleetStore.getState().buffer).toBeNull());
+      expect(shown()).toEqual(['Alpha']);
+      news('b', dismissedAt - 1);
+      expect(shown()).toEqual(['Alpha']);
+      news('b', dismissedAt + 1);
+      expect(shown()).toEqual(['Alpha', 'Beta']);
+    });
+
+    it('says when every card is dismissed; the switcher marks it, and choosing it there shows it again for good', async () => {
+      fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+      renderFleet();
+      fireEvent.click(await screen.findByRole('button', { name: 'Dismiss Alpha' }));
+      expect(screen.getByRole('heading', { name: 'Every card is dismissed' })).toBeInTheDocument();
+      const terminal = screen.getByRole('textbox', { name: 'Terminal' });
+      fireEvent.keyDown(terminal, { key: 'Tab', code: 'Tab', ctrlKey: true });
+      expect(screen.getByRole('option', { selected: true })).toHaveTextContent('Alpha Dismissed');
+      fireEvent.keyDown(terminal, { key: 'Enter' });
+      expect(shown()).toEqual(['Alpha']);
+      fireEvent.keyDown(terminal, { key: 'Escape' });
+      expect(useFleetStore.getState().selectedId).toBeNull();
+      expect(shown()).toEqual(['Alpha']);
+    });
   });
 
   it('counts one waiting workspace as "1 needs you", and an unselected card never marks a workspace seen', async () => {

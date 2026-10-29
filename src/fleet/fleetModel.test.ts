@@ -191,6 +191,24 @@ describe('fleet reducer', () => {
     expect(applyAssistantEvent(base, updated(message('t', 'assistant', 'Working', { kind: 'user' }, 'task-session-t'), 99))).toBe(base);
   });
 
+  it("moves the card's activity time on every kind of news, which brings a dismissed card back", () => {
+    const news: ((s: FleetState, at: number) => FleetState)[] = [
+      (s, at) => apply(s, created(message('a', 'user', 'From an agent', fromAgent(RESEARCHER)), at)),
+      (s, at) => apply(s, completed(message('m', 'assistant', 'From Main'), at)),
+      (s, at) => apply(s, env({ type: 'task_updated', payload: { task: task('t', 'running', at) } } as AssistantUiEvent, at)),
+      (s, at) => apply(s, env({ type: 'run_started', payload: { run: run('r') } }, at, 'task-session-t')),
+      (s, at) => apply(s, askEvent('q', at)),
+      (s, at) => applyRequest(s, { kind: 'approval', request: approval('p') }, at),
+      (s, at) => applyRequest(s, { kind: 'grant', request: { ...(approval('g') as object), requestedPath: '/x', requestedAccess: 'read_only' } as never }, at),
+      (s, at) => applyUserSent(s, WS, MAIN, message('u', 'user', 'From you'), at),
+    ];
+    news.reduce((s, hear, i) => {
+      const next = hear(s, 10 + i);
+      expect(card(next).lastActivityAt).toBe(10 + i);
+      return next;
+    }, withMain());
+  });
+
   it('keeps every message said, in time order, at most SAID_LIMIT; a deleted one leaves', () => {
     let s = withMain();
     for (let i = 0; i < SAID_LIMIT + 3; i++) s = apply(s, created(message(`u${i}`, 'user', `Message ${i}.`), 100 - i));

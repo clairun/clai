@@ -16,6 +16,8 @@ interface FleetSwitcherProps {
   /** Card ids, most recently opened first (`recentlyOpened`), each one in `cards`. */
   order: string[];
   cards: Record<string, FleetCard>;
+  /** Cards off the board until something happens in them; choosing one brings it back. */
+  dismissed: ReadonlySet<string>;
   selectedId: string | null;
   live: FleetLive;
   faces: Record<string, AgentIdentity>;
@@ -42,7 +44,7 @@ const cycleCard = (entries: readonly string[], current: string, step: 1 | -1): s
  * window closes it unchanged.
  * Static: no animation, no blur.
  */
-const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: FleetSwitcherProps) => {
+const FleetSwitcher = ({ order, cards, dismissed, selectedId, live, faces, onSelect }: FleetSwitcherProps) => {
   const [highlightId, setHighlightId] = useState<string | null>(null);
   const entries = useMemo(() => [...order, NEW_WORKSPACE], [order]);
 
@@ -101,6 +103,7 @@ const FleetSwitcher = ({ order, cards, selectedId, live, faces, onSelect }: Flee
               aria-selected={id === highlightId}
             >
               <span className={styles.switcherTitle}>{card.title || 'Workspace'}</span>
+              {dismissed.has(id) && <span className={styles.switcherDismissed}> Dismissed</span>}
               <span className={styles.faces}>
                 {agents.slice(0, 4).map((agent) => (
                   <AgentAvatar

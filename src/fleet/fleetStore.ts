@@ -14,6 +14,7 @@ import { getMessage } from '../assistant/client';
 import { fleetSnapshot } from './client';
 import {
   EMPTY_FLEET,
+  RECENT_WINDOW_MS,
   applyAssistantEvent,
   applyOpened,
   applyRequest,
@@ -32,11 +33,35 @@ type Reducer = (state: FleetState) => FleetState;
 /** Snapshot size: the six-card board plus the cards a full board leaves off. */
 const SNAPSHOT_LIMIT = 16;
 
+/** Where `dismissed` survives a reload, as the workspace rail's collapsed flag does. */
+const DISMISSED_KEY = 'fleet.dismissed';
+
+const readDismissed = (): Record<string, number> => {
+  try {
+    const stored: unknown = JSON.parse(localStorage.getItem(DISMISSED_KEY) ?? '{}');
+    if (!stored || typeof stored !== 'object') return {};
+    return Object.fromEntries(Object.entries(stored).filter(([, at]) => typeof at === 'number'));
+  } catch {
+    return {};
+  }
+};
+
+const saveDismissed = (dismissed: Record<string, number>): Record<string, number> => {
+  try {
+    localStorage.setItem(DISMISSED_KEY, JSON.stringify(dismissed));
+  } catch {
+    // Kept for this session only.
+  }
+  return dismissed;
+};
+
 interface FleetStoreState {
   fleet: FleetState;
   /** When `fleet` last changed or was reloaded: the clock recency is judged against, so rendering stays pure. */
   now: number;
   selectedId: string | null;
+  /** When each dismissed card was dismissed, by workspace (`undismissed`). */
+  dismissed: Record<string, number>;
   /** `null` until the first snapshot lands. */
   loadedAt: number | null;
   loadError: string | null;
@@ -51,13 +76,17 @@ interface FleetStoreState {
   /** Fetches a message the snapshot cut, whole, into its card; a failed fetch leaves the preview. */
   loadWhole: (workspaceId: string, sessionId: string, messageId: string) => void;
   loadSnapshot: () => Promise<void>;
+  /** Selecting a card undoes its dismissal. */
   select: (workspaceId: string | null) => void;
+  /** Takes the card off the board until something happens in it; a selected one is deselected. */
+  dismiss: (workspaceId: string) => void;
 }
 
 export const useFleetStore = create<FleetStoreState>()((set, get) => ({
   fleet: EMPTY_FLEET,
   now: Date.now(),
   selectedId: null,
+  dismissed: readDismissed(),
   loadedAt: null,
   loadError: null,
   buffer: null,
@@ -141,6 +170,24 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
 
   select: (workspaceId) => {
     const now = Date.now();
-    set((s) => ({ selectedId: workspaceId, now, fleet: workspaceId ? applyOpened(s.fleet, workspaceId, now) : s.fleet }));
+    const { fleet, dismissed } = get();
+    const undone = workspaceId !== null && Object.hasOwn(dismissed, workspaceId);
+    set({
+      selectedId: workspaceId,
+      now,
+      fleet: workspaceId ? applyOpened(fleet, workspaceId, now) : fleet,
+      dismissed: undone ? saveDismissed(Object.fromEntries(Object.entries(dismissed).filter(([id]) => id !== workspaceId))) : dismissed,
+    });
+  },
+
+  dismiss: (workspaceId) => {
+    const { dismissed, selectedId } = get();
+    const now = Date.now();
+    // An older dismissal hides nothing that is idle (`eligibleCards`), so it goes, a deleted workspace's too.
+    const recent = Object.entries(dismissed).filter(([, at]) => at >= now - RECENT_WINDOW_MS);
+    set({
+      dismissed: saveDismissed({ ...Object.fromEntries(recent), [workspaceId]: now }),
+      selectedId: selectedId === workspaceId ? null : selectedId,
+    });
   },
 }));

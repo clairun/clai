@@ -12,7 +12,7 @@ const run = (status: AssistantRun['status'], error: string | null = null): Assis
 });
 const renderCard = (lastMainRun: AssistantRun | null) => render(
   <FleetCard card={{ ...base, lastMainRun }} feed={null} shouts={new Set()} live={live}
-    faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} />
+    faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onDismiss={() => {}} />
 );
 
 describe('Fleet card run failure', () => {
@@ -27,17 +27,17 @@ describe('Fleet card run failure', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Provider unavailable');
     expect(screen.getByRole('alert')).not.toHaveAttribute('data-limit');
     view.rerender(<FleetCard card={{ ...base, lastMainRun: run('completed') }} feed={null} shouts={new Set()} live={live}
-      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} />);
+      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onDismiss={() => {}} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     view.rerender(<FleetCard card={{ ...base, lastMainRun: run('completed_with_warnings', 'One tool failed') }} feed={null} shouts={new Set()} live={live}
-      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} />);
+      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onDismiss={() => {}} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('moves its words one line a wheel notch, once it shows', () => {
     const view = renderCard(run('completed'));
     view.rerender(<FleetCard card={{ ...base, lastMainRun: run('failed', 'Provider unavailable') }} feed={null} shouts={new Set()} live={live}
-      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} />);
+      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onDismiss={() => {}} />);
     const banner = screen.getByRole('alert');
     banner.style.lineHeight = '17px';
     const notch = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 93 });

@@ -7,7 +7,7 @@ import styles from '../components/FleetPage/FleetPage.module.css';
 import { listAgentDefinitions } from '../api/client';
 import { identityFor, type AgentIdentity } from '../components/Agents/agentIdentity';
 import { RECENT_WINDOW_MS, cardPhase, type FleetLive } from '../fleet/fleetModel';
-import { eligibleCards, recentlyOpened } from '../fleet/boardSlots';
+import { eligibleCards, recentlyOpened, undismissed } from '../fleet/boardSlots';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useMainRunning } from '../fleet/useMainRunning';
 import { useMinute } from '../fleet/useMinute';
@@ -40,6 +40,8 @@ const FleetPage = () => {
   const clock = Math.max(now, useMinute());
   const selectedId = useFleetStore((s) => s.selectedId);
   const select = useFleetStore((s) => s.select);
+  const dismiss = useFleetStore((s) => s.dismiss);
+  const dismissed = useFleetStore((s) => s.dismissed);
   const loadedAt = useFleetStore((s) => s.loadedAt);
   const loadError = useFleetStore((s) => s.loadError);
   const runs = useFleetActivityStore((s) => s.activeRunsByWorkspace);
@@ -71,6 +73,9 @@ const FleetPage = () => {
     () => eligibleCards(Object.values(cards), { now, selectedId, live }),
     [cards, now, selectedId, live]
   );
+  // The switcher still lists a dismissed card; the board doesn't.
+  const onBoard = useMemo(() => undismissed(placed, cards, dismissed), [placed, cards, dismissed]);
+  const offBoard = useMemo(() => new Set(placed.filter((id) => !onBoard.includes(id))), [placed, onBoard]);
 
   // Escape deselects, unless something else used it first (the switcher,
   // the terminal clearing its output, or an open dialog). Agent questions
@@ -143,9 +148,9 @@ const FleetPage = () => {
       </AppTopBar>
       <main className={styles.gridArea} aria-label="Fleet">
         {loadError && <p className={styles.notice}>{loadError}</p>}
-        {placed.length > 0 ? (
+        {onBoard.length > 0 ? (
           <FleetGrid
-            order={placed}
+            order={onBoard}
             cards={cards}
             selectedId={selectedId}
             live={live}
@@ -153,17 +158,32 @@ const FleetPage = () => {
             now={clock}
             onSelect={select}
             onOpen={openWorkspace}
+            onDismiss={dismiss}
           />
         ) : (
-          loadedAt != null && (
+          loadedAt != null &&
+          (placed.length > 0 ? (
+            <div className={styles.empty}>
+              <h2>Every card is dismissed</h2>
+              <p>A card comes back when something happens in its workspace; Ctrl+Tab brings one back now.</p>
+            </div>
+          ) : (
             <div className={styles.empty}>
               <h2>Nothing active in the last {RECENT_HOURS} hours</h2>
               <p>Type below to start a new workspace, or open the workspaces page.</p>
             </div>
-          )
+          ))
         )}
       </main>
-      <FleetSwitcher order={switcherOrder} cards={cards} selectedId={selectedId} live={live} faces={faces} onSelect={select} />
+      <FleetSwitcher
+        order={switcherOrder}
+        cards={cards}
+        dismissed={offBoard}
+        selectedId={selectedId}
+        live={live}
+        faces={faces}
+        onSelect={select}
+      />
     </div>
   );
 };

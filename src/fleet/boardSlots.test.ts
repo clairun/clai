@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { boardSlots, hiddenActivity } from './boardSlots';
+import { boardSlots, hiddenActivity, undismissed } from './boardSlots';
 import { emptyCard, type FleetCard, type FleetLive } from './fleetModel';
 
 const card = (id: string, lastActivityAt: number, waiting = false): FleetCard => ({
@@ -73,5 +73,19 @@ describe('hiddenActivity', () => {
     expect(hiddenActivity({ working: 1, waiting: 0 })).toBe('1 more working');
     expect(hiddenActivity({ working: 0, waiting: 3 })).toBe('3 more need you');
     expect(hiddenActivity({ working: 0, waiting: 0 })).toBeNull();
+  });
+});
+
+describe('undismissed', () => {
+  it('leaves a dismissed card off the board until it has activity after the dismissal', () => {
+    const cards = cardsOf();
+    // c1 (activity 999) dismissed at 999, c2 (998) at 1000; h7 was dismissed before its last activity.
+    const dismissed = { c1: 999, c2: 1000, h7: 900 };
+    expect(undismissed(ids, cards, dismissed)).toEqual(['c0', 'c3', 'c4', 'c5', 'h6', 'h7']);
+    expect(slots({ cards }).visible).toContain('c1');
+    expect(boardSlots(undismissed(ids, cards, dismissed), cards, { live: NO_LIVE, selectedId: null, prev: FULL, capacity: 6 }).visible)
+      .toEqual(['c0', 'c3', 'c4', 'c5', 'h6', 'h7']);
+    const later = { ...cards, c1: { ...cards.c1!, lastActivityAt: 1000 } };
+    expect(undismissed(ids, later, dismissed)).toContain('c1');
   });
 });

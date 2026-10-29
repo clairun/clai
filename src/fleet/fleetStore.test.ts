@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { AssistantEventEnvelope, FleetWorkspace, WorkspaceTaskResponse } from '../generated/bindings';
 
 let resolveSnapshot: (value: FleetWorkspace[]) => void = () => {};
@@ -8,7 +8,7 @@ vi.mock('./client', () => ({
 
 const { fleetSnapshot } = await import('./client');
 const { useFleetStore } = await import('./fleetStore');
-const { EMPTY_FLEET } = await import('./fleetModel');
+const { EMPTY_FLEET, RECENT_WINDOW_MS, emptyCard: emptyCardOf } = await import('./fleetModel');
 const { useFleetActivityStore } = await import('../stores/fleetActivityStore');
 const { useTaskStore } = await import('../workspace/taskStore');
 
@@ -137,5 +137,49 @@ describe('fleet store snapshot', () => {
     expect(notified).toHaveBeenCalledTimes(1);
     unsubscribe();
     expect(useFleetStore.getState().fleet.cards.ws!.said).toMatchObject([{ id: 'm', text: 'Found it.' }]);
+  });
+});
+
+/** A `localStorage` of its own: Node's global one, without a file, has none. */
+const memoryStorage = () => {
+  const items = new Map<string, string>();
+  return { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) };
+};
+
+describe('fleet store dismissals', () => {
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', memoryStorage());
+    useFleetStore.setState({
+      fleet: { cards: { a: { ...emptyCardOf('a') }, b: { ...emptyCardOf('b') } } },
+      selectedId: 'a',
+      dismissed: { old: 1, b: 40 },
+    });
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('dismisses with the time, deselects only the dismissed card, and drops dismissals older than the recent window', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(RECENT_WINDOW_MS + 10);
+    useFleetStore.getState().dismiss('c');
+    expect(useFleetStore.getState().dismissed).toEqual({ b: 40, c: RECENT_WINDOW_MS + 10 });
+    expect(useFleetStore.getState().selectedId).toBe('a');
+    useFleetStore.getState().dismiss('a');
+    expect(useFleetStore.getState().selectedId).toBeNull();
+  });
+
+  it('keeps dismissals across a reload; selecting a card undoes its own', async () => {
+    useFleetStore.getState().dismiss('a');
+    useFleetStore.getState().dismiss('b');
+    const dismissed = useFleetStore.getState().dismissed;
+    vi.resetModules();
+    const reloaded = (await import('./fleetStore')).useFleetStore;
+    expect(reloaded.getState().dismissed).toEqual(dismissed);
+
+    reloaded.getState().select('a');
+    expect(Object.keys(reloaded.getState().dismissed)).toEqual(['b']);
+    vi.resetModules();
+    expect(Object.keys((await import('./fleetStore')).useFleetStore.getState().dismissed)).toEqual(['b']);
   });
 });

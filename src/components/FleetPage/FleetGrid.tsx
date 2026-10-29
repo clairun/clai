@@ -35,6 +35,8 @@ interface FleetGridProps {
   onSelect: (workspaceId: string | null) => void;
   /** Leave for the workspace's own page. */
   onOpen: (workspaceId: string) => void;
+  /** Take a card off the board until something happens in it. */
+  onDismiss: (workspaceId: string) => void;
 }
 
 /**
@@ -45,7 +47,7 @@ interface FleetGridProps {
  * transition blinks); only the zoom, a portal outside it, does. The drawn
  * effects switch on here.
  */
-const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpen }: FleetGridProps) => {
+const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpen, onDismiss }: FleetGridProps) => {
   // Choosing a card readies the terminal for it, as the switcher does.
   const handleSelect = useCallback(
     (id: string) => {
@@ -53,6 +55,14 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
       dispatchFocusTerminal();
     },
     [onSelect]
+  );
+  // The dismissed card's controls leave with it: the keyboard goes to the terminal.
+  const handleDismiss = useCallback(
+    (id: string) => {
+      onDismiss(id);
+      dispatchFocusTerminal();
+    },
+    [onDismiss]
   );
   const gridRef = useRef<HTMLDivElement | null>(null);
   const theme = useAppTheme();
@@ -99,7 +109,7 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
               data-screentone
               style={accentStyle(hue, theme)}
             >
-              <FleetCard card={card} feed={feed} shouts={loud.rows} live={live} faces={faces} now={now} loud={cardLoud} onSelect={handleSelect} onOpen={onOpen} />
+              <FleetCard card={card} feed={feed} shouts={loud.rows} live={live} faces={faces} now={now} loud={cardLoud} onSelect={handleSelect} onOpen={onOpen} onDismiss={handleDismiss} />
             </article>
           );
         })}

@@ -74,6 +74,17 @@ export const eligibleCards = (
 };
 
 /**
+ * The cards the board shows: all but the dismissed ones (`dismissedAt`, by
+ * workspace) with nothing new in them since. Selecting a card undoes its
+ * dismissal (`select` in the store).
+ */
+export const undismissed = (
+  ids: readonly string[],
+  cards: Record<string, FleetCard>,
+  dismissedAt: Readonly<Record<string, number>>
+): string[] => ids.filter((id) => !Object.hasOwn(dismissedAt, id) || cards[id]!.lastActivityAt > dismissedAt[id]!);
+
+/**
  * The switcher's order: most recently opened by the user first, so it doesn't
  * reshuffle while agents work; never opened, or a tie, by latest activity.
  */

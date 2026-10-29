@@ -82,10 +82,11 @@ interface FleetCardProps {
   loud: FleetLoudness;
   onSelect: (workspaceId: string) => void;
   onOpen: (workspaceId: string) => void;
+  onDismiss: (workspaceId: string) => void;
 }
 
 /** A miniature: the workspace's conversation as highlights, or its open request, answerable in place. */
-const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpen }: FleetCardProps) => {
+const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpen, onDismiss }: FleetCardProps) => {
   const cast = useMemo(() => castFor(faces, card.main), [faces, card.main]);
   const crew = useMemo(() => cardCrew(card, live, now), [card, live, now]);
   const phase = cardPhase(card, live);
@@ -114,7 +115,7 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpe
         <PhaseLabel phase={phase} attention={attention} sticker={stickerFor(loud, request)} />
         <button
           type="button"
-          className={styles.cardOpen}
+          className={styles.cardIcon}
           title="Open workspace"
           aria-label={`Open ${title}`}
           onClick={(e) => {
@@ -124,6 +125,20 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpe
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
             <path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className={styles.cardIcon}
+          title="Dismiss until something happens"
+          aria-label={`Dismiss ${title}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDismiss(card.workspaceId);
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
           </svg>
         </button>
       </header>
