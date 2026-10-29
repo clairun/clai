@@ -354,6 +354,9 @@ fn split(input: &str) -> Option<Vec<Segment>> {
             escape = false;
             if c == '\n' {
                 out.buf.pop(); // remove the trailing backslash
+                if escaped_end == Some(i - 1) {
+                    escaped_end = Some(i + 1);
+                }
                 i += 1;
                 continue;
             }
@@ -839,7 +842,8 @@ fn read_heredoc(input: &str, start: usize, out: &mut Commands) -> Option<usize> 
 /// The heredoc delimiter word heading `rest`: its length, and its text with
 /// quotes removed. It ends at a blank or an operator outside quotes, so
 /// `'EOF'`, `"E F"`, `\EOF` and `E"OF"` close at a line reading `EOF` or
-/// `E F`. `None` for `$'…'` or `$"…"` quoting, which is not read.
+/// `E F`. `None` on an unquoted `$` or backtick, or a line continuation:
+/// bash may end the word elsewhere or read it differently.
 fn heredoc_delimiter(rest: &str) -> Option<(usize, String)> {
     let mut delim = String::new();
     let mut chars = rest.char_indices();
@@ -847,10 +851,11 @@ fn heredoc_delimiter(rest: &str) -> Option<(usize, String)> {
         match c {
             '\'' | '"' => delim.extend(chars.by_ref().map(|(_, q)| q).take_while(|&q| q != c)),
             '\\' => match chars.next() {
-                Some((_, '\n')) | None => {}
+                Some((_, '\n')) => return None,
                 Some((_, escaped)) => delim.push(escaped),
+                None => {}
             },
-            '$' if rest[at + 1..].starts_with(['\'', '"']) => return None,
+            '$' | '`' => return None,
             _ if is_blank(c) || ";&|()<>".contains(c) => return Some((at, delim)),
             _ => delim.push(c),
         }
@@ -1690,7 +1695,11 @@ mod tests {
         for input in [
             "cat <<$'E'\nE\ntouch PWN",
             "cat <<$\"E\"\nE\ntouch PWN",
+            "cat <<$\\\n'E'\nE\ntouch PWN",
+            "cat <<$(x)\n$(x)\ntouch PWN\n$",
+            "cat <<`a`\n`a`\ntouch PWN",
             "cat <<E\nE\\\n\ntouch PWN\nE",
+            "cat <<E\\\nX\nEX\\\n\ntouch PWN\nEX",
             "cat <<-E\n\tE\\\n\ntouch PWN\nE",
             "echo x\n((echo a) ; touch PWN )",
             "((touch PWN) )",
@@ -1717,6 +1726,10 @@ mod tests {
         assert_eq!(
             split("echo a\\\t#; touch PWN"),
             vec![simple("echo a\\\t#"), simple("touch PWN")]
+        );
+        assert_eq!(
+            split("echo a\\ \\\n#; touch PWN"),
+            vec![simple("echo a\\ #"), simple("touch PWN")]
         );
         assert_eq!(split("echo \\\\ #; touch PWN"), vec![simple("echo \\\\")]);
     }
