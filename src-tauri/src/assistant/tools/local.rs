@@ -440,43 +440,8 @@ pub(crate) fn evaluate_command_policy(
     if approvals.is_empty() {
         PolicyResult::Allow
     } else {
-        PolicyResult::NeedsApproval(dedup_approvals_by_prefix(approvals))
+        PolicyResult::NeedsApproval(approvals)
     }
-}
-
-/// Collapses approval rows that share the same non-empty suggested prefix
-/// into one. Without this, a command like `cd /a && cd /b && cd /c` asks the
-/// user to grant `cd` three times in a single modal. Rows with an empty
-/// suggested prefix (no stable allowlist head — e.g. the `:` no-op or an
-/// over-collapsed opaque blob) are never merged: each is a distinct
-/// allow-once decision and has no prefix to key on. When duplicates disagree
-/// on kind, the kept row is marked `Opaque` so the "review carefully"
-/// affordance is preserved rather than silently downgraded to `Simple`.
-fn dedup_approvals_by_prefix(
-    approvals: Vec<crate::commands::permissions::SegmentApproval>,
-) -> Vec<crate::commands::permissions::SegmentApproval> {
-    use crate::commands::permissions::SegmentKind;
-    use std::collections::HashMap;
-
-    let mut result: Vec<crate::commands::permissions::SegmentApproval> =
-        Vec::with_capacity(approvals.len());
-    let mut index_by_prefix: HashMap<String, usize> = HashMap::new();
-
-    for approval in approvals {
-        if approval.suggested_prefix.is_empty() {
-            result.push(approval);
-            continue;
-        }
-        if let Some(&idx) = index_by_prefix.get(&approval.suggested_prefix) {
-            if matches!(approval.kind, SegmentKind::Opaque) {
-                result[idx].kind = SegmentKind::Opaque;
-            }
-            continue;
-        }
-        index_by_prefix.insert(approval.suggested_prefix.clone(), result.len());
-        result.push(approval);
-    }
-    result
 }
 
 /// True for shell segments that have no execution surface of their own and
@@ -2244,50 +2209,24 @@ mod tests {
     }
 
     #[test]
-    fn policy_dedups_repeated_prefix_into_one_approval() {
-        // The motivating bug: repeated segments can derive the same
-        // smart prefix multiple times. The user should be asked once,
-        // exactly once, not once per occurrence.
+    fn policy_asks_for_every_command_even_when_prefixes_repeat() {
+        // A user's decision on a row applies to exactly the command it shows,
+        // so a second command with the same head must get its own row.
         let exec = restricted_execution_config(&[], &[]);
-        let result =
-            evaluate_command_policy(&exec, "git add a && git add b && git add c", &[], &[]);
-        let PolicyResult::NeedsApproval(approvals) = result else {
-            panic!("expected NeedsApproval, got {:?}", policy_label(&result));
-        };
         assert_eq!(
-            approvals.len(),
-            1,
-            "repeated `git add` prefix should collapse"
+            approval_texts(&exec, "rm a.txt; rm -rf ~/x"),
+            vec![
+                ("rm a.txt".to_string(), "rm".to_string()),
+                ("rm -rf ~/x".to_string(), "rm".to_string()),
+            ]
         );
-        assert_eq!(approvals[0].suggested_prefix, "git add");
-    }
-
-    #[test]
-    fn policy_distinct_prefixes_are_not_merged() {
-        // Different derived prefixes remain separate decisions.
-        let exec = restricted_execution_config(&[], &[]);
-        let result = evaluate_command_policy(&exec, "git add -A && git commit -m x", &[], &[]);
-        let PolicyResult::NeedsApproval(approvals) = result else {
-            panic!("expected NeedsApproval, got {:?}", policy_label(&result));
-        };
-        let prefixes: Vec<&str> = approvals
-            .iter()
-            .map(|a| a.suggested_prefix.as_str())
-            .collect();
-        assert_eq!(prefixes, vec!["git add", "git commit"]);
-    }
-
-    #[test]
-    fn policy_empty_prefix_rows_are_not_merged() {
-        // Rows with no stable prefix (junk `:` head) have nothing to key on
-        // and must each stay as a distinct allow-once decision.
-        let exec = restricted_execution_config(&[], &[]);
-        let result = evaluate_command_policy(&exec, ": > a; : > b", &[], &[]);
-        let PolicyResult::NeedsApproval(approvals) = result else {
-            panic!("expected NeedsApproval, got {:?}", policy_label(&result));
-        };
-        assert_eq!(approvals.len(), 2, "empty-prefix rows must not collapse");
-        assert!(approvals.iter().all(|a| a.suggested_prefix.is_empty()));
+        assert_eq!(
+            approval_texts(&exec, "sed -i 's/a/b/' f1 && sed -i '1d' /etc/hosts"),
+            vec![
+                ("sed -i 's/a/b/' f1".to_string(), "sed".to_string()),
+                ("sed -i '1d' /etc/hosts".to_string(), "sed".to_string()),
+            ]
+        );
     }
 
     fn approval_texts(exec: &ExecutionCapabilityConfig, command: &str) -> Vec<(String, String)> {
