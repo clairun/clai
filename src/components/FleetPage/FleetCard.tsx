@@ -1,4 +1,4 @@
-import { memo, useMemo } from 'react';
+import { memo, useMemo, useRef } from 'react';
 import type { AgentIdentity } from '../Agents/agentIdentity';
 import {
   cardAttention,
@@ -16,6 +16,7 @@ import RunFailureBanner from '../RunFailureBanner/RunFailureBanner';
 import FleetCrew from './FleetCrew';
 import FleetRequestPanel from './FleetRequestPanel';
 import FleetFeed from './FleetFeed';
+import { useWheelLines } from './useWheelLines';
 import fx from './FleetEffects';
 import styles from './FleetPage.module.css';
 
@@ -92,6 +93,8 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpe
   const request = useMemo(() => requestScene(card, live), [card, live]);
   const title = card.title || 'Workspace';
   const failure = runFailure(card.lastMainRun);
+  const failureRef = useRef<HTMLDivElement>(null);
+  useWheelLines(failureRef, !!failure);
 
   return (
     <div className={styles.cardInner} onClick={() => onSelect(card.workspaceId)}>
@@ -125,7 +128,7 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpe
         </button>
       </header>
       <FleetCrew crew={crew} cast={cast} />
-      {failure && <RunFailureBanner failure={failure} className={styles.cardRunError} />}
+      {failure && <RunFailureBanner ref={failureRef} failure={failure} className={styles.cardRunError} />}
       {feed && <FleetFeed workspaceId={card.workspaceId} feed={feed} shouts={shouts} now={now} faces={cast} onOpen={onOpen} />}
       {request && <FleetRequestPanel scene={request} faces={cast} loud={loud === 'needs'} now={now} />}
     </div>

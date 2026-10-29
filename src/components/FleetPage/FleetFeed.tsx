@@ -32,6 +32,7 @@ import FleetMarkdown, { ChartOpen, MINIATURE } from './FleetMarkdown';
 import { Caption, MAIN_FACE, OutcomeIcon, ThoughtCloud, Who, type Cast } from './FleetFace';
 import FleetZoom, { Tail, zoomStart, type ZoomStart } from './FleetZoom';
 import { useFollowEnd } from './useFollowEnd';
+import { useWheelLines } from './useWheelLines';
 import styles from './FleetPage.module.css';
 
 /** A row has no bubble to copy: the user's words still take the user's bubble. */
@@ -248,6 +249,7 @@ const Said = ({
   const time = shortTime(line.at, now);
   const following = newest && !expanded;
   const scroller = useFollowEnd(following, line.markdown);
+  useWheelLines(scroller, following || expanded);
   if (!from) {
     // No faces: a word to Main goes without saying, one to a task names it.
     return (

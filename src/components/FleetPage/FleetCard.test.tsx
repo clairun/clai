@@ -33,4 +33,16 @@ describe('Fleet card run failure', () => {
       faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
+
+  it('moves its words one line a wheel notch, once it shows', () => {
+    const view = renderCard(run('completed'));
+    view.rerender(<FleetCard card={{ ...base, lastMainRun: run('failed', 'Provider unavailable') }} feed={null} shouts={new Set()} live={live}
+      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} />);
+    const banner = screen.getByRole('alert');
+    banner.style.lineHeight = '17px';
+    const notch = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 93 });
+    Object.defineProperty(notch, 'wheelDeltaY', { value: -120 });
+    expect(banner.dispatchEvent(notch)).toBe(false);
+    expect(banner.scrollTop).toBe(17);
+  });
 });

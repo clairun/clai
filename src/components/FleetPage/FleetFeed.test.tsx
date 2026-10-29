@@ -403,6 +403,43 @@ describe("Main's newest bubble, scrolling", () => {
     }
   });
 
+  it('moves one line a wheel notch, open or not; leaves a trackpad, Ctrl, sideways, and an older bubble to the browser', () => {
+    const { restore } = scrolling(() => 200);
+    /** A wheel event of `wheelDeltaY` (120 a notch) on the words; false if it was taken. */
+    const wheel = (wheelDeltaY: number, init: WheelEventInit = {}) => {
+      const e = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: -wheelDeltaY, ...init });
+      Object.defineProperty(e, 'wheelDeltaY', { value: wheelDeltaY });
+      return words().dispatchEvent(e);
+    };
+    try {
+      const { rerender } = render(writing());
+      words().style.lineHeight = '15px';
+      expect(words().scrollTop).toBe(100);
+      expect(wheel(120)).toBe(false);
+      expect(words().scrollTop).toBe(85);
+      expect(wheel(240)).toBe(false);
+      expect(words().scrollTop).toBe(55);
+      expect(wheel(-120)).toBe(false);
+      expect(words().scrollTop).toBe(70);
+      expect(wheel(36)).toBe(true);
+      expect(wheel(0, { deltaX: 40 })).toBe(true);
+      expect(wheel(120, { ctrlKey: true })).toBe(true);
+      expect(wheel(120, { cancelable: false })).toBe(true);
+      expect(words().scrollTop).toBe(70);
+
+      fireEvent.click(mainBubble());
+      expect(wheel(-120)).toBe(false);
+      expect(words().scrollTop).toBe(15);
+      fireEvent.keyDown(mainBubble(), { key: 'Escape' });
+
+      rerender(<Feed state={applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW)} now={NOW + 2000} />);
+      expect(wheel(-120)).toBe(true);
+      expect(words().scrollTop).toBe(0);
+    } finally {
+      restore();
+    }
+  });
+
   it('leaves a click on its scrollbar to the scrollbar', () => {
     const { restore } = scrolling(() => 200);
     try {
