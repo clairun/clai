@@ -73,8 +73,10 @@ type Open = (line: FleetLine, origin: HTMLElement) => void;
 
 /**
  * A bubble pressed by a click, Enter or Space; the card under it is not
- * selected. A link or button in it, its vertical
- * scrollbar, and a click that ends a drag selecting its words, are their own.
+ * selected. A link or button in it keeps its click and keys untouched: a
+ * link opens through the opener's listener on `window`. A click on its
+ * vertical scrollbar, or one that ends a drag selecting its words, is not a
+ * press.
  */
 const pressable = (onPress: (target: HTMLElement) => void) => {
   const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest('a, button') !== null;
@@ -88,13 +90,13 @@ const pressable = (onPress: (target: HTMLElement) => void) => {
     role: 'button',
     tabIndex: 0,
     onClick: (e: MouseEvent<HTMLElement>) => {
+      if (ownedInside(e)) return;
       e.stopPropagation();
-      if (!ownedInside(e) && !onScrollbar(e) && !selecting(e)) onPress(e.currentTarget);
+      if (!onScrollbar(e) && !selecting(e)) onPress(e.currentTarget);
     },
     onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
-      if (e.key !== 'Enter' && e.key !== ' ') return;
+      if ((e.key !== 'Enter' && e.key !== ' ') || ownedInside(e)) return;
       e.stopPropagation();
-      if (ownedInside(e)) return;
       e.preventDefault();
       onPress(e.currentTarget);
     },

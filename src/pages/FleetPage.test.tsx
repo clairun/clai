@@ -536,7 +536,7 @@ describe('FleetPage', () => {
     expect(terminal).not.toHaveFocus();
   });
 
-  it("leaves a link in Main's bubble its own click: no zoom, and the card is not selected", async () => {
+  it("leaves a link in Main's bubble its own click: no zoom, and it goes on like any click on the card", async () => {
     vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(300);
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockReturnValue(40);
     fleetSnapshot.mockResolvedValue([{
@@ -548,8 +548,8 @@ describe('FleetPage', () => {
     const bubble = (await screen.findByText('Read', { exact: false })).closest<HTMLElement>('[role=button]')!;
     fireEvent.click(within(bubble).getByRole('link', { name: 'the report' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-    expect(useFleetStore.getState().selectedId).toBeNull();
-    expect(screen.getByRole('textbox', { name: 'Terminal' })).not.toHaveFocus();
+    // Not stopped, so the opener on `window` gets it (`FleetFeed.test`); the card on the way selects itself.
+    expect(useFleetStore.getState().selectedId).toBe('a');
   });
 
   describe('opening a workspace', () => {

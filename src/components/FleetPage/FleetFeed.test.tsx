@@ -418,6 +418,63 @@ describe('a bubble, scrolling', () => {
   });
 });
 
+describe('a link in a bubble', () => {
+  const agent = { kind: 'agent', agent: { workspaceAgentId: 'wa-s', agentDefinitionId: 'def-s', displayName: 'Scout', isDefault: false }, sessionId: 'task-s', runId: null, replyAddress: null };
+  const created = (m: AssistantMessage, at: number) => event({ type: 'message_created', payload: { message: m } } as AssistantUiEvent, at);
+  /** Main's, yours and an agent's bubble, each with a bare URL. */
+  const state = () =>
+    applyAssistantEvent(
+      applyUserSent(saying('First, the leaks: https://github.com/clairun/clai/pull/236'), WS, MAIN, { ...message('u1', [text('Mine: https://example.com/yours')]), role: 'user' }, NOW),
+      created({ ...message('s1', [text('Scout: https://example.com/scout')]), role: 'user', origin: agent } as AssistantMessage, NOW + 1)
+    );
+  /** What the opener plugin does on `window`: open a new-tab link clicked, unless something prevented it. */
+  const opened: string[] = [];
+  const keys: string[] = [];
+  const opener = (e: MouseEvent) => {
+    const link = e.target instanceof Element ? e.target.closest<HTMLAnchorElement>('a[target=_blank]') : null;
+    if (!link || e.defaultPrevented) return;
+    e.preventDefault();
+    opened.push(link.href);
+  };
+  const key = (e: KeyboardEvent) => keys.push(e.key);
+  let height: { mockRestore: () => void };
+  beforeEach(() => {
+    opened.length = 0;
+    keys.length = 0;
+    window.addEventListener('click', opener);
+    window.addEventListener('keydown', key);
+    height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(1000);
+  });
+  afterEach(() => {
+    window.removeEventListener('click', opener);
+    window.removeEventListener('keydown', key);
+    height.mockRestore();
+  });
+
+  it.each([
+    ["Main's bubble", 'https://github.com/clairun/clai/pull/236'],
+    ['your bubble', 'https://example.com/yours'],
+    ["an agent's bubble", 'https://example.com/scout'],
+  ])('in %s opens on a click, through to the opener, and does not zoom the bubble', (_, href) => {
+    render(<Feed state={state()} now={NOW + 2000} />);
+    fireEvent.click(screen.getByRole('link', { name: href }));
+    expect(opened).toEqual([href]);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('opens on Enter too: the key and the click it makes both go through, and the bubble does not zoom', () => {
+    render(<Feed state={state()} now={NOW + 2000} />);
+    const link = screen.getByRole('link', { name: 'https://example.com/scout' });
+    link.focus();
+    // Not prevented: the browser turns it into a click on the link.
+    expect(fireEvent.keyDown(link, { key: 'Enter' })).toBe(true);
+    expect(keys).toEqual(['Enter']);
+    fireEvent.click(link);
+    expect(opened).toEqual(['https://example.com/scout']);
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+});
+
 describe('words selected in the feed', () => {
   /** Main, you, Main: an older bubble of Main's, yours, and Main's newest. */
   const asked = () => {
