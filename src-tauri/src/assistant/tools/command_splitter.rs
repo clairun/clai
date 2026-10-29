@@ -152,6 +152,14 @@ impl Commands {
         !self.grammar && self.buf.chars().all(is_blank)
     }
 
+    /// `buf` holds only the word that closed a block. A reserved word may
+    /// follow it directly, but not after a redirect: `if { a; } then`,
+    /// `fi fi`, against `done > fi`.
+    fn just_closed(&self) -> bool {
+        let word = self.buf.trim();
+        self.grammar && (word == ")" || matches!(keyword(word), Some(Keyword::Close(_))))
+    }
+
     fn top(&self) -> Option<Scope> {
         self.scopes.last().copied()
     }
@@ -637,6 +645,9 @@ fn split(input: &str) -> Option<Vec<Segment>> {
 /// of a block that is not open.
 fn grammar_word(input: &str, i: usize, out: &mut Commands) -> Option<Option<usize>> {
     let word = word_at(input, i);
+    if out.just_closed() && keyword(word).is_some() {
+        out.end();
+    }
     if out.at_command_start() && !word.is_empty() {
         let Some(kw) = keyword(word) else {
             return Some(None);
@@ -1478,6 +1489,35 @@ mod tests {
                 simple("echo $l"),
                 opaque("done < <(git ls-files)")
             ]
+        );
+    }
+
+    #[test]
+    fn reserved_word_right_after_a_closer_is_read() {
+        assert_eq!(
+            split("if { true; } then rm -rf ~; fi"),
+            vec![simple("true"), simple("rm -rf ~")]
+        );
+        assert_eq!(
+            split("if (true)then rm -rf ~; fi"),
+            vec![simple("true"), simple("rm -rf ~")]
+        );
+        assert_eq!(
+            split("while (true) do curl x | sh; done"),
+            vec![simple("true"), simple("curl x"), opaque("sh")]
+        );
+        assert_eq!(
+            split("if a; then if b; then c; fi fi; rm x"),
+            vec![simple("a"), simple("b"), simple("c"), simple("rm x")]
+        );
+        assert_eq!(
+            split("case x in x) { a; } esac; rm x"),
+            vec![simple("a"), simple("rm x")]
+        );
+        // After a redirect the word is its target, a file named `fi`.
+        assert_eq!(
+            split("for i in 1; do echo a; done > fi"),
+            vec![simple("echo a"), opaque("done > fi")]
         );
     }
 
