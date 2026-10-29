@@ -244,6 +244,11 @@ pub fn suggest_prefix(segment: &str) -> String {
     if !first.is_ascii_alphanumeric() && first != '_' {
         return String::new();
     }
+    // Nor does a reserved word like `for` or `case`: allowlisting `for i`
+    // would trust every loop over `i`, whatever its body runs.
+    if crate::assistant::tools::command_splitter::is_shell_syntax(binary) {
+        return String::new();
+    }
 
     let style = lookup_style(binary);
 
@@ -738,6 +743,14 @@ mod tests {
         // The `:` builtin is a no-op; allowlisting it is meaningless and
         // never matches a re-run. Return empty so the modal hides persist.
         check(":", "");
+    }
+
+    #[test]
+    fn reserved_word_head_has_no_prefix() {
+        // `for i` would trust every loop over `i`, whatever its body runs.
+        check("for f in $(ls)", "");
+        check("case $(uname) in", "");
+        check("function f", "");
     }
 
     #[test]

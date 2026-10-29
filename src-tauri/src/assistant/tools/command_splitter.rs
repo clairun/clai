@@ -1,24 +1,33 @@
-//! Splits a shell command string into independently-evaluable segments.
+//! Splits a shell command string into the commands it will run.
 //!
-//! Top-level separators (`|`, `||`, `|&`, `&&`, `;`, `&`, newline) divide a
-//! command line into pieces that the shell will run as separate processes.
-//! Each piece is returned as a [`Segment`].
+//! Every command the shell would execute becomes one [`Segment`]: the
+//! commands joined by `|`, `||`, `|&`, `&&`, `;`, `&` or a newline, and the
+//! commands inside subshells `( … )`, brace groups `{ …; }`, function bodies
+//! and `if`/`while`/`until`/`for`/`select`/`case` blocks. A call to a
+//! function is a command too, wherever the function was defined: its
+//! arguments may be what runs (`f(){ "$@"; }; f rm -rf x`).
+//!
+//! Shell grammar is not a command: braces, parentheses, reserved words,
+//! function headers, `for`/`case` headers and `case` patterns. It is dropped,
+//! unless it redirects or embeds a substitution (`for f in $(ls)`, or
+//! `done > log`, which applies to the whole loop); then it is kept as an
+//! Opaque segment, because it runs or writes something.
 //!
 //! Segments are classified as either:
 //!
 //! - [`Segment::Simple`] — a plain command whose head (binary + canonical
 //!   subcommand) is unambiguous from textual inspection.
 //! - [`Segment::Opaque`] — a segment whose surface form includes one of
-//!   command substitution (`$(...)`, backticks), subshells, command groups,
-//!   control-flow keywords, test expressions, heredocs, redirects, process
-//!   substitution, or an executor-style head (`bash -c`, `xargs`, `eval`,
-//!   ...). The shape is harder to reason about than a plain command, but the
-//!   policy layer still matches an Opaque segment's binary head against the
-//!   allow/blocklist via the same prefix matcher — the `Opaque` tag mostly
-//!   informs the UI ("this is more than a bare command") rather than gating
-//!   persistence. The splitter is intentionally conservative: anything
-//!   ambiguous becomes Opaque, surfaced to the user, and only allowlisted
-//!   after an explicit "Always allow" click on the prefix.
+//!   command substitution (`$(...)`, backticks), test expressions, heredocs,
+//!   redirects, process substitution, or an executor-style head (`bash -c`,
+//!   `xargs`, `eval`, ...). The shape is harder to reason about than a plain
+//!   command, but the policy layer still matches an Opaque segment's binary
+//!   head against the allow/blocklist via the same prefix matcher — the
+//!   `Opaque` tag mostly informs the UI ("this is more than a bare command")
+//!   rather than gating persistence. The splitter is intentionally
+//!   conservative: anything ambiguous becomes Opaque, surfaced to the user,
+//!   and only allowlisted after an explicit "Always allow" click on the
+//!   prefix.
 
 #![allow(dead_code)] // wired into enforce_command_policy in commit 6
 
@@ -40,25 +49,237 @@ impl Segment {
     }
 }
 
+/// A block whose commands are segments of their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Scope {
+    /// `( … )`
+    Subshell,
+    /// `{ …; }`
+    Group,
+    /// `if … fi`
+    If,
+    /// `for`, `select`, `while`, `until` … `done`
+    Loop,
+    /// `case … esac`: its header and its item bodies.
+    Case,
+    /// A `case` item's pattern, from `in` or `;;` to its `)`.
+    Pattern,
+}
+
+/// What a reserved word does where a command would start.
+#[derive(Debug, Clone, Copy)]
+enum Keyword {
+    /// Opens a block whose body follows: `if`, `while`, `until`, `{`.
+    Open(Scope),
+    /// Opens a block with a header that is not a command: `for`,
+    /// `select`, `case`.
+    Header(Scope),
+    /// Separates the parts of a block, or negates a pipeline: `then`,
+    /// `elif`, `else`, `do`, `!`.
+    Part,
+    /// Closes a block: `fi`, `done`, `esac`, `}`.
+    Close(Scope),
+    /// `function NAME`.
+    Function,
+    /// `in`, which belongs only in a header.
+    Misplaced,
+}
+
+fn keyword(word: &str) -> Option<Keyword> {
+    Some(match word {
+        "if" => Keyword::Open(Scope::If),
+        "while" | "until" => Keyword::Open(Scope::Loop),
+        "{" => Keyword::Open(Scope::Group),
+        "for" | "select" => Keyword::Header(Scope::Loop),
+        "case" => Keyword::Header(Scope::Case),
+        "then" | "elif" | "else" | "do" | "!" => Keyword::Part,
+        "fi" => Keyword::Close(Scope::If),
+        "done" => Keyword::Close(Scope::Loop),
+        "esac" => Keyword::Close(Scope::Case),
+        "}" => Keyword::Close(Scope::Group),
+        "function" => Keyword::Function,
+        "in" => Keyword::Misplaced,
+        _ => return None,
+    })
+}
+
+/// True for a word that is shell grammar rather than a command name. Such a
+/// word heads a segment only when the grammar redirects or substitutes, or
+/// the input could not be split; either way it is no prefix to allowlist.
+pub fn is_shell_syntax(word: &str) -> bool {
+    keyword(word).is_some()
+}
+
+/// True if `text` runs a command of its own through a command or process
+/// substitution.
+pub fn has_substitution(text: &str) -> bool {
+    ["$(", "`", "<(", ">("].iter().any(|s| text.contains(s))
+}
+
+/// The characters that separate words in shell syntax. A carriage return is
+/// not one: bash reads it as part of a word.
+fn is_blank(c: char) -> bool {
+    matches!(c, ' ' | '\t' | '\n')
+}
+
+/// A heredoc whose body starts on the line after its operator.
+struct Heredoc {
+    /// The delimiter after quote removal.
+    delim: String,
+    /// `<<-`: the closing line may be indented with tabs.
+    strip_tabs: bool,
+    /// The segment of the command that reads it.
+    owner: usize,
+}
+
+/// The commands read so far, and the one being read.
+#[derive(Default)]
+struct Commands {
+    segments: Vec<Segment>,
+    buf: String,
+    /// `buf` has a construct that makes it Opaque.
+    opaque: bool,
+    /// `buf` is grammar, not a command: a `for`/`case` header, a `case`
+    /// pattern, a function header, or a closed block and its redirects.
+    grammar: bool,
+    scopes: Vec<Scope>,
+    /// Heredocs opened on the current line.
+    heredocs: Vec<Heredoc>,
+}
+
+impl Commands {
+    fn at_command_start(&self) -> bool {
+        !self.grammar && self.buf.chars().all(is_blank)
+    }
+
+    fn top(&self) -> Option<Scope> {
+        self.scopes.last().copied()
+    }
+
+    /// The keyword heading `buf` while it is a `for`, `select` or `case`
+    /// header.
+    fn header(&self) -> Option<&str> {
+        let first = self.buf.split_whitespace().next()?;
+        (self.grammar && matches!(first, "for" | "select" | "case")).then_some(first)
+    }
+
+    /// A header may break lines before its word list: `case WORD` up to
+    /// `in`, and `for NAME` up to `in` or `do`.
+    fn header_continues(&self) -> bool {
+        match self.header() {
+            Some("case") => true,
+            Some(_) => self.buf.split_whitespace().count() == 2,
+            None => false,
+        }
+    }
+
+    /// Ends the command in `buf`. Grammar runs nothing of its own unless it
+    /// redirects or substitutes; then it is kept, as Opaque.
+    fn end(&mut self) {
+        let text = self.buf.trim();
+        let runs = !self.grammar || has_substitution(text) || text.contains(['<', '>']);
+        if runs && !text.is_empty() {
+            let text = text.to_string();
+            self.segments
+                .push(if self.opaque || self.grammar || head_is_executor(&text) {
+                    Segment::Opaque(text)
+                } else {
+                    Segment::Simple(text)
+                });
+        }
+        self.buf.clear();
+        self.opaque = false;
+        self.grammar = false;
+    }
+
+    /// Applies a reserved word read where a command would start. `None`
+    /// when it is out of place, such as closing a block that is not open.
+    fn keyword(&mut self, keyword: Keyword, word: &str) -> Option<()> {
+        match keyword {
+            Keyword::Open(scope) => self.scopes.push(scope),
+            Keyword::Header(scope) => {
+                self.scopes.push(scope);
+                self.buf.push_str(word);
+                self.grammar = true;
+            }
+            Keyword::Part | Keyword::Function => {}
+            Keyword::Close(scope) => self.close(scope, word)?,
+            Keyword::Misplaced => return None,
+        }
+        Some(())
+    }
+
+    /// Closes the innermost block, which must be `scope`, with `word`.
+    /// What follows up to the next separator applies to the whole block,
+    /// so it is grammar, shown after `word` if it redirects.
+    fn close(&mut self, scope: Scope, word: &str) -> Option<()> {
+        if self.scopes.pop() != Some(scope) {
+            return None;
+        }
+        self.buf.push_str(word);
+        self.grammar = true;
+        Some(())
+    }
+
+    fn enter_pattern(&mut self) {
+        self.scopes.push(Scope::Pattern);
+        self.grammar = true;
+    }
+
+    /// Reads the bodies of the heredocs opened on the line that ended just
+    /// before `i`, appends each to the command that reads it, and returns
+    /// where lexing resumes. A body is data, not commands.
+    fn read_heredoc_bodies(&mut self, input: &str, mut i: usize) -> usize {
+        for heredoc in std::mem::take(&mut self.heredocs) {
+            let start = i;
+            for line in input[start..].split_inclusive('\n') {
+                i += line.len();
+                let line = line.strip_suffix('\n').unwrap_or(line);
+                let line = if heredoc.strip_tabs {
+                    line.trim_start_matches('\t')
+                } else {
+                    line
+                };
+                if line == heredoc.delim {
+                    break;
+                }
+            }
+            if let Some(Segment::Simple(text) | Segment::Opaque(text)) =
+                self.segments.get_mut(heredoc.owner)
+            {
+                text.push('\n');
+                text.push_str(input[start..i].trim_end_matches('\n'));
+            }
+        }
+        i
+    }
+}
+
 /// Splits a shell command into [`Segment`]s.
 ///
-/// The returned vector preserves separator order. Empty (whitespace-only)
-/// segments produced by adjacent separators are discarded.
+/// The returned vector preserves execution order. When the input cannot be
+/// split reliably — an unterminated quote, an unbalanced block — separator
+/// detection after that point means nothing (one stray quote silently
+/// swallows later `;` / `&&` / `|`), so the whole input becomes one Opaque
+/// segment the user reviews as a unit. [`is_shell_syntax`] and the junk-head
+/// rule in `suggest_prefix` keep a bogus "always allow" off that blob.
+pub fn split_command(input: &str) -> Vec<Segment> {
+    split(input).unwrap_or_else(|| vec![Segment::Opaque(input.trim().to_string())])
+}
+
 #[allow(
     clippy::cognitive_complexity,
     reason = "lint debt: cognitive complexity 65 against a budget of 25"
 )]
 #[expect(
     clippy::too_many_lines,
-    reason = "lint debt: 366 lines against a 100-line budget; split it, do not raise the budget"
+    reason = "lint debt: 354 lines against a 100-line budget; split it, do not raise the budget"
 )]
-pub fn split_command(input: &str) -> Vec<Segment> {
+fn split(input: &str) -> Option<Vec<Segment>> {
     let bytes = input.as_bytes();
     let n = bytes.len();
 
-    let mut segments: Vec<Segment> = Vec::new();
-    let mut buf = String::new();
-    let mut opaque = false;
+    let mut out = Commands::default();
 
     let mut in_single = false;
     let mut in_double = false;
@@ -77,7 +298,7 @@ pub fn split_command(input: &str) -> Vec<Segment> {
                 .chars()
                 .next()
                 .unwrap_or(char::REPLACEMENT_CHARACTER);
-            buf.push(ch);
+            out.buf.push(ch);
             escape = false;
             i += ch.len_utf8();
             continue;
@@ -92,28 +313,25 @@ pub fn split_command(input: &str) -> Vec<Segment> {
         // Escape: a backslash immediately followed by a newline is a line
         // continuation — the shell removes BOTH characters and joins the
         // lines into one logical command. Drop the backslash we already
-        // buffered and swallow the newline (and a paired `\r\n`). Any other
-        // escaped char is kept literally. (Single quotes never set `escape`,
-        // so `\<newline>` inside `'...'` correctly stays literal.)
+        // buffered and swallow the newline. Any other escaped char is kept
+        // literally, a carriage return too: bash joins no lines at `\`
+        // before `\r\n`. (Single quotes never set `escape`, so
+        // `\<newline>` inside `'...'` correctly stays literal.)
         if escape {
             escape = false;
-            if c == '\n' || c == '\r' {
-                buf.pop(); // remove the trailing backslash
-                if c == '\r' && next == Some('\n') {
-                    i += 2;
-                } else {
-                    i += 1;
-                }
+            if c == '\n' {
+                out.buf.pop(); // remove the trailing backslash
+                i += 1;
                 continue;
             }
-            buf.push(c);
+            out.buf.push(c);
             i += 1;
             continue;
         }
 
         // Inside single quotes: only ' ends it. No escapes.
         if in_single {
-            buf.push(c);
+            out.buf.push(c);
             if c == '\'' {
                 in_single = false;
             }
@@ -123,19 +341,19 @@ pub fn split_command(input: &str) -> Vec<Segment> {
 
         // Inside double quotes: handle \, ", $(, `.
         if in_double {
-            buf.push(c);
+            out.buf.push(c);
             if c == '\\' {
                 escape = true;
             } else if c == '"' {
                 in_double = false;
             } else if c == '$' && next == Some('(') {
-                opaque = true;
-                buf.push('(');
+                out.opaque = true;
+                out.buf.push('(');
                 depth += 1;
                 i += 2;
                 continue;
             } else if c == '`' {
-                opaque = true;
+                out.opaque = true;
                 in_backtick = true;
             }
             i += 1;
@@ -144,7 +362,7 @@ pub fn split_command(input: &str) -> Vec<Segment> {
 
         // Inside backticks: only ` ends it. Backslash escapes the next char.
         if in_backtick {
-            buf.push(c);
+            out.buf.push(c);
             if c == '\\' {
                 escape = true;
             } else if c == '`' {
@@ -154,25 +372,25 @@ pub fn split_command(input: &str) -> Vec<Segment> {
             continue;
         }
 
-        // Outside quotes; depth>0 suppresses separator detection.
+        // Inside a substitution or expansion: one word, no separators.
         if depth > 0 {
-            buf.push(c);
+            out.buf.push(c);
             match c {
                 '\\' => escape = true,
                 '\'' => in_single = true,
                 '"' => in_double = true,
                 '`' => {
                     in_backtick = true;
-                    opaque = true;
+                    out.opaque = true;
                 }
                 '(' | '{' | '[' => depth += 1,
                 ')' | '}' | ']' => {
                     depth = depth.saturating_sub(1);
                 }
                 '$' if next == Some('(') || next == Some('{') => {
-                    buf.push(next.unwrap());
+                    out.buf.push(next.unwrap());
                     if next == Some('(') {
-                        opaque = true;
+                        out.opaque = true;
                     }
                     depth += 1;
                     i += 2;
@@ -194,11 +412,7 @@ pub fn split_command(input: &str) -> Vec<Segment> {
         // command that preceded the inline comment (`ls # listing` →
         // segment "ls", comment dropped).
         if c == '#' {
-            let at_token_start = buf
-                .chars()
-                .last()
-                .map(|ch| ch.is_whitespace())
-                .unwrap_or(true);
+            let at_token_start = out.buf.chars().last().map(is_blank).unwrap_or(true);
             if at_token_start {
                 while i < n && bytes[i] != b'\n' {
                     i += 1;
@@ -209,31 +423,48 @@ pub fn split_command(input: &str) -> Vec<Segment> {
 
         match c {
             '\\' => {
-                buf.push(c);
+                out.buf.push(c);
                 escape = true;
                 i += 1;
                 continue;
             }
             '\'' => {
-                buf.push(c);
+                out.buf.push(c);
                 in_single = true;
                 i += 1;
                 continue;
             }
             '"' => {
-                buf.push(c);
+                out.buf.push(c);
                 in_double = true;
                 i += 1;
                 continue;
             }
             '`' => {
-                buf.push(c);
+                out.buf.push(c);
                 in_backtick = true;
-                opaque = true;
+                out.opaque = true;
                 i += 1;
                 continue;
             }
             _ => {}
+        }
+
+        if c == '\n' {
+            // In a case pattern, or before a header's word list, a newline
+            // is a blank; elsewhere it ends the command.
+            if out.top() == Some(Scope::Pattern) || out.header_continues() {
+                out.buf.push(' ');
+            } else {
+                out.end();
+            }
+            i = out.read_heredoc_bodies(input, i + 1);
+            continue;
+        }
+
+        if let Some(after) = grammar_word(input, i, &mut out)? {
+            i = after;
+            continue;
         }
 
         // Substitution and grouping triggers
@@ -246,31 +477,36 @@ pub fn split_command(input: &str) -> Vec<Segment> {
             if third == Some('(') {
                 // Arithmetic expansion $((  — just text, not a substitution.
                 // Track both parens so the matching `))` brings depth back.
-                buf.push_str("$((");
+                out.buf.push_str("$((");
                 depth += 2;
                 i += 3;
             } else {
                 // Command substitution $(  — runs arbitrary code.
-                buf.push_str("$(");
+                out.buf.push_str("$(");
                 depth += 1;
-                opaque = true;
+                out.opaque = true;
                 i += 2;
             }
             continue;
         }
         if c == '$' && next == Some('{') {
-            buf.push_str("${");
+            out.buf.push_str("${");
             depth += 1;
             i += 2;
             continue;
         }
 
+        if out.top() == Some(Scope::Pattern) {
+            i = read_pattern(input, i, &mut out)?;
+            continue;
+        }
+
         // Process substitution: <( ... ) or >( ... )
         if (c == '<' || c == '>') && next == Some('(') {
-            buf.push(c);
-            buf.push('(');
+            out.buf.push(c);
+            out.buf.push('(');
             depth += 1;
-            opaque = true;
+            out.opaque = true;
             i += 2;
             continue;
         }
@@ -281,107 +517,19 @@ pub fn split_command(input: &str) -> Vec<Segment> {
         // We only treat `<<` and `<<-` as proper heredocs that capture
         // a multi-line body.
         if c == '<' && next == Some('<') && bytes.get(i + 2) != Some(&b'<') {
-            opaque = true;
-            buf.push_str("<<");
-            i += 2;
-            // <<- variant strips leading tabs in body; same delimiter
-            if bytes.get(i) == Some(&b'-') {
-                buf.push('-');
-                i += 1;
-            }
-            // Skip whitespace before the delimiter token.
-            while i < n && (bytes[i] == b' ' || bytes[i] == b'\t') {
-                buf.push(bytes[i] as char);
-                i += 1;
-            }
-            // Parse the delimiter — may be quoted ('EOF' / "EOF") or
-            // bare (EOF).
-            let delim;
-            if i < n && (bytes[i] == b'\'' || bytes[i] == b'"') {
-                let quote = bytes[i];
-                buf.push(bytes[i] as char);
-                i += 1;
-                let start = i;
-                while i < n && bytes[i] != quote {
-                    i += 1;
-                }
-                delim = &input[start..i];
-                buf.push_str(delim);
-                if i < n {
-                    buf.push(bytes[i] as char);
-                    i += 1; // closing quote
-                }
-            } else {
-                let start = i;
-                while i < n && !bytes[i].is_ascii_whitespace() {
-                    i += 1;
-                }
-                delim = &input[start..i];
-                buf.push_str(delim);
-            }
-
-            // Malformed (no delimiter parsed) — leave it as Opaque and
-            // let the outer loop handle whatever comes next. This is
-            // the conservative default; we've already set opaque=true.
-            if delim.is_empty() {
-                continue;
-            }
-
-            // The rest of the current line is part of the line that
-            // *started* the heredoc (e.g. trailing pipes or whatever
-            // follows the delimiter on the same line). We consume it
-            // into the segment buffer without doing any separator
-            // splitting, then move on to the body.
-            let start = i;
-            while i < n && bytes[i] != b'\n' {
-                i += 1;
-            }
-            buf.push_str(&input[start..i]);
-            if i < n {
-                buf.push('\n');
-                i += 1;
-            }
-
-            // Consume body lines until we see the delimiter alone on a
-            // line. Per POSIX shell semantics newlines inside the body
-            // are NOT command separators — they're literal data. We
-            // must therefore skip all of our own separator/quote
-            // logic until the closer.
-            while i < n {
-                let line_start = i;
-                while i < n && bytes[i] != b'\n' {
-                    i += 1;
-                }
-                let line = &input[line_start..i];
-                buf.push_str(line);
-                let is_closer = line.trim() == delim;
-                if i < n {
-                    buf.push('\n');
-                    i += 1;
-                }
-                if is_closer {
-                    break;
-                }
-            }
-            // Heredoc is a self-contained command — flush this segment
-            // now so anything that follows (`echo done` on the next
-            // line, etc.) starts a fresh segment. Without this the
-            // outer loop would keep appending to the same Opaque buf.
-            push_segment(&mut segments, &buf, opaque);
-            buf.clear();
-            opaque = false;
+            i = read_heredoc(input, i, &mut out);
             continue;
         }
 
         // Plain redirects: >, >>, <, plus dup forms like >&1, <&0
         if c == '>' || c == '<' {
-            opaque = true;
-            buf.push(c);
+            out.opaque = true;
+            out.buf.push(c);
             i += 1;
             while i < n {
                 let c2 = bytes[i] as char;
                 if c2 == '>' || c2 == '<' || c2 == '&' || c2 == '|' || c2 == '-' {
-                    buf.push(c2);
+                    out.buf.push(c2);
                     i += 1;
                 } else {
                     break;
@@ -392,14 +540,14 @@ pub fn split_command(input: &str) -> Vec<Segment> {
 
         // &> and &>> stdout+stderr redirect
         if c == '&' && next == Some('>') {
-            opaque = true;
-            buf.push('&');
-            buf.push('>');
+            out.opaque = true;
+            out.buf.push('&');
+            out.buf.push('>');
             i += 2;
             while i < n {
                 let c2 = bytes[i] as char;
                 if c2 == '>' || c2 == '|' || c2 == '-' {
-                    buf.push(c2);
+                    out.buf.push(c2);
                     i += 1;
                 } else {
                     break;
@@ -408,304 +556,219 @@ pub fn split_command(input: &str) -> Vec<Segment> {
             continue;
         }
 
-        // Subshell / command group at segment top level
         if c == '(' {
-            buf.push(c);
-            depth += 1;
-            opaque = true;
-            i += 1;
-            continue;
-        }
-        if c == '{' {
-            // `{` is ambiguous between brace expansion (`a{b,c}d` inside
-            // an argument) and a command group (`{ cmd1; cmd2; }`). The
-            // shell distinguishes by tokenisation: a command group is its
-            // own token, so `{` is preceded by whitespace or starts the
-            // input. If `{` is glued to the preceding token, it's brace
-            // expansion — treat it as a literal so file-glob patterns
-            // like `docs/00{08,09,10}*.md` don't get flagged Opaque.
-            let glued = buf
-                .chars()
-                .last()
-                .map(|ch| !ch.is_whitespace())
-                .unwrap_or(false);
-            if glued {
-                buf.push(c);
+            // `NAME()` or `NAME ()` defines a function; its body follows.
+            if let Some(after) = empty_parens(input, i) {
+                let name = out.buf.trim().to_string();
+                if !out.grammar && is_function_name(&name) {
+                    out.buf.clear();
+                    out.opaque = false;
+                    i = after;
+                    continue;
+                }
+            }
+            // A subshell. `((` opens an arithmetic command instead.
+            if out.at_command_start() && next != Some('(') {
+                out.scopes.push(Scope::Subshell);
                 i += 1;
                 continue;
             }
-            buf.push(c);
+            // An array literal `a=(…)` or arithmetic `((…))`: one word.
+            out.buf.push(c);
             depth += 1;
-            opaque = true;
+            out.opaque = true;
             i += 1;
             continue;
+        }
+        if c == ')' && out.top() == Some(Scope::Subshell) {
+            out.end();
+            out.close(Scope::Subshell, ")")?;
+            i += 1;
+            continue;
+        }
+        // `{` heading a command word (not a group, which is the word `{`
+        // alone) is brace expansion: `{rm,-rf,x}` runs `rm -rf x`.
+        if c == '{' && out.at_command_start() {
+            out.opaque = true;
         }
         // Test expressions: [ ... ] or [[ ... ]] mark Opaque. We don't track
         // their depth — separators inside are unusual and would only cause
         // a benign over-split (each side still becomes Opaque from carrying
         // a `[` or `]` marker, or from the executor-head check).
         if c == '[' {
-            buf.push(c);
-            opaque = true;
-            i += 1;
-            continue;
-        }
-        if c == ']' || c == ')' || c == '}' {
-            buf.push(c);
-            i += 1;
-            continue;
+            out.opaque = true;
         }
 
         // Separators
-        if c == '|' && next == Some('|') {
-            push_segment(&mut segments, &buf, opaque);
-            buf.clear();
-            opaque = false;
-            i += 2;
+        if c == ';' && out.top() == Some(Scope::Case) && matches!(next, Some(';' | '&')) {
+            // `;;`, `;&` or `;;&` ends a case item; a pattern follows.
+            out.end();
+            out.enter_pattern();
+            i += if input[i..].starts_with(";;&") { 3 } else { 2 };
             continue;
         }
-        if c == '&' && next == Some('&') {
-            push_segment(&mut segments, &buf, opaque);
-            buf.clear();
-            opaque = false;
-            i += 2;
-            continue;
-        }
-        if c == '|' && next == Some('&') {
-            // |& : pipe with stderr included. Same separation as |.
-            push_segment(&mut segments, &buf, opaque);
-            buf.clear();
-            opaque = false;
-            i += 2;
-            continue;
-        }
-        if c == '|' {
-            push_segment(&mut segments, &buf, opaque);
-            buf.clear();
-            opaque = false;
-            i += 1;
-            continue;
-        }
-        if c == '&' {
-            push_segment(&mut segments, &buf, opaque);
-            buf.clear();
-            opaque = false;
-            i += 1;
-            continue;
-        }
-        if c == ';' || c == '\n' || c == '\r' {
-            push_segment(&mut segments, &buf, opaque);
-            buf.clear();
-            opaque = false;
-            i += 1;
+        let separator_len = match (c, next) {
+            ('|', Some('|' | '&')) | ('&', Some('&')) => 2,
+            ('|' | '&' | ';', _) => 1,
+            _ => 0,
+        };
+        if separator_len > 0 {
+            out.end();
+            i += separator_len;
             continue;
         }
 
         // Regular character
-        buf.push(c);
+        out.buf.push(c);
         i += 1;
     }
 
-    push_segment(&mut segments, &buf, opaque);
-
-    // If parsing ended inside an unterminated quote, backtick, or bracket
-    // group, separator detection was unreliable for everything after the
-    // opening delimiter — a single stray quote silently swallows later
-    // `;` / `&&` / `|`, collapsing unrelated commands into one mis-identified
-    // segment. Rather than emit a misleading partial segmentation, surface
-    // the whole command as one Opaque segment so the user reviews it as a
-    // unit. `suggest_prefix` declines to offer a prefix for a junk head like
-    // `:`, so no bogus "always allow" is proposed for the blob.
-    if in_single || in_double || in_backtick || depth > 0 {
-        let trimmed = input.trim();
-        if trimmed.is_empty() {
-            return Vec::new();
-        }
-        return vec![Segment::Opaque(trimmed.to_string())];
+    if in_single || in_double || in_backtick || depth > 0 || !out.scopes.is_empty() {
+        return None;
     }
+    out.end();
+    Some(out.segments)
+}
 
-    // Post-process: reclassify Simple segments whose head is an executor
-    // command or a control-flow keyword as Opaque. These run other programs
-    // (xargs, bash -c, ...) or open scoped scopes that aren't safely
-    // allowlistable.
-    for seg in &mut segments {
-        if let Segment::Simple(s) = seg {
-            if head_is_opaque_trigger(s) {
-                *seg = Segment::Opaque(s.clone());
+/// Applies the shell grammar word at `i`, if there is one, and returns
+/// where lexing resumes: a reserved word where a command would start
+/// (elsewhere `done` or `{` is an ordinary argument), or the word that ends
+/// a block header. `None` when the word is out of place, such as a closer
+/// of a block that is not open.
+fn grammar_word(input: &str, i: usize, out: &mut Commands) -> Option<Option<usize>> {
+    let word = word_at(input, i);
+    if out.at_command_start() && !word.is_empty() {
+        let Some(kw) = keyword(word) else {
+            return Some(None);
+        };
+        let mut i = i + word.len();
+        if let Keyword::Function = kw {
+            // `function NAME`, optionally followed by `()`, is a header.
+            i = skip_blanks(input, i);
+            let name = word_at(input, i);
+            if name.is_empty() {
+                return None;
             }
+            i += name.len();
+            i = empty_parens(input, i).unwrap_or(i);
+        } else {
+            out.keyword(kw, word)?;
+        }
+        return Some(Some(i));
+    }
+    // A header ends at `in` (`case WORD in`) or at `do` (the `for NAME do`
+    // form, without a word list).
+    if out.buf.ends_with(is_blank) {
+        let header_ends = match (out.header(), word) {
+            (Some("case"), "in") => true,
+            (Some("for" | "select"), "do") => out.header_continues(),
+            _ => false,
+        };
+        if header_ends {
+            out.end();
+            if word == "in" {
+                out.enter_pattern();
+            }
+            return Some(Some(i + word.len()));
         }
     }
-
-    // Collapse compound shell constructs (`for/while/until/select … done`,
-    // `if … fi`, `case … esac`) into a single Opaque segment. Splitting on
-    // every `;` / `&&` / `||` inside a loop produces meaningless approval
-    // fragments like `do gh run view …`, `break`, `done` — none of which
-    // the user can sensibly decide on in isolation. One construct = one
-    // approval card.
-    merge_compound_constructs(input, segments)
+    Some(None)
 }
 
-fn push_segment(out: &mut Vec<Segment>, buf: &str, opaque: bool) {
-    let trimmed = buf.trim();
-    if trimmed.is_empty() {
-        return;
+/// Reads one step of a `case` pattern, which runs to its `)`: `|` in it
+/// separates alternatives, not commands. `esac` may follow the last item.
+/// Returns where lexing resumes.
+fn read_pattern(input: &str, i: usize, out: &mut Commands) -> Option<usize> {
+    let c = input.as_bytes()[i] as char;
+    let blank = out.buf.chars().all(is_blank);
+    if blank && word_at(input, i) == "esac" {
+        out.scopes.pop();
+        out.close(Scope::Case, "esac")?;
+        return Some(i + "esac".len());
     }
-    let s = trimmed.to_string();
-    if opaque {
-        out.push(Segment::Opaque(s));
-    } else {
-        out.push(Segment::Simple(s));
+    if c == ')' {
+        out.end();
+        out.scopes.pop();
+    } else if !(blank && (c == '(' || is_blank(c))) {
+        out.buf.push(c);
     }
+    Some(i + 1)
 }
 
-/// True if the first non-env-assignment token is an executor command or a
-/// control-flow keyword.
-fn head_is_opaque_trigger(segment: &str) -> bool {
-    // Tokens whose presence at the head means the segment runs arbitrary
-    // other code, or alters control flow such that the segment isn't a
-    // simple "this command, these args" shape.
+/// Reads the heredoc operator at `i` (`<<`, `<<-`) and its delimiter word
+/// into the command, queues the heredoc so its body is read after this
+/// line, and returns where lexing resumes.
+fn read_heredoc(input: &str, start: usize, out: &mut Commands) -> usize {
+    out.opaque = true;
+    let mut i = start + 2;
+    let strip_tabs = input[i..].starts_with('-');
+    if strip_tabs {
+        i += 1;
+    }
+    i = skip_blanks(input, i);
+    // The delimiter is one word, quotes removed: `'EOF'`, `"EOF"`, `\EOF`
+    // and `E"OF"` all close at a line reading `EOF`.
+    let word = word_at(input, i);
+    let mut delim = String::with_capacity(word.len());
+    let mut chars = word.chars();
+    while let Some(c) = chars.next() {
+        match c {
+            '\'' | '"' => delim.extend(chars.by_ref().take_while(|&q| q != c)),
+            '\\' => delim.extend(chars.next()),
+            _ => delim.push(c),
+        }
+    }
+    i += word.len();
+    out.buf.push_str(&input[start..i]);
+    if !delim.is_empty() {
+        out.heredocs.push(Heredoc {
+            delim,
+            strip_tabs,
+            owner: out.segments.len(),
+        });
+    }
+    i
+}
+
+/// The word starting at `i`: up to a blank or an operator character.
+fn word_at(input: &str, i: usize) -> &str {
+    let rest = &input[i..];
+    let len = rest
+        .find(|c: char| is_blank(c) || ";&|()<>".contains(c))
+        .unwrap_or(rest.len());
+    &rest[..len]
+}
+
+fn skip_blanks(input: &str, i: usize) -> usize {
+    input.len() - input[i..].trim_start_matches([' ', '\t']).len()
+}
+
+/// The position after `()` (blanks allowed inside) at `i`, if there.
+fn empty_parens(input: &str, i: usize) -> Option<usize> {
+    let rest = input[skip_blanks(input, i)..].strip_prefix('(')?;
+    let rest = rest.trim_start_matches([' ', '\t']).strip_prefix(')')?;
+    Some(input.len() - rest.len())
+}
+
+/// A word that `NAME()` defines as a function: no blanks, quoting,
+/// expansion, or assignment.
+fn is_function_name(word: &str) -> bool {
+    !word.is_empty()
+        && !word
+            .chars()
+            .any(|c| c.is_whitespace() || "=$'\"`\\".contains(c))
+}
+
+/// `xargs`, `eval`, `source`, and the like.
+fn head_is_executor(segment: &str) -> bool {
     const EXECUTORS: &[&str] = &[
         "bash", "sh", "zsh", "dash", "ksh", "fish", "xargs", "eval", "watch", "nohup", "time",
         "timeout", "nice", "taskset", "env", "exec", "source", ".",
     ];
-    const CONTROL_FLOW: &[&str] = &[
-        "if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case", "esac",
-        "select", "function", "in", "break", "continue", "return",
-    ];
-
-    let mut tokens = segment.split_whitespace();
-    let mut head = tokens.next();
-    while let Some(tok) = head {
-        if is_env_assignment(tok) {
-            head = tokens.next();
-        } else {
-            break;
-        }
-    }
-    let Some(head) = head else {
-        return false;
-    };
-    EXECUTORS.contains(&head) || CONTROL_FLOW.contains(&head)
-}
-
-/// Collapses runs of segments belonging to a single compound shell construct
-/// (`for…done`, `while…done`, `until…done`, `select…done`, `if…fi`,
-/// `case…esac`) into one Opaque segment carrying the verbatim original text.
-///
-/// Uses head-token matching only (not a scan of every word) so that
-/// `echo for; echo done` is *not* falsely treated as a loop. The trade-off:
-/// constructs nested without a separator between keywords (e.g.
-/// `if cond; then if other; then x; fi; fi`) merge in two passes rather than
-/// one. That's a minor regression on a pathological shape, not on the
-/// common shapes the LLM actually emits (CI polling loops, retry loops,
-/// case-based dispatch).
-fn merge_compound_constructs(input: &str, segments: Vec<Segment>) -> Vec<Segment> {
-    if !segments
-        .iter()
-        .any(|s| is_compound_opener(first_token(s.text())))
-    {
-        return segments;
-    }
-    let ranges = locate_segments(input, &segments);
-
-    let mut result: Vec<Segment> = Vec::with_capacity(segments.len());
-    let mut i = 0;
-    while i < segments.len() {
-        let head = first_token(segments[i].text());
-        let Some(opener_kw) = compound_opener_kw(head) else {
-            result.push(segments[i].clone());
-            i += 1;
-            continue;
-        };
-        let mut stack: Vec<&'static str> = vec![opener_kw];
-        let mut end: Option<usize> = None;
-        for (j, seg) in segments.iter().enumerate().skip(i + 1) {
-            let h = first_token(seg.text());
-            if let Some(kw) = compound_opener_kw(h) {
-                stack.push(kw);
-            } else if let Some(closes) = closer_targets(h) {
-                if let Some(top) = stack.last() {
-                    if closes.contains(top) {
-                        stack.pop();
-                    }
-                }
-            }
-            if stack.is_empty() {
-                end = Some(j);
-                break;
-            }
-        }
-        match end {
-            Some(end_idx) => {
-                let start_b = ranges[i].start;
-                let end_b = ranges[end_idx].end;
-                let merged = input[start_b..end_b].trim().to_string();
-                result.push(Segment::Opaque(merged));
-                i = end_idx + 1;
-            }
-            None => {
-                // Malformed: opener with no matching closer in this input.
-                // Fall through to per-segment behavior so the user still
-                // sees something rather than silently dropping work.
-                result.push(segments[i].clone());
-                i += 1;
-            }
-        }
-    }
-    result
-}
-
-fn is_compound_opener(tok: &str) -> bool {
-    compound_opener_kw(tok).is_some()
-}
-
-fn compound_opener_kw(tok: &str) -> Option<&'static str> {
-    match tok {
-        "for" => Some("for"),
-        "while" => Some("while"),
-        "until" => Some("until"),
-        "select" => Some("select"),
-        "if" => Some("if"),
-        "case" => Some("case"),
-        _ => None,
-    }
-}
-
-fn closer_targets(tok: &str) -> Option<&'static [&'static str]> {
-    match tok {
-        "done" => Some(&["for", "while", "until", "select"]),
-        "fi" => Some(&["if"]),
-        "esac" => Some(&["case"]),
-        _ => None,
-    }
-}
-
-fn first_token(s: &str) -> &str {
-    s.split_whitespace().next().unwrap_or("")
-}
-
-/// Finds each segment's byte range in the original input. Segment text was
-/// produced from `input` by the splitter (with at most leading/trailing
-/// whitespace trimmed), so a forward-only substring search reliably
-/// recovers each segment's position. Used by [`merge_compound_constructs`]
-/// to slice the verbatim original text (separators included) when merging.
-fn locate_segments(input: &str, segments: &[Segment]) -> Vec<std::ops::Range<usize>> {
-    let mut ranges = Vec::with_capacity(segments.len());
-    let mut search_from = 0;
-    for seg in segments {
-        let text = seg.text();
-        if let Some(rel) = input[search_from..].find(text) {
-            let start = search_from + rel;
-            let end = start + text.len();
-            ranges.push(start..end);
-            search_from = end;
-        } else {
-            // Unreachable: a segment came from this input. Defensive
-            // fallback keeps indices aligned with `segments`.
-            ranges.push(0..0);
-        }
-    }
-    ranges
+    segment
+        .split_whitespace()
+        .find(|tok| !is_env_assignment(tok))
+        .is_some_and(|head| EXECUTORS.contains(&head))
 }
 
 fn is_env_assignment(tok: &str) -> bool {
@@ -941,11 +1004,12 @@ mod tests {
         );
         let heredoc = "cat <<'FIN' > notes.md\nswitch — 18:02 → café\nFIN";
         assert_eq!(split(heredoc), vec![opaque(heredoc)]);
-        // A compound construct is found again in the input by its parts'
-        // text, so a mangled part cut it short ("… Confi", at the `fi` in
-        // "Confirms").
+        // Inside a block, too: "Confirms" holds no `fi`.
         let compound = "if true; then echo \"Confirms — the blocker\"; fi";
-        assert_eq!(split(compound), vec![opaque(compound)]);
+        assert_eq!(
+            split(compound),
+            vec![simple("true"), simple("echo \"Confirms — the blocker\"")]
+        );
     }
 
     #[test]
@@ -967,6 +1031,71 @@ mod tests {
         assert_eq!(segs.len(), 1);
         assert!(segs[0].is_opaque());
         assert!(segs[0].text().contains("indented body"));
+    }
+
+    #[test]
+    fn heredoc_line_after_operator_is_still_split() {
+        // The body starts on the next line; `| sh` on the operator's line
+        // is a command of its own, not part of the heredoc.
+        assert_eq!(
+            split("cat <<EOF | sh\nrm -rf ~\nEOF\necho done"),
+            vec![
+                opaque("cat <<EOF\nrm -rf ~\nEOF"),
+                opaque("sh"),
+                simple("echo done")
+            ]
+        );
+    }
+
+    #[test]
+    fn heredoc_body_starts_after_the_command_line() {
+        // A continuation, a newline in quotes, or an operator glued to the
+        // delimiter: the body starts after the line the shell reads.
+        assert_eq!(
+            split("cat <<EOF \\\n| sh\ntouch t\nEOF"),
+            vec![opaque("cat <<EOF\ntouch t\nEOF"), opaque("sh")]
+        );
+        assert_eq!(
+            split("cat <<EOF|sh\ntouch t\nEOF"),
+            vec![opaque("cat <<EOF\ntouch t\nEOF"), opaque("sh")]
+        );
+        assert_eq!(
+            split("cat <<EOF; echo \"a\nb\"\nx\nEOF\ntouch t"),
+            vec![
+                opaque("cat <<EOF\nx\nEOF"),
+                simple("echo \"a\nb\""),
+                simple("touch t")
+            ]
+        );
+    }
+
+    #[test]
+    fn heredoc_delimiter_has_quotes_removed_and_closes_exactly() {
+        assert_eq!(
+            split("cat <<\\EOF\nx\nEOF\ntouch t"),
+            vec![opaque("cat <<\\EOF\nx\nEOF"), simple("touch t")]
+        );
+        assert_eq!(
+            split("cat <<E\"OF\"\nx\nEOF\ntouch t"),
+            vec![opaque("cat <<E\"OF\"\nx\nEOF"), simple("touch t")]
+        );
+        // `EOF ` is no closer for bash, so `touch t` is still body.
+        assert_eq!(
+            split("cat <<EOF\nEOF \ntouch t\nEOF"),
+            vec![opaque("cat <<EOF\nEOF \ntouch t\nEOF")]
+        );
+    }
+
+    #[test]
+    fn two_heredocs_on_one_line_take_consecutive_bodies() {
+        assert_eq!(
+            split("diff <<A <<B && echo same\na; b\nA\nb; c\nB\necho next"),
+            vec![
+                opaque("diff <<A <<B\na; b\nA\nb; c\nB"),
+                simple("echo same"),
+                simple("echo next"),
+            ]
+        );
     }
 
     #[test]
@@ -1005,16 +1134,20 @@ mod tests {
     }
 
     #[test]
-    fn subshell_opaque() {
+    fn subshell_yields_its_commands() {
         assert_eq!(
-            split("(cd /tmp && rm -rf foo)"),
-            vec![opaque("(cd /tmp && rm -rf foo)")]
+            split("(cd /tmp && rm -rf foo) | tar -x"),
+            vec![simple("cd /tmp"), simple("rm -rf foo"), simple("tar -x")]
         );
     }
 
     #[test]
-    fn brace_group_opaque() {
-        assert_eq!(split("{ a; b; }"), vec![opaque("{ a; b; }")]);
+    fn brace_group_yields_its_commands() {
+        assert_eq!(split("{ a; b; }"), vec![simple("a"), simple("b")]);
+        assert_eq!(
+            split("{\n  a\n  b\n} > log"),
+            vec![simple("a"), simple("b"), opaque("} > log")]
+        );
     }
 
     #[test]
@@ -1095,12 +1228,10 @@ mod tests {
     }
 
     #[test]
-    fn brace_at_token_start_still_opaque() {
-        // Regression guard: `{` preceded by whitespace is still a
-        // command-group opener and must remain Opaque.
+    fn brace_group_after_separator_yields_its_commands() {
         assert_eq!(
             split("ls && { echo a; echo b; }"),
-            vec![simple("ls"), opaque("{ echo a; echo b; }")]
+            vec![simple("ls"), simple("echo a"), simple("echo b")]
         );
     }
 
@@ -1224,119 +1355,291 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Control-flow keywords → Opaque
+    // Blocks: their commands are segments, their grammar is not
     // -----------------------------------------------------------------
 
     #[test]
-    fn if_then_fi_collapses_to_single_opaque() {
-        let segs = split("if true; then echo yes; fi");
-        assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
-        assert_eq!(segs[0].text(), "if true; then echo yes; fi");
+    fn if_block_yields_its_commands() {
+        assert_eq!(
+            split("if true; then echo yes; elif false; then echo maybe; else echo no; fi"),
+            vec![
+                simple("true"),
+                simple("echo yes"),
+                simple("false"),
+                simple("echo maybe"),
+                simple("echo no"),
+            ]
+        );
     }
 
     #[test]
-    fn for_loop_collapses_to_single_opaque() {
-        let segs = split("for f in *.txt; do cat $f; done");
-        assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
-        assert_eq!(segs[0].text(), "for f in *.txt; do cat $f; done");
+    fn for_loop_yields_body_not_header() {
+        assert_eq!(
+            split("for f in *.txt; do cat $f; done"),
+            vec![simple("cat $f")]
+        );
     }
 
     #[test]
-    fn while_loop_collapses_to_single_opaque() {
-        let segs = split("while true; do sleep 1; done");
-        assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
+    fn for_header_with_substitution_stays_opaque() {
+        // The substitution in the word list runs, so the header is kept.
+        assert_eq!(
+            split("for f in $(ls); do cat $f; done"),
+            vec![opaque("for f in $(ls)"), simple("cat $f")]
+        );
     }
 
     #[test]
-    fn until_loop_collapses_to_single_opaque() {
-        let segs = split("until [ -f /tmp/x ]; do sleep 1; done");
-        assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
+    fn for_without_word_list_ends_header_at_do() {
+        // `for NAME do …` iterates "$@"; `rm` must not hide in the header.
+        assert_eq!(split("for f do rm $f; done"), vec![simple("rm $f")]);
     }
 
     #[test]
-    fn case_block_collapses_to_single_opaque() {
-        let segs = split("case x in a) echo a;; b) echo b;; esac");
-        assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
-        assert!(segs[0].text().contains("esac"));
+    fn while_and_until_conditions_are_commands() {
+        assert_eq!(
+            split("while true; do sleep 1; done"),
+            vec![simple("true"), simple("sleep 1")]
+        );
+        assert_eq!(
+            split("until [ -f /tmp/x ]; do sleep 1; done"),
+            vec![opaque("[ -f /tmp/x ]"), simple("sleep 1")]
+        );
     }
 
     #[test]
-    fn retry_polling_loop_collapses_verbatim() {
-        // Motivating real-world case: a CI polling loop the LLM emitted to
-        // monitor a workflow. Before this fix it produced 4-5 meaningless
-        // approval cards (`for i in 1..5`, `do gh run view ...`, `break`,
-        // `sleep 15`, `done`); now it's one Opaque carrying the original
-        // text verbatim — including `&&` and `||`, not just `;`.
+    fn case_yields_item_bodies_not_patterns() {
+        // `|` in a pattern separates alternatives, not commands.
+        assert_eq!(
+            split("case \"$1\" in start|up) systemctl start x;; (stop) echo b;;\n *) echo c\nesac"),
+            vec![
+                simple("systemctl start x"),
+                simple("echo b"),
+                simple("echo c")
+            ]
+        );
+    }
+
+    #[test]
+    fn retry_polling_loop_yields_real_commands() {
+        // A CI polling loop the LLM emitted.
         let input = "for i in 1 2 3 4 5; do gh run view --json status && break || sleep 15; done";
-        let segs = split(input);
-        assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
-        assert_eq!(segs[0].text(), input);
+        assert_eq!(
+            split(input),
+            vec![
+                simple("gh run view --json status"),
+                simple("break"),
+                simple("sleep 15")
+            ]
+        );
     }
 
     #[test]
-    fn trailing_command_after_loop_stays_separate() {
-        let segs = split("for i in 1 2; do echo $i; done && echo finished");
-        assert_eq!(segs.len(), 2);
-        assert!(segs[0].is_opaque());
-        assert!(segs[0].text().contains("for i in 1 2"));
-        assert!(segs[0].text().contains("done"));
-        assert!(!segs[0].text().contains("finished"));
-        assert_eq!(segs[1], simple("echo finished"));
+    fn redirect_after_block_is_kept_with_its_closer() {
+        // It applies to the whole block, and may write any file.
+        assert_eq!(
+            split("for i in 1 2; do echo $i; done 2>&1 | tail -1"),
+            vec![simple("echo $i"), opaque("done 2>&1"), simple("tail -1")]
+        );
+        assert_eq!(
+            split("if [ 1 ]; then x=1; fi > important"),
+            vec![opaque("[ 1 ]"), simple("x=1"), opaque("fi > important")]
+        );
+        assert_eq!(
+            split("while read l; do echo $l; done < <(git ls-files)"),
+            vec![
+                simple("read l"),
+                simple("echo $l"),
+                opaque("done < <(git ls-files)")
+            ]
+        );
     }
 
     #[test]
-    fn two_sequential_loops_each_collapse_separately() {
-        let segs = split("for i in 1; do echo a; done; for j in 2; do echo b; done");
-        assert_eq!(segs.len(), 2);
-        assert!(segs[0].is_opaque());
-        assert!(segs[0].text().contains("for i in 1"));
-        assert!(segs[1].is_opaque());
-        assert!(segs[1].text().contains("for j in 2"));
+    fn nested_blocks_yield_inner_commands() {
+        assert_eq!(
+            split("for i in *; do if [ -f $i ]; then echo $i; fi; done && echo finished"),
+            vec![
+                opaque("[ -f $i ]"),
+                simple("echo $i"),
+                simple("echo finished")
+            ]
+        );
     }
 
     #[test]
-    fn nested_if_inside_for_collapses_at_outer_done() {
-        let segs = split("for i in *; do if [ -f $i ]; then echo $i; fi; done");
-        assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
-        assert!(segs[0].text().ends_with("done"));
-    }
-
-    #[test]
-    fn malformed_loop_without_closer_falls_through() {
-        // No matching `done`. We don't hang; we keep the segments split.
-        let segs = split("for i in 1 2 3; do echo $i");
-        assert!(!segs.is_empty());
-        for seg in &segs {
-            assert!(seg.is_opaque(), "{:?} should be Opaque", seg);
+    fn malformed_block_collapses_to_single_opaque() {
+        for input in [
+            "for i in 1 2 3; do echo $i",
+            "echo a; fi",
+            "{ echo a;",
+            "echo a; }",
+        ] {
+            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
         }
     }
 
     #[test]
-    fn echo_with_kw_substring_not_treated_as_loop() {
-        // `echo for; echo done` is two echo commands, not a loop. Head
-        // tokens are `echo`, not the loop keywords — must not collapse.
-        let segs = split("echo for; echo done");
-        assert_eq!(segs.len(), 2);
-        assert_eq!(segs[0], simple("echo for"));
-        assert_eq!(segs[1], simple("echo done"));
+    fn reserved_words_as_arguments_are_literal() {
+        // `echo for; echo done` is two echo commands, not a loop.
+        assert_eq!(
+            split("echo for; echo done }"),
+            vec![simple("echo for"), simple("echo done }")]
+        );
     }
 
     #[test]
-    fn break_is_opaque_not_simple_with_prefix() {
-        // `break` is a loop builtin — meaningless outside a loop and
-        // unsafe to allowlist (`break-something` would match). Even
-        // when it survives compound-construct merging (e.g. malformed
-        // input), it must not be Simple.
-        let segs = split("break");
-        assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
+    fn negation_is_grammar_and_jumps_are_commands() {
+        assert_eq!(split("! grep -q x f"), vec![simple("grep -q x f")]);
+        // `break` can name a function: `break() ( … ); break` runs it.
+        assert_eq!(
+            split("break() ( rm -rf x ); break > f"),
+            vec![simple("rm -rf x"), opaque("break > f")]
+        );
+    }
+
+    #[test]
+    fn carriage_return_is_part_of_a_word() {
+        // Bash neither ends a command nor starts a comment at a lone `\r`.
+        assert_eq!(
+            split(">\rbreak rm -rf y"),
+            vec![opaque(">\rbreak rm -rf y")]
+        );
+        assert_eq!(
+            split("echo x\r# ; rm -rf y"),
+            vec![simple("echo x\r#"), simple("rm -rf y")]
+        );
+    }
+
+    #[test]
+    fn header_may_break_lines_before_its_word_list() {
+        assert_eq!(
+            split("case x\nin x) rm -rf y;; esac"),
+            vec![simple("rm -rf y")]
+        );
+        assert_eq!(split("for f\ndo rm $f; done"), vec![simple("rm $f")]);
+        assert_eq!(
+            split("for f\nin a b\ndo rm $f; done"),
+            vec![simple("rm $f")]
+        );
+    }
+
+    #[test]
+    fn brace_word_heading_a_command_is_opaque() {
+        // `{rm,-rf,x}` is brace expansion that runs `rm -rf x`.
+        assert_eq!(split("{rm,-rf,x}"), vec![opaque("{rm,-rf,x}")]);
+    }
+
+    // -----------------------------------------------------------------
+    // Functions: the body is checked, the header is not a command
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn function_body_and_calls_are_commands() {
+        assert_eq!(
+            split("run(){ echo \"== $1\"; go test ./... | head -4; }\nrun a; run b | tail"),
+            vec![
+                simple("echo \"== $1\""),
+                simple("go test ./..."),
+                simple("head -4"),
+                simple("run a"),
+                simple("run b"),
+                simple("tail")
+            ]
+        );
+    }
+
+    #[test]
+    fn function_definition_forms() {
+        let body = vec![simple("echo a"), simple("rm -rf x"), simple("f")];
+        for input in [
+            "f() { echo a; rm -rf x; }; f",
+            "f () {\n  echo a\n  rm -rf x\n}\nf",
+            "f()\n{ echo a; rm -rf x; }; f",
+            "function f { echo a; rm -rf x; }; f",
+            "function f() ( echo a; rm -rf x ); f",
+        ] {
+            assert_eq!(split(input), body, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn call_to_function_not_defined_here_is_a_command() {
+        // A function from a sourced file has a body nobody has seen.
+        assert_eq!(
+            split("source ./env.sh && run x"),
+            vec![opaque("source ./env.sh"), simple("run x")]
+        );
+        // Called before its definition, `run` is whatever it was before.
+        assert_eq!(
+            split("run x; run(){ echo a; }"),
+            vec![simple("run x"), simple("echo a")]
+        );
+    }
+
+    #[test]
+    fn call_runs_what_its_name_and_arguments_say() {
+        // The body seen in the definition is not always what runs.
+        for (input, call) in [
+            ("rm(){ :; }; unset -f rm; rm -rf ~", simple("rm -rf ~")),
+            ("f(){ \"$@\"; }; f rm -rf x", simple("f rm -rf x")),
+            ("{rm,-rf,y}(){ :; }; {rm,-rf,y}", opaque("{rm,-rf,y}")),
+            ("false && f(){ echo a; }; f", simple("f")),
+        ] {
+            let segs = split(input);
+            assert_eq!(segs.last(), Some(&call), "{input:?} → {segs:?}");
+        }
+    }
+
+    #[test]
+    fn owner_command_yields_only_real_commands() {
+        // The command from the bug report: a function body split at its
+        // `;` produced `run(){ echo "== $1"` and a bare `}` as segments.
+        // Now the body's commands and the calls are segments, the header
+        // and braces are not, and the heredoc body stays with `python3`.
+        let input = concat!(
+            "cd /w && source ./.goenv.sh && M=$PWD/.trash/rev/mut && mkdir -p $M && ",
+            "(cd cloud-devstack && git archive e34c080) | tar -x -C $M && cd $M && ",
+            "cp internal/docker/diagnose.go /tmp/d.go 2>/dev/null; cp internal/docker/diagnose.go ../d.orig;\n",
+            "run(){ echo \"== $1\"; go test ./internal/docker/ ./internal/ops/ -run 'Diagnose|FixFor' 2>&1 ",
+            "| grep -E \"^(ok|FAIL|---)\" | head -4; cp ../d.orig internal/docker/diagnose.go; }\n",
+            "sed -i 's/ || strings.Contains(lower, \"cannot connect\")//' internal/docker/diagnose.go; run \"M1 drop\"\n",
+            "sed -i 's/x//' internal/docker/diagnose.go; python3 - <<'E'\n",
+            "p='internal/docker/diagnose.go'; s=open(p).read()\n",
+            "s=s.replace('\\tif err != nil {\\n','\\tif err != nil {\\n',1); open(p,'w').write(s)\n",
+            "E\n",
+            "run \"M2 drop ctx check\"\n",
+        );
+        assert_eq!(
+            split(input),
+            vec![
+                simple("cd /w"),
+                opaque("source ./.goenv.sh"),
+                simple("M=$PWD/.trash/rev/mut"),
+                simple("mkdir -p $M"),
+                simple("cd cloud-devstack"),
+                simple("git archive e34c080"),
+                simple("tar -x -C $M"),
+                simple("cd $M"),
+                opaque("cp internal/docker/diagnose.go /tmp/d.go 2>/dev/null"),
+                simple("cp internal/docker/diagnose.go ../d.orig"),
+                simple("echo \"== $1\""),
+                opaque("go test ./internal/docker/ ./internal/ops/ -run 'Diagnose|FixFor' 2>&1"),
+                simple("grep -E \"^(ok|FAIL|---)\""),
+                simple("head -4"),
+                simple("cp ../d.orig internal/docker/diagnose.go"),
+                simple("sed -i 's/ || strings.Contains(lower, \"cannot connect\")//' internal/docker/diagnose.go"),
+                simple("run \"M1 drop\""),
+                simple("sed -i 's/x//' internal/docker/diagnose.go"),
+                opaque(concat!(
+                    "python3 - <<'E'\n",
+                    "p='internal/docker/diagnose.go'; s=open(p).read()\n",
+                    "s=s.replace('\\tif err != nil {\\n','\\tif err != nil {\\n',1); open(p,'w').write(s)\n",
+                    "E",
+                )),
+                simple("run \"M2 drop ctx check\""),
+            ]
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1447,10 +1750,11 @@ mod tests {
     }
 
     #[test]
-    fn backslash_crlf_continuation_joins_lines() {
+    fn backslash_crlf_is_not_a_continuation() {
+        // Bash escapes the `\r` and ends the line at `\n`.
         assert_eq!(
-            split("git log \\\r\n  --oneline"),
-            vec![simple("git log   --oneline")]
+            split("echo hi \\\r\nrm -rf x"),
+            vec![simple("echo hi \\"), simple("rm -rf x")]
         );
     }
 

