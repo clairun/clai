@@ -314,8 +314,8 @@ describe('FleetPage', () => {
     // Two rows of what came before; older ones hide.
     const rows = within(card.getByRole('list', { name: 'Earlier' }));
     expect(rows.getAllByRole('listitem').map((row) => row.textContent)).toEqual([
-      expect.stringMatching(/^Scout → Main Cargo ran out of disk\.failed ·/),
-      expect.stringMatching(/^Main → Scout Old research\s*working ·/),
+      expect.stringMatching(/^Scout → Main Cargo ran out of disk\.\S.* · failed/),
+      expect.stringMatching(/^Main → Scout Old research\s*\S.* · working/),
     ]);
     expect(card.queryByText(/Look into the leaks/)).not.toBeInTheDocument();
     // The running task is in the crew strip, whichever rows fit: one rule.
@@ -364,8 +364,9 @@ describe('FleetPage', () => {
       fireEvent.click(origin);
       const dialog = screen.getByRole('dialog', { name: 'Message from Scout' });
       expect(within(dialog).getByText('v2').tagName).toBe('STRONG');
-      // The zoom says who to whom and when, in full, before the words.
-      expect(dialog.querySelector('p')).toHaveTextContent(/^Scout → Main · \S/);
+      // The route heads the zoom; the message time stays with its own words.
+      expect(dialog.querySelector('p')).toHaveTextContent(/^Scout → Main$/);
+      expect(dialog.querySelector('[class*=zoomMessage] [class*=messageTime]')).toHaveTextContent(/\S/);
       expect(dialog).toHaveFocus();
       // Zooming is not selecting the card.
       expect(useFleetStore.getState().selectedId).toBeNull();

@@ -637,16 +637,17 @@ button.crewButton {
   outline-offset: 1px;
 }
 
-/* Each message's time is in the scrolling content, ahead of its own words. */
-.messageBlock + .messageBlock {
-  margin-top: 0.5em;
+/* Keep the time and the first line of each message on the bubble's line grid. */
+.messageBlock {
+  display: flow-root;
 }
 
 .messageTime {
-  display: block;
+  float: left;
+  margin-right: 0.4em;
   color: var(--color-text-past);
   font-size: 11px;
-  line-height: 1.35;
+  line-height: inherit;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
@@ -665,12 +666,6 @@ button.crewButton {
   gap: 16px;
   padding: 6px 4px 2px;
   border-radius: var(--radius-md);
-}
-
-/* Keep short messages legible within a narrow card. */
-.said .bubble,
-.fromYou .bubble {
-  min-width: min(120px, 100%);
 }
 
 .said .bubble {
@@ -1144,6 +1139,15 @@ button.crewButton {
 .zoomStamp b {
   font-weight: 650;
   color: var(--color-text-secondary);
+}
+
+.zoomMessage + .zoomMessage {
+  margin-top: 1em;
+}
+
+.zoomMessage .messageTime {
+  float: none;
+  display: block;
 }
 
 @media (prefers-reduced-motion: reduce) {

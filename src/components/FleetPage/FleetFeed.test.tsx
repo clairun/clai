@@ -198,7 +198,7 @@ describe("Main's bubble", () => {
  * around it), sliding text in with `glide` unless motion is reduced.
  */
 const SCROLLER = '[data-bubble] > div';
-const scrolling = (tall: () => number, { reduce = false } = {}) => {
+const scrolling = (tall: () => number, { reduce = false, firstBlockHeight }: { reduce?: boolean; firstBlockHeight?: number } = {}) => {
   const glide = vi.fn();
   Object.defineProperty(HTMLElement.prototype, 'animate', { value: glide, configurable: true });
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: reduce && query.includes('reduce') }));
@@ -207,6 +207,7 @@ const scrolling = (tall: () => number, { reduce = false } = {}) => {
       return this.matches(SCROLLER) ? 100 : 1000;
     }),
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+      if (firstBlockHeight !== undefined && this.matches('[class*=messageBlock]')) return firstBlockHeight;
       return this.parentElement?.matches(SCROLLER) ? tall() : 0;
     }),
     // A slide's transform stretches what scrolls past the words' own height.
@@ -253,6 +254,12 @@ describe("a bubble's time", () => {
     expect(blocks.map((block) => block.querySelector('[class*=messageTime]')?.textContent)).toEqual([clock(firstAt), clock(secondAt)]);
     expect(blocks.map((block) => block.querySelector('p')?.textContent)).toEqual(['First, the leaks.', 'After that, the fix.']);
     expect(blocks.every((block) => block.closest('[class*=bubbleText]') !== null)).toBe(true);
+
+    fireEvent.click(bubble);
+    const zoom = screen.getByRole('dialog', { name: 'Message from Main' });
+    const zoomMessages = [...zoom.querySelectorAll<HTMLElement>('[class*=zoomMessage]')];
+    expect(zoomMessages.map((block) => block.querySelector('[class*=messageTime]')?.textContent)).toEqual([clock(firstAt), clock(secondAt)]);
+    expect(zoomMessages.map((block) => block.querySelector('p')?.textContent)).toEqual(['First, the leaks.', 'After that, the fix.']);
   });
 
   it('adds the date to a message from an earlier day', () => {
@@ -261,6 +268,17 @@ describe("a bubble's time", () => {
     const time = timeOf(bubbleOf(/Old news/));
     expect(time).toHaveTextContent(new Date(at).toLocaleDateString([], { month: 'short', day: 'numeric' }));
     expect(time).toHaveTextContent(clock(at));
+  });
+
+  it('names a completed result beside its time for sighted and screen reader users', () => {
+    const completed = { id: 't-done', workspaceId: WS, title: 'Review code', status: 'completed', sessionId: 'task-session', parentTaskId: null, cycleNo: 1n,
+      assignedAgentDisplayName: 'Reviewer', assignedAgentDefinitionId: 'def-r', assignedToWorkspaceAgentId: 'wa-r', resultSummary: 'Review complete',
+      createdAt: BigInt(NOW - 3000), updatedAt: BigInt(NOW - 1000), completedAt: BigInt(NOW - 1000) } as unknown as WorkspaceTaskResponse;
+    render(<Feed state={saying('Shipped.')} live={{ runs: {}, tasks: { [WS]: { completed } } }} />);
+    const bubble = bubbleOf(/Review complete/);
+    expect(timeOf(bubble)).toHaveTextContent(`${clock(NOW - 1000)} · done`);
+    fireEvent.click(bubble);
+    expect(screen.getByRole('dialog', { name: 'Message from Reviewer' })).toHaveTextContent(`${clock(NOW - 1000)} · done`);
   });
 
   it('shows a failed result and its time together without a status glyph', () => {
@@ -278,6 +296,25 @@ describe("a bubble's time", () => {
 });
 
 describe('a bubble, scrolling', () => {
+  it('follows the full height of two messages in one bubble', () => {
+    let height = 220;
+    const { restore } = scrolling(() => height, { firstBlockHeight: 80 });
+    const first = updated(message('m1', [text('First, the leaks.'), tool('c1')]), NOW - 2000);
+    const second = (content: string) => updated(message('m2', [text(content), tool('c2')]), NOW - 1000);
+    try {
+      const { rerender } = render(<Feed state={fleet(first, second('After that, the fix.'))} />);
+      const scroller = () => mainBubble().querySelector<HTMLElement>(SCROLLER)!;
+      expect(scroller().querySelectorAll('[class*=messageBlock]')).toHaveLength(2);
+      expect(scroller().scrollTop).toBe(120);
+
+      height = 280;
+      rerender(<Feed state={fleet(first, second('After that, the fix. Then the tests.'))} />);
+      expect(scroller().scrollTop).toBe(180);
+    } finally {
+      restore();
+    }
+  });
+
   const writing = (...more: string[]) => <Feed state={twoBlocks(['After that, the fix.', ...more].join(' '))} live={RUNNING} />;
 
   it('follows its end, sliding new lines in; stays where the reader scrolled up; follows again once back at the end', () => {

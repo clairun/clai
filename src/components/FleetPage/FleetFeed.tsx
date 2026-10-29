@@ -60,8 +60,8 @@ const Route = ({ line }: { line: FleetLine }) => (
 );
 
 /** How a task ended, or that it is working or waits its turn. */
-const statusOf = (line: FleetLine): 'failed' | 'stopped' | 'working' | 'next' | null =>
-  line.outcome === 'failed' || line.outcome === 'stopped'
+const statusOf = (line: FleetLine): 'done' | 'failed' | 'stopped' | 'working' | 'next' | null =>
+  line.outcome
     ? line.outcome
     : line.live === 'running'
       ? 'working'
@@ -124,8 +124,8 @@ const Outcome = ({ line, time }: { line: FleetLine; time: string }) => {
   const status = statusOf(line);
   return (
     <span className={styles.lineStatus} data-outcome={line.outcome ?? undefined} data-live={line.live ?? undefined}>
-      {status && `${status} · `}
       {time}
+      {status && ` · ${status}`}
     </span>
   );
 };
@@ -224,14 +224,16 @@ const Words = ({ workspaceId, line, now, route, newest }: { workspaceId: string;
   return (
     <>
       <div ref={scroller} className={styles.bubbleText}>
-        {(line.blocks.length ? line.blocks : [{ at: line.at, start: 0, end: line.markdown.length }]).map((block, i) => (
-          <div className={styles.messageBlock} key={i}>
-            <MessageTime line={line} at={block.at} now={now} route={route && i === 0} />
-            <div className={styles.speechText}>
-              <FleetMarkdown content={line.markdown.slice(block.start, block.end)} />
+        <div>
+          {line.blocks.map((block, i) => (
+            <div className={styles.messageBlock} key={i}>
+              <MessageTime line={line} at={block.at} now={now} route={route && i === 0} />
+              <div className={styles.speechText}>
+                <FleetMarkdown content={line.markdown.slice(block.start, block.end)} />
+              </div>
             </div>
-          </div>
-        ))}
+          ))}
+        </div>
       </div>
       <Thumbs workspaceId={workspaceId} images={line.images} />
     </>
@@ -374,9 +376,14 @@ const Zoomed = ({ workspaceId, line, now }: { workspaceId: string; line: FleetLi
   return (
     <div className={styles.zoomText}>
       <p className={styles.zoomStamp}>
-        <Route line={line} /> · <Outcome line={line} time={shortTime(line.at, now)} />
+        <Route line={line} />
       </p>
-      <MarkdownMessage content={line.markdown} components={MINIATURE} />
+      {line.blocks.map((block, i) => (
+        <div className={styles.zoomMessage} key={i}>
+          <MessageTime line={line} at={block.at} now={now} />
+          <MarkdownMessage content={line.markdown.slice(block.start, block.end)} components={MINIATURE} />
+        </div>
+      ))}
       {line.images.map((part) => (
         <Picture key={part.id} workspaceId={workspaceId} part={part} className={styles.zoomImage} />
       ))}

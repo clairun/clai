@@ -168,11 +168,11 @@ const resultOf = (task: WorkspaceTaskResponse): string =>
 type LineParts = Pick<FleetLine, 'key' | 'at' | 'from' | 'to' | 'markdown'> &
   Partial<Pick<FleetLine, 'images' | 'outcome' | 'live' | 'message' | 'blocks'>>;
 
-const line = ({ markdown, images = [], outcome = null, live = null, message = null, blocks = [], ...said }: LineParts): FleetLine => ({
+const line = ({ markdown, images = [], outcome = null, live = null, message = null, blocks, ...said }: LineParts): FleetLine => ({
   ...said,
   text: plainText(markdown),
   markdown,
-  blocks,
+  blocks: blocks ?? [{ at: said.at, start: 0, end: markdown.length }],
   images,
   message,
   headline: firstSentence(markdown),
