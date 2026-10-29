@@ -417,6 +417,63 @@ describe("Main's newest bubble, scrolling", () => {
   });
 });
 
+describe('words selected in the feed', () => {
+  /** Main, you, Main: an older bubble of Main's, yours, and Main's newest. */
+  const asked = () => {
+    const state = applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW - 500);
+    return applyAssistantEvent(state, updated(message('m2', [text('Docs next.'), tool('c3')]), NOW));
+  };
+  /** Selects the words in `node`, as a drag over them does; letting go clicks them. */
+  const select = (node: HTMLElement) => {
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    getSelection()!.removeAllRanges();
+    getSelection()!.addRange(range);
+    fireEvent.click(node);
+    return getSelection()!.toString();
+  };
+  const open = (words: string) => screen.getByText(words).closest('[aria-expanded]')!.getAttribute('aria-expanded');
+  // Room for three bubbles.
+  const sizes: { mockRestore: () => void }[] = [];
+  beforeEach(() => {
+    sizes.push(
+      vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200),
+      vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
+        return this.tagName === 'P' ? 20 : 40;
+      })
+    );
+  });
+  afterEach(() => {
+    sizes.splice(0).forEach((size) => size.mockRestore());
+    getSelection()!.removeAllRanges();
+  });
+
+  it("stay selected in Main's bubbles, older or newest, which a plain click opens", () => {
+    render(<Feed state={asked()} />);
+    for (const words of ['First, the leaks.', 'Docs next.']) {
+      expect(select(screen.getByText(words))).toBe(words);
+      expect(open(words)).toBe('false');
+    }
+    // A shift-click here extends a selection begun in another bubble.
+    getSelection()!.setBaseAndExtent(screen.getByText('Docs next.'), 0, screen.getByText('First, the leaks.'), 0);
+    fireEvent.click(screen.getByText('First, the leaks.'));
+    expect(open('First, the leaks.')).toBe('false');
+    // Words selected in another bubble leave a plain click on this one a press.
+    getSelection()!.selectAllChildren(screen.getByText('Docs next.'));
+    fireEvent.click(screen.getByText('First, the leaks.'));
+    expect(open('First, the leaks.')).toBe('true');
+  });
+
+  it('stay selected in your bubble, which a plain click zooms', () => {
+    render(<Feed state={asked()} />);
+    expect(select(screen.getByText('And the docs?'))).toBe('And the docs?');
+    expect(screen.queryByRole('dialog')).toBeNull();
+    getSelection()!.removeAllRanges();
+    fireEvent.click(screen.getByText('And the docs?'));
+    expect(screen.getByRole('dialog', { name: 'Message from You' })).toBeInTheDocument();
+  });
+});
+
 describe('a task in the feed', () => {
   const queued = { id: 't1', workspaceId: WS, title: 'Draft the release notes', status: 'queued', sessionId: 'task-session', parentTaskId: null, cycleNo: 1n,
     assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w', assignedToWorkspaceAgentId: 'wa-w', createdAt: BigInt(NOW - 1000), updatedAt: BigInt(NOW - 1000) } as unknown as WorkspaceTaskResponse;

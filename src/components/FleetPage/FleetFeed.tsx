@@ -74,11 +74,15 @@ type Open = (line: FleetLine, origin: HTMLElement) => void;
 
 /**
  * A bubble pressed by a click, Enter or Space (`onKey`, if they do otherwise);
- * the card under it is not selected, and a link or button in it, or its
- * vertical scrollbar, is its own.
+ * the card under it is not selected. A link or button in it, its vertical
+ * scrollbar, and a click that ends a drag selecting its words, are their own.
  */
 const pressable = (onPress: (target: HTMLElement) => void, onKey = onPress) => {
   const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest('a, button') !== null;
+  const selecting = (e: MouseEvent<HTMLElement>) => {
+    const selection = getSelection();
+    return !!selection && !selection.isCollapsed && e.currentTarget.contains(selection.focusNode);
+  };
   const onScrollbar = (e: MouseEvent<HTMLElement>) =>
     e.target instanceof HTMLElement && e.target.scrollHeight > e.target.clientHeight && e.nativeEvent.offsetX >= e.target.clientWidth;
   return {
@@ -86,7 +90,7 @@ const pressable = (onPress: (target: HTMLElement) => void, onKey = onPress) => {
     tabIndex: 0,
     onClick: (e: MouseEvent<HTMLElement>) => {
       e.stopPropagation();
-      if (!ownedInside(e) && !onScrollbar(e)) onPress(e.currentTarget);
+      if (!ownedInside(e) && !onScrollbar(e) && !selecting(e)) onPress(e.currentTarget);
     },
     onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
       if (e.key !== 'Enter' && e.key !== ' ') return;
