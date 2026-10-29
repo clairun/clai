@@ -408,12 +408,12 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                             }
                         }
                     }
-                    "esac" => {
+                    "esac"
                         if substitution_cases.last().is_some_and(|(case_depth, part)| {
                             *case_depth == depth && *part != CasePart::Header
-                        }) {
-                            substitution_cases.pop();
-                        }
+                        }) =>
+                    {
+                        substitution_cases.pop();
                     }
                     _ => {}
                 }
