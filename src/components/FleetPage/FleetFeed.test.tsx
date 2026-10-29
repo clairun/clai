@@ -126,6 +126,7 @@ describe("Main's bubble", () => {
     const state = fleet(updated(message('m1', [text('Before.'), tool('c1'), text('After.')]), NOW - 1000));
     const { rerender } = render(<Feed state={state} />);
     expect([...bubbleOf(/Before/).querySelectorAll('p')].map((p) => p.textContent)).toEqual(['Before.', 'After.']);
+    expect(bubbleOf(/Before/).querySelectorAll('[class*=messageTime]')).toHaveLength(1);
 
     const later = applyUserSent(
       applyUserSent(state, WS, MAIN, { ...message('u1', [text('First reply.')]), role: 'user' }, NOW),

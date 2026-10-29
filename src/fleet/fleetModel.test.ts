@@ -473,7 +473,7 @@ describe("Main's bubbles", () => {
     s = apply(s, updated(both, T + 10));
     const [bubble] = bubbles(s);
     expect(bubbles(s)).toHaveLength(1);
-    expect(bubble).toMatchObject({ key: 'm1', markdown: 'Before.\n\nAfter.', at: T + 10 });
+    expect(bubble).toMatchObject({ key: 'm1', markdown: 'Before.\n\nAfter.', at: T + 10, blocks: [{ at: T, start: 0, end: 15 }] });
   });
 
   it('says nothing twice: completing a message adds only the text not yet heard', () => {

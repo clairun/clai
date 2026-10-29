@@ -103,7 +103,7 @@ const pressable = (onPress: (target: HTMLElement) => void) => {
   };
 };
 
-/** Time and status stay with the words they describe as the bubble scrolls. */
+/** Time and status stay with the message they describe as the bubble scrolls. */
 const MessageTime = ({ line, at, now, route = false }: { line: FleetLine; at: number; now: number; route?: boolean }) => {
   const status = statusOf(line);
   return (

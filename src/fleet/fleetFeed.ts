@@ -45,7 +45,7 @@ export interface FleetLine {
   text: string;
   /** As said, in markdown, for a bubble and the zoom. */
   markdown: string;
-  /** Offsets of each heard block in `markdown`, with its own event time. */
+  /** Offsets of each underlying message in `markdown`, with its first heard time. */
   blocks: readonly { at: number; start: number; end: number }[];
   /** The pictures attached to the message. */
   images: readonly ImagePart[];
@@ -218,11 +218,19 @@ const speak = (items: readonly (FleetLine | Stretch)[], asked: readonly number[]
     const message = bubble.every((s) => s.message?.id === first.message?.id) ? first.message : null;
     const markdown = bubble.map((s) => s.markdown).join('\n\n');
     let start = 0;
-    const blocks = bubble.map((s) => {
-      const block = { at: s.at, start, end: start + s.markdown.length };
-      start = block.end + 2;
-      return block;
-    });
+    const blocks: { at: number; start: number; end: number }[] = [];
+    let previousMessageId: string | undefined;
+    for (const stretch of bubble) {
+      const end = start + stretch.markdown.length;
+      const previous = blocks.at(-1);
+      if (previous && previousMessageId === stretch.message?.id) {
+        previous.end = end;
+      } else {
+        blocks.push({ at: stretch.at, start, end });
+      }
+      previousMessageId = stretch.message?.id;
+      start = end + 2;
+    }
     lines.push(line({ key: first.key, at: bubble.at(-1)!.at, from: MAIN, to: YOU, markdown, blocks, message }));
     bubble = [];
   };
