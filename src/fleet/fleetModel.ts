@@ -97,6 +97,8 @@ export interface FleetCard {
   said: FleetSaid[];
   /** When questions were asked (`ask_user`), at most `SAID_LIMIT`: each closes Main's bubble. */
   asked: number[];
+  /** When you last spoke in the workspace; it never goes back, as a word is deleted or ages out of `said`. */
+  youSaidAt: number;
   /** The workspace's enabled members, Main excluded, in roster order (from the snapshot). */
   agents: FleetAgentRef[];
   /** The workspace's Main, for its face (from the snapshot); `null` until a snapshot names it. */
@@ -136,6 +138,7 @@ export const emptyCard = (workspaceId: string, title = ''): FleetCard => ({
   requests: {},
   said: [],
   asked: [],
+  youSaidAt: 0,
   agents: [],
   main: null,
 });
@@ -153,7 +156,6 @@ const updateCard = (
 
 const bump = (card: FleetCard, at: number): FleetCard =>
   at > card.lastActivityAt ? { ...card, lastActivityAt: at } : card;
-
 
 export const fullMessageText = (message: AssistantMessage): string => {
   const blocks: string[] = [];
@@ -215,7 +217,8 @@ const addSaid = (card: FleetCard, said: readonly FleetSaid[], replace: boolean):
   if (incoming.length === 0) return card;
   const ids = new Set(incoming.map((s) => s.id));
   const next = [...card.said.filter((s) => !ids.has(s.id)), ...incoming].sort((a, b) => a.at - b.at);
-  return { ...card, said: next.slice(-SAID_LIMIT) };
+  const youSaidAt = Math.max(card.youSaidAt, ...incoming.filter((s) => s.origin?.kind === 'user').map((s) => s.at));
+  return { ...card, said: next.slice(-SAID_LIMIT), youSaidAt };
 };
 
 /**

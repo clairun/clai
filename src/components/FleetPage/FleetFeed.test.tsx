@@ -526,14 +526,19 @@ describe('a zoom, as more is said on its card', () => {
     expect(screen.getByRole('dialog')).toHaveTextContent('Other card words.');
   });
 
-  it('zooms again if the word that closed it is taken back', () => {
+  it('stays closed as the word that closed it is taken back or ages out of the feed', () => {
     const { rerender } = render(<Feed state={twoBlocks()} />);
     fireEvent.click(mainBubble());
     rerender(<Feed state={yours(twoBlocks())} />);
     expect(screen.queryByRole('dialog')).toBeNull();
     const deleted = event({ type: 'message_deleted', payload: { message_id: 'u1' } } as AssistantUiEvent, NOW + 1);
     rerender(<Feed state={applyAssistantEvent(yours(twoBlocks()), deleted)} />);
-    expect(screen.getByRole('dialog', { name: 'Message from Main' })).toBeInTheDocument();
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const replies = Array.from({ length: 30 }, (_, i) => ({ ...updated(message(`r${i}`, [text(`Reply ${i}.`), tool('c')]), NOW + 10 + i), runId: `run-${i}` }));
+    const aged = replies.reduce(applyAssistantEvent, yours(twoBlocks()));
+    rerender(<Feed state={aged} />);
+    expect(screen.queryByText('And the docs?')).toBeNull();
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
 

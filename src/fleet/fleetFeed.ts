@@ -41,9 +41,9 @@ export interface FleetLine {
   at: number;
   from: FleetSpeaker;
   to: FleetSpeaker;
-  /** As plain text, for a bubble that clamps its lines. */
+  /** As plain text, for a one-line row. */
   text: string;
-  /** As said, in markdown, for Main's bubble and the zoom. */
+  /** As said, in markdown, for a bubble and the zoom. */
   markdown: string;
   /** The pictures attached to the message. */
   images: readonly ImagePart[];
@@ -68,6 +68,8 @@ export interface FleetFeed {
   mood: FleetMood;
   caption: FleetCaption;
   lines: FleetLine[];
+  /** `FleetCard.youSaidAt`: a word since a zoom opened closes it, so your word shows. */
+  youSaidAt: number;
 }
 
 /** One markdown line as plain text: no block markers, emphasis or link targets. */
@@ -78,7 +80,7 @@ const plainLine = (line: string): string =>
     .replace(/\*\*|__|`|\*/g, '')
     .trim();
 
-/** A markdown text as one plain paragraph, for a bubble that clamps its lines. */
+/** A markdown text as one plain paragraph, for a one-line row. */
 export const plainText = (markdown: string | null | undefined): string =>
   (markdown ?? '').split('\n').map(plainLine).filter(Boolean).join(' ');
 
@@ -299,7 +301,7 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
         : lastWord > 0
           ? { kind: mood, at: lastWord }
           : { kind: 'empty' };
-  return { mood, caption, lines: shown };
+  return { mood, caption, lines: shown, youSaidAt: card.youSaidAt };
 };
 
 /** Bubbles a miniature draws before it keeps room for a row of what came before. */

@@ -337,8 +337,8 @@ interface Fit {
 
 /**
  * How many highlights fit as bubbles (`splitFeed`). A new set of lines, or a
- * new card size, is first laid out all as bubbles and measured; the split is set in the same layout pass, so the
- * measuring layout is never painted.
+ * new card size, is first laid out all as bubbles and measured; the split is
+ * set in the same layout pass, so the measuring layout is never painted.
  */
 const useFit = (lines: readonly FleetLine[]) => {
   const ref = useRef<HTMLDivElement | null>(null);
@@ -398,13 +398,9 @@ interface Zoom {
   line: FleetLine;
   origin: HTMLElement;
   start: ZoomStart;
-  /** When you last spoke on the card as it opened (`yourLast`). */
+  /** `youSaidAt` as it opened. */
   since: number;
 }
-
-/** When you last spoke on the card: a word since a zoom opened closes it, so your word shows. */
-const yourLast = (lines: readonly FleetLine[]): number =>
-  Math.max(...lines.filter((line) => line.from.kind === 'you').map((line) => line.at));
 
 /**
  * A miniature: the workspace's conversation as highlights, in the order it
@@ -432,7 +428,7 @@ const FleetFeed = ({
   const onChart = useCallback(() => onOpen(workspaceId), [onOpen, workspaceId]);
   const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines);
   const [zoom, setZoom] = useState<Zoom | null>(null);
-  const since = yourLast(feed.lines);
+  const since = feed.youSaidAt;
   const shown = (z: Zoom | null): z is Zoom => z !== null && z.since >= since;
   const open = (line: FleetLine, origin: HTMLElement) =>
     setZoom((z) => {
@@ -441,7 +437,7 @@ const FleetFeed = ({
       return { line, origin, since, start: faceFor(line.from, faces) ? start : { ...start, look: { ...YOU_LOOK, ...start.look } } };
     });
   const closed = useCallback(() => setZoom(null), []);
-  const zoomed = shown(zoom) ? (feed.lines.find((line) => line.key === zoom.line.key) ?? zoom.line) : null;
+  const zoomed = shown(zoom) ? { ...zoom, line: feed.lines.find((line) => line.key === zoom.line.key) ?? zoom.line } : null;
   const split = feed.lines.length - count;
   const rows = feed.lines.slice(Math.max(0, split - rowCount), split);
   const bubbles = feed.lines.slice(split);
@@ -471,15 +467,15 @@ const FleetFeed = ({
           />
         ))}
         {feed.lines.length === 0 && <p className={styles.nothing}>No messages yet.</p>}
-        {zoomed && zoom && (
+        {zoomed && (
           <FleetZoom
-            origin={zoom.origin}
-            start={zoom.start}
-            faceIdentity={faceFor(zoomed.from, faces)}
-            label={`Message from ${nameOf(zoomed.from)}`}
+            origin={zoomed.origin}
+            start={zoomed.start}
+            faceIdentity={faceFor(zoomed.line.from, faces)}
+            label={`Message from ${nameOf(zoomed.line.from)}`}
             onClosed={closed}
           >
-            <Zoomed workspaceId={workspaceId} line={zoomed} />
+            <Zoomed workspaceId={workspaceId} line={zoomed.line} />
           </FleetZoom>
         )}
       </div>
