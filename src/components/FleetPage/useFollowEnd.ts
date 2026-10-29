@@ -18,16 +18,12 @@ const keepEnd = (scroller: HTMLElement, end: RefObject<number | null>): number =
 };
 
 /**
- * A scroller that follows its `end`: at the end, new text scrolls into view and
+ * A scroller that follows its end: at the end, new text scrolls into view and
  * its lines slide in from below, and a new size keeps the end in view;
  * scrolled up, it stays until the reader is back at the end. Once it no
- * longer follows, it shows its `start`; the `reader`'s (an open bubble) starts
- * there and is then theirs to scroll as it grows.
+ * longer follows, it shows its start.
  */
-export const useFollowEnd = (anchor: 'end' | 'start' | 'reader', text: string) => {
-  const following = anchor === 'end';
-  /** Only the end moves with new text. */
-  const tracked = following ? text : null;
+export const useFollowEnd = (following: boolean, text: string) => {
   const ref = useRef<HTMLDivElement | null>(null);
   /** The end's scroll position when last kept; null while not following. */
   const end = useRef<number | null>(null);
@@ -35,7 +31,7 @@ export const useFollowEnd = (anchor: 'end' | 'start' | 'reader', text: string) =
   useLayoutEffect(() => {
     const scroller = ref.current;
     if (!scroller) return;
-    if (anchor !== 'end') {
+    if (!following) {
       scroller.scrollTop = 0;
       end.current = null;
       return;
@@ -51,7 +47,7 @@ export const useFollowEnd = (anchor: 'end' | 'start' | 'reader', text: string) =
         composite: 'add',
       });
     }
-  }, [anchor, tracked]);
+  }, [following, text]);
 
   useLayoutEffect(() => {
     const scroller = ref.current;

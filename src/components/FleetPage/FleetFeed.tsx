@@ -74,11 +74,11 @@ const statusOf = (line: FleetLine): 'failed' | 'stopped' | 'working' | 'next' | 
 type Open = (line: FleetLine, origin: HTMLElement) => void;
 
 /**
- * A bubble pressed by a click, Enter or Space (`onKey`, if they do otherwise);
- * the card under it is not selected. A link or button in it, its vertical
+ * A bubble pressed by a click, Enter or Space; the card under it is not
+ * selected. A link or button in it, its vertical
  * scrollbar, and a click that ends a drag selecting its words, are their own.
  */
-const pressable = (onPress: (target: HTMLElement) => void, onKey = onPress) => {
+const pressable = (onPress: (target: HTMLElement) => void) => {
   const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest('a, button') !== null;
   const selecting = (e: MouseEvent<HTMLElement>) => {
     const selection = getSelection();
@@ -98,7 +98,7 @@ const pressable = (onPress: (target: HTMLElement) => void, onKey = onPress) => {
       e.stopPropagation();
       if (ownedInside(e)) return;
       e.preventDefault();
-      onKey(e.currentTarget);
+      onPress(e.currentTarget);
     },
   };
 };
@@ -227,8 +227,6 @@ const Said = ({
   faces,
   open,
   newest,
-  expanded,
-  onExpand,
 }: {
   workspaceId: string;
   line: FleetLine;
@@ -238,18 +236,14 @@ const Said = ({
   open: Open;
   /** The card's last bubble: Main's follows how it ends (`useFollowEnd`); once another follows, it shows how it starts. */
   newest: boolean;
-  /** Main's bubble, open in place. */
-  expanded: boolean;
-  onExpand: (key: string | null) => void;
 }) => {
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
   const thinking = line.live === 'running';
   const style = useAuthorColor(from);
   const time = shortTime(line.at, now);
-  const anchor = expanded ? 'reader' : newest ? 'end' : 'start';
-  const scroller = useFollowEnd(anchor, line.markdown);
-  useWheelLines(scroller, anchor !== 'start');
+  const scroller = useFollowEnd(newest, line.markdown);
+  useWheelLines(scroller, newest);
   if (!from) {
     // No faces: a word to Main goes without saying, one to a task names it.
     return (
@@ -273,9 +267,8 @@ const Said = ({
       data-thinking={thinking || undefined}
       data-row
       style={style}
-      {...(speech
-        ? { 'aria-expanded': expanded, ...pressable(() => onExpand(line.key), () => onExpand(expanded ? null : line.key)) }
-        : { 'aria-haspopup': 'dialog' as const, ...pressable((target) => open(line, target)) })}
+      aria-haspopup="dialog"
+      {...pressable((target) => open(line, target))}
     >
       {shout && thinking && <SpeedLines />}
       {shout && <Sfx word={thinking ? 'GO!' : 'DONE!'} tone={thinking ? 'go' : 'done'} level={shoutLevel(line.at, now)} />}
@@ -284,11 +277,11 @@ const Said = ({
         <div className={styles.bubble} data-bubble>
           <Tail />
           {speech ? (
-            <div ref={scroller} className={`${styles.bubbleText} ${styles.speech}`} data-newest={anchor === 'end' || undefined} data-open={expanded || undefined}>
+            <div ref={scroller} className={`${styles.bubbleText} ${styles.speech}`} data-newest={newest || undefined}>
               <div>
                 <Stamp line={line} time={time} />
                 <div className={styles.speechText}>
-                  {expanded ? <FullSpeech workspaceId={workspaceId} line={line} /> : <FleetMarkdown content={line.markdown} />}
+                  <FleetMarkdown content={line.markdown} />
                 </div>
               </div>
             </div>
@@ -334,14 +327,13 @@ interface Fit {
 }
 
 /**
- * How many highlights fit as bubbles (`splitFeed`). A new set of lines, a
- * bubble opened or closed, or a new card size, is first laid out all as
- * bubbles and measured; the split is set in the same layout pass, so the
+ * How many highlights fit as bubbles (`splitFeed`). A new set of lines, or a
+ * new card size, is first laid out all as bubbles and measured; the split is set in the same layout pass, so the
  * measuring layout is never painted.
  */
-const useFit = (lines: readonly FleetLine[], expanded: string | null) => {
+const useFit = (lines: readonly FleetLine[]) => {
   const ref = useRef<HTMLDivElement | null>(null);
-  const signature = `${expanded}\n${lines.map((l) => `${l.key}|${l.live}|${l.outcome}|${l.images.length}|${l.text}`).join('\n')}`;
+  const signature = lines.map((l) => `${l.key}|${l.live}|${l.outcome}|${l.images.length}|${l.text}`).join('\n');
   const [fit, setFit] = useState<Fit | null>(null);
   const fitRef = useRef(fit);
   const measuring = fit?.signature !== signature;
@@ -373,7 +365,7 @@ const useFit = (lines: readonly FleetLine[], expanded: string | null) => {
     return () => observer.disconnect();
   }, []);
 
-  return { ref, bubbles: expanded || measuring ? lines.length : fit.bubbles, rows: expanded || measuring ? 0 : fit.rows };
+  return { ref, bubbles: measuring ? lines.length : fit.bubbles, rows: measuring ? 0 : fit.rows };
 };
 
 /** A truncated message's full text, once fetched; the preview until then, or if it can't be. */
@@ -396,11 +388,6 @@ const useFullText = (workspaceId: string, line: FleetLine): string => {
   return full && full.id === messageId ? full.text : line.markdown;
 };
 
-/** Main's whole bubble, fetched when its text was cut. */
-const FullSpeech = ({ workspaceId, line }: { workspaceId: string; line: FleetLine }) => (
-  <FleetMarkdown content={useFullText(workspaceId, line)} />
-);
-
 /** The zoomed highlight: who said it to whom and when, then the whole message as markdown and its pictures; Main's charts as its bubble draws them. */
 const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine }) => {
   const text = useFullText(workspaceId, line);
@@ -417,16 +404,6 @@ const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine })
   );
 };
 
-/** Main's bubble open in place, and when you last spoke as it opened. */
-interface Opened {
-  key: string;
-  since: number;
-}
-
-/** When you last spoke on the card: a word since a bubble opened closes it, so it shows. */
-const yourLast = (lines: readonly FleetLine[]): number =>
-  Math.max(...lines.filter((line) => line.from.kind === 'you').map((line) => line.at));
-
 interface Zoom {
   line: FleetLine;
   origin: HTMLElement;
@@ -437,11 +414,8 @@ interface Zoom {
  * A miniature: the workspace's conversation as highlights, in the order it
  * happened. The newest are bubbles, as many as fit; up to `ROWS` older ones
  * collapse to one-line rows above them, the newest row nearest the bubbles.
- * A row, or a bubble of anyone but Main, zooms out to the whole message;
- * Main's bubble opens in place, one at a time; as in a zoom, a click in it is
- * then the reader's, and a press outside it or Esc closes it, as Enter or
- * Space on it does, or a word of yours after it opened. A chart in Main's
- * words opens the workspace (`onOpen`).
+ * A row or a bubble zooms out to the whole message. A chart in Main's words
+ * opens the workspace (`onOpen`).
  */
 const FleetFeed = ({
   workspaceId,
@@ -459,32 +433,8 @@ const FleetFeed = ({
   faces: Cast;
   onOpen: (workspaceId: string) => void;
 }) => {
-  const [opened, setOpened] = useState<Opened | null>(null);
   const onChart = useCallback(() => onOpen(workspaceId), [onOpen, workspaceId]);
-  const since = yourLast(feed.lines);
-  const openKey = opened && opened.since >= since && feed.lines.some((line) => line.key === opened.key) ? opened.key : null;
-  const expand = (key: string | null) => setOpened(key === null ? null : { key, since });
-  const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines, openKey);
-  useEffect(() => {
-    const card = ref.current?.parentElement;
-    if (!card || !openKey) return undefined;
-    // A press, not a click: a selection dragged out of the bubble ends in a click outside it.
-    const pressOutside = (event: Event) => {
-      if (!(event.target instanceof Element && event.target.closest('[aria-expanded="true"]'))) setOpened(null);
-    };
-    // Prevented, so the page keeps the card selected (`FleetPage`).
-    const escape = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      setOpened(null);
-    };
-    card.addEventListener('pointerdown', pressOutside, true);
-    card.addEventListener('keydown', escape);
-    return () => {
-      card.removeEventListener('pointerdown', pressOutside, true);
-      card.removeEventListener('keydown', escape);
-    };
-  }, [openKey, ref]);
+  const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines);
   const [zoom, setZoom] = useState<Zoom | null>(null);
   const open = useCallback<Open>(
     (line, origin) =>
@@ -501,7 +451,7 @@ const FleetFeed = ({
   const bubbles = feed.lines.slice(split);
   return (
     <ChartOpen.Provider value={onChart}>
-      <div ref={ref} className={styles.scene} data-mood={feed.mood} data-expanded={!!openKey || undefined}>
+      <div ref={ref} className={styles.scene} data-mood={feed.mood}>
         <p className={styles.captionRow}>
           <Caption caption={feed.caption} mood={feed.mood} now={now} />
         </p>
@@ -522,8 +472,6 @@ const FleetFeed = ({
             faces={faces}
             open={open}
             newest={i === bubbles.length - 1}
-            expanded={openKey === line.key}
-            onExpand={expand}
           />
         ))}
         {feed.lines.length === 0 && <p className={styles.nothing}>No messages yet.</p>}

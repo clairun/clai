@@ -413,11 +413,6 @@ button.crewButton {
   flex-shrink: 0;
 }
 
-/* An open Main bubble gets the feed; earlier highlights return on close. */
-.scene[data-expanded] > [data-row]:not([aria-expanded='true']) {
-  display: none;
-}
-
 /* Narration box: square, like a manga caption. */
 .captionRow {
   display: flex;
@@ -562,8 +557,8 @@ button.crewButton {
   max-height: calc(var(--lines) * 1lh);
 }
 
-/* The card's newest, following its end (`useFollowEnd`), or one opened in place. */
-.speech:is([data-newest], [data-open]) {
+/* The card's newest, following its end (`useFollowEnd`). */
+.speech[data-newest] {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -580,17 +575,6 @@ button.crewButton {
 .speech::-webkit-scrollbar-thumb {
   background: var(--color-overlay-14);
   border-radius: var(--radius-full);
-}
-
-/* Opened in place: all of it. */
-.speech[data-open] {
-  max-height: 50cqh;
-}
-
-/* Leave room for the caption, row gap, and bubble chrome, including the
- * working row's larger top padding. */
-.scene[data-expanded] .speech[data-open] {
-  max-height: max(0px, calc(100cqh - 72px));
 }
 
 /* The time leads the first line: a first paragraph or heading runs on after it. */
@@ -642,10 +626,6 @@ button.crewButton {
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
   font-size: 0.9em;
   white-space: pre-wrap;
-}
-
-.speech[data-open] .speechText > * + * {
-  margin-top: 0.5em;
 }
 
 /* A chart in Main's words: a chip that opens the workspace, where it is drawn. */
@@ -877,13 +857,9 @@ button.crewButton {
   cursor: zoom-in;
 }
 
-/* A bubble or a row zooms out to the whole message; an open bubble's words are the reader's. */
+/* A bubble or a row zooms out to the whole message. */
 .scene [role='button'] {
   cursor: zoom-in;
-}
-
-.scene [aria-expanded='true'] {
-  cursor: auto;
 }
 
 .scene [role='button']:focus-visible,

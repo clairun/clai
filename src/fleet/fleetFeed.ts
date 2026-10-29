@@ -154,7 +154,7 @@ export const shortTime = (at: number, now: number): string => {
 
 const YOU: FleetSpeaker = { kind: 'you' };
 const MAIN: FleetSpeaker = { kind: 'main' };
-/** Main's words to you: a bubble that opens in place and grows while Main writes. */
+/** Main's words to you: a bubble that grows while Main writes. */
 export const isSpeech = (line: FleetLine): boolean => line.from.kind === 'main' && line.to.kind === 'you';
 const speaker = (agent: FleetAgentRef | null): FleetSpeaker => (agent ? { kind: 'agent', agent } : MAIN);
 const OUTCOMES: Partial<Record<TaskStatus, FleetOutcome>> = { completed: 'done', failed: 'failed', stopped: 'stopped' };

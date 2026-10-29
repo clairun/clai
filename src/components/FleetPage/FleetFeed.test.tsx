@@ -76,53 +76,24 @@ describe("Main's bubble", () => {
     }
   });
 
-  it('opens in place on a click, and keeps growing open; it never zooms', () => {
-    const { rerender } = render(<Feed state={twoBlocks()} live={RUNNING} />);
-    expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
-    fireEvent.click(mainBubble());
-    expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
-    // Open, it scrolls inside instead of following the newest lines.
-    expect(words()).toHaveAttribute('data-open');
-    expect(words()).not.toHaveAttribute('data-newest');
-    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
-
-    rerender(<Feed state={twoBlocks('After that, the fix. Then the docs.')} live={RUNNING} />);
-    expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
-    expect(words()).toHaveTextContent('Then the docs.');
+  it('zooms out on a click, Enter or Space, like every bubble; it never opens in place', () => {
+    render(<Feed state={twoBlocks()} live={RUNNING} />);
+    const bubble = mainBubble();
+    expect(bubble).toHaveAttribute('aria-haspopup', 'dialog');
+    fireEvent.click(bubble);
+    const zoom = screen.getByRole('dialog', { name: 'Message from Main' });
+    expect(zoom).toHaveTextContent('After that, the fix.');
+    expect(bubble).not.toHaveAttribute('aria-expanded');
+    fireEvent.keyDown(zoom, { key: 'Escape' });
+    expect(screen.queryByRole('dialog')).toBeNull();
+    for (const key of ['Enter', ' ']) {
+      expect(fireEvent.keyDown(bubble, { key })).toBe(false);
+      fireEvent.keyDown(screen.getByRole('dialog', { name: 'Message from Main' }), { key: 'Escape' });
+      expect(screen.queryByRole('dialog')).toBeNull();
+    }
   });
 
-  it('leaves clicks in it open to the reader; a press outside or Esc closes it', () => {
-    render(<Feed state={twoBlocks()} />);
-    const open = () => mainBubble().getAttribute('aria-expanded');
-    fireEvent.keyDown(mainBubble(), { key: 'Enter' });
-    expect(open()).toBe('true');
-    // A click in it: its words are the reader's to select.
-    fireEvent.click(words());
-    expect(open()).toBe('true');
-    // A selection dragged out of it starts inside and ends in a click on what holds it both.
-    const scene = mainBubble().closest<HTMLElement>('[data-mood]')!;
-    fireEvent.pointerDown(words());
-    fireEvent.click(scene);
-    expect(open()).toBe('true');
-
-    // Esc closes it, and is its alone: the page keeps the card selected.
-    expect(fireEvent.keyDown(words(), { key: 'Escape' })).toBe(false);
-    expect(open()).toBe('false');
-
-    fireEvent.click(mainBubble());
-    expect(open()).toBe('true');
-    fireEvent.pointerDown(scene);
-    expect(open()).toBe('false');
-    expect(words()).not.toHaveAttribute('data-open');
-
-    // Enter or Space opens and closes it, as a disclosure.
-    fireEvent.keyDown(mainBubble(), { key: ' ' });
-    expect(open()).toBe('true');
-    fireEvent.keyDown(mainBubble(), { key: 'Enter' });
-    expect(open()).toBe('false');
-  });
-
-  it('fetches a reply the snapshot cut whole, once while it is open, not again on each recompute', async () => {
+  it('fetches a reply the snapshot cut whole, once while it is zoomed, not again on each recompute', async () => {
     const preview = { message: { ...message('m1', [text('First, the')]), createdAt: BigInt(NOW - 1000) }, runId: 'r1', truncated: true };
     const snapshot = { workspaceId: WS, mainSessionId: MAIN, lastActivityAt: 0n, lastOpenedAt: 0n, lastMainRun: null, lastAssistantMessage: null, recentMessages: [preview],
       pendingAsks: [], pendingPermissions: [], pendingPathGrants: [], agents: [] } as unknown as FleetWorkspace;
@@ -136,140 +107,22 @@ describe("Main's bubble", () => {
       expect(await screen.findByText('First, the leaks.')).toBeInTheDocument();
       // Every Fleet event recomputes the feed: new lines, the same message.
       rerender(<FleetFeed workspaceId={WS} feed={cut()} shouts={new Set()} now={NOW + 1} faces={castFor({}, null)} onOpen={() => {}} />);
-      expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+      expect(screen.getByRole('dialog')).toHaveTextContent('First, the leaks.');
       expect(fetches() - at).toBe(1);
     } finally {
       fetched.mockImplementation(async () => undefined);
     }
   });
 
-  it('keeps an older Main bubble expanded and gives it the card space', () => {
-    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(200);
-    const rowHeight = vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
-      if (this.tagName === 'P') return 20;
-      return this.getAttribute('aria-expanded') === 'true' ? 120 : 40;
-    });
-    try {
-      const first = applyUserSent(EMPTY_FLEET, WS, MAIN, { ...message('u0', [text('Earlier.')]), role: 'user' }, NOW - 3000);
-      const main = applyAssistantEvent(first, updated(message('m1', [text('First, the leaks.')]), NOW - 2000));
-      const next = applyUserSent(main, WS, MAIN, { ...message('u1', [text('Next reply.')]), role: 'user' }, NOW - 1000);
-      const state = applyUserSent(next, WS, MAIN, { ...message('u2', [text('Newest reply.')]), role: 'user' }, NOW);
-      render(<Feed state={state} />);
-
-      fireEvent.click(mainBubble());
-      expect(screen.getByText('First, the leaks.').closest('[aria-expanded]')).toHaveAttribute('aria-expanded', 'true');
-      expect(mainBubble().closest('[data-mood]')).toHaveAttribute('data-expanded', 'true');
-      fireEvent.keyDown(mainBubble(), { key: 'Escape' });
-      expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
-      expect(mainBubble().closest('[data-mood]')).not.toHaveAttribute('data-expanded');
-      expect(screen.getByRole('list', { name: 'Earlier' })).toBeInTheDocument();
-    } finally {
-      height.mockRestore();
-      rowHeight.mockRestore();
-    }
-  });
-
-  it('releases the feed when the expanded message leaves it', () => {
-    const { rerender } = render(<Feed state={saying('First, the leaks.')} />);
-    fireEvent.click(mainBubble());
-    expect(mainBubble().closest('[data-mood]')).toHaveAttribute('data-expanded', 'true');
-
-    rerender(<Feed state={fleet(updated(message('m2', [text('Other words.'), tool('c2')]), NOW))} />);
-    expect(screen.getByText('Other words.')).toBeInTheDocument();
-    expect(screen.getByText('Other words.').closest('[data-mood]')).not.toHaveAttribute('data-expanded');
-  });
-
-  describe('open, as more is said', () => {
-    const yours = (state: FleetState, workspaceId = WS) =>
-      applyUserSent(state, workspaceId, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW);
-
-    it('stays open as Main or an agent says more', () => {
-      const done = { id: 't1', workspaceId: WS, title: 'Draft the release notes', status: 'completed', resultSummary: 'Notes drafted.', sessionId: 'task-session',
-        parentTaskId: null, cycleNo: 1n, assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w', assignedToWorkspaceAgentId: 'wa-w',
-        createdAt: BigInt(NOW + 500), updatedAt: BigInt(NOW + 800), completedAt: BigInt(NOW + 800) } as unknown as WorkspaceTaskResponse;
-      const { rerender } = render(<Feed state={twoBlocks()} />);
-      fireEvent.click(mainBubble());
-      const more = applyAssistantEvent(twoBlocks(), updated(message('m2', [text('Docs next.'), tool('c3')]), NOW + 1000));
-      rerender(<Feed state={more} live={{ runs: {}, tasks: { [WS]: { t1: done } } }} now={NOW + 2000} />);
-      expect(screen.getByText('Notes drafted.')).toBeInTheDocument();
-      expect(screen.getByText('Docs next.')).toBeInTheDocument();
-      expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
-    });
-
-    it('closes when you speak on its card, and on no other', () => {
-      const WS2 = 'ws-2';
-      const other = (state: FleetState) => {
-        const said = { ...message('o1', [text('Other card words.'), tool('c9')]), sessionId: 'main-2' };
-        return applyAssistantEvent(applyUserSent(state, WS2, 'main-2', null, 0), { ...updated(said, NOW - 1000), workspaceId: WS2, sessionId: 'main-2' });
-      };
-      const Cards = ({ state }: { state: FleetState }) =>
-        [WS, WS2].map((id) => (
-          <FleetFeed key={id} workspaceId={id} feed={cardFeed(state.cards[id]!, IDLE, NOW)} shouts={new Set()} now={NOW} faces={castFor({}, null)} onOpen={() => {}} />
-        ));
-      const otherBubble = () => bubbleOf(/Other card words/);
-      const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(1000);
-      try {
-        const { rerender } = render(<Cards state={other(twoBlocks())} />);
-        fireEvent.click(mainBubble());
-        fireEvent.click(otherBubble());
-        expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
-        expect(otherBubble()).toHaveAttribute('aria-expanded', 'true');
-
-        rerender(<Cards state={yours(other(twoBlocks()))} />);
-        expect(screen.getByText('And the docs?')).toBeInTheDocument();
-        expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
-        expect(otherBubble()).toHaveAttribute('aria-expanded', 'true');
-      } finally {
-        height.mockRestore();
-      }
-    });
-
-    it('opens again if the word that closed it is taken back', () => {
-      const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(1000);
-      try {
-        const { rerender } = render(<Feed state={twoBlocks()} />);
-        fireEvent.click(mainBubble());
-        rerender(<Feed state={yours(twoBlocks())} />);
-        expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
-        const deleted = event({ type: 'message_deleted', payload: { message_id: 'u1' } } as AssistantUiEvent, NOW + 1);
-        rerender(<Feed state={applyAssistantEvent(yours(twoBlocks()), deleted)} />);
-        expect(screen.queryByText('And the docs?')).toBeNull();
-        expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
-      } finally {
-        height.mockRestore();
-      }
-    });
-
-    it('shows its start once your word closes it, no longer the newest; a click opens it again', () => {
-      const { restore } = scrolling(() => 200);
-      try {
-        const { rerender } = render(<Feed state={twoBlocks()} />);
-        fireEvent.click(mainBubble());
-        words().scrollTop = 60;
-        rerender(<Feed state={yours(twoBlocks())} />);
-        expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
-        expect(words()).not.toHaveAttribute('data-open');
-        expect(words()).not.toHaveAttribute('data-newest');
-        expect(words().scrollTop).toBe(0);
-
-        fireEvent.click(mainBubble());
-        expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
-      } finally {
-        restore();
-      }
-    });
-  });
-
-  it('says its words as markdown, closed and open', () => {
+  it('says its words as markdown, in its bubble and its zoom', () => {
     render(<Feed state={saying('First, the leaks, in **two** places:\n\n- the pool\n- the cache')} />);
-    const shown = () => {
-      expect(within(words()).getByText('two').tagName).toBe('STRONG');
-      expect(within(words()).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['the pool', 'the cache']);
+    const shown = (where: HTMLElement) => {
+      expect(within(where).getByText('two').tagName).toBe('STRONG');
+      expect(within(where).getAllByRole('listitem').map((li) => li.textContent)).toEqual(['the pool', 'the cache']);
     };
-    shown();
+    shown(words());
     fireEvent.click(mainBubble());
-    expect(words()).toHaveAttribute('data-open');
-    shown();
+    shown(screen.getByRole('dialog'));
   });
 
   it('keeps tool-separated text in distinct paragraphs in a bubble and its zoom', () => {
@@ -326,7 +179,7 @@ describe("Main's bubble", () => {
     expect(mainBubble().querySelector('img, canvas, svg[role=graphics-document]')).toBeNull();
     fireEvent.click(chip);
     expect(onOpen).toHaveBeenCalledWith(WS);
-    expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 
   it('leaves Enter and Space on a chip or link in it to that chip or link', () => {
@@ -338,7 +191,7 @@ describe("Main's bubble", () => {
       expect(fireEvent.keyDown(inner, { key: 'Enter' })).toBe(true);
       expect(fireEvent.keyDown(inner, { key: ' ' })).toBe(true);
     }
-    expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('dialog')).toBeNull();
   });
 });
 
@@ -352,14 +205,14 @@ const scrolling = (tall: () => number, { reduce = false } = {}) => {
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: reduce && query.includes('reduce') }));
   const spies = [
     vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
-      return this.matches('[data-newest], [data-open]') ? 100 : 1000;
+      return this.matches('[data-newest]') ? 100 : 1000;
     }),
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
-      return this.parentElement?.matches('[data-newest], [data-open]') ? tall() : 0;
+      return this.parentElement?.matches('[data-newest]') ? tall() : 0;
     }),
     // A slide's transform stretches what scrolls past the words' own height.
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
-      return this.matches('[data-newest], [data-open]') ? tall() + (glide.mock.calls.length > 0 ? 60 : 0) : 0;
+      return this.matches('[data-newest]') ? tall() + (glide.mock.calls.length > 0 ? 60 : 0) : 0;
     }),
     vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(200),
   ];
@@ -423,35 +276,14 @@ describe("Main's newest bubble, scrolling", () => {
     }
   });
 
-  it('shows its start once another bubble follows or while open, and its end again once closed', () => {
+  it('shows its start once another bubble follows', () => {
     const { restore } = scrolling(() => 200);
     try {
       const { rerender } = render(writing());
       expect(words().scrollTop).toBe(100);
-      fireEvent.click(mainBubble());
-      expect(words().scrollTop).toBe(0);
-      fireEvent.keyDown(mainBubble(), { key: 'Escape' });
-      expect(words().scrollTop).toBe(100);
-
       rerender(<Feed state={applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW)} now={NOW + 2000} />);
       expect(words()).not.toHaveAttribute('data-newest');
       expect(words().scrollTop).toBe(0);
-    } finally {
-      restore();
-    }
-  });
-
-  it('leaves an open bubble where the reader scrolled it as Main writes on', () => {
-    let tall = 200;
-    const { restore } = scrolling(() => tall);
-    try {
-      const { rerender } = render(writing());
-      fireEvent.click(mainBubble());
-      words().scrollTop = 60;
-      tall = 260;
-      rerender(writing('Then the docs.'));
-      expect(words()).toHaveTextContent('Then the docs.');
-      expect(words().scrollTop).toBe(60);
     } finally {
       restore();
     }
@@ -500,7 +332,7 @@ describe("Main's newest bubble, scrolling", () => {
     }
   });
 
-  it('moves one line a wheel notch, open or not; leaves a trackpad, Ctrl, sideways, and an older bubble to the browser', () => {
+  it('moves one line a wheel notch; leaves a trackpad, Ctrl, sideways, and an older bubble to the browser', () => {
     const { restore } = scrolling(() => 200);
     /** A wheel event of `wheelDeltaY` (120 a notch) on the words; false if it was taken. */
     const wheel = (wheelDeltaY: number, init: WheelEventInit = {}) => {
@@ -524,11 +356,6 @@ describe("Main's newest bubble, scrolling", () => {
       expect(wheel(120, { cancelable: false })).toBe(true);
       expect(words().scrollTop).toBe(70);
 
-      fireEvent.click(mainBubble());
-      expect(wheel(-120)).toBe(false);
-      expect(words().scrollTop).toBe(15);
-      fireEvent.keyDown(mainBubble(), { key: 'Escape' });
-
       rerender(<Feed state={applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW)} now={NOW + 2000} />);
       expect(wheel(-120)).toBe(true);
       expect(words().scrollTop).toBe(0);
@@ -542,9 +369,9 @@ describe("Main's newest bubble, scrolling", () => {
     try {
       render(writing());
       fireEvent.click(words(), { clientX: 203 });
-      expect(mainBubble()).toHaveAttribute('aria-expanded', 'false');
+      expect(screen.queryByRole('dialog')).toBeNull();
       fireEvent.click(words(), { clientX: 120 });
-      expect(mainBubble()).toHaveAttribute('aria-expanded', 'true');
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
     } finally {
       restore();
     }
@@ -566,7 +393,7 @@ describe('words selected in the feed', () => {
     fireEvent.click(node);
     return getSelection()!.toString();
   };
-  const open = (words: string) => screen.getByText(words).closest('[aria-expanded]')!.getAttribute('aria-expanded');
+  const zoomed = () => screen.queryByRole('dialog') !== null;
   // Room for three bubbles.
   const sizes: { mockRestore: () => void }[] = [];
   beforeEach(() => {
@@ -582,20 +409,20 @@ describe('words selected in the feed', () => {
     getSelection()!.removeAllRanges();
   });
 
-  it("stay selected in Main's bubbles, older or newest, which a plain click opens", () => {
+  it("stay selected in Main's bubbles, older or newest, which a plain click zooms", () => {
     render(<Feed state={asked()} />);
     for (const words of ['First, the leaks.', 'Docs next.']) {
       expect(select(screen.getByText(words))).toBe(words);
-      expect(open(words)).toBe('false');
+      expect(zoomed()).toBe(false);
     }
     // A shift-click here extends a selection begun in another bubble.
     getSelection()!.setBaseAndExtent(screen.getByText('Docs next.'), 0, screen.getByText('First, the leaks.'), 0);
     fireEvent.click(screen.getByText('First, the leaks.'));
-    expect(open('First, the leaks.')).toBe('false');
+    expect(zoomed()).toBe(false);
     // Words selected in another bubble leave a plain click on this one a press.
     getSelection()!.selectAllChildren(screen.getByText('Docs next.'));
     fireEvent.click(screen.getByText('First, the leaks.'));
-    expect(open('First, the leaks.')).toBe('true');
+    expect(screen.getByRole('dialog', { name: 'Message from Main' })).toHaveTextContent('First, the leaks.');
   });
 
   it('stay selected in your bubble, which a plain click zooms', () => {
