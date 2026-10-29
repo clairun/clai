@@ -2423,7 +2423,11 @@ mod tests {
             "git --version ; for i in a; { touch PWN; }",
             "cat <<$'E'\nE\ntouch PWN",
             "cat <<$\"E\"\nE\ntouch PWN",
+            "cat <<$\\\n'E'\nE\ntouch PWN",
+            "cat <<$(x)\n$(x)\ntouch PWN\n$",
+            "cat <<`a`\n`a`\ntouch PWN",
             "cat <<E\nE\\\n\ntouch PWN\nE",
+            "cat <<E\\\nX\nEX\\\n\ntouch PWN\nEX",
             "echo x\n((echo a) ; touch PWN )",
             "((touch PWN) )",
             "echo $((echo a) ; touch PWN )",
@@ -2472,6 +2476,10 @@ mod tests {
         };
         assert!(matches!(
             evaluate_command_policy(&exec, "echo a\\ #; touch PWN", &[], &[]),
+            PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
+        ));
+        assert!(matches!(
+            evaluate_command_policy(&exec, "echo a\\ \\\n#; touch PWN", &[], &[]),
             PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
         ));
     }
