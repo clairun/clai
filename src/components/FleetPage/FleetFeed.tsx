@@ -398,14 +398,20 @@ interface Zoom {
   line: FleetLine;
   origin: HTMLElement;
   start: ZoomStart;
+  /** When you last spoke on the card as it opened (`yourLast`). */
+  since: number;
 }
+
+/** When you last spoke on the card: a word since a zoom opened closes it, so your word shows. */
+const yourLast = (lines: readonly FleetLine[]): number =>
+  Math.max(...lines.filter((line) => line.from.kind === 'you').map((line) => line.at));
 
 /**
  * A miniature: the workspace's conversation as highlights, in the order it
  * happened. The newest are bubbles, as many as fit; up to `ROWS` older ones
  * collapse to one-line rows above them, the newest row nearest the bubbles.
- * A row or a bubble zooms out to the whole message. A chart in a bubble
- * opens the workspace (`onOpen`).
+ * A row or a bubble zooms out to the whole message, until you say something
+ * on the card. A chart in a bubble opens the workspace (`onOpen`).
  */
 const FleetFeed = ({
   workspaceId,
@@ -426,17 +432,16 @@ const FleetFeed = ({
   const onChart = useCallback(() => onOpen(workspaceId), [onOpen, workspaceId]);
   const { ref, bubbles: count, rows: rowCount } = useFit(feed.lines);
   const [zoom, setZoom] = useState<Zoom | null>(null);
-  const open = useCallback<Open>(
-    (line, origin) =>
-      setZoom((z) => {
-        if (z) return z;
-        const start = zoomStart(origin);
-        return faceFor(line.from, faces) ? { line, origin, start } : { line, origin, start: { ...start, look: { ...YOU_LOOK, ...start.look } } };
-      }),
-    [faces]
-  );
+  const since = yourLast(feed.lines);
+  const shown = (z: Zoom | null): z is Zoom => z !== null && z.since >= since;
+  const open = (line: FleetLine, origin: HTMLElement) =>
+    setZoom((z) => {
+      if (shown(z)) return z;
+      const start = zoomStart(origin);
+      return { line, origin, since, start: faceFor(line.from, faces) ? start : { ...start, look: { ...YOU_LOOK, ...start.look } } };
+    });
   const closed = useCallback(() => setZoom(null), []);
-  const zoomed = zoom && (feed.lines.find((line) => line.key === zoom.line.key) ?? zoom.line);
+  const zoomed = shown(zoom) ? (feed.lines.find((line) => line.key === zoom.line.key) ?? zoom.line) : null;
   const split = feed.lines.length - count;
   const rows = feed.lines.slice(Math.max(0, split - rowCount), split);
   const bubbles = feed.lines.slice(split);
@@ -466,7 +471,7 @@ const FleetFeed = ({
           />
         ))}
         {feed.lines.length === 0 && <p className={styles.nothing}>No messages yet.</p>}
-        {zoom && zoomed && (
+        {zoomed && zoom && (
           <FleetZoom
             origin={zoom.origin}
             start={zoom.start}

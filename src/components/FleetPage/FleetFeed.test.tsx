@@ -475,6 +475,68 @@ describe('a link in a bubble', () => {
   });
 });
 
+describe('a zoom, as more is said on its card', () => {
+  const yours = (state: FleetState) => applyUserSent(state, WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW);
+  let height: { mockRestore: () => void };
+  beforeEach(() => {
+    height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(1000);
+  });
+  afterEach(() => height.mockRestore());
+
+  it('closes when you speak on its card, so your word shows; a click zooms again', () => {
+    const { rerender } = render(<Feed state={twoBlocks()} />);
+    const bubble = mainBubble();
+    fireEvent.click(bubble);
+    expect(screen.getByRole('dialog', { name: 'Message from Main' })).toBeInTheDocument();
+    rerender(<Feed state={yours(twoBlocks())} />);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    expect(screen.getByText('And the docs?')).toBeInTheDocument();
+    fireEvent.click(bubble);
+    expect(screen.getByRole('dialog', { name: 'Message from Main' })).toBeInTheDocument();
+  });
+
+  it('stays as Main or an agent says more', () => {
+    const done = { id: 't1', workspaceId: WS, title: 'Draft the release notes', status: 'completed', resultSummary: 'Notes drafted.', sessionId: 'task-session',
+      parentTaskId: null, cycleNo: 1n, assignedAgentDisplayName: 'Writer', assignedAgentDefinitionId: 'def-w', assignedToWorkspaceAgentId: 'wa-w',
+      createdAt: BigInt(NOW + 500), updatedAt: BigInt(NOW + 800), completedAt: BigInt(NOW + 800) } as unknown as WorkspaceTaskResponse;
+    const { rerender } = render(<Feed state={twoBlocks()} />);
+    fireEvent.click(mainBubble());
+    const more = applyAssistantEvent(twoBlocks(), updated(message('m2', [text('Docs next.'), tool('c3')]), NOW + 1000));
+    rerender(<Feed state={more} live={{ runs: {}, tasks: { [WS]: { t1: done } } }} now={NOW + 2000} />);
+    expect(screen.getByText('Notes drafted.')).toBeInTheDocument();
+    expect(screen.getByText('Docs next.')).toBeInTheDocument();
+    expect(screen.getByRole('dialog', { name: 'Message from Main' })).toHaveTextContent('First, the leaks.');
+  });
+
+  it("leaves another card's zoom open", () => {
+    const WS2 = 'ws-2';
+    const other = (state: FleetState) => {
+      const said = { ...message('o1', [text('Other card words.'), tool('c9')]), sessionId: 'main-2' };
+      return applyAssistantEvent(applyUserSent(state, WS2, 'main-2', null, 0), { ...updated(said, NOW - 1000), workspaceId: WS2, sessionId: 'main-2' });
+    };
+    const Cards = ({ state }: { state: FleetState }) =>
+      [WS, WS2].map((id) => (
+        <FleetFeed key={id} workspaceId={id} feed={cardFeed(state.cards[id]!, IDLE, NOW)} shouts={new Set()} now={NOW} faces={castFor({}, null)} onOpen={() => {}} />
+      ));
+    const { rerender } = render(<Cards state={other(twoBlocks())} />);
+    fireEvent.click(mainBubble());
+    fireEvent.click(bubbleOf(/Other card words/));
+    expect(screen.getAllByRole('dialog')).toHaveLength(2);
+    rerender(<Cards state={yours(other(twoBlocks()))} />);
+    expect(screen.getByRole('dialog')).toHaveTextContent('Other card words.');
+  });
+
+  it('zooms again if the word that closed it is taken back', () => {
+    const { rerender } = render(<Feed state={twoBlocks()} />);
+    fireEvent.click(mainBubble());
+    rerender(<Feed state={yours(twoBlocks())} />);
+    expect(screen.queryByRole('dialog')).toBeNull();
+    const deleted = event({ type: 'message_deleted', payload: { message_id: 'u1' } } as AssistantUiEvent, NOW + 1);
+    rerender(<Feed state={applyAssistantEvent(yours(twoBlocks()), deleted)} />);
+    expect(screen.getByRole('dialog', { name: 'Message from Main' })).toBeInTheDocument();
+  });
+});
+
 describe('words selected in the feed', () => {
   /** Main, you, Main: an older bubble of Main's, yours, and Main's newest. */
   const asked = () => {
@@ -652,7 +714,8 @@ describe('pictures in the feed', () => {
       fireEvent.click(await screen.findByAltText('fit-a.png'));
       const zoom = screen.getByRole('dialog', { name: 'Message from You' });
       expect(within(zoom).getByAltText('fit-a.png')).toHaveAttribute('src', 'data:image/png;base64,QUJD');
-      rerender(<Feed state={fleet(...said, created(yours('u3', [text('Last.')], NOW)))} />);
+      // Main's word, not yours: yours would close the zoom.
+      rerender(<Feed state={fleet(...said, updated(message('m3', [text('Last.'), tool('c3')]), NOW))} />);
       expect(within(screen.getByRole('list', { name: 'Earlier' })).getByText(/Two shots/)).toBeInTheDocument();
       expect(screen.getByRole('dialog')).toBe(zoom);
     } finally {
