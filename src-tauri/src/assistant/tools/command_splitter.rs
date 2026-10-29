@@ -706,19 +706,8 @@ fn read_heredoc(input: &str, start: usize, out: &mut Commands) -> usize {
         i += 1;
     }
     i = skip_blanks(input, i);
-    // The delimiter is one word, quotes removed: `'EOF'`, `"EOF"`, `\EOF`
-    // and `E"OF"` all close at a line reading `EOF`.
-    let word = word_at(input, i);
-    let mut delim = String::with_capacity(word.len());
-    let mut chars = word.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\'' | '"' => delim.extend(chars.by_ref().take_while(|&q| q != c)),
-            '\\' => delim.extend(chars.next()),
-            _ => delim.push(c),
-        }
-    }
-    i += word.len();
+    let (len, delim) = heredoc_delimiter(&input[i..]);
+    i += len;
     out.buf.push_str(&input[start..i]);
     if !delim.is_empty() {
         out.heredocs.push(Heredoc {
@@ -728,6 +717,27 @@ fn read_heredoc(input: &str, start: usize, out: &mut Commands) -> usize {
         });
     }
     i
+}
+
+/// The heredoc delimiter word heading `rest`: its length, and its text with
+/// quotes removed. It ends at a blank or an operator outside quotes, so
+/// `'EOF'`, `"E F"`, `\EOF` and `E"OF"` close at a line reading `EOF` or
+/// `E F`.
+fn heredoc_delimiter(rest: &str) -> (usize, String) {
+    let mut delim = String::new();
+    let mut chars = rest.char_indices();
+    while let Some((at, c)) = chars.next() {
+        match c {
+            '\'' | '"' => delim.extend(chars.by_ref().map(|(_, q)| q).take_while(|&q| q != c)),
+            '\\' => match chars.next() {
+                Some((_, '\n')) | None => {}
+                Some((_, escaped)) => delim.push(escaped),
+            },
+            _ if is_blank(c) || ";&|()<>".contains(c) => return (at, delim),
+            _ => delim.push(c),
+        }
+    }
+    (rest.len(), delim)
 }
 
 /// The word starting at `i`: up to a blank or an operator character.
@@ -1067,6 +1077,22 @@ mod tests {
                 simple("touch t")
             ]
         );
+    }
+
+    #[test]
+    fn quoted_heredoc_delimiter_may_hold_blanks_and_operators() {
+        for (input, heredoc) in [
+            ("cat <<'E F'\nx\nE F\necho y #'", "cat <<'E F'\nx\nE F"),
+            ("cat <<\"E F\"\nx\nE F\necho y #\"", "cat <<\"E F\"\nx\nE F"),
+            ("cat <<'E;F'\nx\nE;F\necho y #'", "cat <<'E;F'\nx\nE;F"),
+            ("cat <<E\\ F\nx\nE F\necho y #'", "cat <<E\\ F\nx\nE F"),
+        ] {
+            assert_eq!(
+                split(input),
+                vec![opaque(heredoc), simple("echo y")],
+                "{input:?}"
+            );
+        }
     }
 
     #[test]
