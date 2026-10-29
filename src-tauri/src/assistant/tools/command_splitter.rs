@@ -275,6 +275,13 @@ pub fn split_command(input: &str) -> Vec<Segment> {
     split(input).unwrap_or_else(|| vec![Segment::Opaque(input.trim().to_string())])
 }
 
+#[derive(PartialEq, Eq)]
+enum CasePart {
+    Header,
+    Pattern,
+    Body,
+}
+
 #[allow(
     clippy::cognitive_complexity,
     reason = "lint debt: cognitive complexity 65 against a budget of 25"
@@ -294,6 +301,8 @@ fn split(input: &str) -> Option<Vec<Segment>> {
     let mut in_backtick = false;
     let mut escape = false;
     let mut depth: u32 = 0;
+    let mut double_quote_resume_depths = Vec::new();
+    let mut substitution_cases: Vec<(u32, CasePart)> = Vec::new();
 
     let mut i = 0;
     while i < n {
@@ -358,6 +367,8 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                 out.opaque = true;
                 out.buf.push('(');
                 depth += 1;
+                double_quote_resume_depths.push(depth - 1);
+                in_double = false;
                 i += 2;
                 continue;
             } else if c == '`' {
@@ -382,6 +393,38 @@ fn split(input: &str) -> Option<Vec<Segment>> {
 
         // Inside a substitution or expansion: one word, no separators.
         if depth > 0 {
+            // A case pattern's `)` belongs to the item, not the substitution.
+            let word_start =
+                i == 0 || is_blank(bytes[i - 1] as char) || ";&|()".contains(bytes[i - 1] as char);
+            if word_start {
+                match word_at(input, i) {
+                    "case" => substitution_cases.push((depth, CasePart::Header)),
+                    "in" => {
+                        if let Some((case_depth, part @ CasePart::Header)) =
+                            substitution_cases.last_mut()
+                        {
+                            if *case_depth == depth {
+                                *part = CasePart::Pattern;
+                            }
+                        }
+                    }
+                    "esac" => {
+                        if substitution_cases.last().is_some_and(|(case_depth, part)| {
+                            *case_depth == depth && *part != CasePart::Header
+                        }) {
+                            substitution_cases.pop();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if c == ';' && next == Some(';') {
+                if let Some((case_depth, part @ CasePart::Body)) = substitution_cases.last_mut() {
+                    if *case_depth == depth {
+                        *part = CasePart::Pattern;
+                    }
+                }
+            }
             out.buf.push(c);
             match c {
                 '\\' => escape = true,
@@ -391,9 +434,26 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                     in_backtick = true;
                     out.opaque = true;
                 }
+                '(' if substitution_cases.last().is_some_and(|(case_depth, part)| {
+                    *case_depth == depth && *part == CasePart::Pattern
+                }) => {}
                 '(' | '{' | '[' => depth += 1,
+                ')' if substitution_cases
+                    .last_mut()
+                    .is_some_and(|(case_depth, part)| {
+                        if *case_depth == depth && *part == CasePart::Pattern {
+                            *part = CasePart::Body;
+                            true
+                        } else {
+                            false
+                        }
+                    }) => {}
                 ')' | '}' | ']' => {
-                    depth = depth.saturating_sub(1);
+                    depth -= 1;
+                    if double_quote_resume_depths.last() == Some(&depth) {
+                        double_quote_resume_depths.pop();
+                        in_double = true;
+                    }
                 }
                 '$' if next == Some('(') || next == Some('{') => {
                     out.buf.push(next.unwrap());
@@ -1519,6 +1579,35 @@ mod tests {
             split("for i in 1; do echo a; done > fi"),
             vec![simple("echo a"), opaque("done > fi")]
         );
+    }
+
+    #[test]
+    fn case_inside_a_substitution_ends_at_its_closing_paren() {
+        // A pattern's `)` does not close the substitution.
+        for (input, inner) in [
+            (
+                "echo $(case x in x) a;; esac); rm -rf x",
+                "echo $(case x in x) a;; esac)",
+            ),
+            (
+                "echo \"$(case x in x) a;; esac)\"; rm -rf x",
+                "echo \"$(case x in x) a;; esac)\"",
+            ),
+            (
+                "cat <(case x in x) a;; esac); rm -rf x",
+                "cat <(case x in x) a;; esac)",
+            ),
+            (
+                "echo `case x in x) a;; esac`; rm -rf x",
+                "echo `case x in x) a;; esac`",
+            ),
+        ] {
+            assert_eq!(
+                split(input),
+                vec![opaque(inner), simple("rm -rf x")],
+                "{input:?}"
+            );
+        }
     }
 
     #[test]
