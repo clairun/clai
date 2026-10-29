@@ -308,7 +308,7 @@ describe('FleetPage', () => {
     const card = within((await screen.findByText('v2')).closest('article')!);
     // Three bubbles fit, newest last: Main's, yours, Main's.
     const bubbles = card.getAllByRole('button', { name: /On it|Thanks|Shipped/ });
-    const stamp = (b: HTMLElement) => b.querySelector('[class*=stamp]')!.textContent;
+    const stamp = (b: HTMLElement) => b.querySelector('[class*=messageTime]')!.textContent;
     const words = (b: HTMLElement) => b.querySelector('[data-bubble]')!.textContent!.replace(stamp(b)!, '');
     expect(bubbles.map(words)).toEqual(['On it. Two tasks out.', 'Thanks!', 'Shipped v2']);
     // Two rows of what came before; older ones hide.
@@ -321,7 +321,7 @@ describe('FleetPage', () => {
     // The running task is in the crew strip, whichever rows fit: one rule.
     expect(card.getByRole('button', { name: 'Scout working on: Old research' })).toBeInTheDocument();
     expect(rows.getAllByRole('listitem')[1]!.querySelector('[class*=rowThinking]')).toBeNull();
-    // Each bubble starts with its time; no line under it. Main is named once,
+    // Each bubble starts with its time inside the scroller. Main is named once,
     // under its face; your word to Main needs no label at all.
     const now = Date.now();
     expect(bubbles.map(stamp)).toEqual([30, 20, 10].map((min) => shortTime(now - min * 60_000, now)));
@@ -340,7 +340,7 @@ describe('FleetPage', () => {
     ]);
     renderFleet();
     const bubble = (await screen.findByText('Faster, please.')).closest<HTMLElement>('[role=button]')!;
-    expect(bubble.querySelector('[data-bubble] > [class*=stamp]')).toHaveTextContent(/^\S+( \S+)? → Scout$/);
+    expect(bubble.querySelector('[data-bubble] [class*=messageTime]')).toHaveTextContent(/^\S+( \S+)? → Scout$/);
   });
 
   describe('zoom', () => {

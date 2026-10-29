@@ -45,6 +45,8 @@ export interface FleetLine {
   text: string;
   /** As said, in markdown, for a bubble and the zoom. */
   markdown: string;
+  /** Offsets of each heard block in `markdown`, with its own event time. */
+  blocks: readonly { at: number; start: number; end: number }[];
   /** The pictures attached to the message. */
   images: readonly ImagePart[];
   /** The message said, to fetch in full when `truncated`; `null` for a task's own line. */
@@ -164,12 +166,13 @@ const resultOf = (task: WorkspaceTaskResponse): string =>
   (task.status === 'failed' ? taskDisplayStatus(task).label : task.title);
 
 type LineParts = Pick<FleetLine, 'key' | 'at' | 'from' | 'to' | 'markdown'> &
-  Partial<Pick<FleetLine, 'images' | 'outcome' | 'live' | 'message'>>;
+  Partial<Pick<FleetLine, 'images' | 'outcome' | 'live' | 'message' | 'blocks'>>;
 
-const line = ({ markdown, images = [], outcome = null, live = null, message = null, ...said }: LineParts): FleetLine => ({
+const line = ({ markdown, images = [], outcome = null, live = null, message = null, blocks = [], ...said }: LineParts): FleetLine => ({
   ...said,
   text: plainText(markdown),
   markdown,
+  blocks,
   images,
   message,
   headline: firstSentence(markdown),
@@ -214,7 +217,13 @@ const speak = (items: readonly (FleetLine | Stretch)[], asked: readonly number[]
     if (!first) return;
     const message = bubble.every((s) => s.message?.id === first.message?.id) ? first.message : null;
     const markdown = bubble.map((s) => s.markdown).join('\n\n');
-    lines.push(line({ key: first.key, at: bubble.at(-1)!.at, from: MAIN, to: YOU, markdown, message }));
+    let start = 0;
+    const blocks = bubble.map((s) => {
+      const block = { at: s.at, start, end: start + s.markdown.length };
+      start = block.end + 2;
+      return block;
+    });
+    lines.push(line({ key: first.key, at: bubble.at(-1)!.at, from: MAIN, to: YOU, markdown, blocks, message }));
     bubble = [];
   };
   for (const item of items) {

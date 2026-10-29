@@ -27,7 +27,7 @@ import { shoutLevel } from '../../fleet/fleetCrew';
 import fx, { Sfx, SpeedLines, type Expression } from './FleetEffects';
 import AgentAvatar from '../Agents/AgentAvatar';
 import FleetMarkdown, { ChartOpen, MINIATURE } from './FleetMarkdown';
-import { Caption, MAIN_FACE, OutcomeIcon, ThoughtCloud, Who, type Cast } from './FleetFace';
+import { Caption, MAIN_FACE, ThoughtCloud, Who, type Cast } from './FleetFace';
 import FleetZoom, { Tail, zoomStart, type ZoomStart } from './FleetZoom';
 import { useFollowEnd } from './useFollowEnd';
 import { useWheelLines } from './useWheelLines';
@@ -103,17 +103,12 @@ const pressable = (onPress: (target: HTMLElement) => void) => {
   };
 };
 
-/**
- * On a bubble's frame, small: when, how a task ended or that it waits its
- * turn, and whom it is for when no face there says so. The faces' names are
- * the only names a bubble shows. It stays put while the words scroll.
- */
-const Stamp = ({ line, time, route = false }: { line: FleetLine; time: string; route?: boolean }) => {
+/** Time and status stay with the words they describe as the bubble scrolls. */
+const MessageTime = ({ line, at, now, route = false }: { line: FleetLine; at: number; now: number; route?: boolean }) => {
   const status = statusOf(line);
   return (
-    <span className={styles.stamp} data-outcome={line.outcome ?? undefined} data-live={line.live ?? undefined}>
-      <OutcomeIcon line={line} />
-      {time}
+    <span className={styles.messageTime} data-outcome={line.outcome ?? undefined} data-live={line.live ?? undefined}>
+      {shortTime(at, now)}
       {route && line.to.kind !== 'you' && (
         <>
           {' → '}
@@ -129,7 +124,6 @@ const Outcome = ({ line, time }: { line: FleetLine; time: string }) => {
   const status = statusOf(line);
   return (
     <span className={styles.lineStatus} data-outcome={line.outcome ?? undefined} data-live={line.live ?? undefined}>
-      <OutcomeIcon line={line} />
       {status && `${status} · `}
       {time}
     </span>
@@ -229,11 +223,15 @@ const Words = ({ workspaceId, line, now, route, newest }: { workspaceId: string;
   useWheelLines(scroller, true);
   return (
     <>
-      <Stamp line={line} time={shortTime(line.at, now)} route={route} />
       <div ref={scroller} className={styles.bubbleText}>
-        <div className={styles.speechText}>
-          <FleetMarkdown content={line.markdown} />
-        </div>
+        {(line.blocks.length ? line.blocks : [{ at: line.at, start: 0, end: line.markdown.length }]).map((block, i) => (
+          <div className={styles.messageBlock} key={i}>
+            <MessageTime line={line} at={block.at} now={now} route={route && i === 0} />
+            <div className={styles.speechText}>
+              <FleetMarkdown content={line.markdown.slice(block.start, block.end)} />
+            </div>
+          </div>
+        ))}
       </div>
       <Thumbs workspaceId={workspaceId} images={line.images} />
     </>

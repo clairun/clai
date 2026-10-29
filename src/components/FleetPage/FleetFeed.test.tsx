@@ -227,22 +227,52 @@ const scrolling = (tall: () => number, { reduce = false } = {}) => {
 describe("a bubble's time", () => {
   const DAY_MS = 86_400_000;
   const clock = (at: number) => new Date(at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const stampOf = (bubble: HTMLElement) => bubble.querySelector<HTMLElement>('[data-bubble] [class*=stamp]')!;
+  const timeOf = (bubble: HTMLElement) => bubble.querySelector<HTMLElement>('[class*=messageTime]')!;
 
-  it('shows when its message was said, on the frame, outside the words that scroll', () => {
+  it('shows when its message was said before its words, inside the scrolling area', () => {
     render(<Feed state={saying('Shipped.')} />);
-    const stamp = stampOf(bubbleOf(/Shipped/));
-    expect(stamp).toHaveTextContent(new RegExp(`^${clock(NOW - 1000)}$`));
-    expect(stamp.closest('[class*=bubbleText]')).toBeNull();
-    expect(bubbleOf(/Shipped/).querySelector('[class*=bubbleText]')).not.toContainElement(stamp);
+    const bubble = bubbleOf(/Shipped/);
+    const time = timeOf(bubble);
+    expect(time).toHaveTextContent(new RegExp(`^${clock(NOW - 1000)}$`));
+    expect(time.closest('[class*=bubbleText]')).toBe(bubble.querySelector('[class*=bubbleText]'));
+    expect(time.compareDocumentPosition(screen.getByText('Shipped.')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps each underlying message time ahead of its text in a shared bubble', () => {
+    const firstAt = NOW - 20 * 60_000;
+    const secondAt = NOW - 1000;
+    const state = fleet(
+      updated(message('m1', [text('First, the leaks.'), tool('c1')]), firstAt),
+      updated(message('m2', [text('After that, the fix.'), tool('c2')]), secondAt)
+    );
+    render(<Feed state={state} />);
+    const bubble = mainBubble();
+    const blocks = [...bubble.querySelectorAll<HTMLElement>('[class*=messageBlock]')];
+    expect(blocks).toHaveLength(2);
+    expect(blocks.map((block) => block.querySelector('[class*=messageTime]')?.textContent)).toEqual([clock(firstAt), clock(secondAt)]);
+    expect(blocks.map((block) => block.querySelector('p')?.textContent)).toEqual(['First, the leaks.', 'After that, the fix.']);
+    expect(blocks.every((block) => block.closest('[class*=bubbleText]') !== null)).toBe(true);
   });
 
   it('adds the date to a message from an earlier day', () => {
     const at = NOW - 2 * DAY_MS;
     render(<Feed state={fleet(updated(message('m1', [text('Old news.'), tool('c1')]), at))} />);
-    const stamp = stampOf(bubbleOf(/Old news/));
-    expect(stamp).toHaveTextContent(new Date(at).toLocaleDateString([], { month: 'short', day: 'numeric' }));
-    expect(stamp).toHaveTextContent(clock(at));
+    const time = timeOf(bubbleOf(/Old news/));
+    expect(time).toHaveTextContent(new Date(at).toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    expect(time).toHaveTextContent(clock(at));
+  });
+
+  it('shows a failed result and its time together without a status glyph', () => {
+    const failed = { id: 't-failed', workspaceId: WS, title: 'Review code', status: 'failed', sessionId: 'task-session', parentTaskId: null, cycleNo: 1n,
+      assignedAgentDisplayName: 'Reviewer', assignedAgentDefinitionId: 'def-r', assignedToWorkspaceAgentId: 'wa-r', error: 'Session limit reached',
+      createdAt: BigInt(NOW - 3000), updatedAt: BigInt(NOW - 1000), completedAt: BigInt(NOW - 1000) } as unknown as WorkspaceTaskResponse;
+    render(<Feed state={saying('Shipped.')} live={{ runs: {}, tasks: { [WS]: { failed } } }} />);
+    const bubble = bubbleOf(/Session limit reached/);
+    const time = timeOf(bubble);
+    expect(time).toHaveTextContent(`${clock(NOW - 1000)} · failed`);
+    expect(time).toHaveAttribute('data-outcome', 'failed');
+    expect(time.closest('[class*=bubbleText]')).not.toBeNull();
+    expect(bubble.querySelector('svg path[d="M6 6l12 12M18 6L6 18"]')).toBeNull();
   });
 });
 

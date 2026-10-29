@@ -4,7 +4,7 @@ import AgentAvatar from '../Agents/AgentAvatar';
 import { mainIdentity, type AgentActivity, type AgentIdentity } from '../Agents/agentIdentity';
 import { oklchToHex, paletteForHue, type AvatarTheme } from '../Agents/avatarGenerator';
 import type { FleetMainRef } from '../../fleet/fleetModel';
-import { captionText, type FleetCaption, type FleetLine } from '../../fleet/fleetFeed';
+import { captionText, type FleetCaption } from '../../fleet/fleetFeed';
 import fx, { FaceExpression, type Expression } from './FleetEffects';
 import styles from './FleetPage.module.css';
 
@@ -106,19 +106,3 @@ export const Who = ({
     <figcaption>{name}</figcaption>
   </figure>
 );
-
-const Check = () => (
-  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden="true">
-    <path d="M5 12.5l4.5 4.5L19 7" />
-  </svg>
-);
-
-const Cross = () => (
-  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" aria-hidden="true">
-    <path d="M6 6l12 12M18 6L6 18" />
-  </svg>
-);
-
-/** A line's outcome mark: a tick when done, a cross when failed. */
-export const OutcomeIcon = ({ line }: { line: FleetLine }) =>
-  line.outcome === 'failed' ? <Cross /> : line.outcome === 'done' ? <Check /> : null;

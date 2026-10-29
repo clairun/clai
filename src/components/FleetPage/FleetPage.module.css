@@ -637,38 +637,23 @@ button.crewButton {
   outline-offset: 1px;
 }
 
-/* On the bubble's top frame, in the padding: no line of its own, and still there as the words scroll. */
-.stamp {
-  position: absolute;
-  top: -8px;
-  left: 14px;
-  max-width: calc(100% - 28px);
-  padding: 0 4px;
-  /* The card above the frame's centre, the bubble below it. */
-  background: linear-gradient(var(--color-bg-elevated) 7px, var(--color-bg-primary) 7px);
-  font-size: 12px;
-  font-weight: 500;
-  line-height: 14px;
+/* Each message's time is in the scrolling content, ahead of its own words. */
+.messageBlock + .messageBlock {
+  margin-top: 0.5em;
+}
+
+.messageTime {
+  display: block;
   color: var(--color-text-past);
+  font-size: 11px;
+  line-height: 1.35;
+  font-weight: 500;
   font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
-.fromYou .stamp {
-  left: auto;
-  right: 14px;
-}
-
-.stamp b {
+.messageTime b {
   font-weight: 650;
   color: var(--color-text-secondary);
-}
-
-.stamp svg {
-  margin-right: 3px;
-  vertical-align: -1px;
 }
 
 /* ── A highlight as a bubble: who says it (left), to whom (right) ── */
@@ -682,7 +667,7 @@ button.crewButton {
   border-radius: var(--radius-md);
 }
 
-/* Room on the frame for a date and time (`.stamp`), however short the words, within a narrow card. */
+/* Keep short messages legible within a narrow card. */
 .said .bubble,
 .fromYou .bubble {
   min-width: min(120px, 100%);
@@ -905,18 +890,18 @@ button.crewButton {
   font-variant-numeric: tabular-nums;
 }
 
-.lineStatus[data-outcome='done'] svg,
-.stamp[data-outcome='done'] svg {
+.lineStatus[data-outcome='done'],
+.messageTime[data-outcome='done'] {
   color: var(--fleet-ok-text);
 }
 
 .lineStatus[data-outcome='failed'],
-.stamp[data-outcome='failed'] {
+.messageTime[data-outcome='failed'] {
   color: var(--fleet-bad-text);
 }
 
 .lineStatus[data-live='running'],
-.stamp[data-live='running'] {
+.messageTime[data-live='running'] {
   color: var(--fleet-run-text);
 }
 
