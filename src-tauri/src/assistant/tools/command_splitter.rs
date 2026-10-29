@@ -129,6 +129,9 @@ struct Heredoc {
     delim: String,
     /// `<<-`: the closing line may be indented with tabs.
     strip_tabs: bool,
+    /// Part of the delimiter was quoted, so the body has no line
+    /// continuations.
+    quoted: bool,
     /// The segment of the command that reads it.
     owner: usize,
 }
@@ -240,8 +243,10 @@ impl Commands {
 
     /// Reads the bodies of the heredocs opened on the line that ended just
     /// before `i`, appends each to the command that reads it, and returns
-    /// where lexing resumes. A body is data, not commands.
-    fn read_heredoc_bodies(&mut self, input: &str, mut i: usize) -> usize {
+    /// where lexing resumes. A body is data, not commands. `None` when an
+    /// unquoted body has a line continuation, which can join lines into
+    /// the closing line.
+    fn read_heredoc_bodies(&mut self, input: &str, mut i: usize) -> Option<usize> {
         for heredoc in std::mem::take(&mut self.heredocs) {
             let start = i;
             for line in input[start..].split_inclusive('\n') {
@@ -255,6 +260,9 @@ impl Commands {
                 if line == heredoc.delim {
                     break;
                 }
+                if !heredoc.quoted && line.ends_with('\\') {
+                    return None;
+                }
             }
             if let Some(Segment::Simple(text) | Segment::Opaque(text)) =
                 self.segments.get_mut(heredoc.owner)
@@ -263,7 +271,7 @@ impl Commands {
                 text.push_str(input[start..i].trim_end_matches('\n'));
             }
         }
-        i
+        Some(i)
     }
 }
 
@@ -284,6 +292,10 @@ struct Nesting {
     closer: char,
     /// It was opened inside double quotes, which resume once it closes.
     in_double: bool,
+    /// The inner `(` of `((` or `$((`. Bash reads arithmetic only when its
+    /// `)` is directly followed by the outer one; otherwise it re-reads the
+    /// parentheses as commands.
+    arith: bool,
 }
 
 #[allow(
@@ -304,6 +316,8 @@ fn split(input: &str) -> Option<Vec<Segment>> {
     let mut in_double = false;
     let mut in_backtick = false;
     let mut escape = false;
+    // Where the last escaped character ends: a blank there is part of a word.
+    let mut escaped_end = None;
     let mut nesting: Vec<Nesting> = Vec::new();
 
     let mut i = 0;
@@ -345,6 +359,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
             }
             out.buf.push(c);
             i += 1;
+            escaped_end = Some(i);
             continue;
         }
 
@@ -385,6 +400,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                 nesting.push(Nesting {
                     closer: closer_of(open),
                     in_double: true,
+                    arith: false,
                 });
                 in_double = false;
                 i += 2;
@@ -426,10 +442,11 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                 '(' | '{' => nesting.push(Nesting {
                     closer: closer_of(c),
                     in_double: false,
+                    arith: false,
                 }),
                 ')' | '}' => {
                     let closed = nesting.pop()?;
-                    if closed.closer != c {
+                    if closed.closer != c || (closed.arith && next != Some(')')) {
                         return None;
                     }
                     in_double = closed.in_double;
@@ -441,6 +458,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                     nesting.push(Nesting {
                         closer: closer_of(open),
                         in_double: false,
+                        arith: false,
                     });
                     i += 2;
                     continue;
@@ -461,7 +479,8 @@ fn split(input: &str) -> Option<Vec<Segment>> {
         // command that preceded the inline comment (`ls # listing` →
         // segment "ls", comment dropped).
         if c == '#' {
-            let at_token_start = out.buf.chars().last().map(is_blank).unwrap_or(true);
+            let at_token_start =
+                escaped_end != Some(i) && out.buf.chars().last().map(is_blank).unwrap_or(true);
             if at_token_start {
                 while i < n && bytes[i] != b'\n' {
                     i += 1;
@@ -509,7 +528,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
             } else {
                 out.end();
             }
-            i = out.read_heredoc_bodies(input, i + 1);
+            i = out.read_heredoc_bodies(input, i + 1)?;
             continue;
         }
 
@@ -529,9 +548,10 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                 // Arithmetic expansion $((  — just text, not a substitution.
                 // Track both parens so the matching `))` closes it.
                 out.buf.push_str("$((");
-                nesting.extend([')', ')'].map(|closer| Nesting {
-                    closer,
+                nesting.extend([false, true].map(|arith| Nesting {
+                    closer: ')',
                     in_double: false,
+                    arith,
                 }));
                 i += 3;
             } else {
@@ -540,6 +560,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                 nesting.push(Nesting {
                     closer: ')',
                     in_double: false,
+                    arith: false,
                 });
                 out.opaque = true;
                 i += 2;
@@ -551,6 +572,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
             nesting.push(Nesting {
                 closer: '}',
                 in_double: false,
+                arith: false,
             });
             i += 2;
             continue;
@@ -568,6 +590,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
             nesting.push(Nesting {
                 closer: ')',
                 in_double: false,
+                arith: false,
             });
             out.opaque = true;
             i += 2;
@@ -580,7 +603,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
         // We only treat `<<` and `<<-` as proper heredocs that capture
         // a multi-line body.
         if c == '<' && next == Some('<') && bytes.get(i + 2) != Some(&b'<') {
-            i = read_heredoc(input, i, &mut out);
+            i = read_heredoc(input, i, &mut out)?;
             continue;
         }
 
@@ -631,16 +654,28 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                 }
             }
             // A subshell. `((` opens an arithmetic command instead.
-            if out.at_command_start() && next != Some('(') {
-                out.scopes.push(Scope::Subshell);
-                i += 1;
+            if out.at_command_start() {
+                if next == Some('(') {
+                    out.buf.push_str("((");
+                    nesting.extend([false, true].map(|arith| Nesting {
+                        closer: ')',
+                        in_double: false,
+                        arith,
+                    }));
+                    out.opaque = true;
+                    i += 2;
+                } else {
+                    out.scopes.push(Scope::Subshell);
+                    i += 1;
+                }
                 continue;
             }
-            // An array literal `a=(…)` or arithmetic `((…))`: one word.
+            // An array literal `a=(…)` or a `for ((…))` header: one word.
             out.buf.push(c);
             nesting.push(Nesting {
                 closer: ')',
                 in_double: false,
+                arith: false,
             });
             out.opaque = true;
             i += 1;
@@ -778,7 +813,7 @@ fn read_pattern(input: &str, i: usize, out: &mut Commands) -> Option<usize> {
 /// Reads the heredoc operator at `i` (`<<`, `<<-`) and its delimiter word
 /// into the command, queues the heredoc so its body is read after this
 /// line, and returns where lexing resumes.
-fn read_heredoc(input: &str, start: usize, out: &mut Commands) -> usize {
+fn read_heredoc(input: &str, start: usize, out: &mut Commands) -> Option<usize> {
     out.opaque = true;
     let mut i = start + 2;
     let strip_tabs = input[i..].starts_with('-');
@@ -786,24 +821,26 @@ fn read_heredoc(input: &str, start: usize, out: &mut Commands) -> usize {
         i += 1;
     }
     i = skip_blanks(input, i);
-    let (len, delim) = heredoc_delimiter(&input[i..]);
+    let (len, delim) = heredoc_delimiter(&input[i..])?;
+    let quoted = input[i..i + len].contains(['\'', '"', '\\']);
     i += len;
     out.buf.push_str(&input[start..i]);
     if !delim.is_empty() {
         out.heredocs.push(Heredoc {
             delim,
             strip_tabs,
+            quoted,
             owner: out.segments.len(),
         });
     }
-    i
+    Some(i)
 }
 
 /// The heredoc delimiter word heading `rest`: its length, and its text with
 /// quotes removed. It ends at a blank or an operator outside quotes, so
 /// `'EOF'`, `"E F"`, `\EOF` and `E"OF"` close at a line reading `EOF` or
-/// `E F`.
-fn heredoc_delimiter(rest: &str) -> (usize, String) {
+/// `E F`. `None` for `$'…'` or `$"…"` quoting, which is not read.
+fn heredoc_delimiter(rest: &str) -> Option<(usize, String)> {
     let mut delim = String::new();
     let mut chars = rest.char_indices();
     while let Some((at, c)) = chars.next() {
@@ -813,11 +850,12 @@ fn heredoc_delimiter(rest: &str) -> (usize, String) {
                 Some((_, '\n')) | None => {}
                 Some((_, escaped)) => delim.push(escaped),
             },
-            _ if is_blank(c) || ";&|()<>".contains(c) => return (at, delim),
+            '$' if rest[at + 1..].starts_with(['\'', '"']) => return None,
+            _ if is_blank(c) || ";&|()<>".contains(c) => return Some((at, delim)),
             _ => delim.push(c),
         }
     }
-    (rest.len(), delim)
+    Some((rest.len(), delim))
 }
 
 fn closer_of(open: char) -> char {
@@ -1642,6 +1680,45 @@ mod tests {
         ] {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
+    }
+
+    #[test]
+    fn syntax_whose_end_bash_reads_differently_is_unparsed() {
+        // bash runs the `touch PWN` in each: it ends the heredoc at a
+        // `$'…'` delimiter or a continued line, and re-reads a `((` whose
+        // `)`s are not adjacent as subshells.
+        for input in [
+            "cat <<$'E'\nE\ntouch PWN",
+            "cat <<$\"E\"\nE\ntouch PWN",
+            "cat <<E\nE\\\n\ntouch PWN\nE",
+            "cat <<-E\n\tE\\\n\ntouch PWN\nE",
+            "echo x\n((echo a) ; touch PWN )",
+            "((touch PWN) )",
+            "echo $((echo a) ; touch PWN )",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
+        assert_eq!(
+            split("cat <<\"E\"\nE\\\n\ntouch PWN\nE"),
+            vec![opaque("cat <<\"E\"\nE\\\n\ntouch PWN\nE")]
+        );
+        assert_eq!(
+            split("(( (1+2) * 3 )) ; echo $((1+2))"),
+            vec![opaque("(( (1+2) * 3 ))"), simple("echo $((1+2))")]
+        );
+    }
+
+    #[test]
+    fn hash_after_an_escaped_blank_is_part_of_the_word() {
+        assert_eq!(
+            split("echo a\\ #; touch PWN"),
+            vec![simple("echo a\\ #"), simple("touch PWN")]
+        );
+        assert_eq!(
+            split("echo a\\\t#; touch PWN"),
+            vec![simple("echo a\\\t#"), simple("touch PWN")]
+        );
+        assert_eq!(split("echo \\\\ #; touch PWN"), vec![simple("echo \\\\")]);
     }
 
     #[test]
