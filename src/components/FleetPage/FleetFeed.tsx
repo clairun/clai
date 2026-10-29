@@ -10,15 +10,13 @@ import {
   type SyntheticEvent,
 } from 'react';
 import { flushSync } from 'react-dom';
-import { getMessage } from '../../assistant/client';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import { useImageSrc } from '../AssistantChat/ImageAttachment';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { faceOf, identityRingColor, type AgentIdentity } from '../Agents/agentIdentity';
-import { fullMessageText } from '../../fleet/fleetModel';
+import { useFleetStore } from '../../fleet/fleetStore';
 import type { ImagePart } from '../../assistant/imageParts';
 import {
-  isSpeech,
   splitFeed,
   shortTime,
   type FleetFeed as Feed,
@@ -213,6 +211,40 @@ const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: 
   );
 };
 
+/** A message the snapshot cut, fetched whole into its card while a bubble or zoom shows it; its preview until then. */
+const useWhole = (workspaceId: string, line: FleetLine) => {
+  const cut = line.message?.truncated ? line.message : null;
+  const sessionId = cut?.sessionId;
+  const messageId = cut?.id;
+  useEffect(() => {
+    if (sessionId && messageId) useFleetStore.getState().loadWhole(workspaceId, sessionId, messageId);
+  }, [workspaceId, sessionId, messageId]);
+};
+
+/**
+ * A bubble's words: the whole message, as markdown, and its pictures. They
+ * scroll past the bubble's height; the card's newest follows its end as it
+ * grows (`useFollowEnd`), an older one shows its start.
+ */
+const Words = ({ workspaceId, line, now, route, newest }: { workspaceId: string; line: FleetLine; now: number; route: boolean; newest: boolean }) => {
+  useWhole(workspaceId, line);
+  const scroller = useFollowEnd(newest, line.markdown);
+  useWheelLines(scroller, true);
+  return (
+    <>
+      <div ref={scroller} className={styles.bubbleText}>
+        <div>
+          <Stamp line={line} time={shortTime(line.at, now)} route={route} />
+          <div className={styles.speechText}>
+            <FleetMarkdown content={line.markdown} />
+          </div>
+        </div>
+      </div>
+      <Thumbs workspaceId={workspaceId} images={line.images} />
+    </>
+  );
+};
+
 /**
  * One of the newest highlights, as a bubble: the speaker's face, the words,
  * and whom they are for. A task handed over shows its agent thinking; the
@@ -234,33 +266,25 @@ const Said = ({
   now: number;
   faces: Cast;
   open: Open;
-  /** The card's last bubble: Main's follows how it ends (`useFollowEnd`); once another follows, it shows how it starts. */
+  /** The card's last bubble. */
   newest: boolean;
 }) => {
   const from = faceFor(line.from, faces);
   const to = faceFor(line.to, faces);
   const thinking = line.live === 'running';
   const style = useAuthorColor(from);
-  const time = shortTime(line.at, now);
-  const scroller = useFollowEnd(newest, line.markdown);
-  useWheelLines(scroller, newest);
   if (!from) {
     // No faces: a word to Main goes without saying, one to a task names it.
     return (
       <div className={styles.fromYou} data-row aria-haspopup="dialog" {...pressable((target) => open(line, target))}>
         <div className={styles.bubble} data-bubble>
           <Tail right />
-          <span className={styles.bubbleText} title={line.text}>
-            <Stamp line={line} time={time} route={line.to.kind === 'agent'} />
-            <span>{line.text}</span>
-          </span>
-          <Thumbs workspaceId={workspaceId} images={line.images} />
+          <Words workspaceId={workspaceId} line={line} now={now} route={line.to.kind === 'agent'} newest={newest} />
         </div>
       </div>
     );
   }
   const fromExpression: Expression | undefined = line.outcome === 'done' ? 'done' : undefined;
-  const speech = isSpeech(line);
   return (
     <div
       className={`${styles.said} ${thinking ? fx.tilt : ''}`}
@@ -276,24 +300,7 @@ const Said = ({
       <div className={styles.say}>
         <div className={styles.bubble} data-bubble>
           <Tail />
-          {speech ? (
-            <div ref={scroller} className={`${styles.bubbleText} ${styles.speech}`} data-newest={newest || undefined}>
-              <div>
-                <Stamp line={line} time={time} />
-                <div className={styles.speechText}>
-                  <FleetMarkdown content={line.markdown} />
-                </div>
-              </div>
-            </div>
-          ) : (
-            <>
-              <span className={styles.bubbleText} title={line.text}>
-                <Stamp line={line} time={time} />
-                <span>{line.text}</span>
-              </span>
-              <Thumbs workspaceId={workspaceId} images={line.images} />
-            </>
-          )}
+          <Words workspaceId={workspaceId} line={line} now={now} route={false} newest={newest} />
         </div>
       </div>
       {to && (
@@ -368,35 +375,15 @@ const useFit = (lines: readonly FleetLine[]) => {
   return { ref, bubbles: measuring ? lines.length : fit.bubbles, rows: measuring ? 0 : fit.rows };
 };
 
-/** A truncated message's full text, once fetched; the preview until then, or if it can't be. */
-const useFullText = (workspaceId: string, line: FleetLine): string => {
-  // Only a cut message is fetched, and it can't grow: a live update replaces it whole.
-  const cut = line.message?.truncated ? line.message : null;
-  const sessionId = cut?.sessionId;
-  const messageId = cut?.id;
-  const [full, setFull] = useState<{ id: string; text: string } | null>(null);
-  useEffect(() => {
-    if (!sessionId || !messageId) return undefined;
-    let current = true;
-    getMessage(workspaceId, sessionId, messageId)
-      .then((m) => current && setFull({ id: messageId, text: fullMessageText(m) }))
-      .catch(() => undefined);
-    return () => {
-      current = false;
-    };
-  }, [workspaceId, sessionId, messageId]);
-  return full && full.id === messageId ? full.text : line.markdown;
-};
-
-/** The zoomed highlight: who said it to whom and when, then the whole message as markdown and its pictures; Main's charts as its bubble draws them. */
+/** The zoomed highlight: who said it to whom and when, then the whole message as markdown and its pictures; charts as its bubble draws them. */
 const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine }) => {
-  const text = useFullText(workspaceId, line);
+  useWhole(workspaceId, line);
   return (
     <div className={styles.zoomText}>
       <p className={styles.zoomStamp}>
         <Route line={line} /> · <Outcome line={line} time={fullTime(line.at)} />
       </p>
-      <MarkdownMessage content={text} components={isSpeech(line) ? MINIATURE : undefined} />
+      <MarkdownMessage content={line.markdown} components={MINIATURE} />
       {line.images.map((part) => (
         <Picture key={part.id} workspaceId={workspaceId} part={part} className={styles.zoomImage} />
       ))}
@@ -405,6 +392,7 @@ const Zoomed = ({ workspaceId, line }: { workspaceId: string; line: FleetLine })
 };
 
 interface Zoom {
+  /** As zoomed; the feed's copy, fetched whole or grown since, is shown while the feed has it. */
   line: FleetLine;
   origin: HTMLElement;
   start: ZoomStart;
@@ -414,7 +402,7 @@ interface Zoom {
  * A miniature: the workspace's conversation as highlights, in the order it
  * happened. The newest are bubbles, as many as fit; up to `ROWS` older ones
  * collapse to one-line rows above them, the newest row nearest the bubbles.
- * A row or a bubble zooms out to the whole message. A chart in Main's words
+ * A row or a bubble zooms out to the whole message. A chart in a bubble
  * opens the workspace (`onOpen`).
  */
 const FleetFeed = ({
@@ -446,6 +434,7 @@ const FleetFeed = ({
     [faces]
   );
   const closed = useCallback(() => setZoom(null), []);
+  const zoomed = zoom && (feed.lines.find((line) => line.key === zoom.line.key) ?? zoom.line);
   const split = feed.lines.length - count;
   const rows = feed.lines.slice(Math.max(0, split - rowCount), split);
   const bubbles = feed.lines.slice(split);
@@ -475,15 +464,15 @@ const FleetFeed = ({
           />
         ))}
         {feed.lines.length === 0 && <p className={styles.nothing}>No messages yet.</p>}
-        {zoom && (
+        {zoom && zoomed && (
           <FleetZoom
             origin={zoom.origin}
             start={zoom.start}
-            faceIdentity={faceFor(zoom.line.from, faces)}
-            label={`Message from ${nameOf(zoom.line.from)}`}
+            faceIdentity={faceFor(zoomed.from, faces)}
+            label={`Message from ${nameOf(zoomed.from)}`}
             onClosed={closed}
           >
-            <Zoomed workspaceId={workspaceId} line={zoom.line} />
+            <Zoomed workspaceId={workspaceId} line={zoomed} />
           </FleetZoom>
         )}
       </div>

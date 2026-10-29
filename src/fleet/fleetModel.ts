@@ -32,8 +32,6 @@ import type { PendingAskUser } from '../assistant/sessionStore';
 
 /** A workspace with no event in this window and nothing live gets no card. */
 export const RECENT_WINDOW_MS = 12 * 60 * 60 * 1000;
-/** At most the snapshot's `PREVIEW_CHARS` (commands/fleet.rs). */
-const NOTE_CHARS = 600;
 /** Messages a card keeps; a miniature shows fewer. */
 export const SAID_LIMIT = 24;
 
@@ -70,9 +68,9 @@ export interface FleetSaid {
   role: 'user' | 'assistant';
   /** Who sent a user message; `null` for an assistant message. */
   origin: MessageOrigin | null;
-  /** A user message clipped to `NOTE_CHARS`, ending in `…` when cut; an assistant message whole as heard so far, or the snapshot's preview. */
+  /** Whole as heard, without tool calls (`fullMessageText`), or the snapshot's preview ending in `…` until fetched whole (`applyWholeMessage`). */
   text: string;
-  /** Cut short: the full message has to be fetched. */
+  /** The snapshot's preview: the whole message has to be fetched. */
   truncated: boolean;
   /** A user message's pictures, which the chat draws too; none for an assistant message. */
   images: readonly ImagePart[];
@@ -156,12 +154,6 @@ const updateCard = (
 const bump = (card: FleetCard, at: number): FleetCard =>
   at > card.lastActivityAt ? { ...card, lastActivityAt: at } : card;
 
-/** `text` to at most `NOTE_CHARS`, ending in `…` when it, or the message it came from (`cut`), was cut. */
-const clip = (text: string, cut = false): { text: string; truncated: boolean } => {
-  const trimmed = text.trim();
-  if (trimmed.length > NOTE_CHARS) return { text: `${trimmed.slice(0, NOTE_CHARS - 1)}…`, truncated: true };
-  return cut ? { text: `${trimmed}…`, truncated: true } : { text: trimmed, truncated: false };
-};
 
 export const fullMessageText = (message: AssistantMessage): string => {
   const blocks: string[] = [];
@@ -178,6 +170,9 @@ export const fullMessageText = (message: AssistantMessage): string => {
   return blocks.join(message.role === 'assistant' ? '\n\n' : '').trim();
 };
 
+/** What a bubble says of a message (`fullMessageText`), ending in `…` when the snapshot cut it. */
+const saidText = (message: AssistantMessage, cut: boolean): string => `${fullMessageText(message)}${cut ? '…' : ''}`;
+
 export const isTaskLive = (status: TaskStatus): boolean =>
   status === 'queued' || status === 'running' || status === 'stopping';
 
@@ -186,7 +181,8 @@ const userSaid = (message: AssistantMessage, at: number, runId: string | null, c
   sessionId: message.sessionId,
   role: 'user',
   origin: message.origin,
-  ...clip(fullMessageText(message), cut),
+  text: saidText(message, cut),
+  truncated: cut,
   images: imageParts(message.content),
   at,
   runId,
@@ -391,9 +387,16 @@ export const applyOpened = (state: FleetState, workspaceId: string, at: number):
 const seedSaid = ({ message, runId, truncated }: FleetHighlight): FleetSaid => {
   const at = Number(message.createdAt);
   if (message.role !== 'assistant') return userSaid(message, at, runId, truncated);
-  const text = truncated ? clip(fullMessageText(message), true).text : fullMessageText(message);
+  const text = saidText(message, truncated);
   return { ...assistantSaid(message, text, runId, [{ at, end: text.length }]), truncated };
 };
+
+/** A message the snapshot cut, fetched whole (`loadWhole` in the store), in place of its preview. */
+export const applyWholeMessage = (state: FleetState, workspaceId: string, message: AssistantMessage): FleetState =>
+  updateCard(state, workspaceId, (card) => {
+    const held = card.said.find((s) => s.id === message.id);
+    return held?.truncated ? addSaid(card, [seedSaid({ message, runId: held.runId, truncated: false })], true) : card;
+  });
 
 /**
  * Apply a snapshot. The Fleet becomes exactly the snapshot's workspaces, so a
@@ -408,7 +411,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
   for (const ws of snapshot) {
     const card = state.cards[ws.workspaceId] ?? emptyCard(ws.workspaceId);
     const activity = Number(ws.lastActivityAt);
-    // Main's last reply comes whole: it replaces its cut copy among the recent messages.
+    // Main's last reply, which the recent messages of every session may leave out.
     const last = ws.lastAssistantMessage;
     const seed = (last ? [...ws.recentMessages.filter((h) => h.message.id !== last.message.id), last] : ws.recentMessages).map(seedSaid);
     // Approvals and grants carry no timestamp; the workspace's activity stands in.

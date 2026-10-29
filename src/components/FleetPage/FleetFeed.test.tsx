@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { fireEvent, render, screen, within } from '@testing-library/react';
-import type { AssistantEventEnvelope, AssistantMessage, AssistantUiEvent, FleetWorkspace, WorkspaceTaskResponse } from '../../generated/bindings';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import type { AssistantEventEnvelope, AssistantMessage, AssistantUiEvent, FleetHighlight, FleetWorkspace, WorkspaceTaskResponse } from '../../generated/bindings';
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn(async () => undefined) }));
 
@@ -19,8 +19,9 @@ vi.mock('react-markdown', async (importOriginal) => {
 import { invoke } from '@tauri-apps/api/core';
 import FleetFeed from './FleetFeed';
 import { castFor } from './FleetFace';
-import { EMPTY_FLEET, applyAssistantEvent, applyUserSent, seedFleet, type FleetLive, type FleetState } from '../../fleet/fleetModel';
+import { EMPTY_FLEET, applyAssistantEvent, applyUserSent, applyWholeMessage, seedFleet, type FleetLive, type FleetState } from '../../fleet/fleetModel';
 import { cardFeed } from '../../fleet/fleetFeed';
+import { useFleetStore } from '../../fleet/fleetStore';
 
 const WS = 'ws-1';
 const MAIN = 'main-session';
@@ -45,6 +46,10 @@ const twoBlocks = (second = 'After that, the fix.') =>
 const Feed = ({ state, live = IDLE, now = NOW, onOpen = () => {} }: { state: FleetState; live?: FleetLive; now?: number; onOpen?: (id: string) => void }) => (
   <FleetFeed workspaceId={WS} feed={cardFeed(state.cards[WS]!, live, now)} shouts={new Set()} now={now} faces={castFor({}, null)} onOpen={onOpen} />
 );
+/** A snapshot of the card with these recent messages. */
+const snapshotWith = (...recentMessages: FleetHighlight[]) =>
+  ({ workspaceId: WS, mainSessionId: MAIN, lastActivityAt: 0n, lastOpenedAt: 0n, lastMainRun: null, lastAssistantMessage: null, recentMessages,
+    pendingAsks: [], pendingPermissions: [], pendingPathGrants: [], agents: [] }) as unknown as FleetWorkspace;
 const saying = (markdown: string) => fleet(updated(message('m1', [text(markdown), tool('c1')]), NOW - 1000));
 
 const bubbleOf = (words: RegExp) => screen.getByText(words).closest<HTMLElement>('[role=button]')!;
@@ -52,30 +57,6 @@ const mainBubble = () => bubbleOf(/First, the leaks/);
 const words = () => mainBubble().querySelector<HTMLElement>('[data-bubble] > div')!;
 
 describe("Main's bubble", () => {
-  it('shows its newest lines while it is the last bubble, run done or not, and its first once another follows', () => {
-    const height = vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(1000);
-    try {
-      const { rerender } = render(<Feed state={twoBlocks()} live={RUNNING} />);
-      expect(words()).toHaveAttribute('data-newest');
-      expect(words()).toHaveTextContent('First, the leaks.');
-      expect(words()).toHaveTextContent('After that, the fix.');
-      rerender(<Feed state={twoBlocks()} live={IDLE} />);
-      expect(words()).toHaveAttribute('data-newest');
-
-      const asked = applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW);
-      rerender(<Feed state={asked} now={NOW + 2000} />);
-      expect(words()).not.toHaveAttribute('data-newest');
-
-      const answered = applyAssistantEvent(asked, updated(message('m2', [text('Docs next.'), tool('c3')]), NOW + 1000));
-      rerender(<Feed state={answered} now={NOW + 2000} />);
-      const reply = bubbleOf(/Docs next/).querySelector('[data-bubble] > div');
-      expect(reply).toHaveAttribute('data-newest');
-      expect(words()).not.toHaveAttribute('data-newest');
-    } finally {
-      height.mockRestore();
-    }
-  });
-
   it('zooms out on a click, Enter or Space, like every bubble; it never opens in place', () => {
     render(<Feed state={twoBlocks()} live={RUNNING} />);
     const bubble = mainBubble();
@@ -93,24 +74,40 @@ describe("Main's bubble", () => {
     }
   });
 
-  it('fetches a reply the snapshot cut whole, once while it is zoomed, not again on each recompute', async () => {
+  it('says a reply the snapshot cut whole once fetched, in its bubble and its zoom; fetched once, not on each recompute', async () => {
     const preview = { message: { ...message('m1', [text('First, the')]), createdAt: BigInt(NOW - 1000) }, runId: 'r1', truncated: true };
-    const snapshot = { workspaceId: WS, mainSessionId: MAIN, lastActivityAt: 0n, lastOpenedAt: 0n, lastMainRun: null, lastAssistantMessage: null, recentMessages: [preview],
-      pendingAsks: [], pendingPermissions: [], pendingPathGrants: [], agents: [] } as unknown as FleetWorkspace;
-    const cut = () => cardFeed(seedFleet(EMPTY_FLEET, [snapshot]).cards[WS]!, IDLE, NOW);
-    const fetched = vi.mocked(invoke).mockImplementation(async (cmd) => (cmd === 'assistant_get_message' ? message('m1', [text('First, the leaks.')]) : undefined));
+    useFleetStore.setState({ fleet: seedFleet(EMPTY_FLEET, [snapshotWith(preview)]), buffer: null });
+    let release = () => {};
+    const fetched = vi.mocked(invoke).mockImplementation((cmd) =>
+      cmd === 'assistant_get_message'
+        ? new Promise((resolve) => (release = () => resolve(message('m1', [text('First, the leaks.'), tool('c1'), text('Then the fix.')]))))
+        : Promise.resolve(undefined)
+    );
     const fetches = () => fetched.mock.calls.filter(([cmd]) => cmd === 'assistant_get_message').length;
     const at = fetches();
+    /** The card as the store has it, as every Fleet event recomputes it. */
+    const Live = ({ now }: { now: number }) => {
+      const card = useFleetStore((s) => s.fleet.cards[WS]!);
+      return <FleetFeed workspaceId={WS} feed={cardFeed(card, IDLE, now)} shouts={new Set()} now={now} faces={castFor({}, null)} onOpen={() => {}} />;
+    };
+    const { rerender, unmount } = render(<Live now={NOW} />);
     try {
-      const { rerender } = render(<FleetFeed workspaceId={WS} feed={cut()} shouts={new Set()} now={NOW} faces={castFor({}, null)} onOpen={() => {}} />);
-      fireEvent.click(bubbleOf(/First, the…/));
-      expect(await screen.findByText('First, the leaks.')).toBeInTheDocument();
-      // Every Fleet event recomputes the feed: new lines, the same message.
-      rerender(<FleetFeed workspaceId={WS} feed={cut()} shouts={new Set()} now={NOW + 1} faces={castFor({}, null)} onOpen={() => {}} />);
-      expect(screen.getByRole('dialog')).toHaveTextContent('First, the leaks.');
+      const shown = () => bubbleOf(/First, the/).querySelector('[data-bubble] > div')!;
+      // The preview, until the whole reply arrives.
+      expect(shown()).toHaveTextContent('First, the…');
+      await act(async () => release());
+      expect(shown()).toHaveTextContent('First, the leaks.');
+      expect(shown()).toHaveTextContent('Then the fix.');
+      expect(shown()).not.toHaveTextContent('…');
+      expect(shown()).not.toHaveTextContent('bash_exec');
+      rerender(<Live now={NOW + 1} />);
+      fireEvent.click(mainBubble());
+      expect(screen.getByRole('dialog')).toHaveTextContent('Then the fix.');
       expect(fetches() - at).toBe(1);
     } finally {
+      unmount();
       fetched.mockImplementation(async () => undefined);
+      useFleetStore.setState({ fleet: EMPTY_FLEET });
     }
   });
 
@@ -196,23 +193,24 @@ describe("Main's bubble", () => {
 });
 
 /**
- * Main's newest bubble as a 100px scroller over `tall()` px of words (the card
- * roomy around it), sliding text in with `glide` unless motion is reduced.
+ * Every bubble as a 100px scroller over `tall()` px of words (the card roomy
+ * around it), sliding text in with `glide` unless motion is reduced.
  */
+const SCROLLER = '[data-bubble] > div';
 const scrolling = (tall: () => number, { reduce = false } = {}) => {
   const glide = vi.fn();
   Object.defineProperty(HTMLElement.prototype, 'animate', { value: glide, configurable: true });
   vi.stubGlobal('matchMedia', (query: string) => ({ matches: reduce && query.includes('reduce') }));
   const spies = [
     vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockImplementation(function (this: HTMLElement) {
-      return this.matches('[data-newest]') ? 100 : 1000;
+      return this.matches(SCROLLER) ? 100 : 1000;
     }),
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
-      return this.parentElement?.matches('[data-newest]') ? tall() : 0;
+      return this.parentElement?.matches(SCROLLER) ? tall() : 0;
     }),
     // A slide's transform stretches what scrolls past the words' own height.
     vi.spyOn(HTMLElement.prototype, 'scrollHeight', 'get').mockImplementation(function (this: HTMLElement) {
-      return this.matches('[data-newest]') ? tall() + (glide.mock.calls.length > 0 ? 60 : 0) : 0;
+      return this.matches(SCROLLER) ? tall() + (glide.mock.calls.length > 0 ? 60 : 0) : 0;
     }),
     vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockReturnValue(200),
   ];
@@ -226,7 +224,7 @@ const scrolling = (tall: () => number, { reduce = false } = {}) => {
   };
 };
 
-describe("Main's newest bubble, scrolling", () => {
+describe('a bubble, scrolling', () => {
   const writing = (...more: string[]) => <Feed state={twoBlocks(['After that, the fix.', ...more].join(' '))} live={RUNNING} />;
 
   it('follows its end, sliding new lines in; stays where the reader scrolled up; follows again once back at the end', () => {
@@ -276,14 +274,55 @@ describe("Main's newest bubble, scrolling", () => {
     }
   });
 
-  it('shows its start once another bubble follows', () => {
+  it('shows its end while it is the newest, run going or done, and its start once another follows, whoever said it', () => {
     const { restore } = scrolling(() => 200);
+    const scrollOf = (words: RegExp) => bubbleOf(words).querySelector<HTMLElement>(SCROLLER)!.scrollTop;
     try {
       const { rerender } = render(writing());
-      expect(words().scrollTop).toBe(100);
-      rerender(<Feed state={applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW)} now={NOW + 2000} />);
-      expect(words()).not.toHaveAttribute('data-newest');
-      expect(words().scrollTop).toBe(0);
+      expect(scrollOf(/First, the leaks/)).toBe(100);
+      rerender(<Feed state={twoBlocks()} />);
+      expect(scrollOf(/First, the leaks/)).toBe(100);
+
+      const asked = applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW);
+      rerender(<Feed state={asked} now={NOW + 2000} />);
+      expect(scrollOf(/First, the leaks/)).toBe(0);
+      expect(scrollOf(/And the docs/)).toBe(100);
+
+      rerender(<Feed state={applyAssistantEvent(asked, updated(message('m2', [text('Docs next.'), tool('c3')]), NOW + 1000))} now={NOW + 2000} />);
+      expect(scrollOf(/First, the leaks/)).toBe(0);
+      expect(scrollOf(/And the docs/)).toBe(0);
+      expect(scrollOf(/Docs next/)).toBe(100);
+    } finally {
+      restore();
+    }
+  });
+
+  it.each([
+    ['yours', { kind: 'user' }],
+    ["an agent's", { kind: 'agent', agent: { workspaceAgentId: 'wa-s', agentDefinitionId: 'def-s', displayName: 'Scout', isDefault: false }, sessionId: 'task-s', runId: null, replyAddress: null }],
+  ])("%s follows its end as its words grow, sliding them in, like Main's; scrolled up, it stays", (_, origin) => {
+    let tall = 200;
+    const { glide, restore } = scrolling(() => tall);
+    const said = { ...message('w1', [text('First words')]), role: 'user', origin, createdAt: BigInt(NOW - 1000) } as AssistantMessage;
+    const cut = seedFleet(EMPTY_FLEET, [snapshotWith({ message: said, runId: null, truncated: true })]);
+    const grown = applyWholeMessage(cut, WS, { ...said, content: [text('First words, then more.')] });
+    const scroller = () => bubbleOf(/First words/).querySelector<HTMLElement>(SCROLLER)!;
+    try {
+      const { rerender, unmount } = render(<Feed state={cut} />);
+      expect(scroller().scrollTop).toBe(100);
+      tall = 260;
+      rerender(<Feed state={grown} />);
+      expect(scroller()).toHaveTextContent('then more.');
+      expect(scroller().scrollTop).toBe(160);
+      expect(glide).toHaveBeenCalledTimes(1);
+      unmount();
+
+      tall = 200;
+      const again = render(<Feed state={cut} />);
+      scroller().scrollTop = 40;
+      tall = 260;
+      again.rerender(<Feed state={grown} />);
+      expect(scroller().scrollTop).toBe(40);
     } finally {
       restore();
     }
@@ -332,7 +371,7 @@ describe("Main's newest bubble, scrolling", () => {
     }
   });
 
-  it('moves one line a wheel notch; leaves a trackpad, Ctrl, sideways, and an older bubble to the browser', () => {
+  it('moves one line a wheel notch, newest or older; leaves a trackpad, Ctrl and sideways to the browser', () => {
     const { restore } = scrolling(() => 200);
     /** A wheel event of `wheelDeltaY` (120 a notch) on the words; false if it was taken. */
     const wheel = (wheelDeltaY: number, init: WheelEventInit = {}) => {
@@ -357,8 +396,9 @@ describe("Main's newest bubble, scrolling", () => {
       expect(words().scrollTop).toBe(70);
 
       rerender(<Feed state={applyUserSent(twoBlocks(), WS, MAIN, { ...message('u1', [text('And the docs?')]), role: 'user' }, NOW)} now={NOW + 2000} />);
-      expect(wheel(-120)).toBe(true);
       expect(words().scrollTop).toBe(0);
+      expect(wheel(-120)).toBe(false);
+      expect(words().scrollTop).toBe(15);
     } finally {
       restore();
     }

@@ -541,38 +541,24 @@ button.crewButton {
   stroke-linecap: round;
 }
 
-/* `--lines`: how many lines a bubble shows. */
+/* A bubble's words, `--lines` tall at most; past that they scroll (`useFollowEnd`). */
 .bubbleText {
   --lines: 2;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: var(--lines);
-  overflow: hidden;
-}
-
-/* Main's words, as markdown: clipped by height at its start, unless it scrolls. */
-.speech {
-  display: block;
-  -webkit-line-clamp: none;
   max-height: calc(var(--lines) * 1lh);
-}
-
-/* The card's newest, following its end (`useFollowEnd`). */
-.speech[data-newest] {
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 
 /* A thin classic scrollbar beside the words, not WebKitGTK's overlay one over them. */
-.speech::-webkit-scrollbar {
+.bubbleText::-webkit-scrollbar {
   width: 6px;
 }
 
-.speech::-webkit-scrollbar-track {
+.bubbleText::-webkit-scrollbar-track {
   background: transparent;
 }
 
-.speech::-webkit-scrollbar-thumb {
+.bubbleText::-webkit-scrollbar-thumb {
   background: var(--color-overlay-14);
   border-radius: var(--radius-full);
 }
@@ -620,7 +606,7 @@ button.crewButton {
   max-height: calc(3 * 1lh);
 }
 
-/* A code block in Main's words: its source, never drawn or highlighted. */
+/* A code block in a bubble: its source, never drawn or highlighted. */
 .source {
   margin: 0 0 12px;
   font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
@@ -628,7 +614,7 @@ button.crewButton {
   white-space: pre-wrap;
 }
 
-/* A chart in Main's words: a chip that opens the workspace, where it is drawn. */
+/* A chart in a bubble: a chip that opens the workspace, where it is drawn. */
 .chartChip {
   display: inline-flex;
   align-items: center;

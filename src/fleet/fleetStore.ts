@@ -10,6 +10,7 @@ import { create } from 'zustand';
 import type { AssistantEventEnvelope, AssistantMessage } from '../generated/bindings';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
+import { getMessage } from '../assistant/client';
 import { fleetSnapshot } from './client';
 import {
   EMPTY_FLEET,
@@ -18,6 +19,7 @@ import {
   applyRequest,
   applyRequestResolved,
   applyUserSent,
+  applyWholeMessage,
   isFleetEvent,
   seedFleet,
   type FleetPendingRequest,
@@ -46,6 +48,8 @@ interface FleetStoreState {
   resolveRequest: (kind: FleetRequestKind, requestId: string) => void;
   /** The user sent `message` on `sessionId`, or cleared the chat into it (`message` null). */
   noteUserSent: (workspaceId: string, sessionId: string, message: AssistantMessage | null) => void;
+  /** Fetches a message the snapshot cut, whole, into its card; a failed fetch leaves the preview. */
+  loadWhole: (workspaceId: string, sessionId: string, messageId: string) => void;
   loadSnapshot: () => Promise<void>;
   select: (workspaceId: string | null) => void;
 }
@@ -82,6 +86,11 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
   noteUserSent: (workspaceId, sessionId, message) => {
     const at = Date.now();
     get().dispatch((s) => applyUserSent(s, workspaceId, sessionId, message, at));
+  },
+  loadWhole: (workspaceId, sessionId, messageId) => {
+    getMessage(workspaceId, sessionId, messageId)
+      .then((message) => get().dispatch((s) => applyWholeMessage(s, workspaceId, message)))
+      .catch(() => undefined);
   },
 
   loadSnapshot: async () => {

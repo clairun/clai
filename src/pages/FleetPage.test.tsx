@@ -340,19 +340,21 @@ describe('FleetPage', () => {
     ]);
     renderFleet();
     const bubble = (await screen.findByText('Faster, please.')).closest<HTMLElement>('[role=button]')!;
-    expect(bubble.querySelector('[title] > span:first-child')).toHaveTextContent(/^\S+( \S+)? → Scout ·$/);
+    expect(bubble.querySelector('[data-bubble] > div > div > span:first-child')).toHaveTextContent(/^\S+( \S+)? → Scout ·$/);
   });
 
   describe('zoom', () => {
-    // An agent's word to Main: Main's own bubbles open in place instead (`FleetFeed.test`).
+    // An agent's word to Main; every bubble zooms alike (`FleetFeed.test`).
     const scout = { kind: 'agent', agent: { workspaceAgentId: 'wa-s', agentDefinitionId: 'def-s', displayName: 'Scout', isDefault: false }, sessionId: 'task-s', runId: null, replyAddress: null };
-    const seed = (text = 'Shipped **v2** to staging') =>
+    const seed = (text = 'Shipped **v2** to staging', truncated = false) =>
       fleetSnapshot.mockResolvedValue([
         workspace('s', 'Staged'),
-        { ...workspace('a', 'Alpha', 1000), mainSessionId: 'main-a', recentMessages: [said('u1', 'Ship it.', 20 * 60_000), said('a2', text, 10 * 60_000, { origin: scout })] },
+        { ...workspace('a', 'Alpha', 1000), mainSessionId: 'main-a', recentMessages: [said('u1', 'Ship it.', 20 * 60_000), { ...said('a2', text, 10 * 60_000, { origin: scout }), truncated }] },
       ]);
-    const bubble = async (text: RegExp) => (await screen.findByText(text)).closest<HTMLElement>('[role=button]')!;
-    // Past what a card holds: the snapshot's word is cut and the zoom fetches it whole.
+    /** The bubble whose words start as `text`: a paragraph of its markdown. */
+    const bubble = async (text: RegExp) =>
+      (await screen.findByText((_, el) => el?.tagName === 'P' && text.test(el.textContent ?? ''))).closest<HTMLElement>('[role=button]')!;
+    // The snapshot's preview of a longer word, which the bubble fetches whole.
     const cut = `Shipped **v2** to\n\n${'staging and prod, '.repeat(40)}`;
 
     it('zooms a bubble out to the whole message as markdown; Esc zooms back and focus returns to it', async () => {
@@ -480,7 +482,7 @@ describe('FleetPage', () => {
     });
 
     it('shows a cut message at once and swaps in the whole one when it arrives', async () => {
-      seed(cut);
+      seed(cut, true);
       let resolve: (m: unknown) => void = () => {};
       mockInvoke.mockImplementation(((cmd: string) => (cmd === 'assistant_get_message' ? new Promise((r) => (resolve = r)) : Promise.resolve(undefined))) as never);
       renderFleet();
@@ -493,7 +495,7 @@ describe('FleetPage', () => {
     });
 
     it('keeps the cut message when the whole one cannot be fetched', async () => {
-      seed(cut);
+      seed(cut, true);
       mockInvoke.mockImplementation(((cmd: string) => (cmd === 'assistant_get_message' ? Promise.reject(new Error('Assistant message not found: a2')) : Promise.resolve(undefined))) as never);
       renderFleet();
       fireEvent.click(await bubble(/^Shipped v2 to/));

@@ -52,7 +52,7 @@ export const MINIATURE: Components = {
   ),
 };
 
-/** Main's words in its bubble: markdown, each chart a chip. */
+/** A bubble's words: markdown, each chart a chip. */
 const FleetMarkdown = ({ content }: { content: string }) => <MarkdownBlock content={content} components={MINIATURE} />;
 
 export default FleetMarkdown;

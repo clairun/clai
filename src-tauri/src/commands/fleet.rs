@@ -25,10 +25,8 @@ const MAX_WORKSPACE_LIMIT: u32 = 32;
 const OPEN_TASK_LIMIT: i64 = 20;
 const FINISHED_TASK_LIMIT: i64 = 10;
 const RECENT_MESSAGE_LIMIT: i64 = 12;
-/// How much of a recent message's text the snapshot carries; the Fleet
-/// fetches the rest (`assistant_get_message`) when it shows the message
-/// whole. At least the Fleet's `NOTE_CHARS` (fleetModel.ts), so a seeded
-/// preview isn't clipped shorter than a live one.
+/// How much of a message's text the snapshot carries; the Fleet fetches the
+/// rest (`assistant_get_message`) for a message it shows.
 const PREVIEW_CHARS: usize = 600;
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -55,8 +53,7 @@ pub struct FleetWorkspace {
     pub pending_permissions: Vec<PermissionRequest>,
     pub pending_path_grants: Vec<PathGrantRequest>,
     pub pending_asks: Vec<PendingAsk>,
-    /// The main session's newest assistant reply with text, its text whole:
-    /// the Fleet's newest bubble shows how it ends.
+    /// The main session's newest assistant reply with text.
     pub last_assistant_message: Option<FleetHighlight>,
     /// The newest user and assistant messages with text or an image across
     /// every session, oldest first; tool rows and tool-only replies are left
@@ -66,8 +63,8 @@ pub struct FleetWorkspace {
     pub agents: Vec<AgentRefSnapshot>,
 }
 
-/// A message of the workspace's conversation, its text cut to a budget,
-/// with the run that wrote it.
+/// A message of the workspace's conversation, cut to a preview, with the
+/// run that wrote it.
 #[derive(Debug, Clone, Serialize, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
@@ -79,8 +76,8 @@ pub struct FleetHighlight {
 }
 
 impl FleetHighlight {
-    fn new(mut message: AssistantMessage, run_id: Option<String>, budget: usize) -> Self {
-        let (content, truncated) = preview(message.content, budget);
+    fn new(mut message: AssistantMessage, run_id: Option<String>) -> Self {
+        let (content, truncated) = preview(message.content, PREVIEW_CHARS);
         message.content = content;
         Self {
             message,
@@ -240,13 +237,13 @@ async fn workspace_snapshot(
     let last_assistant_message = match &main_session {
         Some(session) => repository::last_completed_assistant_text(pool, &session.id)
             .await?
-            .map(|(message, run_id)| FleetHighlight::new(message, run_id, usize::MAX)),
+            .map(|(message, run_id)| FleetHighlight::new(message, run_id)),
         None => None,
     };
     let recent_messages = repository::recent_conversation_messages(pool, RECENT_MESSAGE_LIMIT)
         .await?
         .into_iter()
-        .map(|(message, run_id)| FleetHighlight::new(message, run_id, PREVIEW_CHARS))
+        .map(|(message, run_id)| FleetHighlight::new(message, run_id))
         .collect();
 
     let rows = workspace_tasks_repo::list_open_and_recent_tasks(
@@ -487,18 +484,10 @@ mod tests {
         );
         assert_eq!(busy.tasks[0].assigned_agent_display_name, "Manager");
 
-        // A long reply travels whole as the last reply, and as its first
-        // PREVIEW_CHARS characters, flagged, among the recent messages.
+        // A long reply travels as its first PREVIEW_CHARS characters, flagged.
         let last = &busy.last_assistant_message.as_ref().expect("last reply");
-        assert_eq!(only_text(last), long_reply);
-        assert!(!last.truncated);
-        let recent = busy
-            .recent_messages
-            .iter()
-            .find(|h| h.message.id == last.message.id)
-            .expect("recent reply");
-        assert_eq!(only_text(recent), "é".repeat(PREVIEW_CHARS));
-        assert!(recent.truncated);
+        assert_eq!(only_text(last), "é".repeat(PREVIEW_CHARS));
+        assert!(last.truncated);
 
         let idle = &snapshot[1];
         assert_eq!((idle.last_activity_at, idle.last_opened_at), (0, 0));

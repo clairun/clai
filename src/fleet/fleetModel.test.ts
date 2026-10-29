@@ -17,6 +17,7 @@ import {
   applyRequest,
   applyRequestResolved,
   applyUserSent,
+  applyWholeMessage,
   cardAttention,
   openRequests,
   cardPhase,
@@ -320,14 +321,13 @@ describe('the highlight feed', () => {
     expect(card(s).said.map((m) => m.id)).toEqual(['u1']);
   });
 
-  it("marks a live message cut to fit the card, so the zoom fetches it whole; Main's words are kept whole", () => {
+  it('keeps a live message whole, yours and Main\'s alike, without its tool calls', () => {
     const long = `${'word '.repeat(200)}end`;
-    const s = apply(withMain(), created(message('u1', 'user', long), NOW - 2), completed(message('a1', 'assistant', long), NOW - 1));
-    const [cut, whole] = feedOf(s).lines;
-    expect(cut!.message).toEqual({ sessionId: MAIN, id: 'u1', truncated: true });
-    expect(cut!.markdown.endsWith('…')).toBe(true);
-    expect(whole!.message).toEqual({ sessionId: MAIN, id: 'a1', truncated: false });
-    expect(whole!.markdown).toBe(long);
+    const s = apply(withMain(), created(message('u1', 'user', long), NOW - 2), completed(withParts('a1', text(long), tool('c1')), NOW - 1));
+    expect(feedOf(s).lines.map((l) => [l.markdown, l.message])).toEqual([
+      [long, { sessionId: MAIN, id: 'u1', truncated: false }],
+      [long, { sessionId: MAIN, id: 'a1', truncated: false }],
+    ]);
   });
 
   it("says how a task ended from its status when no report came, and a subtask answers its parent's agent", () => {
@@ -641,7 +641,7 @@ describe('snapshot', () => {
     expect(feedOf(continued).lines.map((line) => [line.markdown, line.at])).toEqual([['Before.\n\nAfter.\n\nMore.', NOW]]);
   });
 
-  it('keeps which message a line says and whether it was cut, so the zoom can fetch it whole', () => {
+  it('keeps which message a line says and whether the snapshot cut it, so it can be fetched whole', () => {
     const s = seedFleet(EMPTY_FLEET, [
       snapshotOf({
         recentMessages: [
@@ -656,21 +656,35 @@ describe('snapshot', () => {
     const feed = feedOf(s, withTasks(task('t', 'failed', NOW - 100)));
     expect(feed.lines.map((l) => [l.key, l.markdown, l.message])).toEqual([
       ['task:t', 'Task t', null],
-      ['rep', `${broke.slice(0, 599)}…`, { sessionId: MAIN, id: 'rep', truncated: true }],
+      ['rep', broke, { sessionId: MAIN, id: 'rep', truncated: false }],
       ['u2', 'Ship it…', { sessionId: MAIN, id: 'u2', truncated: true }],
       ['a0', 'Shipped to stag…', { sessionId: MAIN, id: 'a0', truncated: true }],
       ['a1', 'All done.', { sessionId: MAIN, id: 'a1', truncated: false }],
     ]);
   });
 
-  it('takes the last reply whole over its cut copy among the recent messages, so its bubble ends as it does', () => {
+  it('takes a message the snapshot cut whole once fetched, where and when it was said; nothing else', () => {
     const s = seedFleet(EMPTY_FLEET, [
       snapshotOf({
-        recentMessages: [highlight(message('a1', 'assistant', 'All do'), NOW - 20, null, true)],
-        lastAssistantMessage: highlight(message('a1', 'assistant', 'All done. Ship it.'), NOW - 20),
+        recentMessages: [
+          highlight(message('u1', 'user', 'Ship'), NOW - 30, null, true),
+          highlight(withParts('a1', text('All do')), NOW - 20, 'r1', true),
+        ],
       }),
     ]);
-    expect(feedOf(s).lines.map((l) => [l.markdown, l.message?.truncated])).toEqual([['All done. Ship it.', false]]);
+    const whole = applyWholeMessage(
+      applyWholeMessage(s, WS, { ...message('u1', 'user', 'Ship it.'), createdAt: BigInt(NOW - 30) }),
+      WS,
+      { ...withParts('a1', text('All done.'), tool('c1'), text('Shipped.')), createdAt: BigInt(NOW - 20) }
+    );
+    expect(feedOf(whole).lines.map((l) => [l.markdown, l.at, l.message?.truncated])).toEqual([
+      ['Ship it.', NOW - 30, false],
+      ['All done.\n\nShipped.', NOW - 20, false],
+    ]);
+    expect(card(whole).said.map((m) => m.runId)).toEqual([null, 'r1']);
+    // Already whole, or not on the card: nothing changes.
+    expect(applyWholeMessage(whole, WS, message('u1', 'user', 'Other words.'))).toBe(whole);
+    expect(applyWholeMessage(whole, 'elsewhere', message('u1', 'user', 'Other words.'))).toBe(whole);
   });
 
   it('seeds the last reply alone when the recent messages miss it', () => {
