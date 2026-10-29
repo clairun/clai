@@ -2260,6 +2260,7 @@ mod tests {
             "for i in 1; do rm -rf x; done",
             "if true; then rm -rf x; fi",
             "case a in a) rm -rf x;; esac",
+            "echo $(case x in x) a;; esac); rm -rf x",
             "! rm -rf x",
             "cat <<EOF | rm -rf x\nhi\nEOF",
             "cat <<EOF|rm -rf x\nhi\nEOF",
