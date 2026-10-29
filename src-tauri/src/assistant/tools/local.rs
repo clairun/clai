@@ -2421,6 +2421,12 @@ mod tests {
             "echo $(cat <& 0 case in a </dev/null)\ntouch PWN\n;; esac)",
             "echo \"$(ls >& case in a)\"\ntouch PWN\n;; esac)",
             "git --version ; for i in a; { touch PWN; }",
+            "cat <<$'E'\nE\ntouch PWN",
+            "cat <<$\"E\"\nE\ntouch PWN",
+            "cat <<E\nE\\\n\ntouch PWN\nE",
+            "echo x\n((echo a) ; touch PWN )",
+            "((touch PWN) )",
+            "echo $((echo a) ; touch PWN )",
         ];
         for mode in [ShellAccessMode::Full, ShellAccessMode::Restricted] {
             for (durable, run) in [("touch", ""), ("", "touch"), ("sudo", "")] {
@@ -2452,6 +2458,22 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn blocklist_sees_a_command_after_an_escaped_blank_and_hash() {
+        let exec = ExecutionCapabilityConfig {
+            shell: ShellCapabilityConfig {
+                mode: ShellAccessMode::Full,
+                allowed_command_prefixes: vec![],
+                blocked_command_prefixes: vec!["touch".to_string()],
+            },
+            ..Default::default()
+        };
+        assert!(matches!(
+            evaluate_command_policy(&exec, "echo a\\ #; touch PWN", &[], &[]),
+            PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
+        ));
     }
 
     #[test]
