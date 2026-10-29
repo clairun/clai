@@ -21,13 +21,10 @@
 //!   command substitution (`$(...)`, backticks), test expressions, heredocs,
 //!   redirects, process substitution, or an executor-style head (`bash -c`,
 //!   `xargs`, `eval`, ...). The shape is harder to reason about than a plain
-//!   command, but the policy layer still matches an Opaque segment's binary
-//!   head against the allow/blocklist via the same prefix matcher — the
-//!   `Opaque` tag mostly informs the UI ("this is more than a bare command")
-//!   rather than gating persistence. The splitter is intentionally
-//!   conservative: anything ambiguous becomes Opaque, surfaced to the user,
-//!   and only allowlisted after an explicit "Always allow" click on the
-//!   prefix.
+//!   command. The policy layer can match its head when there is a stable
+//!   suggested prefix.
+//! - [`Segment::Unparsed`] — the whole input when it cannot be split
+//!   reliably. The policy layer decides it as one row of exact text.
 
 #![allow(dead_code)] // wired into enforce_command_policy in commit 6
 
@@ -35,17 +32,19 @@
 pub enum Segment {
     Simple(String),
     Opaque(String),
+    /// The whole input when shell grammar could not be parsed reliably.
+    Unparsed(String),
 }
 
 impl Segment {
     pub fn text(&self) -> &str {
         match self {
-            Segment::Simple(s) | Segment::Opaque(s) => s,
+            Segment::Simple(s) | Segment::Opaque(s) | Segment::Unparsed(s) => s,
         }
     }
 
     pub fn is_opaque(&self) -> bool {
-        matches!(self, Segment::Opaque(_))
+        matches!(self, Segment::Opaque(_) | Segment::Unparsed(_))
     }
 }
 
@@ -108,6 +107,8 @@ fn keyword(word: &str) -> Option<Keyword> {
 /// the input could not be split; either way it is no prefix to allowlist.
 pub fn is_shell_syntax(word: &str) -> bool {
     keyword(word).is_some()
+        || word.strip_suffix("()").is_some_and(is_function_name)
+        || word.strip_suffix("(){").is_some_and(is_function_name)
 }
 
 /// True if `text` runs a command of its own through a command or process
@@ -143,6 +144,8 @@ struct Commands {
     /// pattern, a function header, or a closed block and its redirects.
     grammar: bool,
     scopes: Vec<Scope>,
+    /// Parentheses nested inside the current case pattern (for extglob).
+    pattern_parens: u32,
     /// Heredocs opened on the current line.
     heredocs: Vec<Heredoc>,
 }
@@ -231,6 +234,7 @@ impl Commands {
 
     fn enter_pattern(&mut self) {
         self.scopes.push(Scope::Pattern);
+        self.pattern_parens = 0;
         self.grammar = true;
     }
 
@@ -268,18 +272,18 @@ impl Commands {
 /// The returned vector preserves execution order. When the input cannot be
 /// split reliably — an unterminated quote, an unbalanced block — separator
 /// detection after that point means nothing (one stray quote silently
-/// swallows later `;` / `&&` / `|`), so the whole input becomes one Opaque
-/// segment the user reviews as a unit. [`is_shell_syntax`] and the junk-head
-/// rule in `suggest_prefix` keep a bogus "always allow" off that blob.
+/// swallows later `;` / `&&` / `|`), so the whole input becomes one Unparsed
+/// segment the user reviews as a unit, with no saved allowlist prefix.
 pub fn split_command(input: &str) -> Vec<Segment> {
-    split(input).unwrap_or_else(|| vec![Segment::Opaque(input.trim().to_string())])
+    split(input).unwrap_or_else(|| vec![Segment::Unparsed(input.trim().to_string())])
 }
 
-#[derive(PartialEq, Eq)]
-enum CasePart {
-    Header,
-    Pattern,
-    Body,
+/// An open `$( … )`, `( … )`, `${ … }` or `{ … }` inside a word.
+struct Nesting {
+    /// The character that closes it.
+    closer: char,
+    /// It was opened inside double quotes, which resume once it closes.
+    in_double: bool,
 }
 
 #[allow(
@@ -300,9 +304,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
     let mut in_double = false;
     let mut in_backtick = false;
     let mut escape = false;
-    let mut depth: u32 = 0;
-    let mut double_quote_resume_depths = Vec::new();
-    let mut substitution_cases: Vec<(u32, CasePart)> = Vec::new();
+    let mut nesting: Vec<Nesting> = Vec::new();
 
     let mut i = 0;
     while i < n {
@@ -356,30 +358,8 @@ fn split(input: &str) -> Option<Vec<Segment>> {
             continue;
         }
 
-        // Inside double quotes: handle \, ", $(, `.
-        if in_double {
-            out.buf.push(c);
-            if c == '\\' {
-                escape = true;
-            } else if c == '"' {
-                in_double = false;
-            } else if c == '$' && next == Some('(') {
-                out.opaque = true;
-                out.buf.push('(');
-                depth += 1;
-                double_quote_resume_depths.push(depth - 1);
-                in_double = false;
-                i += 2;
-                continue;
-            } else if c == '`' {
-                out.opaque = true;
-                in_backtick = true;
-            }
-            i += 1;
-            continue;
-        }
-
         // Inside backticks: only ` ends it. Backslash escapes the next char.
+        // Read before double quotes: a backtick opened inside them ends first.
         if in_backtick {
             out.buf.push(c);
             if c == '\\' {
@@ -391,39 +371,48 @@ fn split(input: &str) -> Option<Vec<Segment>> {
             continue;
         }
 
-        // Inside a substitution or expansion: one word, no separators.
-        if depth > 0 {
-            // A case pattern's `)` belongs to the item, not the substitution.
-            let word_start =
-                i == 0 || is_blank(bytes[i - 1] as char) || ";&|()".contains(bytes[i - 1] as char);
-            if word_start {
-                match word_at(input, i) {
-                    "case" => substitution_cases.push((depth, CasePart::Header)),
-                    "in" => {
-                        if let Some((case_depth, part @ CasePart::Header)) =
-                            substitution_cases.last_mut()
-                        {
-                            if *case_depth == depth {
-                                *part = CasePart::Pattern;
-                            }
-                        }
-                    }
-                    "esac"
-                        if substitution_cases.last().is_some_and(|(case_depth, part)| {
-                            *case_depth == depth && *part != CasePart::Header
-                        }) =>
-                    {
-                        substitution_cases.pop();
-                    }
-                    _ => {}
-                }
+        // Inside double quotes: handle \, ", $(, `.
+        if in_double {
+            out.buf.push(c);
+            if c == '\\' {
+                escape = true;
+            } else if c == '"' {
+                in_double = false;
+            } else if c == '$' && matches!(next, Some('(' | '{')) {
+                let open = next.unwrap();
+                out.opaque |= open == '(';
+                out.buf.push(open);
+                nesting.push(Nesting {
+                    closer: closer_of(open),
+                    in_double: true,
+                });
+                in_double = false;
+                i += 2;
+                continue;
+            } else if c == '`' {
+                out.opaque = true;
+                in_backtick = true;
             }
-            if c == ';' && next == Some(';') {
-                if let Some((case_depth, part @ CasePart::Body)) = substitution_cases.last_mut() {
-                    if *case_depth == depth {
-                        *part = CasePart::Pattern;
-                    }
-                }
+            i += 1;
+            continue;
+        }
+
+        // Inside a substitution or expansion: one word, no separators.
+        // Only quotes and nesting are read here, so the split gives up on
+        // anything that moves where the word ends: a `case` pattern's `)`,
+        // a comment, a heredoc body, `$'…'` quoting, a quote or nesting
+        // inside `"${…}"`, or a closer that does not match its opener.
+        if let Some(top) = nesting.last() {
+            let prev = bytes[i - 1] as char;
+            let word_start = is_blank(prev) || ";&|()<>".contains(prev);
+            if (word_start && (c == '#' || word_at(input, i) == "case"))
+                || (input[i..].starts_with("<<") && !input[i..].starts_with("<<<") && prev != '<')
+                || (c == '$' && next == Some('\''))
+                || (top.closer == '}'
+                    && top.in_double
+                    && (matches!(c, '\'' | '"' | '(' | '{') || (c == '$' && next == Some('{'))))
+            {
+                return None;
             }
             out.buf.push(c);
             match c {
@@ -434,33 +423,25 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                     in_backtick = true;
                     out.opaque = true;
                 }
-                '(' if substitution_cases.last().is_some_and(|(case_depth, part)| {
-                    *case_depth == depth && *part == CasePart::Pattern
-                }) => {}
-                '(' | '{' | '[' => depth += 1,
-                ')' if substitution_cases
-                    .last_mut()
-                    .is_some_and(|(case_depth, part)| {
-                        if *case_depth == depth && *part == CasePart::Pattern {
-                            *part = CasePart::Body;
-                            true
-                        } else {
-                            false
-                        }
-                    }) => {}
-                ')' | '}' | ']' => {
-                    depth -= 1;
-                    if double_quote_resume_depths.last() == Some(&depth) {
-                        double_quote_resume_depths.pop();
-                        in_double = true;
+                '(' | '{' => nesting.push(Nesting {
+                    closer: closer_of(c),
+                    in_double: false,
+                }),
+                ')' | '}' => {
+                    let closed = nesting.pop()?;
+                    if closed.closer != c {
+                        return None;
                     }
+                    in_double = closed.in_double;
                 }
-                '$' if next == Some('(') || next == Some('{') => {
-                    out.buf.push(next.unwrap());
-                    if next == Some('(') {
-                        out.opaque = true;
-                    }
-                    depth += 1;
+                '$' if matches!(next, Some('(' | '{')) => {
+                    let open = next.unwrap();
+                    out.buf.push(open);
+                    out.opaque |= open == '(';
+                    nesting.push(Nesting {
+                        closer: closer_of(open),
+                        in_double: false,
+                    });
                     i += 2;
                     continue;
                 }
@@ -515,6 +496,8 @@ fn split(input: &str) -> Option<Vec<Segment>> {
                 i += 1;
                 continue;
             }
+            // `$'…'` quoting, whose backslash escapes a quote, is not read.
+            '$' if next == Some('\'') => return None,
             _ => {}
         }
 
@@ -544,14 +527,20 @@ fn split(input: &str) -> Option<Vec<Segment>> {
             };
             if third == Some('(') {
                 // Arithmetic expansion $((  — just text, not a substitution.
-                // Track both parens so the matching `))` brings depth back.
+                // Track both parens so the matching `))` closes it.
                 out.buf.push_str("$((");
-                depth += 2;
+                nesting.extend([')', ')'].map(|closer| Nesting {
+                    closer,
+                    in_double: false,
+                }));
                 i += 3;
             } else {
                 // Command substitution $(  — runs arbitrary code.
                 out.buf.push_str("$(");
-                depth += 1;
+                nesting.push(Nesting {
+                    closer: ')',
+                    in_double: false,
+                });
                 out.opaque = true;
                 i += 2;
             }
@@ -559,7 +548,10 @@ fn split(input: &str) -> Option<Vec<Segment>> {
         }
         if c == '$' && next == Some('{') {
             out.buf.push_str("${");
-            depth += 1;
+            nesting.push(Nesting {
+                closer: '}',
+                in_double: false,
+            });
             i += 2;
             continue;
         }
@@ -573,7 +565,10 @@ fn split(input: &str) -> Option<Vec<Segment>> {
         if (c == '<' || c == '>') && next == Some('(') {
             out.buf.push(c);
             out.buf.push('(');
-            depth += 1;
+            nesting.push(Nesting {
+                closer: ')',
+                in_double: false,
+            });
             out.opaque = true;
             i += 2;
             continue;
@@ -643,12 +638,16 @@ fn split(input: &str) -> Option<Vec<Segment>> {
             }
             // An array literal `a=(…)` or arithmetic `((…))`: one word.
             out.buf.push(c);
-            depth += 1;
+            nesting.push(Nesting {
+                closer: ')',
+                in_double: false,
+            });
             out.opaque = true;
             i += 1;
             continue;
         }
-        if c == ')' && out.top() == Some(Scope::Subshell) {
+        if c == ')' {
+            // A `)` that closes no subshell is out of place.
             out.end();
             out.close(Scope::Subshell, ")")?;
             i += 1;
@@ -691,7 +690,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
         i += 1;
     }
 
-    if in_single || in_double || in_backtick || depth > 0 || !out.scopes.is_empty() {
+    if in_single || in_double || in_backtick || !nesting.is_empty() || !out.scopes.is_empty() {
         return None;
     }
     out.end();
@@ -757,11 +756,21 @@ fn read_pattern(input: &str, i: usize, out: &mut Commands) -> Option<usize> {
         out.close(Scope::Case, "esac")?;
         return Some(i + "esac".len());
     }
-    if c == ')' {
-        out.end();
-        out.scopes.pop();
-    } else if !(blank && (c == '(' || is_blank(c))) {
-        out.buf.push(c);
+    match c {
+        '(' if !blank => {
+            out.pattern_parens += 1;
+            out.buf.push(c);
+        }
+        ')' if out.pattern_parens > 0 => {
+            out.pattern_parens -= 1;
+            out.buf.push(c);
+        }
+        ')' => {
+            out.end();
+            out.scopes.pop();
+        }
+        _ if !(blank && (c == '(' || is_blank(c))) => out.buf.push(c),
+        _ => {}
     }
     Some(i + 1)
 }
@@ -809,6 +818,14 @@ fn heredoc_delimiter(rest: &str) -> (usize, String) {
         }
     }
     (rest.len(), delim)
+}
+
+fn closer_of(open: char) -> char {
+    if open == '(' {
+        ')'
+    } else {
+        '}'
+    }
 }
 
 /// The word starting at `i`: up to a blank or an operator character.
@@ -880,6 +897,10 @@ mod tests {
 
     fn opaque(s: &str) -> Segment {
         Segment::Opaque(s.to_string())
+    }
+
+    fn unparsed(s: &str) -> Segment {
+        Segment::Unparsed(s.to_string())
     }
 
     fn split(s: &str) -> Vec<Segment> {
@@ -1582,32 +1603,74 @@ mod tests {
     }
 
     #[test]
-    fn case_inside_a_substitution_ends_at_its_closing_paren() {
-        // A pattern's `)` does not close the substitution.
-        for (input, inner) in [
-            (
-                "echo $(case x in x) a;; esac); rm -rf x",
-                "echo $(case x in x) a;; esac)",
-            ),
-            (
-                "echo \"$(case x in x) a;; esac)\"; rm -rf x",
-                "echo \"$(case x in x) a;; esac)\"",
-            ),
-            (
-                "cat <(case x in x) a;; esac); rm -rf x",
-                "cat <(case x in x) a;; esac)",
-            ),
-            (
-                "echo `case x in x) a;; esac`; rm -rf x",
-                "echo `case x in x) a;; esac`",
-            ),
+    fn case_inside_backticks_ends_at_the_closing_backtick() {
+        assert_eq!(
+            split("echo `case x in x) a;; esac`; rm -rf x"),
+            vec![opaque("echo `case x in x) a;; esac`"), simple("rm -rf x")]
+        );
+    }
+
+    #[test]
+    fn substitution_syntax_that_moves_its_end_is_unparsed() {
+        // The splitter does not model these inside a substitution, so it
+        // cannot trust where the substitution ends; in most of them bash
+        // runs a `touch PWN` or `rm -rf x` that a wrong end would hide.
+        for input in [
+            "echo $(case x in x) a;; esac); rm -rf x",
+            "echo \"$(case x in x) a;; esac)\"; rm -rf x",
+            "cat <(case x in x) a;; esac); rm -rf x",
+            "echo $(case a in a) echo;& b) echo;; esac); rm -rf x",
+            "echo $(case a in @(a|b)) echo ok;; esac); rm -rf x",
+            "echo $(echo case in a); rm -rf x",
+            "echo $(ls >& case in a)\ntouch PWN\n;; esac)",
+            "echo $(ls &> case in a)\ntouch PWN\n;; esac)",
+            "echo $(ls &>> case in a)\ntouch PWN\n;; esac)",
+            "echo $(ls >| case in a)\ntouch PWN\n;; esac)",
+            "echo $(cat <& 0 case in a </dev/null)\ntouch PWN\n;; esac)",
+            "echo \"$(ls >& case in a)\"\ntouch PWN\n;; esac)",
+            "echo $(echo a # (\n) ; touch PWN # )",
+            "echo $(cat <<E\n(\nE\n) ; touch PWN # )",
+            "echo $(cat <<E\n(\nE\n) ; touch PWN ; cat <<F\n)\nF",
+            "echo $(printf %s $'\\'') ; touch PWN ; echo \"')'\" \\'",
+            "echo $(echo }) ; touch PWN ; echo ${x:-)}",
+            "echo ${x:-)} ; touch PWN ; echo $(echo })",
+            "echo $(echo {) ; touch PWN ; echo }",
+            "echo ${x/(/y} ; touch PWN # )",
+            "echo \"${x:-'\"'}\" ; touch PWN # \"",
+            "echo $'\\'' ; touch PWN ; echo \\'",
+            "echo ) ; touch PWN",
         ] {
-            assert_eq!(
-                split(input),
-                vec![opaque(inner), simple("rm -rf x")],
-                "{input:?}"
-            );
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
+    }
+
+    #[test]
+    fn substitutions_without_such_syntax_still_split() {
+        assert_eq!(
+            split("echo $(echo [) ; touch PWN ; echo $(echo ])"),
+            vec![
+                opaque("echo $(echo [)"),
+                simple("touch PWN"),
+                opaque("echo $(echo ])")
+            ]
+        );
+        assert_eq!(
+            split("echo \"`date`\" ; touch PWN # `"),
+            vec![opaque("echo \"`date`\""), simple("touch PWN")]
+        );
+        let words = r#"echo "${HOME}/x" ${a[0]} $((1+2)) <(ls) "$(echo ")")" $(f {} \;)"#;
+        assert_eq!(
+            split(&format!("{words}; ls")),
+            vec![opaque(words), simple("ls")]
+        );
+    }
+
+    #[test]
+    fn extglob_case_pattern_keeps_body_as_command() {
+        assert_eq!(
+            split("shopt -s extglob\ncase a in @(a|b)) rm -rf y;; esac"),
+            vec![simple("shopt -s extglob"), simple("rm -rf y")]
+        );
     }
 
     #[test]
@@ -1623,14 +1686,14 @@ mod tests {
     }
 
     #[test]
-    fn malformed_block_collapses_to_single_opaque() {
+    fn malformed_block_collapses_to_single_unparsed() {
         for input in [
             "for i in 1 2 3; do echo $i",
             "echo a; fi",
             "{ echo a;",
             "echo a; }",
         ] {
-            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
     }
 
@@ -1941,9 +2004,9 @@ mod tests {
     }
 
     #[test]
-    fn unterminated_single_quote_collapses_to_single_opaque() {
+    fn unterminated_single_quote_collapses_to_single_unparsed() {
         let segs = split("echo 'oops ; ls");
-        assert_eq!(segs, vec![opaque("echo 'oops ; ls")]);
+        assert_eq!(segs, vec![unparsed("echo 'oops ; ls")]);
     }
 
     #[test]
