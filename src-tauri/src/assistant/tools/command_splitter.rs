@@ -835,17 +835,21 @@ fn read_heredoc(input: &str, start: usize, out: &mut Commands) -> Option<usize> 
     }
     i = skip_blanks(input, i);
     let (len, delim) = heredoc_delimiter(&input[i..])?;
+    // Bash finds a different closing line for these: an empty delimiter
+    // closes at the first empty line, 0x01 and 0x7f are its internal quoting
+    // bytes, and `<<-` compares a line before stripping its tabs.
+    if delim.is_empty() || delim.contains(['\t', '\x01', '\x7f']) {
+        return None;
+    }
     let quoted = input[i..i + len].contains(['\'', '"', '\\']);
     i += len;
     out.buf.push_str(&input[start..i]);
-    if !delim.is_empty() {
-        out.heredocs.push(Heredoc {
-            delim,
-            strip_tabs,
-            quoted,
-            owner: out.segments.len(),
-        });
-    }
+    out.heredocs.push(Heredoc {
+        delim,
+        strip_tabs,
+        quoted,
+        owner: out.segments.len(),
+    });
     Some(i)
 }
 
@@ -1692,6 +1696,25 @@ mod tests {
             "echo \"${x:-'\"'}\" ; touch PWN # \"",
             "echo $'\\'' ; touch PWN ; echo \\'",
             "echo ) ; touch PWN",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn heredoc_delimiter_bash_closes_elsewhere_is_unparsed() {
+        // bash runs the `touch PWN` in each: an empty delimiter closes at the
+        // first empty line, 0x01 and 0x7f do not match themselves, and `<<-`
+        // matches a quoted leading tab before stripping tabs.
+        for input in [
+            "cat <<''\n'\n\ntouch PWN\n'",
+            "cat <<\"\"\n'\n\ntouch PWN\n'",
+            "cat <<''\n\ntouch PWN",
+            "cat <<'E\u{1}'\nE\u{1}\n'\nE\u{1}\u{1}\ntouch PWN\n'",
+            "cat <<'E\u{7f}'\nE\u{7f}\n'\nE\u{1}\u{7f}\ntouch PWN\n'",
+            "cat <<-\"\tE\"\n\tE\ntouch PWN",
+            "cat <<-'\tE'\n\tE\ntouch PWN",
+            "cat <<-\\\tE\n\tE\ntouch PWN",
         ] {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
