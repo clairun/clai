@@ -10,7 +10,7 @@ import {
 } from '../../fleet/fleetModel';
 import { cardFeed } from '../../fleet/fleetFeed';
 import { fleetLoudness } from '../../fleet/fleetCrew';
-import { boardShape, boardSlots, hiddenActivity } from '../../fleet/boardSlots';
+import { BOARD_CAPACITY, boardShape, boardSlots, hiddenActivity } from '../../fleet/boardSlots';
 import { useAppTheme } from '../../hooks/useAppTheme';
 import { workspaceHue } from '../../fleet/workspaceHue';
 import { dispatchFocusTerminal } from '../../utils/workspaceUiEvents';
@@ -66,17 +66,16 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
   );
   const gridRef = useRef<HTMLDivElement | null>(null);
   const theme = useAppTheme();
-  const shape = boardShape(order.length);
-  // The previous slots, so cards on the board keep them (derived state;
-  // the slots are a fixed point of themselves).
-  const [slots, setSlots] = useState<string[]>([]);
-  const capacity = shape.cols * shape.rows;
+  // The previous board, so cards on it keep their slots and cards left off
+  // stay off (derived state; the board is a fixed point of itself).
+  const [prev, setPrev] = useState<{ visible: string[]; off: string[] }>({ visible: [], off: [] });
   const board = useMemo(
-    () => boardSlots(order, cards, { live, selectedId, prev: slots, capacity }),
-    [order, cards, live, selectedId, slots, capacity]
+    () => boardSlots(order, cards, { live, selectedId, prev, capacity: BOARD_CAPACITY }),
+    [order, cards, live, selectedId, prev]
   );
-  if (board.visible.join(',') !== slots.join(',')) setSlots(board.visible);
+  if (board.visible.join(',') !== prev.visible.join(',') || board.off.join(',') !== prev.off.join(',')) setPrev(board);
   const { visible } = board;
+  const shape = boardShape(visible.length);
   const more = hiddenActivity(board.hidden);
   useThoughtBeat(gridRef, visible.some((id) => cardPhase(cards[id]!, live) === 'working'));
   // Each card's feed, once. A card with an open request shows that instead.

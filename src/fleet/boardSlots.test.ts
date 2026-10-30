@@ -16,11 +16,11 @@ const cardsOf = (waiting: string[] = []) =>
   Object.fromEntries(ids.map((id, i) => [id, card(id, 1000 - i, waiting.includes(id))]));
 const working = (...ws: string[]): FleetLive => ({ runs: Object.fromEntries(ws.map((w) => [w, ['run']])), tasks: {} });
 const NO_LIVE = working();
-const slots = (opts: { cards?: Record<string, FleetCard>; live?: FleetLive; selectedId?: string | null; prev?: string[]; capacity?: number } = {}) =>
+const slots = (opts: { cards?: Record<string, FleetCard>; live?: FleetLive; selectedId?: string | null; prev?: string[]; off?: string[]; capacity?: number } = {}) =>
   boardSlots(ids, opts.cards ?? cardsOf(), {
     live: opts.live ?? NO_LIVE,
     selectedId: opts.selectedId ?? null,
-    prev: opts.prev ?? [],
+    prev: { visible: opts.prev ?? [], off: opts.off ?? [] },
     capacity: opts.capacity ?? 6,
   });
 const FULL = ['c0', 'c1', 'c2', 'c3', 'c4', 'c5'];
@@ -52,12 +52,23 @@ describe('boardSlots', () => {
   it('always shows the selected card, and keeps it after deselecting', () => {
     const picked = slots({ prev: FULL, selectedId: 'h7', live: working('c0', 'c1', 'c2', 'c3', 'c4', 'c5') });
     expect(picked.visible).toEqual(['c0', 'c1', 'c2', 'c3', 'c4', 'h7']);
-    expect(slots({ prev: picked.visible }).visible).toEqual(picked.visible);
+    expect(slots({ prev: picked.visible, off: picked.off }).visible).toEqual(picked.visible);
   });
 
-  it('fills a freed slot from off the board', () => {
-    const left = boardSlots(ids.filter((id) => id !== 'c2'), cardsOf(), { live: NO_LIVE, selectedId: null, prev: FULL, capacity: 6 });
-    expect(left.visible).toEqual(['c0', 'c1', 'c3', 'c4', 'c5', 'h6']);
+  it('leaves a freed slot empty for the cards left off, and gives it to a card new to the board', () => {
+    const without = (...gone: string[]) => ids.filter((id) => !gone.includes(id));
+    const left = boardSlots(without('c2'), cardsOf(), { live: NO_LIVE, selectedId: null, prev: { visible: FULL, off: ['h6', 'h7'] }, capacity: 6 });
+    expect(left.visible).toEqual(['c0', 'c1', 'c3', 'c4', 'c5']);
+    expect(left.off).toEqual(['h6', 'h7']);
+    const back = boardSlots(without('c2'), cardsOf(), { live: NO_LIVE, selectedId: null, prev: { visible: left.visible, off: ['h7'] }, capacity: 6 });
+    expect(back.visible).toEqual(['c0', 'c1', 'c3', 'c4', 'c5', 'h6']);
+    // One that outranks a card on the board takes the free slot rather than that card's.
+    const busy = boardSlots(without('c2'), cardsOf(), { live: working('h7'), selectedId: null, prev: left, capacity: 6 });
+    expect(busy.visible).toEqual(['c0', 'c1', 'c3', 'c4', 'c5', 'h7']);
+    // An empty board takes only the selected card.
+    const empty = boardSlots(['h6', 'h7'], cardsOf(), { live: working('h7'), selectedId: null, prev: { visible: [], off: ['h6', 'h7'] }, capacity: 6 });
+    expect(empty.visible).toEqual([]);
+    expect(boardSlots(['h6', 'h7'], cardsOf(), { live: NO_LIVE, selectedId: 'h6', prev: empty, capacity: 6 }).visible).toEqual(['h6']);
   });
 
   it('counts the active cards left off the board', () => {
@@ -83,8 +94,9 @@ describe('undismissed', () => {
     const dismissed = { c1: 999, c2: 1000, h7: 900 };
     expect(undismissed(ids, cards, dismissed)).toEqual(['c0', 'c3', 'c4', 'c5', 'h6', 'h7']);
     expect(slots({ cards }).visible).toContain('c1');
-    expect(boardSlots(undismissed(ids, cards, dismissed), cards, { live: NO_LIVE, selectedId: null, prev: FULL, capacity: 6 }).visible)
-      .toEqual(['c0', 'c3', 'c4', 'c5', 'h6', 'h7']);
+    // The dismissed cards' slots stay empty; h6 stays off, and h7 too: it was dismissed before this board.
+    expect(boardSlots(undismissed(ids, cards, dismissed), cards, { live: NO_LIVE, selectedId: null, prev: { visible: FULL, off: ['h6', 'h7'] }, capacity: 6 }).visible)
+      .toEqual(['c0', 'c3', 'c4', 'c5']);
     const later = { ...cards, c1: { ...cards.c1!, lastActivityAt: 1000 } };
     expect(undismissed(ids, later, dismissed)).toContain('c1');
   });

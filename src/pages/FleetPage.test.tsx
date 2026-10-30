@@ -679,7 +679,10 @@ describe('FleetPage', () => {
         } as never)
       );
 
-    it('takes it off the board without selecting it or zooming, and the next card takes the slot', async () => {
+    const grid = () => screen.getAllByRole('article')[0]!.parentElement!;
+    const shape = () => [grid().style.getPropertyValue('--cols'), grid().style.getPropertyValue('--rows'), grid().children.length];
+
+    it('takes it off the board without selecting it or zooming; of six, five stay on 3 × 2 and no card off the board takes the slot, a reload either', async () => {
       fleetSnapshot.mockResolvedValue([
         { ...workspace('w0', 'W0'), recentMessages: [said('s1', 'Ship the release notes', 0)] },
         ...Array.from({ length: 6 }, (_, i) => workspace(`w${i + 1}`, `W${i + 1}`, (i + 1) * 1000)),
@@ -688,10 +691,28 @@ describe('FleetPage', () => {
       await screen.findByRole('button', { name: 'Select W5' });
       expect(shown()).toEqual(['W0', 'W1', 'W2', 'W3', 'W4', 'W5']);
       fireEvent.click(screen.getByRole('button', { name: 'Dismiss W0' }));
-      expect(shown()).toEqual(['W1', 'W2', 'W3', 'W4', 'W5', 'W6']);
+      expect(shown()).toEqual(['W1', 'W2', 'W3', 'W4', 'W5']);
+      expect(shape()).toEqual(['3', '2', 5]);
       expect(useFleetStore.getState().selectedId).toBeNull();
       expect(screen.queryByRole('dialog')).toBeNull();
       expect(screen.getByRole('textbox', { name: 'Terminal' })).toHaveFocus();
+      fireEvent.focus(window);
+      await waitFor(() => expect(fleetSnapshot).toHaveBeenCalledTimes(2));
+      await waitFor(() => expect(useFleetStore.getState().buffer).toBeNull());
+      expect(shown()).toEqual(['W1', 'W2', 'W3', 'W4', 'W5']);
+    });
+
+    it('lays the cards left as a board of only them would: four become three in a row, none off the board brought on', async () => {
+      fleetSnapshot.mockResolvedValue(Array.from({ length: 8 }, (_, i) => workspace(`w${i}`, `W${i}`, i * 1000)));
+      renderFleet();
+      await screen.findByRole('button', { name: 'Select W5' });
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss W0' }));
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss W1' }));
+      expect(shown()).toEqual(['W2', 'W3', 'W4', 'W5']);
+      expect(shape()).toEqual(['2', '2', 4]);
+      fireEvent.click(screen.getByRole('button', { name: 'Dismiss W2' }));
+      expect(shown()).toEqual(['W3', 'W4', 'W5']);
+      expect(shape()).toEqual(['3', '1', 3]);
     });
 
     it('brings it back on news after the dismissal, not on news from before it', async () => {

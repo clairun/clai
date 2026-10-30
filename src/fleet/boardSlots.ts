@@ -1,23 +1,30 @@
 import { RECENT_WINDOW_MS, cardPhase, type FleetCard, type FleetLive } from './fleetModel';
 
+/** The most cards the board shows (`boardShape`). */
+export const BOARD_CAPACITY = 6;
+
 interface BoardSlots {
   /** The cards on the board, in slot order; at most the capacity. */
   visible: string[];
+  /** The cards left off it, most pressing first. */
+  off: string[];
   /** Cards off the board that are still active. */
   hidden: { working: number; waiting: number };
 }
 
 /**
  * Which cards fit on a board that never scrolls. Cards on it keep their
- * slots; a free slot takes the most pressing card off the board. A card off
- * the board takes the slot of the least pressing card on it only when it
- * outranks it: selected > needs you > working > idle (an idle card never
- * pushes in; ties stay). Within a rank the least recent card goes first.
+ * slots, and a card left off stays off: a slot a card leaves (closed, gone
+ * idle too long, deleted) stays empty. A free slot takes only a card new to
+ * the board, the most pressing first. A card off the board takes a free slot,
+ * or else the slot of the least pressing card on it, only when it outranks
+ * that card: selected > needs you > working > idle (an idle card never pushes
+ * in; ties stay). Within a rank the least recent card goes first.
  */
 export const boardSlots = (
   order: readonly string[],
   cards: Record<string, FleetCard>,
-  options: { live: FleetLive; selectedId: string | null; prev: readonly string[]; capacity: number }
+  options: { live: FleetLive; selectedId: string | null; prev: Pick<BoardSlots, 'visible' | 'off'>; capacity: number }
 ): BoardSlots => {
   const { live, selectedId, prev, capacity } = options;
   const phase = new Map(order.map((id) => [id, cardPhase(cards[id]!, live)]));
@@ -26,19 +33,29 @@ export const boardSlots = (
   const byPressing = (a: string, b: string) => rank(a) - rank(b) || cards[b]!.lastActivityAt - cards[a]!.lastActivityAt;
   const least = (slots: readonly string[]) => slots.reduce((low, id) => (byPressing(id, low) > 0 ? id : low));
 
-  let visible = prev.filter((id) => phase.has(id));
+  let visible = prev.visible.filter((id) => phase.has(id));
   while (visible.length > capacity) visible = visible.filter((id) => id !== least(visible));
   const off = order.filter((id) => !visible.includes(id)).sort(byPressing);
-  while (visible.length < capacity && off.length > 0) visible.push(off.shift()!);
-  while (off.length > 0 && visible.length > 0) {
-    const low = least(visible);
-    if (rank(off[0]!) >= rank(low)) break;
+  for (const id of off.filter((id) => !prev.off.includes(id))) {
+    if (visible.length === capacity) break;
+    visible.push(id);
+    off.splice(off.indexOf(id), 1);
+  }
+  while (off.length > 0) {
+    // An empty board takes only the selected card.
+    const low = visible.length > 0 ? least(visible) : null;
+    if (low === null ? off[0] !== selectedId : rank(off[0]!) >= rank(low)) break;
+    if (low === null || visible.length < capacity) {
+      visible.push(off.shift()!);
+      continue;
+    }
     visible[visible.indexOf(low)] = off.shift()!;
     off.push(low);
     off.sort(byPressing);
   }
   return {
     visible,
+    off,
     hidden: {
       working: off.filter((id) => phase.get(id) === 'working').length,
       waiting: off.filter((id) => phase.get(id) === 'waiting').length,
@@ -102,8 +119,8 @@ interface BoardShape {
 }
 
 /**
- * Six cards 3 × 2, the rest off the board; with fewer, each grows. Never fewer than
- * two columns, so a lone card's bubbles don't stretch into very long lines.
+ * The grid for the cards on the board: six 3 × 2; with fewer, each grows. Never
+ * fewer than two columns, so a lone card's bubbles don't stretch into very long lines.
  */
 export const boardShape = (count: number): BoardShape => {
   if (count <= 3) return { cols: Math.max(2, count), rows: 1 };
