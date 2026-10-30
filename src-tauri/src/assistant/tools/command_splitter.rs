@@ -856,14 +856,25 @@ fn read_heredoc(input: &str, start: usize, out: &mut Commands) -> Option<usize> 
 /// The heredoc delimiter word heading `rest`: its length, and its text with
 /// quotes removed. It ends at a blank or an operator outside quotes, so
 /// `'EOF'`, `"E F"`, `\EOF` and `E"OF"` close at a line reading `EOF` or
-/// `E F`. `None` on an unquoted `$` or backtick, or a line continuation:
-/// bash may end the word elsewhere or read it differently.
+/// `E F`. `None` on an unquoted `$` or backtick, a `\` inside double
+/// quotes, or a line continuation: bash may end the word elsewhere or read it
+/// differently.
 fn heredoc_delimiter(rest: &str) -> Option<(usize, String)> {
     let mut delim = String::new();
     let mut chars = rest.char_indices();
     while let Some((at, c)) = chars.next() {
         match c {
-            '\'' | '"' => delim.extend(chars.by_ref().map(|(_, q)| q).take_while(|&q| q != c)),
+            '\'' | '"' => {
+                let part: String = chars
+                    .by_ref()
+                    .map(|(_, q)| q)
+                    .take_while(|&q| q != c)
+                    .collect();
+                if c == '"' && part.contains('\\') {
+                    return None;
+                }
+                delim.push_str(&part);
+            }
             '\\' => match chars.next() {
                 Some((_, '\n')) => return None,
                 Some((_, escaped)) => delim.push(escaped),
@@ -1704,8 +1715,9 @@ mod tests {
     #[test]
     fn heredoc_delimiter_bash_closes_elsewhere_is_unparsed() {
         // bash runs the `touch PWN` in each: an empty delimiter closes at the
-        // first empty line, 0x01 and 0x7f do not match themselves, and `<<-`
-        // matches a quoted leading tab before stripping tabs.
+        // first empty line, 0x01 and 0x7f do not match themselves, `<<-`
+        // matches a quoted leading tab before stripping tabs, and a `\` in
+        // double quotes escapes the next character.
         for input in [
             "cat <<''\n'\n\ntouch PWN\n'",
             "cat <<\"\"\n'\n\ntouch PWN\n'",
@@ -1715,6 +1727,13 @@ mod tests {
             "cat <<-\"\tE\"\n\tE\ntouch PWN",
             "cat <<-'\tE'\n\tE\ntouch PWN",
             "cat <<-\\\tE\n\tE\ntouch PWN",
+            "cat <<\"E\\\\\"\nE\\\ntouch PWN\nE\\\\",
+            "cat <<\"E\\\"F\"\nE\"F\ntouch PWN",
+            "cat <<\"E\\$\"\nE$\ntouch PWN\nE\\$",
+            "cat <<\"E\\`\"\nE`\ntouch PWN\nE\\`",
+            "cat <<E\"\\\\\"\nE\\\ntouch PWN\nE\\\\",
+            "cat <<-\"E\\\\\"\n\tE\\\ntouch PWN\nE\\\\",
+            "[ x <<\"E\\\\\" ]\nE\\\ntouch PWN\nE\\\\",
         ] {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
