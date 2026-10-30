@@ -14,8 +14,9 @@ interface BoardSlots {
 
 /**
  * Which cards fit on a board that never scrolls. Cards on it keep their
- * slots, and a card left off stays off: a slot a card leaves (closed, gone
- * idle too long, deleted) stays empty. A free slot takes only a card new to
+ * order, and a card left off stays off: when a card leaves (closed, gone
+ * idle too long, deleted), the ones after it move up and the board keeps one
+ * card fewer, even none. A free slot takes only a card new to
  * the board, the most pressing first. A card off the board takes a free slot,
  * or else the slot of the least pressing card on it, only when it outranks
  * that card: selected > needs you > working > idle (an idle card never pushes

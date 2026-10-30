@@ -715,6 +715,16 @@ describe('FleetPage', () => {
       expect(shape()).toEqual(['3', '1', 3]);
     });
 
+    it('says the board is empty once every card shown is closed while others are off it', async () => {
+      fleetSnapshot.mockResolvedValue(Array.from({ length: 8 }, (_, i) => workspace(`w${i}`, `W${i}`, i * 1000)));
+      renderFleet();
+      await screen.findByRole('button', { name: 'Select W5' });
+      for (const name of ['W0', 'W1', 'W2', 'W3', 'W4', 'W5']) fireEvent.click(screen.getByRole('button', { name: `Dismiss ${name}` }));
+      expect(screen.queryAllByRole('article')).toHaveLength(0);
+      expect(screen.getByRole('heading', { name: 'The board is empty' })).toBeInTheDocument();
+      expect(screen.getByText(/2 cards are off it; Ctrl\+Tab brings one in/)).toBeInTheDocument();
+    });
+
     it('brings it back on news after the dismissal, not on news from before it', async () => {
       fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha'), workspace('b', 'Beta', 60_000)]);
       renderFleet();

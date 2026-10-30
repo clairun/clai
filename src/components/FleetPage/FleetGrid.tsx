@@ -95,6 +95,15 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
 
   return (
     <>
+    {visible.length === 0 ? (
+      // Every card shown was closed; the ones left off stay off.
+      <div className={styles.empty}>
+        <h2>The board is empty</h2>
+        <p>
+          {board.off.length} {board.off.length === 1 ? 'card is' : 'cards are'} off it; Ctrl+Tab brings one in.
+        </p>
+      </div>
+    ) : (
     <div ref={gridRef} className={`${styles.board} ${fx.fx}`} onClick={deselect}>
       <div className={styles.cards} style={{ '--cols': shape.cols, '--rows': shape.rows } as CSSProperties} onClick={deselect}>
         {panels.map(({ card, feed, selected, hue }) => {
@@ -114,6 +123,7 @@ const FleetGrid = ({ order, cards, selectedId, live, faces, now, onSelect, onOpe
         })}
       </div>
     </div>
+    )}
     {more && (
       <p className={styles.offBoard}>
         {more} — Ctrl+Tab to switch, or open the <Link to="/workspace">Workspace view</Link>
