@@ -116,6 +116,26 @@ describe('AppRoutes', () => {
     expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace/ws-123');
   });
 
+  it('keeps the last workspace when the user then hit a route that is not a view', async () => {
+    existingWorkspaces('ws-123');
+    visit('/workspace/ws-123');
+    visit('/nope');
+
+    renderAt('/');
+    expect(await screen.findByTestId('workspace')).toHaveTextContent('ws-123');
+  });
+
+  it('replaces the entry when reopening a workspace, so Back leaves the app', async () => {
+    existingWorkspaces('ws-123');
+    visit('/workspace/ws-123');
+
+    renderEntries(['/somewhere', '/']);
+    expect(await screen.findByTestId('workspace')).toHaveTextContent('ws-123');
+
+    fireEvent.click(screen.getByText('back'));
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/somewhere');
+  });
+
   it('reopens on the fleet when the user left a workspace for the fleet', () => {
     visit('/workspace/ws-123');
     visit('/fleet');
