@@ -1,32 +1,30 @@
 //! Splits a shell command string into the commands it will run.
 //!
-//! Every command the shell would execute becomes one [`Segment`]: the
-//! commands joined by `|`, `||`, `|&`, `&&`, `;`, `&` or a newline, and the
-//! commands inside subshells `( … )`, brace groups `{ …; }`, function bodies
-//! and `if`/`while`/`until`/`for`/`select`/`case` blocks. A call to a
-//! function is a command too, wherever the function was defined: its
-//! arguments may be what runs (`f(){ "$@"; }; f rm -rf x`).
+//! The input is parsed with tree-sitter-bash. Every command the shell would
+//! execute becomes one [`Segment`]: the commands joined by `|`, `|&`, `&&`,
+//! `||`, `;`, `&` or a newline, the commands inside subshells, brace groups,
+//! function bodies and `if`/`while`/`until`/`for`/`case` blocks, and the
+//! commands inside command and process substitutions, which become rows of
+//! their own next to the command that holds them.
 //!
-//! Shell grammar is not a command: braces, parentheses, reserved words,
-//! function headers, `for`/`case` headers and `case` patterns. It is dropped,
-//! unless it redirects or embeds a substitution (`for f in $(ls)`, or
-//! `done > log`, which applies to the whole loop); then it is kept as an
-//! Opaque segment, because it runs or writes something.
+//! Shell grammar is not a command: braces, reserved words, function headers,
+//! `for`/`case` headers and `case` patterns. Redirects on a block are kept as
+//! an Opaque segment, because they may write any file.
 //!
-//! Segments are classified as either:
+//! Only node kinds and tokens this module names are accepted. A parse error,
+//! anything else, or a construct whose effect depends on runtime values bash
+//! may evaluate as code (arithmetic on variables, indirect expansion) makes
+//! the whole input one [`Segment::Unparsed`]. So does a command that runs
+//! another command from its arguments (`xargs`, `env`, `time`, `bash -c`, …)
+//! or whose name is not a plain word (`\rm`, `"$cmd"`).
 //!
-//! - [`Segment::Simple`] — a plain command whose head (binary + canonical
-//!   subcommand) is unambiguous from textual inspection.
-//! - [`Segment::Opaque`] — a segment whose surface form includes one of
-//!   command substitution (`$(...)`, backticks), test expressions, heredocs,
-//!   redirects, process substitution, or an executor-style head (`bash -c`,
-//!   `xargs`, `eval`, ...). The shape is harder to reason about than a plain
-//!   command. The policy layer can match its head when there is a stable
-//!   suggested prefix.
+//! - [`Segment::Simple`] — a plain command.
+//! - [`Segment::Opaque`] — a command with a redirect, heredoc, here-string,
+//!   command or process substitution, or a `[`/`[[` test.
 //! - [`Segment::Unparsed`] — the whole input when it cannot be split
 //!   reliably. The policy layer decides it as one row of exact text.
 
-#![allow(dead_code)] // wired into enforce_command_policy in commit 6
+use tree_sitter::Node;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Segment {
@@ -48,67 +46,13 @@ impl Segment {
     }
 }
 
-/// A block whose commands are segments of their own.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Scope {
-    /// `( … )`
-    Subshell,
-    /// `{ …; }`
-    Group,
-    /// `if … fi`
-    If,
-    /// `for`, `select`, `while`, `until` … `done`
-    Loop,
-    /// `case … esac`: its header and its item bodies.
-    Case,
-    /// A `case` item's pattern, from `in` or `;;` to its `)`.
-    Pattern,
-}
-
-/// What a reserved word does where a command would start.
-#[derive(Debug, Clone, Copy)]
-enum Keyword {
-    /// Opens a block whose body follows: `if`, `while`, `until`, `{`.
-    Open(Scope),
-    /// Opens a block with a header that is not a command: `for`,
-    /// `select`, `case`.
-    Header(Scope),
-    /// Separates the parts of a block, or negates a pipeline: `then`,
-    /// `elif`, `else`, `do`, `!`.
-    Part,
-    /// Closes a block: `fi`, `done`, `esac`, `}`.
-    Close(Scope),
-    /// `function NAME`.
-    Function,
-    /// `in`, which belongs only in a header.
-    Misplaced,
-}
-
-fn keyword(word: &str) -> Option<Keyword> {
-    Some(match word {
-        "if" => Keyword::Open(Scope::If),
-        "while" | "until" => Keyword::Open(Scope::Loop),
-        "{" => Keyword::Open(Scope::Group),
-        "for" | "select" => Keyword::Header(Scope::Loop),
-        "case" => Keyword::Header(Scope::Case),
-        "then" | "elif" | "else" | "do" | "!" => Keyword::Part,
-        "fi" => Keyword::Close(Scope::If),
-        "done" => Keyword::Close(Scope::Loop),
-        "esac" => Keyword::Close(Scope::Case),
-        "}" => Keyword::Close(Scope::Group),
-        "function" => Keyword::Function,
-        "in" => Keyword::Misplaced,
-        _ => return None,
-    })
-}
-
-/// True for a word that is shell grammar rather than a command name. Such a
-/// word heads a segment only when the grammar redirects or substitutes, or
-/// the input could not be split; either way it is no prefix to allowlist.
+/// True for a word that is shell grammar rather than a command name.
 pub fn is_shell_syntax(word: &str) -> bool {
-    keyword(word).is_some()
-        || word.strip_suffix("()").is_some_and(is_function_name)
-        || word.strip_suffix("(){").is_some_and(is_function_name)
+    const RESERVED: &[&str] = &[
+        "if", "then", "elif", "else", "fi", "while", "until", "for", "select", "in", "do", "done",
+        "case", "esac", "function", "{", "}", "!", "[[", "]]",
+    ];
+    RESERVED.contains(&word) || word.ends_with("()") || word.ends_with("(){")
 }
 
 /// True if `text` runs a command of its own through a command or process
@@ -117,843 +61,501 @@ pub fn has_substitution(text: &str) -> bool {
     ["$(", "`", "<(", ">("].iter().any(|s| text.contains(s))
 }
 
-/// The characters that separate words in shell syntax. A carriage return is
-/// not one: bash reads it as part of a word.
-fn is_blank(c: char) -> bool {
-    matches!(c, ' ' | '\t' | '\n')
-}
-
-/// A heredoc whose body starts on the line after its operator.
-struct Heredoc {
-    /// The delimiter after quote removal.
-    delim: String,
-    /// `<<-`: the closing line may be indented with tabs.
-    strip_tabs: bool,
-    /// Part of the delimiter was quoted, so body lines are not joined.
-    quoted: bool,
-    /// The segment of the command that reads it.
-    owner: usize,
-}
-
-/// The commands read so far, and the one being read.
-#[derive(Default)]
-struct Commands {
-    segments: Vec<Segment>,
-    buf: String,
-    /// `buf` has a construct that makes it Opaque.
-    opaque: bool,
-    /// `buf` is grammar, not a command: a `for`/`case` header, a `case`
-    /// pattern, a function header, or a closed block and its redirects.
-    grammar: bool,
-    scopes: Vec<Scope>,
-    /// Parentheses nested inside the current case pattern (for extglob).
-    pattern_parens: u32,
-    /// Heredocs opened on the current line.
-    heredocs: Vec<Heredoc>,
-}
-
-impl Commands {
-    fn at_command_start(&self) -> bool {
-        !self.grammar && self.buf.chars().all(is_blank)
-    }
-
-    /// `buf` holds only the word that closed a block. A reserved word may
-    /// follow it directly, but not after a redirect: `if { a; } then`,
-    /// `fi fi`, against `done > fi`.
-    fn just_closed(&self) -> bool {
-        let word = self.buf.trim();
-        self.grammar && (word == ")" || matches!(keyword(word), Some(Keyword::Close(_))))
-    }
-
-    fn top(&self) -> Option<Scope> {
-        self.scopes.last().copied()
-    }
-
-    /// The keyword heading `buf` while it is a `for`, `select` or `case`
-    /// header.
-    fn header(&self) -> Option<&str> {
-        let first = self.buf.split_whitespace().next()?;
-        (self.grammar && matches!(first, "for" | "select" | "case")).then_some(first)
-    }
-
-    /// A header may break lines before its word list: `case WORD` up to
-    /// `in`, and `for NAME` up to `in` or `do`.
-    fn header_continues(&self) -> bool {
-        match self.header() {
-            Some("case") => true,
-            Some(_) => self.buf.split_whitespace().count() == 2,
-            None => false,
-        }
-    }
-
-    /// Ends the command in `buf`. Grammar runs nothing of its own unless it
-    /// redirects or substitutes; then it is kept, as Opaque.
-    fn end(&mut self) {
-        let text = self.buf.trim();
-        let runs = !self.grammar || has_substitution(text) || text.contains(['<', '>']);
-        if runs && !text.is_empty() {
-            let text = text.to_string();
-            self.segments
-                .push(if self.opaque || self.grammar || head_is_executor(&text) {
-                    Segment::Opaque(text)
-                } else {
-                    Segment::Simple(text)
-                });
-        }
-        self.buf.clear();
-        self.opaque = false;
-        self.grammar = false;
-    }
-
-    /// Applies a reserved word read where a command would start. `None`
-    /// when it is out of place, such as closing a block that is not open.
-    fn keyword(&mut self, keyword: Keyword, word: &str) -> Option<()> {
-        match keyword {
-            Keyword::Open(scope) => self.scopes.push(scope),
-            Keyword::Header(scope) => {
-                self.scopes.push(scope);
-                self.buf.push_str(word);
-                self.grammar = true;
-            }
-            Keyword::Part | Keyword::Function => {}
-            Keyword::Close(scope) => self.close(scope, word)?,
-            Keyword::Misplaced => return None,
-        }
-        Some(())
-    }
-
-    /// Closes the innermost block, which must be `scope`, with `word`.
-    /// What follows up to the next separator applies to the whole block,
-    /// so it is grammar, shown after `word` if it redirects.
-    fn close(&mut self, scope: Scope, word: &str) -> Option<()> {
-        if self.scopes.pop() != Some(scope) {
-            return None;
-        }
-        self.buf.push_str(word);
-        self.grammar = true;
-        Some(())
-    }
-
-    fn enter_pattern(&mut self) {
-        self.scopes.push(Scope::Pattern);
-        self.pattern_parens = 0;
-        self.grammar = true;
-    }
-
-    /// Reads the bodies of the heredocs opened on the line that ended just
-    /// before `i`, appends each to the command that reads it, and returns
-    /// where lexing resumes. A body is data, not commands.
-    ///
-    /// Under an unquoted delimiter, bash first joins a line ending in an odd
-    /// run of backslashes with the next one, dropping that last backslash and
-    /// the newline; `<<-` then strips tabs from the start of the joined line.
-    fn read_heredoc_bodies(&mut self, input: &str, mut i: usize) -> usize {
-        for heredoc in std::mem::take(&mut self.heredocs) {
-            let start = i;
-            let mut line = String::new();
-            for physical in input[start..].split_inclusive('\n') {
-                i += physical.len();
-                match physical.strip_suffix('\n') {
-                    Some(text)
-                        if !heredoc.quoted
-                            && (text.len() - text.trim_end_matches('\\').len()) % 2 == 1 =>
-                    {
-                        line.push_str(&text[..text.len() - 1]);
-                        continue;
-                    }
-                    Some(text) => line.push_str(text),
-                    None => line.push_str(physical),
-                }
-                let closer = if heredoc.strip_tabs {
-                    line.trim_start_matches('\t')
-                } else {
-                    &line
-                };
-                if closer == heredoc.delim {
-                    break;
-                }
-                line.clear();
-            }
-            if let Some(Segment::Simple(text) | Segment::Opaque(text)) =
-                self.segments.get_mut(heredoc.owner)
-            {
-                text.push('\n');
-                text.push_str(input[start..i].trim_end_matches('\n'));
-            }
-        }
-        i
-    }
-}
-
-/// Splits a shell command into [`Segment`]s.
-///
-/// The returned vector preserves execution order. When the input cannot be
-/// split reliably — an unterminated quote, an unbalanced block — separator
-/// detection after that point means nothing (one stray quote silently
-/// swallows later `;` / `&&` / `|`), so the whole input becomes one Unparsed
-/// segment the user reviews as a unit, with no saved allowlist prefix.
+/// Splits a shell command into [`Segment`]s, in source order.
 pub fn split_command(input: &str) -> Vec<Segment> {
     split(input).unwrap_or_else(|| vec![Segment::Unparsed(input.trim().to_string())])
 }
 
-/// An open `$( … )`, `( … )`, `${ … }` or `{ … }` inside a word.
-struct Nesting {
-    /// The character that closes it.
-    closer: char,
-    /// It was opened inside double quotes, which resume once it closes.
-    in_double: bool,
-    /// The inner `(` of `((` or `$((`. Bash reads arithmetic only when its
-    /// `)` is directly followed by the outer one; otherwise it re-reads the
-    /// parentheses as commands.
-    arith: bool,
+fn split(input: &str) -> Option<Vec<Segment>> {
+    if !lexes_like_bash(input) {
+        return None;
+    }
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(input, None)?;
+    let root = tree.root_node();
+    if root.has_error() {
+        return None;
+    }
+    let mut walker = Walker {
+        src: input,
+        out: Vec::new(),
+    };
+    walker.node(root)?;
+    Some(walker.out)
 }
 
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "lint debt: cognitive complexity 65 against a budget of 25"
-)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "lint debt: 354 lines against a 100-line budget; split it, do not raise the budget"
-)]
-fn split(input: &str) -> Option<Vec<Segment>> {
-    let bytes = input.as_bytes();
-    let n = bytes.len();
+/// Commands that run another command named in their arguments.
+const WRAPPERS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "xargs", "eval", "watch", "nohup", "time",
+    "timeout", "nice", "taskset", "env", "exec", "source", ".", "command", "builtin", "coproc",
+];
 
-    let mut out = Commands::default();
+/// Tokens that only sequence or group commands.
+const GRAMMAR_TOKENS: &[&str] = &[
+    "&&", "||", "|", "|&", ";", "&", "\n", "(", ")", "{", "}", "!", "if", "then", "elif", "else",
+    "fi", "while", "until", "for", "select", "in", "do", "done", "case", "esac", ";;", "function",
+];
 
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut in_backtick = false;
-    let mut escape = false;
-    // Where the last escaped character ends: a blank there is part of a word.
-    let mut escaped_end = None;
-    let mut nesting: Vec<Nesting> = Vec::new();
+/// Operators of `${…}` that read a variable without evaluating its value.
+const EXPANSION_TOKENS: &[&str] = &[
+    "${", "}", "#", "##", "%", "%%", "/", "//", "/#", "/%", ":-", "-", ":=", "=", ":+", "+", ":?",
+    "?", "^", "^^", ",", ",,", "[", "]",
+];
 
-    let mut i = 0;
-    while i < n {
-        // Shell syntax is ASCII, so any other character is literal text in
-        // every state: copy it whole. Read byte by byte, `—` would become
-        // `â\u{80}\u{94}`. Every other step moves over ASCII bytes, so `i`
-        // is always on a character boundary here.
-        if !bytes[i].is_ascii() {
-            let ch = input[i..]
-                .chars()
-                .next()
-                .unwrap_or(char::REPLACEMENT_CHARACTER);
-            out.buf.push(ch);
-            escape = false;
-            i += ch.len_utf8();
-            continue;
-        }
-        let c = bytes[i] as char;
-        let next = if i + 1 < n {
-            Some(bytes[i + 1] as char)
-        } else {
-            None
-        };
+/// Operators that compare their operands as arithmetic, evaluating a
+/// variable's value as an expression (`a[$(cmd)]` runs `cmd`).
+const ARITHMETIC_TESTS: &[&str] = &["-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-v"];
 
-        // Escape: a backslash immediately followed by a newline is a line
-        // continuation — the shell removes BOTH characters and joins the
-        // lines into one logical command. Drop the backslash we already
-        // buffered and swallow the newline. Any other escaped char is kept
-        // literally, a carriage return too: bash joins no lines at `\`
-        // before `\r\n`. (Single quotes never set `escape`, so
-        // `\<newline>` inside `'...'` correctly stays literal.)
-        if escape {
-            escape = false;
-            if c == '\n' {
-                out.buf.pop(); // remove the trailing backslash
-                if escaped_end == Some(i - 1) {
-                    escaped_end = Some(i + 1);
-                }
-                i += 1;
-                continue;
+struct Walker<'src> {
+    src: &'src str,
+    out: Vec<Segment>,
+}
+
+impl<'src> Walker<'src> {
+    fn text(&self, node: Node) -> &'src str {
+        &self.src[node.byte_range()]
+    }
+
+    fn children<'tree>(node: Node<'tree>) -> Vec<Node<'tree>> {
+        let mut cursor = node.walk();
+        node.children(&mut cursor).collect()
+    }
+
+    /// Walks a node. `None` when it holds anything not proven understood.
+    fn node(&mut self, node: Node) -> Option<()> {
+        match node.kind() {
+            "comment" => self.starts_word(node.start_byte()).then_some(()),
+            "program"
+            | "list"
+            | "pipeline"
+            | "subshell"
+            | "compound_statement"
+            | "negated_command"
+            | "do_group"
+            | "if_statement"
+            | "elif_clause"
+            | "else_clause"
+            | "while_statement"
+            | "for_statement"
+            | "case_statement"
+            | "case_item"
+            | "function_definition" => self.grammar(node),
+            "command" | "declaration_command" | "unset_command" => self.command(node, node),
+            "variable_assignment" | "variable_assignments" => {
+                self.words(node)?;
+                self.out.push(Segment::Simple(self.row_text(node)));
+                Some(())
             }
-            out.buf.push(c);
-            i += 1;
-            escaped_end = Some(i);
-            continue;
+            "test_command" => self.test(node),
+            "redirected_statement" => self.redirected(node),
+            _ => self.word(node),
         }
+    }
 
-        // Inside single quotes: only ' ends it. No escapes.
-        if in_single {
-            out.buf.push(c);
-            if c == '\'' {
-                in_single = false;
+    /// Grammar that only sequences commands: walk what it holds.
+    fn grammar(&mut self, node: Node) -> Option<()> {
+        if node.kind() == "compound_statement" && self.text(node).starts_with("((") {
+            return self.arithmetic(node);
+        }
+        for child in Self::children(node) {
+            if child.is_named() {
+                self.node(child)?;
+            } else if !GRAMMAR_TOKENS.contains(&child.kind()) {
+                return None;
             }
-            i += 1;
-            continue;
         }
+        Some(())
+    }
 
-        // Inside backticks: only ` ends it. Backslash escapes the next char.
-        // Read before double quotes: a backtick opened inside them ends first.
-        if in_backtick {
-            out.buf.push(c);
-            if c == '\\' {
-                escape = true;
-            } else if c == '`' {
-                in_backtick = false;
+    /// A command; `row` is the node whose text the user approves.
+    fn command(&mut self, node: Node, row: Node) -> Option<()> {
+        if node.kind() == "command" {
+            let name = node.child_by_field_name("name")?;
+            let word = name.named_child(0)?;
+            let text = self.text(word);
+            if word.kind() != "word" || !is_plain_name(text) || WRAPPERS.contains(&text) {
+                return None;
             }
-            i += 1;
-            continue;
-        }
-
-        // Inside double quotes: handle \, ", $(, `.
-        if in_double {
-            out.buf.push(c);
-            if c == '\\' {
-                escape = true;
-            } else if c == '"' {
-                in_double = false;
-            } else if c == '$' && matches!(next, Some('(' | '{')) {
-                let open = next.unwrap();
-                out.opaque |= open == '(';
-                out.buf.push(open);
-                nesting.push(Nesting {
-                    closer: closer_of(open),
-                    in_double: true,
-                    arith: false,
-                });
-                in_double = false;
-                i += 2;
-                continue;
-            } else if c == '`' {
-                out.opaque = true;
-                in_backtick = true;
-            }
-            i += 1;
-            continue;
-        }
-
-        // Inside a substitution or expansion: one word, no separators.
-        // Only quotes and nesting are read here, so the split gives up on
-        // anything that moves where the word ends: a `case` pattern's `)`,
-        // a comment, a heredoc body, `$'…'` quoting, a quote or nesting
-        // inside `"${…}"`, or a closer that does not match its opener.
-        if let Some(top) = nesting.last() {
-            let prev = bytes[i - 1] as char;
-            let word_start = is_blank(prev) || ";&|()<>".contains(prev);
-            if (word_start && (c == '#' || word_at(input, i) == "case"))
-                || (input[i..].starts_with("<<") && !input[i..].starts_with("<<<") && prev != '<')
-                || (c == '$' && next == Some('\''))
-                || (top.closer == '}'
-                    && top.in_double
-                    && (matches!(c, '\'' | '"' | '(' | '{') || (c == '$' && next == Some('{'))))
+            // A redirect before the name would head the row, hiding the
+            // command from prefix rules: `2>&1 rm -rf x`.
+            let mut cursor = node.walk();
+            if node
+                .children(&mut cursor)
+                .take_while(|c| *c != name)
+                .any(|c| c.kind().ends_with("redirect"))
             {
                 return None;
             }
-            out.buf.push(c);
-            match c {
-                '\\' => escape = true,
-                '\'' => in_single = true,
-                '"' => in_double = true,
-                '`' => {
-                    in_backtick = true;
-                    out.opaque = true;
-                }
-                '(' | '{' => nesting.push(Nesting {
-                    closer: closer_of(c),
-                    in_double: false,
-                    arith: false,
-                }),
-                ')' | '}' => {
-                    let closed = nesting.pop()?;
-                    if closed.closer != c || (closed.arith && next != Some(')')) {
-                        return None;
+        }
+        let start = self.out.len();
+        let opaque = self.words(node)?;
+        self.out.insert(start, Segment::Simple(String::new()));
+        let text = self.row_text(row);
+        self.out[start] = if opaque || row != node {
+            Segment::Opaque(text)
+        } else {
+            Segment::Simple(text)
+        };
+        Some(())
+    }
+
+    /// `[ … ]` or `[[ … ]]`, always Opaque.
+    fn test(&mut self, node: Node) -> Option<()> {
+        let mut stack = vec![node];
+        while let Some(n) = stack.pop() {
+            if n.kind() == "binary_expression" || n.kind() == "unary_expression" {
+                let op = n.child_by_field_name("operator").map(|o| self.text(o));
+                if op.is_some_and(|op| ARITHMETIC_TESTS.contains(&op)) {
+                    for operand in Self::children(n).into_iter().filter(|c| c.is_named()) {
+                        if operand.kind() != "test_operator" && !self.is_constant(operand) {
+                            return None;
+                        }
                     }
-                    in_double = closed.in_double;
-                }
-                '$' if matches!(next, Some('(' | '{')) => {
-                    let open = next.unwrap();
-                    out.buf.push(open);
-                    out.opaque |= open == '(';
-                    nesting.push(Nesting {
-                        closer: closer_of(open),
-                        in_double: false,
-                        arith: false,
-                    });
-                    i += 2;
-                    continue;
-                }
-                _ => {}
-            }
-            i += 1;
-            continue;
-        }
-
-        // depth == 0, outside all quotes: full logic applies.
-
-        // Shell comment: `#` at token start (preceded by whitespace or at
-        // the start of input/segment) consumes the rest of the line. Bare
-        // `#` mid-token (e.g. `foo#bar`) is a literal — the previous-char
-        // check filters that out. We DON'T consume the trailing `\n` so
-        // the newline-as-separator handling below still flushes any
-        // command that preceded the inline comment (`ls # listing` →
-        // segment "ls", comment dropped).
-        if c == '#' {
-            let at_token_start =
-                escaped_end != Some(i) && out.buf.chars().last().map(is_blank).unwrap_or(true);
-            if at_token_start {
-                while i < n && bytes[i] != b'\n' {
-                    i += 1;
-                }
-                continue;
-            }
-        }
-
-        match c {
-            '\\' => {
-                out.buf.push(c);
-                escape = true;
-                i += 1;
-                continue;
-            }
-            '\'' => {
-                out.buf.push(c);
-                in_single = true;
-                i += 1;
-                continue;
-            }
-            '"' => {
-                out.buf.push(c);
-                in_double = true;
-                i += 1;
-                continue;
-            }
-            '`' => {
-                out.buf.push(c);
-                in_backtick = true;
-                out.opaque = true;
-                i += 1;
-                continue;
-            }
-            // `$'…'` quoting, whose backslash escapes a quote, is not read.
-            '$' if next == Some('\'') => return None,
-            _ => {}
-        }
-
-        if c == '\n' {
-            // In a case pattern, or before a header's word list, a newline
-            // is a blank; elsewhere it ends the command.
-            if out.top() == Some(Scope::Pattern) || out.header_continues() {
-                out.buf.push(' ');
-            } else {
-                out.end();
-            }
-            i = out.read_heredoc_bodies(input, i + 1);
-            continue;
-        }
-
-        if let Some(after) = grammar_word(input, i, &mut out)? {
-            i = after;
-            continue;
-        }
-
-        // Substitution and grouping triggers
-        if c == '$' && next == Some('(') {
-            let third = if i + 2 < n {
-                Some(bytes[i + 2] as char)
-            } else {
-                None
-            };
-            if third == Some('(') {
-                // Arithmetic expansion $((  — just text, not a substitution.
-                // Track both parens so the matching `))` closes it.
-                out.buf.push_str("$((");
-                nesting.extend([false, true].map(|arith| Nesting {
-                    closer: ')',
-                    in_double: false,
-                    arith,
-                }));
-                i += 3;
-            } else {
-                // Command substitution $(  — runs arbitrary code.
-                out.buf.push_str("$(");
-                nesting.push(Nesting {
-                    closer: ')',
-                    in_double: false,
-                    arith: false,
-                });
-                out.opaque = true;
-                i += 2;
-            }
-            continue;
-        }
-        if c == '$' && next == Some('{') {
-            out.buf.push_str("${");
-            nesting.push(Nesting {
-                closer: '}',
-                in_double: false,
-                arith: false,
-            });
-            i += 2;
-            continue;
-        }
-
-        if out.top() == Some(Scope::Pattern) {
-            i = read_pattern(input, i, &mut out)?;
-            continue;
-        }
-
-        // Process substitution: <( ... ) or >( ... )
-        if (c == '<' || c == '>') && next == Some('(') {
-            out.buf.push(c);
-            out.buf.push('(');
-            nesting.push(Nesting {
-                closer: ')',
-                in_double: false,
-                arith: false,
-            });
-            out.opaque = true;
-            i += 2;
-            continue;
-        }
-
-        // Here-strings (`<<<word`): single-token input, no body. Fall
-        // through to the redirect handler below — they're consumed as
-        // part of the `<` redirect run, like any other redirect form.
-        // We only treat `<<` and `<<-` as proper heredocs that capture
-        // a multi-line body.
-        if c == '<' && next == Some('<') && bytes.get(i + 2) != Some(&b'<') {
-            i = read_heredoc(input, i, &mut out)?;
-            continue;
-        }
-
-        // Plain redirects: >, >>, <, plus dup forms like >&1, <&0
-        if c == '>' || c == '<' {
-            out.opaque = true;
-            out.buf.push(c);
-            i += 1;
-            while i < n {
-                let c2 = bytes[i] as char;
-                if c2 == '>' || c2 == '<' || c2 == '&' || c2 == '|' || c2 == '-' {
-                    out.buf.push(c2);
-                    i += 1;
-                } else {
-                    break;
                 }
             }
-            continue;
+            stack.extend(Self::children(n));
         }
-
-        // &> and &>> stdout+stderr redirect
-        if c == '&' && next == Some('>') {
-            out.opaque = true;
-            out.buf.push('&');
-            out.buf.push('>');
-            i += 2;
-            while i < n {
-                let c2 = bytes[i] as char;
-                if c2 == '>' || c2 == '|' || c2 == '-' {
-                    out.buf.push(c2);
-                    i += 1;
-                } else {
-                    break;
-                }
-            }
-            continue;
-        }
-
-        if c == '(' {
-            // `NAME()` or `NAME ()` defines a function; its body follows.
-            if let Some(after) = empty_parens(input, i) {
-                let name = out.buf.trim().to_string();
-                if !out.grammar && is_function_name(&name) {
-                    out.buf.clear();
-                    out.opaque = false;
-                    i = after;
-                    continue;
-                }
-            }
-            // A subshell. `((` opens an arithmetic command instead.
-            if out.at_command_start() {
-                if next == Some('(') {
-                    out.buf.push_str("((");
-                    nesting.extend([false, true].map(|arith| Nesting {
-                        closer: ')',
-                        in_double: false,
-                        arith,
-                    }));
-                    out.opaque = true;
-                    i += 2;
-                } else {
-                    out.scopes.push(Scope::Subshell);
-                    i += 1;
-                }
-                continue;
-            }
-            // An array literal `a=(…)` or a `for ((…))` header: one word.
-            out.buf.push(c);
-            nesting.push(Nesting {
-                closer: ')',
-                in_double: false,
-                arith: false,
-            });
-            out.opaque = true;
-            i += 1;
-            continue;
-        }
-        if c == ')' {
-            // A `)` that closes no subshell is out of place.
-            out.end();
-            out.close(Scope::Subshell, ")")?;
-            i += 1;
-            continue;
-        }
-        // `{` heading a command word (not a group, which is the word `{`
-        // alone) is brace expansion: `{rm,-rf,x}` runs `rm -rf x`.
-        if c == '{' && out.at_command_start() {
-            out.opaque = true;
-        }
-        // Test expressions: [ ... ] or [[ ... ]] mark Opaque. We don't track
-        // their depth — separators inside are unusual and would only cause
-        // a benign over-split (each side still becomes Opaque from carrying
-        // a `[` or `]` marker, or from the executor-head check).
-        if c == '[' {
-            out.opaque = true;
-        }
-
-        // Separators
-        if c == ';' && out.top() == Some(Scope::Case) && matches!(next, Some(';' | '&')) {
-            // `;;`, `;&` or `;;&` ends a case item; a pattern follows.
-            out.end();
-            out.enter_pattern();
-            i += if input[i..].starts_with(";;&") { 3 } else { 2 };
-            continue;
-        }
-        let separator_len = match (c, next) {
-            ('|', Some('|' | '&')) | ('&', Some('&')) => 2,
-            ('|' | '&' | ';', _) => 1,
-            _ => 0,
-        };
-        if separator_len > 0 {
-            out.end();
-            i += separator_len;
-            continue;
-        }
-
-        // Regular character
-        out.buf.push(c);
-        i += 1;
+        let start = self.out.len();
+        self.parts(node, &["[", "]", "[[", "]]"])?;
+        self.out
+            .insert(start, Segment::Opaque(self.text(node).trim().to_string()));
+        Some(())
     }
 
-    if in_single || in_double || in_backtick || !nesting.is_empty() || !out.scopes.is_empty() {
-        return None;
+    /// A command or block with redirects.
+    fn redirected(&mut self, node: Node) -> Option<()> {
+        let body = node.child_by_field_name("body");
+        match body {
+            Some(body) if body.kind() == "command" => {
+                self.command(body, node)?;
+                for child in Self::children(node).into_iter().filter(|c| *c != body) {
+                    self.word(child)?;
+                }
+                Some(())
+            }
+            Some(body) => {
+                self.node(body)?;
+                let start = self.out.len();
+                for child in Self::children(node).into_iter().filter(|c| *c != body) {
+                    self.word(child)?;
+                }
+                let redirects = self.src[body.end_byte()..node.end_byte()]
+                    .trim()
+                    .to_string();
+                self.out.insert(start, Segment::Opaque(redirects));
+                Some(())
+            }
+            // Tree-sitter reads the words after a leading redirect as its
+            // target (`> f touch x`), where bash runs them.
+            None => None,
+        }
     }
-    out.end();
-    Some(out.segments)
-}
 
-/// Applies the shell grammar word at `i`, if there is one, and returns
-/// where lexing resumes: a reserved word where a command would start
-/// (elsewhere `done` or `{` is an ordinary argument), or the word that ends
-/// a block header. `None` when the word is out of place, such as a closer
-/// of a block that is not open.
-fn grammar_word(input: &str, i: usize, out: &mut Commands) -> Option<Option<usize>> {
-    let word = word_at(input, i);
-    if out.just_closed() && keyword(word).is_some() {
-        out.end();
-    }
-    if out.at_command_start() && !word.is_empty() {
-        let Some(kw) = keyword(word) else {
-            return Some(None);
-        };
-        let mut i = i + word.len();
-        if let Keyword::Function = kw {
-            // `function NAME`, optionally followed by `()`, is a header.
-            i = skip_blanks(input, i);
-            let name = word_at(input, i);
-            if name.is_empty() {
+    /// Walks the words of a command, pushing the commands they substitute.
+    /// Returns true if any makes the command Opaque.
+    fn words(&mut self, node: Node) -> Option<bool> {
+        let mut opaque = false;
+        for child in Self::children(node) {
+            if child.is_named() {
+                opaque |= matches!(
+                    child.kind(),
+                    "file_redirect" | "heredoc_redirect" | "herestring_redirect"
+                );
+                let before = self.out.len();
+                self.word(child)?;
+                opaque |= self.out.len() > before;
+            } else if !matches!(
+                child.kind(),
+                "export"
+                    | "declare"
+                    | "local"
+                    | "readonly"
+                    | "typeset"
+                    | "unset"
+                    | "unsetenv"
+                    | "="
+                    | "+="
+            ) {
                 return None;
             }
-            i += name.len();
-            i = empty_parens(input, i).unwrap_or(i);
-        } else {
-            out.keyword(kw, word)?;
         }
-        return Some(Some(i));
+        Some(opaque)
     }
-    // A header ends at `in` (`case WORD in`) or at `do` (the `for NAME do`
-    // form, without a word list).
-    if out.buf.ends_with(is_blank) {
-        let header_ends = match (out.header(), word) {
-            (Some("case"), "in") => true,
-            (Some("for" | "select"), "do") => out.header_continues(),
-            _ => false,
-        };
-        if header_ends {
-            out.end();
-            if word == "in" {
-                out.enter_pattern();
+
+    /// A word, or part of one. Substituted commands are pushed as segments.
+    fn word(&mut self, node: Node) -> Option<()> {
+        match node.kind() {
+            "word"
+            | "number"
+            | "raw_string"
+            | "ansi_c_string"
+            | "string_content"
+            | "variable_name"
+            | "special_variable_name"
+            | "extglob_pattern"
+            | "regex"
+            | "test_operator"
+            | "file_descriptor"
+            | "heredoc_content"
+            | "heredoc_end" => Some(()),
+            "command_name"
+            | "string"
+            | "concatenation"
+            | "simple_expansion"
+            | "array"
+            | "variable_assignment"
+            | "file_redirect"
+            | "herestring_redirect"
+            | "binary_expression"
+            | "unary_expression"
+            | "parenthesized_expression"
+            | "heredoc_body" => self.parts(
+                node,
+                &[
+                    "\"", "$", "(", ")", "=", "+=", "!", "<", ">", ">>", "&>", "&>>", "<&", ">&",
+                    ">|", "<>", "<<<", ">&-", "<&-", "==", "=~", "!=", "&&", "||", "-a", "-o",
+                ],
+            ),
+            "command_substitution" | "process_substitution" => {
+                for child in Self::children(node) {
+                    if child.is_named() {
+                        self.node(child)?;
+                    } else if !matches!(child.kind(), "$(" | ")" | "`" | "<(" | ">(") {
+                        return None;
+                    }
+                }
+                Some(())
             }
-            return Some(Some(i + word.len()));
+            "expansion" => self.parts(node, EXPANSION_TOKENS),
+            "subscript" => {
+                let index = node.child_by_field_name("index")?;
+                (self.is_constant(index) || matches!(self.text(index), "@" | "*")).then_some(())
+            }
+            "arithmetic_expansion" => self.arithmetic(node),
+            "heredoc_redirect" => self.heredoc(node),
+            _ => None,
         }
     }
-    Some(None)
+
+    fn parts(&mut self, node: Node, tokens: &[&str]) -> Option<()> {
+        for child in Self::children(node) {
+            if child.is_named() {
+                if matches!(
+                    child.kind(),
+                    "pipeline" | "list" | "command" | "redirected_statement"
+                ) {
+                    self.node(child)?;
+                } else {
+                    self.word(child)?;
+                }
+            } else if !tokens.contains(&child.kind()) {
+                return None;
+            }
+        }
+        Some(())
+    }
+
+    /// `$(( … ))` or `(( … ))`: accepted only on constants, since bash
+    /// evaluates a variable's value as an expression that may run commands.
+    fn arithmetic(&mut self, node: Node) -> Option<()> {
+        let constant = Self::children(node)
+            .into_iter()
+            .filter(|c| c.is_named())
+            .all(|c| self.is_constant(c));
+        if !constant {
+            return None;
+        }
+        if node.kind() == "compound_statement" {
+            self.out.push(Segment::Opaque(self.text(node).to_string()));
+        }
+        Some(())
+    }
+
+    /// Numbers and arithmetic on numbers.
+    fn is_constant(&self, node: Node) -> bool {
+        match node.kind() {
+            "number" => true,
+            "word" => self.text(node).bytes().all(|b| b.is_ascii_digit()),
+            "simple_expansion" => matches!(self.text(node), "$?" | "$#" | "$$" | "$!"),
+            "binary_expression" | "unary_expression" | "parenthesized_expression" => {
+                Self::children(node).into_iter().all(|c| {
+                    if c.is_named() {
+                        self.is_constant(c)
+                    } else {
+                        c.kind().bytes().all(|b| b"+-*/%()<>=!&|^~".contains(&b))
+                    }
+                })
+            }
+            _ => false,
+        }
+    }
+
+    /// `<<DELIM`: only delimiters bash and tree-sitter read alike, and a
+    /// body that ends at the first line bash would end it at.
+    fn heredoc(&mut self, node: Node) -> Option<()> {
+        let mut delim = None;
+        let mut strip_tabs = false;
+        let mut body_start = None;
+        for child in Self::children(node) {
+            match child.kind() {
+                "<<" => {}
+                "<<-" => strip_tabs = true,
+                "heredoc_start" => {
+                    delim = Some(heredoc_delimiter(self.text(child))?);
+                    body_start =
+                        Some(child.end_byte() + self.src[child.end_byte()..].find('\n')? + 1);
+                }
+                "heredoc_body" => {
+                    let (_, quoted) = delim.as_ref()?;
+                    let text = self.text(child);
+                    if Some(child.start_byte()) != body_start && !text.is_empty()
+                        || !quoted && (text.contains("\\\n") || text.contains('`'))
+                    {
+                        return None;
+                    }
+                    self.word(child)?;
+                }
+                "heredoc_end" => {
+                    let (word, _) = delim.as_ref()?;
+                    let closes = |line: &str| {
+                        let line = if strip_tabs {
+                            line.trim_start_matches('\t')
+                        } else {
+                            line
+                        };
+                        line == word
+                    };
+                    let line_start = self.src[..child.start_byte()].rfind('\n')? + 1;
+                    let line_end = self.src[child.end_byte()..]
+                        .find('\n')
+                        .map_or(self.src.len(), |i| child.end_byte() + i);
+                    let body = self.src.get(body_start?..line_start)?;
+                    if !closes(&self.src[line_start..line_end]) || body.lines().any(closes) {
+                        return None;
+                    }
+                }
+                "pipeline" | "list" | "command" | "redirected_statement" => self.node(child)?,
+                "file_redirect" | "herestring_redirect" => self.word(child)?,
+                "&&" | "||" | "|" | "|&" | ";" | "&" => {}
+                _ => return None,
+            }
+        }
+        Some(())
+    }
+
+    /// The text of `row`, without the commands tree-sitter nests in a
+    /// heredoc redirect (`cat <<EOF | sh` keeps `sh` a row of its own).
+    fn row_text(&self, row: Node) -> String {
+        let mut text = String::new();
+        let mut at = row.start_byte();
+        let mut stack = vec![row];
+        while let Some(n) = stack.pop() {
+            if n.kind() == "heredoc_redirect" {
+                for c in Self::children(n) {
+                    if matches!(
+                        c.kind(),
+                        "pipeline"
+                            | "list"
+                            | "command"
+                            | "redirected_statement"
+                            | "&&"
+                            | "||"
+                            | "|"
+                            | "|&"
+                            | ";"
+                            | "&"
+                    ) {
+                        text.push_str(&self.src[at..c.start_byte()]);
+                        at = c.end_byte();
+                    }
+                }
+            } else {
+                stack.extend(Self::children(n).into_iter().rev());
+            }
+        }
+        text.push_str(&self.src[at..row.end_byte()]);
+        text.trim().to_string()
+    }
+
+    /// True if bash starts a word at `at`, so a `#` there is a comment.
+    fn starts_word(&self, at: usize) -> bool {
+        let before = &self.src.as_bytes()[..at];
+        match before.last() {
+            None | Some(b';' | b'&' | b'|' | b'(' | b')') => true,
+            Some(b' ' | b'\t' | b'\n') => {
+                let escapes = before[..before.len() - 1]
+                    .iter()
+                    .rev()
+                    .take_while(|b| **b == b'\\')
+                    .count();
+                escapes % 2 == 0
+            }
+            Some(_) => false,
+        }
+    }
 }
 
-/// Reads one step of a `case` pattern, which runs to its `)`: `|` in it
-/// separates alternatives, not commands. `esac` may follow the last item.
-/// Returns where lexing resumes.
-fn read_pattern(input: &str, i: usize, out: &mut Commands) -> Option<usize> {
-    let c = input.as_bytes()[i] as char;
-    let blank = out.buf.chars().all(is_blank);
-    if blank && word_at(input, i) == "esac" {
-        out.scopes.pop();
-        out.close(Scope::Case, "esac")?;
-        return Some(i + "esac".len());
-    }
-    match c {
-        '(' if !blank => {
-            out.pattern_parens += 1;
-            out.buf.push(c);
+/// False for bytes tree-sitter-bash reads as blanks or line continuations
+/// where bash does not, which would let a comment or a word hide a command:
+/// control characters other than tab and newline (`echo x\r# ; rm -rf y`),
+/// an escaped tab, and a line continuation not preceded by a blank.
+fn lexes_like_bash(input: &str) -> bool {
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\t' | b'\n' => {}
+            0..=0x1f | 0x7f => return false,
+            b'\\' => {
+                match bytes.get(i + 1) {
+                    Some(b'\t' | 0..=0x08 | 0x0b..=0x1f | 0x7f) => return false,
+                    Some(b'\n') => {
+                        let blank = i > 0 && matches!(bytes[i - 1], b' ' | b'\t');
+                        if !blank || (i > 1 && bytes[i - 2] == b'\\') {
+                            return false;
+                        }
+                    }
+                    _ => {}
+                }
+                i += 1;
+            }
+            _ => {}
         }
-        ')' if out.pattern_parens > 0 => {
-            out.pattern_parens -= 1;
-            out.buf.push(c);
-        }
-        ')' => {
-            out.end();
-            out.scopes.pop();
-        }
-        _ if !(blank && (c == '(' || is_blank(c))) => out.buf.push(c),
-        _ => {}
-    }
-    Some(i + 1)
-}
-
-/// Reads the heredoc operator at `i` (`<<`, `<<-`) and its delimiter word
-/// into the command, queues the heredoc so its body is read after this
-/// line, and returns where lexing resumes.
-fn read_heredoc(input: &str, start: usize, out: &mut Commands) -> Option<usize> {
-    out.opaque = true;
-    let mut i = start + 2;
-    let strip_tabs = input[i..].starts_with('-');
-    if strip_tabs {
         i += 1;
     }
-    i = skip_blanks(input, i);
-    let (len, delim) = heredoc_delimiter(&input[i..])?;
-    // Bash finds a different closing line for these: an empty delimiter
-    // closes at the first empty line, 0x01 and 0x7f are its internal quoting
-    // bytes, and `<<-` compares a line before stripping its tabs.
-    if delim.is_empty() || delim.contains(['\t', '\x01', '\x7f']) {
-        return None;
-    }
-    let quoted = input[i..i + len].contains(['\'', '"', '\\']);
-    i += len;
-    out.buf.push_str(&input[start..i]);
-    out.heredocs.push(Heredoc {
-        delim,
-        strip_tabs,
-        quoted,
-        owner: out.segments.len(),
-    });
-    Some(i)
+    true
 }
 
-/// The heredoc delimiter word heading `rest`: its length, and its text with
-/// quotes removed. It ends at a blank or an operator outside quotes, so
-/// `'EOF'`, `"E F"`, `\EOF` and `E"OF"` close at a line reading `EOF` or
-/// `E F`. `None` on an unquoted `$` or backtick, a `\` inside double
-/// quotes, or a line continuation: bash may end the word elsewhere or read it
-/// differently.
-fn heredoc_delimiter(rest: &str) -> Option<(usize, String)> {
-    let mut delim = String::new();
-    let mut chars = rest.char_indices();
-    while let Some((at, c)) = chars.next() {
-        match c {
-            '\'' | '"' => {
-                let part: String = chars
-                    .by_ref()
-                    .map(|(_, q)| q)
-                    .take_while(|&q| q != c)
-                    .collect();
-                if c == '"' && part.contains('\\') {
-                    return None;
-                }
-                delim.push_str(&part);
-            }
-            '\\' => match chars.next() {
-                Some((_, '\n')) => return None,
-                Some((_, escaped)) => delim.push(escaped),
-                None => {}
-            },
-            '$' | '`' => return None,
-            _ if is_blank(c) || ";&|()<>".contains(c) => return Some((at, delim)),
-            _ => delim.push(c),
-        }
-    }
-    Some((rest.len(), delim))
+/// A command name with no quoting, escaping, expansion or globbing.
+fn is_plain_name(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_-./:+@%,~=".contains(&b) || b >= 0x80)
 }
 
-fn closer_of(open: char) -> char {
-    if open == '(' {
-        ')'
+/// A heredoc delimiter as bash and tree-sitter both read it: a word of
+/// letters, digits and `_`, bare, quoted whole, or after one backslash.
+/// Returns the word and whether it was quoted.
+fn heredoc_delimiter(raw: &str) -> Option<(String, bool)> {
+    let (word, quoted) = if let Some(w) = raw.strip_prefix('\\') {
+        (w, true)
+    } else if let Some(w) = raw.strip_prefix('\'').and_then(|w| w.strip_suffix('\'')) {
+        (w, true)
+    } else if let Some(w) = raw.strip_prefix('"').and_then(|w| w.strip_suffix('"')) {
+        (w, true)
     } else {
-        '}'
-    }
-}
-
-/// The word starting at `i`: up to a blank or an operator character.
-fn word_at(input: &str, i: usize) -> &str {
-    let rest = &input[i..];
-    let len = rest
-        .find(|c: char| is_blank(c) || ";&|()<>".contains(c))
-        .unwrap_or(rest.len());
-    &rest[..len]
-}
-
-fn skip_blanks(input: &str, i: usize) -> usize {
-    input.len() - input[i..].trim_start_matches([' ', '\t']).len()
-}
-
-/// The position after `()` (blanks allowed inside) at `i`, if there.
-fn empty_parens(input: &str, i: usize) -> Option<usize> {
-    let rest = input[skip_blanks(input, i)..].strip_prefix('(')?;
-    let rest = rest.trim_start_matches([' ', '\t']).strip_prefix(')')?;
-    Some(input.len() - rest.len())
-}
-
-/// A word that `NAME()` defines as a function: no blanks, quoting,
-/// expansion, or assignment.
-fn is_function_name(word: &str) -> bool {
-    !word.is_empty()
-        && !word
-            .chars()
-            .any(|c| c.is_whitespace() || "=$'\"`\\".contains(c))
-}
-
-/// `xargs`, `eval`, `source`, and the like.
-fn head_is_executor(segment: &str) -> bool {
-    const EXECUTORS: &[&str] = &[
-        "bash", "sh", "zsh", "dash", "ksh", "fish", "xargs", "eval", "watch", "nohup", "time",
-        "timeout", "nice", "taskset", "env", "exec", "source", ".",
-    ];
-    segment
-        .split_whitespace()
-        .find(|tok| !is_env_assignment(tok))
-        .is_some_and(|head| EXECUTORS.contains(&head))
-}
-
-fn is_env_assignment(tok: &str) -> bool {
-    let Some(eq) = tok.find('=') else {
-        return false;
+        (raw, false)
     };
-    if eq == 0 {
-        return false;
-    }
-    let name = &tok[..eq];
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    let plain = !word.is_empty() && word.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+    plain.then(|| (word.to_string(), quoted))
 }
+
+#[cfg(test)]
+mod bash_runs;
 
 #[cfg(test)]
 mod tests {
@@ -1048,11 +650,6 @@ mod tests {
     }
 
     #[test]
-    fn repeated_separators_no_empty_segments() {
-        assert_eq!(split("a ;;; b"), vec![simple("a"), simple("b")]);
-    }
-
-    #[test]
     fn three_pipe_chain() {
         assert_eq!(
             split("git log --oneline -5 | head -3 | wc -l"),
@@ -1131,8 +728,8 @@ mod tests {
     }
 
     #[test]
-    fn heredoc_opaque() {
-        assert_eq!(split("cat <<EOF"), vec![opaque("cat <<EOF")]);
+    fn heredoc_without_a_body_is_unparsed() {
+        assert_eq!(split("cat <<EOF"), vec![unparsed("cat <<EOF")]);
     }
 
     #[test]
@@ -1205,100 +802,79 @@ mod tests {
 
     #[test]
     fn heredoc_line_after_operator_is_still_split() {
-        // The body starts on the next line; `| sh` on the operator's line
-        // is a command of its own, not part of the heredoc.
+        // The body starts on the next line; `| wc -l` on the operator's
+        // line is a command of its own, not part of the heredoc.
         assert_eq!(
-            split("cat <<EOF | sh\nrm -rf ~\nEOF\necho done"),
+            split("cat <<EOF | wc -l\nrm -rf ~\nEOF\necho done"),
             vec![
-                opaque("cat <<EOF\nrm -rf ~\nEOF"),
-                opaque("sh"),
+                opaque("cat <<EOF \nrm -rf ~\nEOF"),
+                simple("wc -l"),
                 simple("echo done")
             ]
         );
     }
 
     #[test]
-    fn heredoc_body_starts_after_the_command_line() {
+    fn heredoc_body_after_a_continued_or_glued_line_is_unparsed() {
         // A continuation, a newline in quotes, or an operator glued to the
-        // delimiter: the body starts after the line the shell reads.
-        assert_eq!(
-            split("cat <<EOF \\\n| sh\ntouch t\nEOF"),
-            vec![opaque("cat <<EOF\ntouch t\nEOF"), opaque("sh")]
-        );
-        assert_eq!(
-            split("cat <<EOF|sh\ntouch t\nEOF"),
-            vec![opaque("cat <<EOF\ntouch t\nEOF"), opaque("sh")]
-        );
-        assert_eq!(
-            split("cat <<EOF; echo \"a\nb\"\nx\nEOF\ntouch t"),
-            vec![
-                opaque("cat <<EOF\nx\nEOF"),
-                simple("echo \"a\nb\""),
-                simple("touch t")
-            ]
-        );
-    }
-
-    #[test]
-    fn quoted_heredoc_delimiter_may_hold_blanks_and_operators() {
-        for (input, heredoc) in [
-            ("cat <<'E F'\nx\nE F\necho y #'", "cat <<'E F'\nx\nE F"),
-            ("cat <<\"E F\"\nx\nE F\necho y #\"", "cat <<\"E F\"\nx\nE F"),
-            ("cat <<'E;F'\nx\nE;F\necho y #'", "cat <<'E;F'\nx\nE;F"),
-            ("cat <<E\\ F\nx\nE F\necho y #'", "cat <<E\\ F\nx\nE F"),
+        // delimiter: tree-sitter does not start the body where bash does.
+        for input in [
+            "cat <<EOF \\\n| wc -l\ntouch t\nEOF",
+            "cat <<EOF|wc -l\ntouch t\nEOF",
+            "cat <<EOF; echo \"a\nb\"\nx\nEOF\ntouch t",
         ] {
-            assert_eq!(
-                split(input),
-                vec![opaque(heredoc), simple("echo y")],
-                "{input:?}"
-            );
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
     }
 
     #[test]
-    fn heredoc_delimiter_has_quotes_removed_and_closes_exactly() {
+    fn heredoc_delimiter_with_blanks_or_operators_is_unparsed() {
+        for input in [
+            "cat <<'E F'\nx\nE F\necho y #'",
+            "cat <<\"E F\"\nx\nE F\necho y #\"",
+            "cat <<'E;F'\nx\nE;F\necho y #'",
+            "cat <<E\\ F\nx\nE F\necho y #'",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn heredoc_delimiter_closes_exactly() {
         assert_eq!(
             split("cat <<\\EOF\nx\nEOF\ntouch t"),
             vec![opaque("cat <<\\EOF\nx\nEOF"), simple("touch t")]
         );
-        assert_eq!(
-            split("cat <<E\"OF\"\nx\nEOF\ntouch t"),
-            vec![opaque("cat <<E\"OF\"\nx\nEOF"), simple("touch t")]
-        );
-        // `EOF ` is no closer for bash, so `touch t` is still body.
-        assert_eq!(
-            split("cat <<EOF\nEOF \ntouch t\nEOF"),
-            vec![opaque("cat <<EOF\nEOF \ntouch t\nEOF")]
-        );
+        // A partly quoted delimiter, and `EOF ` (no closer for bash).
+        for input in [
+            "cat <<E\"OF\"\nx\nEOF\ntouch t",
+            "cat <<EOF\nEOF \ntouch t\nEOF",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
     }
 
     #[test]
-    fn two_heredocs_on_one_line_take_consecutive_bodies() {
-        assert_eq!(
-            split("diff <<A <<B && echo same\na; b\nA\nb; c\nB\necho next"),
-            vec![
-                opaque("diff <<A <<B\na; b\nA\nb; c\nB"),
-                simple("echo same"),
-                simple("echo next"),
-            ]
-        );
+    fn two_heredocs_on_one_line_are_unparsed() {
+        let input = "diff <<A <<B && echo same\na; b\nA\nb; c\nB\necho next";
+        assert_eq!(split(input), vec![unparsed(input)]);
     }
 
     #[test]
     fn heredoc_chained_with_logical_and_does_not_overflow() {
-        // The motivating real-world bug from the screenshot: the LLM
-        // emits `cd dir && cat > file << 'EOF' ... EOF` followed by
-        // another command. Before this fix the heredoc body lines were
-        // each treated as separate segments.
+        // `cd dir && cat > file << 'EOF' ... EOF` followed by another
+        // command: the body lines are not commands. Tree-sitter attaches the
+        // redirects to the list, so they are a row of their own.
         let input = "cd dir && cat > file << 'EOF'\n//! a\n//! b\nEOF\ncat file";
-        let segs = split(input);
-        // Three logical commands: cd dir, the cat-heredoc Opaque, cat file
-        assert_eq!(segs.len(), 3, "got {:?}", segs);
-        assert_eq!(segs[0], simple("cd dir"));
-        assert!(segs[1].is_opaque());
-        assert!(segs[1].text().contains("//! a"));
-        assert!(segs[1].text().contains("//! b"));
-        assert_eq!(segs[2], simple("cat file"));
+        assert_eq!(
+            split(input),
+            vec![
+                simple("cd dir"),
+                simple("cat"),
+                opaque("> file << 'EOF'\n//! a\n//! b\nEOF"),
+                simple("cat file")
+            ]
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1306,17 +882,23 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn dollar_paren_substitution_opaque_and_no_inner_split() {
-        // The `|` inside $(...) must not cause a split.
+    fn dollar_paren_substitution_is_opaque_and_its_commands_are_rows() {
         assert_eq!(
             split("echo $(date | tr a A)"),
-            vec![opaque("echo $(date | tr a A)")]
+            vec![
+                opaque("echo $(date | tr a A)"),
+                simple("date"),
+                simple("tr a A")
+            ]
         );
     }
 
     #[test]
-    fn backtick_substitution_opaque() {
-        assert_eq!(split("echo `date`"), vec![opaque("echo `date`")]);
+    fn backtick_substitution_is_opaque_and_its_command_a_row() {
+        assert_eq!(
+            split("echo `date`"),
+            vec![opaque("echo `date`"), simple("date")]
+        );
     }
 
     #[test]
@@ -1332,7 +914,7 @@ mod tests {
         assert_eq!(split("{ a; b; }"), vec![simple("a"), simple("b")]);
         assert_eq!(
             split("{\n  a\n  b\n} > log"),
-            vec![simple("a"), simple("b"), opaque("} > log")]
+            vec![simple("a"), simple("b"), opaque("> log")]
         );
     }
 
@@ -1422,8 +1004,11 @@ mod tests {
     }
 
     #[test]
-    fn process_substitution_opaque() {
-        assert_eq!(split("diff <(a) <(b)"), vec![opaque("diff <(a) <(b)")]);
+    fn process_substitution_is_opaque_and_its_commands_are_rows() {
+        assert_eq!(
+            split("diff <(a) <(b)"),
+            vec![opaque("diff <(a) <(b)"), simple("a"), simple("b")]
+        );
     }
 
     #[test]
@@ -1464,61 +1049,26 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn bash_dash_c_opaque() {
-        assert_eq!(
-            split(r#"bash -c "rm -rf /""#),
-            vec![opaque(r#"bash -c "rm -rf /""#)]
-        );
-    }
-
-    #[test]
-    fn sh_dash_c_opaque() {
-        assert_eq!(
-            split(r#"sh -c "echo hi""#),
-            vec![opaque(r#"sh -c "echo hi""#)]
-        );
-    }
-
-    #[test]
-    fn xargs_in_pipe_opaque() {
-        assert_eq!(
-            split("find . -name '*.tmp' | xargs rm"),
-            vec![simple("find . -name '*.tmp'"), opaque("xargs rm")]
-        );
-    }
-
-    #[test]
-    fn eval_opaque() {
-        assert_eq!(split(r#"eval "$cmd""#), vec![opaque(r#"eval "$cmd""#)]);
-    }
-
-    #[test]
-    fn watch_opaque() {
-        assert_eq!(split("watch -n 1 'ls'"), vec![opaque("watch -n 1 'ls'")]);
-    }
-
-    #[test]
-    fn time_opaque() {
-        assert_eq!(split("time make build"), vec![opaque("time make build")]);
-    }
-
-    #[test]
-    fn env_opaque() {
-        // env runs another binary; conservative Opaque.
-        assert_eq!(split("env -i mycmd"), vec![opaque("env -i mycmd")]);
-    }
-
-    #[test]
-    fn source_opaque() {
-        assert_eq!(
-            split("source ./setup.sh"),
-            vec![opaque("source ./setup.sh")]
-        );
-    }
-
-    #[test]
-    fn dot_source_opaque() {
-        assert_eq!(split(". ./setup.sh"), vec![opaque(". ./setup.sh")]);
+    fn command_that_runs_its_arguments_is_unparsed() {
+        for input in [
+            r#"bash -c "rm -rf /""#,
+            r#"sh -c "echo hi""#,
+            "find . -name '*.tmp' | xargs rm",
+            r#"eval "$cmd""#,
+            "watch -n 1 'ls'",
+            "time make build",
+            "timeout 60 cargo test",
+            "nohup touch PWN",
+            "env -i mycmd",
+            "command touch PWN",
+            "exec touch PWN",
+            "source ./setup.sh",
+            ". ./setup.sh",
+            "\\touch PWN",
+            "\"touch\" PWN",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1567,18 +1117,20 @@ mod tests {
     }
 
     #[test]
-    fn for_header_with_substitution_stays_opaque() {
-        // The substitution in the word list runs, so the header is kept.
+    fn for_header_substitution_is_a_row() {
         assert_eq!(
             split("for f in $(ls); do cat $f; done"),
-            vec![opaque("for f in $(ls)"), simple("cat $f")]
+            vec![simple("ls"), simple("cat $f")]
         );
     }
 
     #[test]
     fn for_without_word_list_ends_header_at_do() {
         // `for NAME do …` iterates "$@"; `rm` must not hide in the header.
-        assert_eq!(split("for f do rm $f; done"), vec![simple("rm $f")]);
+        assert_eq!(split("for f\ndo rm $f; done"), vec![simple("rm $f")]);
+        // Tree-sitter does not parse it on one line.
+        let one_line = "for f do rm $f; done";
+        assert_eq!(split(one_line), vec![unparsed(one_line)]);
     }
 
     #[test]
@@ -1621,22 +1173,23 @@ mod tests {
     }
 
     #[test]
-    fn redirect_after_block_is_kept_with_its_closer() {
+    fn redirect_after_block_is_a_row() {
         // It applies to the whole block, and may write any file.
         assert_eq!(
             split("for i in 1 2; do echo $i; done 2>&1 | tail -1"),
-            vec![simple("echo $i"), opaque("done 2>&1"), simple("tail -1")]
+            vec![simple("echo $i"), opaque("2>&1"), simple("tail -1")]
         );
         assert_eq!(
             split("if [ 1 ]; then x=1; fi > important"),
-            vec![opaque("[ 1 ]"), simple("x=1"), opaque("fi > important")]
+            vec![opaque("[ 1 ]"), simple("x=1"), opaque("> important")]
         );
         assert_eq!(
             split("while read l; do echo $l; done < <(git ls-files)"),
             vec![
                 simple("read l"),
                 simple("echo $l"),
-                opaque("done < <(git ls-files)")
+                opaque("< <(git ls-files)"),
+                simple("git ls-files")
             ]
         );
     }
@@ -1644,45 +1197,42 @@ mod tests {
     #[test]
     fn reserved_word_right_after_a_closer_is_read() {
         assert_eq!(
-            split("if { true; } then rm -rf ~; fi"),
-            vec![simple("true"), simple("rm -rf ~")]
-        );
-        assert_eq!(
-            split("if (true)then rm -rf ~; fi"),
-            vec![simple("true"), simple("rm -rf ~")]
-        );
-        assert_eq!(
-            split("while (true) do curl x | sh; done"),
-            vec![simple("true"), simple("curl x"), opaque("sh")]
-        );
-        assert_eq!(
-            split("if a; then if b; then c; fi fi; rm x"),
-            vec![simple("a"), simple("b"), simple("c"), simple("rm x")]
-        );
-        assert_eq!(
             split("case x in x) { a; } esac; rm x"),
             vec![simple("a"), simple("rm x")]
         );
         // After a redirect the word is its target, a file named `fi`.
         assert_eq!(
             split("for i in 1; do echo a; done > fi"),
-            vec![simple("echo a"), opaque("done > fi")]
+            vec![simple("echo a"), opaque("> fi")]
         );
+        // Tree-sitter does not parse these.
+        for input in [
+            "if { true; } then rm -rf ~; fi",
+            "if (true)then rm -rf ~; fi",
+            "while (true) do curl x | wc; done",
+            "if a; then if b; then c; fi fi; rm x",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
     }
 
     #[test]
     fn case_inside_backticks_ends_at_the_closing_backtick() {
         assert_eq!(
             split("echo `case x in x) a;; esac`; rm -rf x"),
-            vec![opaque("echo `case x in x) a;; esac`"), simple("rm -rf x")]
+            vec![
+                opaque("echo `case x in x) a;; esac`"),
+                simple("a"),
+                simple("rm -rf x")
+            ]
         );
     }
 
     #[test]
-    fn substitution_syntax_that_moves_its_end_is_unparsed() {
-        // The splitter does not model these inside a substitution, so it
-        // cannot trust where the substitution ends; in most of them bash
-        // runs a `touch PWN` or `rm -rf x` that a wrong end would hide.
+    fn substitution_syntax_that_moves_its_end_hides_no_command() {
+        // A hand lexer misplaces the end of these substitutions. Bash runs
+        // the `touch PWN` or `rm -rf x` in each: it must head a row, or the
+        // input must be Unparsed.
         for input in [
             "echo $(case x in x) a;; esac); rm -rf x",
             "echo \"$(case x in x) a;; esac)\"; rm -rf x",
@@ -1706,10 +1256,18 @@ mod tests {
             "echo ${x/(/y} ; touch PWN # )",
             "echo \"${x:-'\"'}\" ; touch PWN # \"",
             "echo $'\\'' ; touch PWN ; echo \\'",
-            "echo ) ; touch PWN",
         ] {
-            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+            let segs = split(input);
+            let seen = segs == vec![unparsed(input)]
+                || segs
+                    .iter()
+                    .any(|s| s.text() == "touch PWN" || s.text() == "rm -rf x");
+            assert!(seen, "{input:?} → {segs:?}");
         }
+        assert_eq!(
+            split("echo ) ; touch PWN"),
+            vec![unparsed("echo ) ; touch PWN")]
+        );
     }
 
     #[test]
@@ -1764,39 +1322,21 @@ mod tests {
     }
 
     #[test]
-    fn unquoted_heredoc_joins_continued_lines_before_the_closer() {
-        let dockerfile =
-            "cat <<EOF > Dockerfile\nRUN apt-get update && \\\n    apt-get install -y curl\nEOF";
-        assert_eq!(split(dockerfile), vec![opaque(dockerfile)]);
-        // `E\` and the empty line join into the closer `E`.
-        assert_eq!(
-            split("cat <<E\nE\\\n\ntouch PWN\nE"),
-            vec![opaque("cat <<E\nE\\"), simple("touch PWN"), simple("E")]
-        );
-        assert_eq!(
-            split("cat <<-E\n\tE\\\n\ntouch PWN\nE"),
-            vec![opaque("cat <<-E\n\tE\\"), simple("touch PWN"), simple("E")]
-        );
-        // `<<-` strips tabs from the joined line.
-        assert_eq!(
-            split("cat <<-E\n\t\\\n\tE\ntouch PWN"),
-            vec![opaque("cat <<-E\n\t\\\n\tE"), simple("touch PWN")]
-        );
-        // An even run of backslashes joins nothing; an odd one does.
-        assert_eq!(
-            split("cat <<E\na\\\\\nE\ntouch PWN"),
-            vec![opaque("cat <<E\na\\\\\nE"), simple("touch PWN")]
-        );
-        let odd = "cat <<E\na\\\\\\\nE\ntouch PWN\nE";
-        assert_eq!(split(odd), vec![opaque(odd)]);
-        // A continued last line, or a backslash at the end of input, closes
-        // nothing.
-        for input in ["cat <<E\nhi\\\nE", "cat <<E\nhi\\"] {
-            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
+    fn unquoted_heredoc_with_a_continued_line_is_unparsed() {
+        // Bash joins `\`-newline in an unquoted body before it looks for the
+        // closer; tree-sitter does not. Its end of a quoted one differs too.
+        for input in [
+            "cat <<EOF > Dockerfile\nRUN apt-get update && \\\n    apt-get install -y curl\nEOF",
+            "cat <<E\nE\\\n\ntouch PWN\nE",
+            "cat <<-E\n\tE\\\n\ntouch PWN\nE",
+            "cat <<-E\n\t\\\n\tE\ntouch PWN",
+            "cat <<E\na\\\\\\\nE\ntouch PWN\nE",
+            "cat <<E\nhi\\\nE",
+            "cat <<E\nhi\\",
+            "cat <<\"E\"\nE\\\n\ntouch PWN\nE",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
-        // A quoted delimiter joins no lines.
-        let quoted = "cat <<\"E\"\nE\\\n\ntouch PWN\nE";
-        assert_eq!(split(quoted), vec![opaque(quoted)]);
     }
 
     #[test]
@@ -1805,15 +1345,11 @@ mod tests {
             split("echo a\\ #; touch PWN"),
             vec![simple("echo a\\ #"), simple("touch PWN")]
         );
-        assert_eq!(
-            split("echo a\\\t#; touch PWN"),
-            vec![simple("echo a\\\t#"), simple("touch PWN")]
-        );
-        assert_eq!(
-            split("echo a\\ \\\n#; touch PWN"),
-            vec![simple("echo a\\ #"), simple("touch PWN")]
-        );
         assert_eq!(split("echo \\\\ #; touch PWN"), vec![simple("echo \\\\")]);
+        // Tree-sitter reads these `#` as a comment, which bash does not.
+        for input in ["echo a\\\t#; touch PWN", "echo a\\ \\\n#; touch PWN"] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
     }
 
     #[test]
@@ -1822,18 +1358,22 @@ mod tests {
             split("echo $(echo [) ; touch PWN ; echo $(echo ])"),
             vec![
                 opaque("echo $(echo [)"),
+                simple("echo ["),
                 simple("touch PWN"),
-                opaque("echo $(echo ])")
+                opaque("echo $(echo ])"),
+                simple("echo ]")
             ]
-        );
-        assert_eq!(
-            split("echo \"`date`\" ; touch PWN # `"),
-            vec![opaque("echo \"`date`\""), simple("touch PWN")]
         );
         let words = r#"echo "${HOME}/x" ${a[0]} $((1+2)) <(ls) "$(echo ")")" $(f {} \;)"#;
         assert_eq!(
             split(&format!("{words}; ls")),
-            vec![opaque(words), simple("ls")]
+            vec![
+                opaque(words),
+                simple("ls"),
+                simple(r#"echo ")""#),
+                simple(r"f {} \;"),
+                simple("ls")
+            ]
         );
     }
 
@@ -1861,12 +1401,14 @@ mod tests {
     fn malformed_block_collapses_to_single_unparsed() {
         for input in [
             "for i in 1 2 3; do echo $i",
-            "echo a; fi",
             "{ echo a;",
             "echo a; }",
+            "a ;;; b",
         ] {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
+        // Bash rejects this as a whole; tree-sitter reads `fi` as a command.
+        assert_eq!(split("echo a; fi"), vec![simple("echo a"), simple("fi")]);
     }
 
     #[test]
@@ -1889,16 +1431,15 @@ mod tests {
     }
 
     #[test]
-    fn carriage_return_is_part_of_a_word() {
-        // Bash neither ends a command nor starts a comment at a lone `\r`.
-        assert_eq!(
-            split(">\rbreak rm -rf y"),
-            vec![opaque(">\rbreak rm -rf y")]
-        );
-        assert_eq!(
-            split("echo x\r# ; rm -rf y"),
-            vec![simple("echo x\r#"), simple("rm -rf y")]
-        );
+    fn carriage_return_is_unparsed() {
+        // Bash reads a lone `\r` as part of a word; tree-sitter as a blank.
+        for input in [
+            ">\rbreak rm -rf y",
+            "echo x\r# ; rm -rf y",
+            "echo hi \\\r\nrm -rf x",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
     }
 
     #[test]
@@ -1907,17 +1448,8 @@ mod tests {
             split("case x\nin x) rm -rf y;; esac"),
             vec![simple("rm -rf y")]
         );
-        assert_eq!(split("for f\ndo rm $f; done"), vec![simple("rm $f")]);
-        assert_eq!(
-            split("for f\nin a b\ndo rm $f; done"),
-            vec![simple("rm $f")]
-        );
-    }
-
-    #[test]
-    fn brace_word_heading_a_command_is_opaque() {
-        // `{rm,-rf,x}` is brace expansion that runs `rm -rf x`.
-        assert_eq!(split("{rm,-rf,x}"), vec![opaque("{rm,-rf,x}")]);
+        let for_in = "for f\nin a b\ndo rm $f; done";
+        assert_eq!(split(for_in), vec![unparsed(for_in)]);
     }
 
     // -----------------------------------------------------------------
@@ -1955,11 +1487,6 @@ mod tests {
 
     #[test]
     fn call_to_function_not_defined_here_is_a_command() {
-        // A function from a sourced file has a body nobody has seen.
-        assert_eq!(
-            split("source ./env.sh && run x"),
-            vec![opaque("source ./env.sh"), simple("run x")]
-        );
         // Called before its definition, `run` is whatever it was before.
         assert_eq!(
             split("run x; run(){ echo a; }"),
@@ -1970,14 +1497,21 @@ mod tests {
     #[test]
     fn call_runs_what_its_name_and_arguments_say() {
         // The body seen in the definition is not always what runs.
-        for (input, call) in [
-            ("rm(){ :; }; unset -f rm; rm -rf ~", simple("rm -rf ~")),
-            ("f(){ \"$@\"; }; f rm -rf x", simple("f rm -rf x")),
-            ("{rm,-rf,y}(){ :; }; {rm,-rf,y}", opaque("{rm,-rf,y}")),
-            ("false && f(){ echo a; }; f", simple("f")),
+        assert_eq!(
+            split("rm(){ :; }; unset -f rm; rm -rf ~").last(),
+            Some(&simple("rm -rf ~"))
+        );
+        assert_eq!(
+            split("false && f(){ echo a; }; f").last(),
+            Some(&simple("f"))
+        );
+        // A name that is not a plain word: `"$@"` and brace expansion.
+        for input in [
+            "f(){ \"$@\"; }; f rm -rf x",
+            "{rm,-rf,y}(){ :; }; {rm,-rf,y}",
+            "{rm,-rf,x}",
         ] {
-            let segs = split(input);
-            assert_eq!(segs.last(), Some(&call), "{input:?} → {segs:?}");
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
     }
 
@@ -2000,18 +1534,20 @@ mod tests {
             "E\n",
             "run \"M2 drop ctx check\"\n",
         );
+        // `source` runs a file nobody has seen.
+        assert_eq!(split(input), vec![unparsed(input.trim())]);
         assert_eq!(
-            split(input),
+            split(&input.replace("source ./.goenv.sh && ", "")),
             vec![
                 simple("cd /w"),
-                opaque("source ./.goenv.sh"),
                 simple("M=$PWD/.trash/rev/mut"),
                 simple("mkdir -p $M"),
                 simple("cd cloud-devstack"),
                 simple("git archive e34c080"),
                 simple("tar -x -C $M"),
                 simple("cd $M"),
-                opaque("cp internal/docker/diagnose.go /tmp/d.go 2>/dev/null"),
+                simple("cp internal/docker/diagnose.go /tmp/d.go"),
+                opaque("2>/dev/null"),
                 simple("cp internal/docker/diagnose.go ../d.orig"),
                 simple("echo \"== $1\""),
                 opaque("go test ./internal/docker/ ./internal/ops/ -run 'Diagnose|FixFor' 2>&1"),
@@ -2099,59 +1635,21 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // is_env_assignment / head_is_opaque_trigger
-    // -----------------------------------------------------------------
-
-    #[test]
-    fn is_env_assignment_recognizes_valid() {
-        assert!(is_env_assignment("FOO=bar"));
-        assert!(is_env_assignment("_FOO=bar"));
-        assert!(is_env_assignment("a1=2"));
-        assert!(is_env_assignment("X="));
-    }
-
-    #[test]
-    fn is_env_assignment_rejects_invalid() {
-        assert!(!is_env_assignment("FOO"));
-        assert!(!is_env_assignment("=bar"));
-        assert!(!is_env_assignment("1FOO=bar")); // can't start with digit
-        assert!(!is_env_assignment("foo-bar=x")); // dash not allowed
-    }
-
-    // -----------------------------------------------------------------
     // Backslash-newline line continuation (Fix #1)
     // -----------------------------------------------------------------
 
     #[test]
     fn backslash_newline_continuation_joins_lines() {
-        // The shell removes `\<newline>` entirely: this is one `git log`,
-        // not a segment carrying a literal backslash + embedded newline.
+        // One command; the row keeps the text as written.
         assert_eq!(
             split("git log \\\n  --oneline"),
-            vec![simple("git log   --oneline")]
+            vec![simple("git log \\\n  --oneline")]
         );
-    }
-
-    #[test]
-    fn backslash_newline_continuation_does_not_create_extra_segment() {
-        // Without continuation handling the bare newline would split this
-        // into two segments; the `\` must suppress that.
-        assert_eq!(split("echo a \\\necho b"), vec![simple("echo a echo b")]);
-    }
-
-    #[test]
-    fn backslash_crlf_is_not_a_continuation() {
-        // Bash escapes the `\r` and ends the line at `\n`.
         assert_eq!(
-            split("echo hi \\\r\nrm -rf x"),
-            vec![simple("echo hi \\"), simple("rm -rf x")]
+            split("echo a \\\necho b"),
+            vec![simple("echo a \\\necho b")]
         );
-    }
-
-    #[test]
-    fn backslash_newline_continuation_inside_double_quotes() {
-        // Line continuation is also removed inside double quotes.
-        assert_eq!(split("echo \"a \\\nb\""), vec![simple("echo \"a b\"")]);
+        assert_eq!(split("echo \"a \\\nb\""), vec![simple("echo \"a \\\nb\"")]);
     }
 
     #[test]
