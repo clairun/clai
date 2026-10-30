@@ -343,7 +343,7 @@ pub(crate) fn evaluate_command_policy(
     extra_blocked_prefixes: &[String],
 ) -> PolicyResult {
     use crate::assistant::tools::command_splitter::{split_command, Segment};
-    use crate::assistant::tools::prefix_detector::suggest_prefix;
+    use crate::assistant::tools::prefix_detector::{by_command_name, suggest_prefix};
     use crate::commands::permissions::SegmentApproval;
 
     if command.trim().is_empty() {
@@ -379,12 +379,13 @@ pub(crate) fn evaluate_command_policy(
         // Blocklist applies to every segment. Durable blocklist is checked
         // first; run-scoped blocklist (this run's accepted `DenyAlways`
         // decisions) is checked next so a fresh deny-always takes effect
-        // mid-run. A blocked name also blocks it run by path.
+        // mid-run. A blocked name is also blocked when run by path or after
+        // assignments (`FOO=1 /usr/bin/rm`); the allowlist is not widened.
         let blocked = |text: &str| {
             find_matching_prefix(&execution.shell.blocked_command_prefixes, text)
                 .or_else(|| find_matching_prefix(extra_blocked_prefixes, text))
         };
-        if let Some(matched) = blocked(text).or_else(|| blocked(&without_command_dir(text))) {
+        if let Some(matched) = blocked(text).or_else(|| blocked(&by_command_name(text))) {
             return PolicyResult::Block {
                 segment_text: text.to_string(),
                 matched_prefix: matched,
@@ -533,19 +534,6 @@ fn is_pure_assignment_token(tok: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-/// `text` with the directory dropped from its command name, after any
-/// leading assignments: `FOO=1 /usr/bin/rm -rf x` → `FOO=1 rm -rf x`.
-fn without_command_dir(text: &str) -> String {
-    let mut words: Vec<&str> = text.split(' ').collect();
-    if let Some(name) = words
-        .iter_mut()
-        .find(|word| !word.is_empty() && !is_pure_assignment_token(word))
-    {
-        *name = name.rsplit('/').next().unwrap_or(name);
-    }
-    words.join(" ")
 }
 
 /// Cleans up an abandoned permission request when the approval-wait future
@@ -1101,10 +1089,12 @@ fn matches_prefix(prefix: &str, command: &str) -> bool {
 }
 
 /// Literal word-boundary prefix test: `command` equals `p`, or starts with
-/// `p` followed by a space (so `git log` matches `git log --oneline` but not
-/// `git logs`).
+/// `p` followed by whitespace (so `git log` matches `git log --oneline` but
+/// not `git logs`).
 fn matches_prefix_literal(p: &str, command: &str) -> bool {
-    command == p || (command.starts_with(p) && command.as_bytes().get(p.len()) == Some(&b' '))
+    command
+        .strip_prefix(p)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace()))
 }
 
 // =============================================================================
@@ -2235,6 +2225,9 @@ mod tests {
             "./rm x",
             "FOO=1 /bin/rm x",
             "ls; ../bin/rm x",
+            "FOO='a b' /usr/bin/rm x",
+            "rm\tx",
+            "/bin/rm\t-rf x",
         ] {
             let err = enforce_command_policy(&exec, None, command).unwrap_err();
             assert!(

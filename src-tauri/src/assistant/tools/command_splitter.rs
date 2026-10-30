@@ -11,13 +11,15 @@
 //! `for`/`case` headers and `case` patterns. Redirects on a block are kept as
 //! an Opaque segment, because they may write any file.
 //!
-//! Only node kinds and tokens this module names are accepted. A parse error,
-//! anything else, or a construct whose effect depends on runtime values bash
-//! may evaluate as code (arithmetic on variables, indirect expansion) makes
-//! the whole input one [`Segment::Unparsed`]. So does a command that runs
-//! another command or a string as code from its arguments (`xargs`, `env`,
-//! `bash -c`, `trap`, …), an assignment to a variable bash expands as code
-//! (`PS4`), or a command whose name is not a plain word (`\rm`, `"$cmd"`).
+//! Only node kinds and tokens this module names are accepted, and a node
+//! accepted whole must hold nothing tree-sitter nested in it and no `$` it
+//! did not parse (`Walker::leaf`). A parse error, anything else, or a
+//! construct whose effect depends on runtime values bash may evaluate as code
+//! (arithmetic on variables, indirect expansion) makes the whole input one
+//! [`Segment::Unparsed`]. So does a command that runs another command or a
+//! string as code from its arguments (`xargs`, `/usr/bin/env`, `bash -c`,
+//! `trap`, …), input that names a variable bash expands as code (`PS4`), or a
+//! command whose name is not a plain word (`\rm`, `"$cmd"`).
 //!
 //! - [`Segment::Simple`] — a plain command.
 //! - [`Segment::Opaque`] — a command with a redirect, heredoc, here-string,
@@ -68,7 +70,7 @@ pub fn split_command(input: &str) -> Vec<Segment> {
 }
 
 fn split(input: &str) -> Option<Vec<Segment>> {
-    if !lexes_like_bash(input) {
+    if !lexes_like_bash(input) || names_code_variable(input) {
         return None;
     }
     let mut parser = tree_sitter::Parser::new();
@@ -89,7 +91,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
 }
 
 /// Commands that run another command, or a string as code, from their
-/// arguments.
+/// arguments. Matched on the last part of the command's path.
 const WRAPPERS: &[&str] = &[
     "bash",
     "sh",
@@ -126,6 +128,19 @@ const WRAPPERS: &[&str] = &[
 
 /// Variables whose value bash, or a bash it starts, expands as code.
 const CODE_VARIABLES: &[&str] = &["PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV"];
+
+/// True if `input` names a [`CODE_VARIABLES`] entry anywhere, with quotes and
+/// backslashes ignored, since any word may be or build an assignment to it
+/// (`export 'PS4=$(cmd)'`, `PS4[0]=…`, `read PS4`).
+fn names_code_variable(input: &str) -> bool {
+    let unquoted: String = input
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect();
+    unquoted
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|name| CODE_VARIABLES.contains(&name))
+}
 
 /// Tokens that only sequence or group commands.
 const GRAMMAR_TOKENS: &[&str] = &[
@@ -180,7 +195,8 @@ impl<'src> Walker<'src> {
             "command" | "declaration_command" | "unset_command" => self.command(node, node),
             "variable_assignment" | "variable_assignments" => {
                 self.word(node)?;
-                self.out.push(Segment::Simple(self.row_text(node)));
+                self.out
+                    .push(Segment::Simple(self.row_text(node, node.start_byte())));
                 Some(())
             }
             "test_command" => self.test(node),
@@ -210,7 +226,8 @@ impl<'src> Walker<'src> {
             let name = node.child_by_field_name("name")?;
             let word = name.named_child(0)?;
             let text = self.text(word);
-            if word.kind() != "word" || !is_plain_name(text) || WRAPPERS.contains(&text) {
+            let basename = text.rsplit('/').next().unwrap_or(text);
+            if word.kind() != "word" || !is_plain_name(text) || WRAPPERS.contains(&basename) {
                 return None;
             }
             // A redirect before the name would head the row, hiding the
@@ -227,7 +244,7 @@ impl<'src> Walker<'src> {
         let start = self.out.len();
         let opaque = self.words(node)?;
         self.out.insert(start, Segment::Simple(String::new()));
-        let text = self.row_text(row);
+        let text = self.row_text(row, node.start_byte());
         self.out[start] = if opaque || row != node {
             Segment::Opaque(text)
         } else {
@@ -261,31 +278,55 @@ impl<'src> Walker<'src> {
 
     /// A command or block with redirects.
     fn redirected(&mut self, node: Node) -> Option<()> {
-        let body = node.child_by_field_name("body");
-        match body {
-            Some(body) if body.kind() == "command" => {
+        // Tree-sitter reads the words after a leading redirect as its target
+        // (`> f touch x`), where bash runs them.
+        let body = node.child_by_field_name("body")?;
+        self.redirected_body(body, node)
+    }
+
+    /// `body` followed by the redirects of `node`. Tree-sitter hangs them on
+    /// a whole list or pipeline, where bash binds them to its last command
+    /// (`cd x && cat > f`).
+    fn redirected_body(&mut self, body: Node, node: Node) -> Option<()> {
+        match body.kind() {
+            "command" => {
                 self.command(body, node)?;
-                for child in Self::children(node).into_iter().filter(|c| *c != body) {
-                    self.word(child)?;
-                }
-                Some(())
+                self.redirects(node)
             }
-            Some(body) => {
+            "list" | "pipeline" => {
+                let children = Self::children(body);
+                let (last, rest) = children.split_last()?;
+                for child in rest {
+                    if child.is_named() {
+                        self.node(*child)?;
+                    } else if !GRAMMAR_TOKENS.contains(&child.kind()) {
+                        return None;
+                    }
+                }
+                self.redirected_body(*last, node)
+            }
+            _ => {
                 self.node(body)?;
                 let start = self.out.len();
-                for child in Self::children(node).into_iter().filter(|c| *c != body) {
-                    self.word(child)?;
-                }
+                self.redirects(node)?;
                 let redirects = self.src[body.end_byte()..node.end_byte()]
                     .trim()
                     .to_string();
                 self.out.insert(start, Segment::Opaque(redirects));
                 Some(())
             }
-            // Tree-sitter reads the words after a leading redirect as its
-            // target (`> f touch x`), where bash runs them.
-            None => None,
         }
+    }
+
+    fn redirects(&mut self, node: Node) -> Option<()> {
+        let body = node.child_by_field_name("body");
+        for child in Self::children(node)
+            .into_iter()
+            .filter(|c| Some(*c) != body)
+        {
+            self.word(child)?;
+        }
+        Some(())
     }
 
     /// Walks the words of a command, pushing the commands they substitute.
@@ -322,26 +363,19 @@ impl<'src> Walker<'src> {
     /// A word, or part of one. Substituted commands are pushed as segments.
     fn word(&mut self, node: Node) -> Option<()> {
         match node.kind() {
-            // Tree-sitter leaves some substitutions inside these leaves
-            // (`${x#$(cmd)}`, `${x:-`cmd`}`, nested backticks).
-            "word" | "string_content" | "extglob_pattern" | "regex" | "heredoc_content" => {
-                (!has_substitution(self.text(node))).then_some(())
-            }
-            "number"
+            "word"
+            | "number"
             | "raw_string"
             | "ansi_c_string"
+            | "string_content"
             | "variable_name"
             | "special_variable_name"
+            | "extglob_pattern"
+            | "regex"
             | "test_operator"
             | "file_descriptor"
-            | "heredoc_end" => Some(()),
-            "variable_assignment"
-                if node
-                    .child_by_field_name("name")
-                    .is_some_and(|name| CODE_VARIABLES.contains(&self.text(name))) =>
-            {
-                None
-            }
+            | "heredoc_content"
+            | "heredoc_end" => self.leaf(node),
             "command_name"
             | "string"
             | "concatenation"
@@ -361,6 +395,9 @@ impl<'src> Walker<'src> {
                     ">|", "<>", "<<<", ">&-", "<&-", "==", "=~", "!=", "&&", "||", "-a", "-o",
                 ],
             ),
+            // Bash reads `$((` as arithmetic where tree-sitter may read a
+            // subshell (`${x:-$((i))}`).
+            "command_substitution" if self.text(node).starts_with("$((") => None,
             "command_substitution" | "process_substitution" => {
                 for child in Self::children(node) {
                     if child.is_named() {
@@ -380,6 +417,17 @@ impl<'src> Walker<'src> {
             "heredoc_redirect" => self.heredoc(node),
             _ => None,
         }
+    }
+
+    /// A node accepted whole: nothing is nested in it, and unless it is
+    /// quoted literally its text holds no `$`, backtick, `<(` or `>(`, which
+    /// tree-sitter would otherwise have parsed as an expansion of its own
+    /// (`16#$(cmd)`, `${x#$(cmd)}`, `${x#${a[i]}}`, nested backticks).
+    fn leaf(&self, node: Node) -> Option<()> {
+        let literal = matches!(node.kind(), "raw_string" | "ansi_c_string");
+        let text = self.text(node);
+        (node.child_count() == 0 && (literal || !text.contains('$') && !has_substitution(text)))
+            .then_some(())
     }
 
     fn parts(&mut self, node: Node, tokens: &[&str]) -> Option<()> {
@@ -419,8 +467,10 @@ impl<'src> Walker<'src> {
     /// Numbers and arithmetic on numbers.
     fn is_constant(&self, node: Node) -> bool {
         match node.kind() {
-            "number" => true,
-            "word" => self.text(node).bytes().all(|b| b.is_ascii_digit()),
+            "number" => self.leaf(node).is_some(),
+            "word" => {
+                self.leaf(node).is_some() && self.text(node).bytes().all(|b| b.is_ascii_digit())
+            }
             "simple_expansion" => matches!(self.text(node), "$?" | "$#" | "$$" | "$!"),
             "binary_expression" | "unary_expression" | "parenthesized_expression" => {
                 Self::children(node).into_iter().all(|c| {
@@ -453,7 +503,12 @@ impl<'src> Walker<'src> {
                 "heredoc_body" => {
                     let (_, quoted) = delim.as_ref()?;
                     let text = self.text(child);
-                    if Some(child.start_byte()) != body_start && !text.is_empty()
+                    // Tree-sitter starts the body after any blank lines.
+                    let moved = self
+                        .src
+                        .get(body_start?..child.start_byte())
+                        .is_none_or(|skipped| skipped.bytes().any(|b| b != b'\n'));
+                    if moved && !text.is_empty()
                         || !quoted && (text.contains("\\\n") || text.contains('`'))
                     {
                         return None;
@@ -491,13 +546,17 @@ impl<'src> Walker<'src> {
         Some(())
     }
 
-    /// The text of `row`, without the commands tree-sitter nests in a
-    /// heredoc redirect (`cat <<EOF | sh` keeps `sh` a row of its own).
-    fn row_text(&self, row: Node) -> String {
+    /// The text of `row` from `start`, without the commands tree-sitter
+    /// nests in a heredoc redirect (`cat <<EOF | sh` keeps `sh` a row of its
+    /// own).
+    fn row_text(&self, row: Node, start: usize) -> String {
         let mut text = String::new();
-        let mut at = row.start_byte();
+        let mut at = start;
         let mut stack = vec![row];
         while let Some(n) = stack.pop() {
+            if n.end_byte() <= start {
+                continue;
+            }
             if n.kind() == "heredoc_redirect" {
                 for c in Self::children(n) {
                     if matches!(
@@ -512,7 +571,8 @@ impl<'src> Walker<'src> {
                             | "|&"
                             | ";"
                             | "&"
-                    ) {
+                    ) && c.start_byte() >= at
+                    {
                         text.push_str(&self.src[at..c.start_byte()]);
                         at = c.end_byte();
                     }
@@ -804,6 +864,50 @@ mod tests {
     }
 
     #[test]
+    fn wrappers_run_by_path_are_unparsed() {
+        for input in [
+            "/usr/bin/env touch PWN",
+            "/bin/sh -c 'touch PWN'",
+            "/usr/bin/xargs touch <<< PWN",
+            "/usr/bin/timeout 2 touch PWN",
+            "FOO=1 ./nice touch PWN",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input}");
+        }
+    }
+
+    #[test]
+    fn heredoc_body_may_start_with_blank_lines() {
+        for input in ["cat >> f <<'EOF'\n\nhi\nEOF", "cat >> f <<EOF\n\n\nhi\nEOF"] {
+            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn redirect_after_a_list_stays_with_its_last_command() {
+        assert_eq!(
+            split("cd x && cat > f"),
+            vec![simple("cd x"), opaque("cat > f")]
+        );
+        assert_eq!(
+            split("cd x && cat <<'EOF'\nhi\nEOF"),
+            vec![simple("cd x"), opaque("cat <<'EOF'\nhi\nEOF")]
+        );
+        assert_eq!(
+            split("a | b 2>&1 || c d >> log"),
+            vec![simple("a"), opaque("b 2>&1"), opaque("c d >> log")]
+        );
+        assert_eq!(
+            split("a && b > $(touch PWN)"),
+            vec![simple("a"), opaque("b > $(touch PWN)"), simple("touch PWN")]
+        );
+        assert_eq!(
+            split("a && { b; } > f"),
+            vec![simple("a"), simple("b"), opaque("> f")]
+        );
+    }
+
+    #[test]
     fn quoted_heredoc_body_runs_nothing() {
         assert_eq!(
             split("cat <<'EOF'\n$(rm x) `rm y`\nEOF"),
@@ -923,8 +1027,7 @@ mod tests {
             split(input),
             vec![
                 simple("cd dir"),
-                simple("cat"),
-                opaque("> file << 'EOF'\n//! a\n//! b\nEOF"),
+                opaque("cat > file << 'EOF'\n//! a\n//! b\nEOF"),
                 simple("cat file")
             ]
         );
@@ -1599,8 +1702,7 @@ mod tests {
                 simple("git archive e34c080"),
                 simple("tar -x -C $M"),
                 simple("cd $M"),
-                simple("cp internal/docker/diagnose.go /tmp/d.go"),
-                opaque("2>/dev/null"),
+                opaque("cp internal/docker/diagnose.go /tmp/d.go 2>/dev/null"),
                 simple("cp internal/docker/diagnose.go ../d.orig"),
                 simple("echo \"== $1\""),
                 opaque("go test ./internal/docker/ ./internal/ops/ -run 'Diagnose|FixFor' 2>&1"),
