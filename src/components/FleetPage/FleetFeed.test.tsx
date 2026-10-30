@@ -159,6 +159,10 @@ describe("Main's bubble", () => {
     const { rerender } = render(<Feed state={twoBlocks()} live={RUNNING} />);
     const times = () => parsed.filter((t) => t.startsWith('First, the leaks.')).length;
     expect(times()).toBe(1);
+    // A day on, the time leading the same words gains its date.
+    rerender(<Feed state={twoBlocks()} live={RUNNING} now={NOW + 86_400_000} />);
+    expect(mainBubble().querySelector('[class*=messageTime]')).toHaveTextContent(new Date(NOW - 1000).toLocaleDateString([], { month: 'short', day: 'numeric' }));
+    expect(times()).toBe(1);
     // The clock, a new word of yours, a new callback: the same words.
     rerender(<Feed state={applyUserSent(twoBlocks(), WS, MAIN, { ...message('u2', [text('Thanks')]), role: 'user' }, NOW)} live={RUNNING} now={NOW + 60_000} onOpen={() => {}} />);
     expect(screen.getByText(/Thanks/)).toBeInTheDocument();
@@ -255,6 +259,12 @@ describe("a bubble's time", () => {
     expect(time.parentElement!.tagName).toBe('P');
     expect(time.parentElement).toHaveTextContent(new RegExp(`^${clock(NOW - 1000)}$`));
     expect(time.parentElement!.nextElementSibling!.tagName).toBe('UL');
+  });
+
+  it('leads a message that starts with raw HTML, which is drawn as its text', () => {
+    render(<Feed state={saying('<!-- note -->\n\nHello')} />);
+    const time = timeOf(bubbleOf(/Hello/));
+    expect(time.closest('[class*=speechText]')).toHaveTextContent(new RegExp(`^${clock(NOW - 1000)} ?<!-- note -->`));
   });
 
   it('keeps each underlying message time ahead of its text in a shared bubble', () => {

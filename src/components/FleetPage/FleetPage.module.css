@@ -644,6 +644,11 @@ button.crewButton {
   font-variant-numeric: tabular-nums;
 }
 
+.speechText .messageTime {
+  /* Copying a paragraph copies its words, not the time leading it. */
+  user-select: none;
+}
+
 .messageTime b {
   font-weight: 650;
   color: var(--color-text-secondary);

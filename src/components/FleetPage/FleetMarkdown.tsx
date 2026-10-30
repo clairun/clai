@@ -65,7 +65,8 @@ const Lead = createContext<ReactNode>(null);
  */
 const leadFirstLine = () => (tree: Required<Pick<Hast, 'children'>>) => {
   const lead: Hast = { type: 'element', tagName: 'time', properties: {}, children: [] };
-  const first = tree.children.find((node) => node.type === 'element');
+  // Raw HTML, drawn as its text, is a first block too.
+  const first = tree.children.find((node) => node.type !== 'text' || node.value?.trim());
   if (first?.tagName === 'p') first.children?.unshift(lead, { type: 'text', value: ' ' });
   else tree.children.unshift({ type: 'element', tagName: 'p', properties: {}, children: [lead] });
 };
