@@ -125,7 +125,7 @@ describe("Main's bubble", () => {
   it('keeps tool-separated text in distinct paragraphs in a bubble and its zoom', () => {
     const state = fleet(updated(message('m1', [text('Before.'), tool('c1'), text('After.')]), NOW - 1000));
     const { rerender } = render(<Feed state={state} />);
-    expect([...bubbleOf(/Before/).querySelectorAll('p')].map((p) => p.textContent)).toEqual(['Before.', 'After.']);
+    expect([...bubbleOf(/Before/).querySelectorAll('p')].map((p) => p.textContent)).toEqual([expect.stringMatching(/\S Before\.$/), 'After.']);
     expect(bubbleOf(/Before/).querySelectorAll('[class*=messageTime]')).toHaveLength(1);
 
     const later = applyUserSent(
@@ -207,7 +207,7 @@ const scrolling = (tall: () => number, { reduce = false, firstBlockHeight }: { r
       return this.matches(SCROLLER) ? 100 : 1000;
     }),
     vi.spyOn(HTMLElement.prototype, 'offsetHeight', 'get').mockImplementation(function (this: HTMLElement) {
-      if (firstBlockHeight !== undefined && this.matches('[class*=messageBlock]')) return firstBlockHeight;
+      if (firstBlockHeight !== undefined && this.matches('[class*=speechText]')) return firstBlockHeight;
       return this.parentElement?.matches(SCROLLER) ? tall() : 0;
     }),
     // A slide's transform stretches what scrolls past the words' own height.
@@ -237,7 +237,24 @@ describe("a bubble's time", () => {
     const time = timeOf(bubble);
     expect(time).toHaveTextContent(new RegExp(`^${clock(NOW - 1000)}$`));
     expect(time.closest('[class*=bubbleText]')).toBe(bubble.querySelector('[class*=bubbleText]'));
-    expect(time.compareDocumentPosition(screen.getByText('Shipped.')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(time.parentElement).toHaveTextContent(new RegExp(`^${clock(NOW - 1000)} Shipped\\.$`));
+  });
+
+  // jsdom lays nothing out: the one line, the shared baseline and the bubble's width rest on the time being the first line's own text.
+  it('starts its first line, inside the first paragraph, so a short message keeps one line', () => {
+    render(<Feed state={saying('ok, fix it')} />);
+    const time = timeOf(bubbleOf(/fix it/));
+    expect(time.parentElement!.tagName).toBe('P');
+    expect(time.parentElement!.firstChild).toBe(time);
+    expect(time.parentElement).toHaveTextContent(new RegExp(`^${clock(NOW - 1000)} ok, fix it$`));
+  });
+
+  it('takes a line of its own above a message that starts with a list or a quote', () => {
+    render(<Feed state={saying('- first\n- second\n\n> quoted')} />);
+    const time = timeOf(bubbleOf(/first/));
+    expect(time.parentElement!.tagName).toBe('P');
+    expect(time.parentElement).toHaveTextContent(new RegExp(`^${clock(NOW - 1000)}$`));
+    expect(time.parentElement!.nextElementSibling!.tagName).toBe('UL');
   });
 
   it('keeps each underlying message time ahead of its text in a shared bubble', () => {
@@ -249,10 +266,10 @@ describe("a bubble's time", () => {
     );
     render(<Feed state={state} />);
     const bubble = mainBubble();
-    const blocks = [...bubble.querySelectorAll<HTMLElement>('[class*=messageBlock]')];
+    const blocks = [...bubble.querySelectorAll<HTMLElement>('[class*=speechText]')];
     expect(blocks).toHaveLength(2);
     expect(blocks.map((block) => block.querySelector('[class*=messageTime]')?.textContent)).toEqual([clock(firstAt), clock(secondAt)]);
-    expect(blocks.map((block) => block.querySelector('p')?.textContent)).toEqual(['First, the leaks.', 'After that, the fix.']);
+    expect(blocks.map((block) => block.querySelector('p')?.textContent)).toEqual([`${clock(firstAt)} First, the leaks.`, `${clock(secondAt)} After that, the fix.`]);
     expect(blocks.every((block) => block.closest('[class*=bubbleText]') !== null)).toBe(true);
 
     fireEvent.click(bubble);
@@ -304,7 +321,7 @@ describe('a bubble, scrolling', () => {
     try {
       const { rerender } = render(<Feed state={fleet(first, second('After that, the fix.'))} />);
       const scroller = () => mainBubble().querySelector<HTMLElement>(SCROLLER)!;
-      expect(scroller().querySelectorAll('[class*=messageBlock]')).toHaveLength(2);
+      expect(scroller().querySelectorAll('[class*=speechText]')).toHaveLength(2);
       expect(scroller().scrollTop).toBe(120);
 
       height = 280;
@@ -666,7 +683,7 @@ describe('words selected in the feed', () => {
   it("stay selected in Main's bubbles, older or newest, which a plain click zooms", () => {
     render(<Feed state={asked()} />);
     for (const words of ['First, the leaks.', 'Docs next.']) {
-      expect(select(screen.getByText(words))).toBe(words);
+      expect(select(screen.getByText(words))).toMatch(new RegExp(`\\S ${words}$`));
       expect(zoomed()).toBe(false);
     }
     // A shift-click here extends a selection begun in another bubble.
@@ -681,7 +698,7 @@ describe('words selected in the feed', () => {
 
   it('stay selected in your bubble, which a plain click zooms', () => {
     render(<Feed state={asked()} />);
-    expect(select(screen.getByText('And the docs?'))).toBe('And the docs?');
+    expect(select(screen.getByText('And the docs?'))).toMatch(/\S And the docs\?$/);
     expect(screen.queryByRole('dialog')).toBeNull();
     getSelection()!.removeAllRanges();
     fireEvent.click(screen.getByText('And the docs?'));

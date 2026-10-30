@@ -1,4 +1,4 @@
-import { createContext, useContext } from 'react';
+import { createContext, useContext, type ReactNode } from 'react';
 import type { Components } from 'react-markdown';
 import { MarkdownBlock } from '../Chat/MarkdownMessage';
 import { isWorkspaceRelativeHref } from '../../utils/htmlBundle';
@@ -28,6 +28,9 @@ const Chip = ({ title }: { title: string }) => {
 };
 
 interface Hast {
+  type?: string;
+  tagName?: string;
+  properties?: object;
   value?: string;
   children?: Hast[];
 }
@@ -52,7 +55,30 @@ export const MINIATURE: Components = {
   ),
 };
 
-/** A bubble's words: markdown, each chart a chip. */
-const FleetMarkdown = ({ content }: { content: string }) => <MarkdownBlock content={content} components={MINIATURE} />;
+/** What a bubble's message begins with: its time, read as part of its first line. */
+const Lead = createContext<ReactNode>(null);
+
+/**
+ * The lead goes inline at the start of the first paragraph, on its line and
+ * baseline and counted in the bubble's width; before any other first block,
+ * as a line of its own.
+ */
+const leadFirstLine = () => (tree: Required<Pick<Hast, 'children'>>) => {
+  const lead: Hast = { type: 'element', tagName: 'time', properties: {}, children: [] };
+  const first = tree.children.find((node) => node.type === 'element');
+  if (first?.tagName === 'p') first.children?.unshift(lead, { type: 'text', value: ' ' });
+  else tree.children.unshift({ type: 'element', tagName: 'p', properties: {}, children: [lead] });
+};
+
+const LEAD = [leadFirstLine];
+const LeadTime = () => useContext(Lead);
+const BUBBLE: Components = { ...MINIATURE, time: LeadTime };
+
+/** A bubble's words: markdown, each chart a chip, led by `lead`. */
+const FleetMarkdown = ({ content, lead }: { content: string; lead: ReactNode }) => (
+  <Lead.Provider value={lead}>
+    <MarkdownBlock content={content} components={BUBBLE} rehypePlugins={LEAD} />
+  </Lead.Provider>
+);
 
 export default FleetMarkdown;

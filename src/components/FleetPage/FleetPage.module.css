@@ -637,17 +637,9 @@ button.crewButton {
   outline-offset: 1px;
 }
 
-/* Keep the time and the first line of each message on the bubble's line grid. */
-.messageBlock {
-  display: flow-root;
-}
-
 .messageTime {
-  float: left;
-  margin-right: 0.4em;
   color: var(--color-text-past);
   font-size: 11px;
-  line-height: inherit;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
 }
@@ -1146,7 +1138,6 @@ button.crewButton {
 }
 
 .zoomMessage .messageTime {
-  float: none;
   display: block;
 }
 

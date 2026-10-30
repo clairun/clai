@@ -1,5 +1,5 @@
 import React, { memo, useMemo } from 'react';
-import ReactMarkdown, { type Components } from 'react-markdown';
+import ReactMarkdown, { type Components, type Options } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import CodeBlock from './CodeBlock';
 import MermaidDiagram from './MermaidDiagram';
@@ -18,6 +18,8 @@ interface MarkdownMessageProps {
   // Renderers that replace the defaults for some elements. Pass a stable
   // object: a new one re-renders the whole block.
   components?: Components;
+  // Transforms of the rendered tree, as `components`: a stable list.
+  rehypePlugins?: Options['rehypePlugins'];
 }
 
 // Memoized remark plugins array to prevent recreation
@@ -195,12 +197,13 @@ const useMarkdownComponents = (isStreaming: boolean, overrides?: Components): Co
     ...overrides,
   }), [isStreaming, overrides]); // styles object is stable; isStreaming feeds mermaid/vega-lite blocks
 
-export const MarkdownBlock = memo(({ content, isStreaming = false, components: overrides }: MarkdownMessageProps) => {
+export const MarkdownBlock = memo(({ content, isStreaming = false, components: overrides, rehypePlugins }: MarkdownMessageProps) => {
   const components = useMarkdownComponents(isStreaming, overrides);
 
   return (
     <ReactMarkdown
       remarkPlugins={remarkPlugins}
+      rehypePlugins={rehypePlugins}
       components={components}
     >
       {content}

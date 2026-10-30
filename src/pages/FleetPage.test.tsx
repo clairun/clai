@@ -309,7 +309,7 @@ describe('FleetPage', () => {
     // Three bubbles fit, newest last: Main's, yours, Main's.
     const bubbles = card.getAllByRole('button', { name: /On it|Thanks|Shipped/ });
     const stamp = (b: HTMLElement) => b.querySelector('[class*=messageTime]')!.textContent;
-    const words = (b: HTMLElement) => b.querySelector('[data-bubble]')!.textContent!.replace(stamp(b)!, '');
+    const words = (b: HTMLElement) => b.querySelector('[data-bubble]')!.textContent!.replace(`${stamp(b)} `, '');
     expect(bubbles.map(words)).toEqual(['On it. Two tasks out.', 'Thanks!', 'Shipped v2']);
     // Two rows of what came before; older ones hide.
     const rows = within(card.getByRole('list', { name: 'Earlier' }));
@@ -351,9 +351,10 @@ describe('FleetPage', () => {
         workspace('s', 'Staged'),
         { ...workspace('a', 'Alpha', 1000), mainSessionId: 'main-a', recentMessages: [said('u1', 'Ship it.', 20 * 60_000), { ...said('a2', text, 10 * 60_000, { origin: scout }), truncated }] },
       ]);
-    /** The bubble whose words start as `text`: a paragraph of its markdown. */
+    /** The bubble whose words start as `text`: a paragraph of its markdown, after its time. */
+    const wordsOf = (p: Element) => [...p.childNodes].filter((node) => !(node instanceof Element && node.matches('[class*=messageTime]'))).map((node) => node.textContent).join('').trim();
     const bubble = async (text: RegExp) =>
-      (await screen.findByText((_, el) => el?.tagName === 'P' && text.test(el.textContent ?? ''))).closest<HTMLElement>('[role=button]')!;
+      (await screen.findByText((_, el) => el?.tagName === 'P' && text.test(wordsOf(el)))).closest<HTMLElement>('[role=button]')!;
     // The snapshot's preview of a longer word, which the bubble fetches whole.
     const cut = `Shipped **v2** to\n\n${'staging and prod, '.repeat(40)}`;
 

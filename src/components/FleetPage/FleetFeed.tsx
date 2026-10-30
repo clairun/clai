@@ -226,11 +226,11 @@ const Words = ({ workspaceId, line, now, route, newest }: { workspaceId: string;
       <div ref={scroller} className={styles.bubbleText}>
         <div>
           {line.blocks.map((block, i) => (
-            <div className={styles.messageBlock} key={i}>
-              <MessageTime line={line} at={block.at} now={now} route={route && i === 0} />
-              <div className={styles.speechText}>
-                <FleetMarkdown content={line.markdown.slice(block.start, block.end)} />
-              </div>
+            <div className={styles.speechText} key={i}>
+              <FleetMarkdown
+                content={line.markdown.slice(block.start, block.end)}
+                lead={<MessageTime line={line} at={block.at} now={now} route={route && i === 0} />}
+              />
             </div>
           ))}
         </div>
