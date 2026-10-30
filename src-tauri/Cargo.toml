@@ -78,6 +78,10 @@ tauri-plugin-updater = "2.12.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Shell parsing for command permission checks
+tree-sitter = "=0.26.13"
+tree-sitter-bash = "=0.25.1"
+
 # HTTP client - like axios for Rust
 # Features: json (automatic JSON parsing), stream (for SSE), gzip (compression)
 reqwest = { version = "0.12", features = ["json", "stream", "gzip"] }
