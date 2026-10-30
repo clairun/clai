@@ -2426,7 +2426,6 @@ mod tests {
             "cat <<$\\\n'E'\nE\ntouch PWN",
             "cat <<$(x)\n$(x)\ntouch PWN\n$",
             "cat <<`a`\n`a`\ntouch PWN",
-            "cat <<E\nE\\\n\ntouch PWN\nE",
             "cat <<E\\\nX\nEX\\\n\ntouch PWN\nEX",
             "echo x\n((echo a) ; touch PWN )",
             "((touch PWN) )",
@@ -2480,6 +2479,28 @@ mod tests {
         ));
         assert!(matches!(
             evaluate_command_policy(&exec, "echo a\\ \\\n#; touch PWN", &[], &[]),
+            PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
+        ));
+    }
+
+    #[test]
+    fn continued_heredoc_line_is_read_as_bash_joins_it() {
+        let mut exec = ExecutionCapabilityConfig {
+            shell: ShellCapabilityConfig {
+                mode: ShellAccessMode::Full,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let dockerfile =
+            "cat <<EOF > Dockerfile\nRUN apt-get update && \\\n    apt-get install -y curl\nEOF";
+        assert!(matches!(
+            evaluate_command_policy(&exec, dockerfile, &[], &[]),
+            PolicyResult::Allow
+        ));
+        exec.shell.blocked_command_prefixes = vec!["touch".to_string()];
+        assert!(matches!(
+            evaluate_command_policy(&exec, "cat <<E\nE\\\n\ntouch PWN\nE", &[], &[]),
             PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
         ));
     }
