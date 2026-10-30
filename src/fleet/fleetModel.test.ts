@@ -342,9 +342,9 @@ describe('the highlight feed', () => {
   it('keeps a live message whole, yours and Main\'s alike, without its tool calls', () => {
     const long = `${'word '.repeat(200)}end`;
     const s = apply(withMain(), created(message('u1', 'user', long), NOW - 2), completed(withParts('a1', text(long), tool('c1')), NOW - 1));
-    expect(feedOf(s).lines.map((l) => [l.markdown, l.message])).toEqual([
-      [long, { sessionId: MAIN, id: 'u1', truncated: false }],
-      [long, { sessionId: MAIN, id: 'a1', truncated: false }],
+    expect(feedOf(s).lines.map((l) => [l.markdown, l.cut])).toEqual([
+      [long, []],
+      [long, []],
     ]);
   });
 
@@ -489,8 +489,6 @@ describe("Main's bubbles", () => {
     const next = { ...completed(message('m2', 'assistant', 'Second message.'), T + 10), runId: 'r1' } as AssistantEventEnvelope;
     let s = apply(withMain(), { ...completed(message('m1', 'assistant', 'First message.'), T), runId: 'r1' } as AssistantEventEnvelope, next);
     expect(bubbles(s).map((l) => l.markdown)).toEqual(['First message.\n\nSecond message.']);
-    // Spanning two messages, the bubble has no one message to fetch.
-    expect(bubbles(s)[0]!.message).toBeNull();
     s = apply(s, { ...completed(message('m3', 'assistant', 'Next run.'), T + 20), runId: 'r2' } as AssistantEventEnvelope);
     expect(bubbles(s).map((l) => l.markdown)).toEqual(['First message.\n\nSecond message.', 'Next run.']);
   });
@@ -659,6 +657,21 @@ describe('snapshot', () => {
     expect(feedOf(continued).lines.map((line) => [line.markdown, line.at])).toEqual([['Before.\n\nAfter.\n\nMore.', NOW]]);
   });
 
+  it('lists each message a bubble joins that the snapshot cut, so each is fetched whole', () => {
+    const s = seedFleet(EMPTY_FLEET, [
+      snapshotOf({
+        recentMessages: [
+          highlight(message('a1', 'assistant', 'First of the'), NOW - 30, 'r1', true),
+          highlight(message('a2', 'assistant', 'Whole.'), NOW - 25, 'r1'),
+          highlight(message('a3', 'assistant', 'Then the'), NOW - 20, 'r1', true),
+        ],
+      }),
+    ]);
+    expect(feedOf(s).lines.map((l) => [l.markdown, l.cut])).toEqual([
+      ['First of the…\n\nWhole.\n\nThen the…', [{ sessionId: MAIN, id: 'a1' }, { sessionId: MAIN, id: 'a3' }]],
+    ]);
+  });
+
   it('keeps which message a line says and whether the snapshot cut it, so it can be fetched whole', () => {
     const s = seedFleet(EMPTY_FLEET, [
       snapshotOf({
@@ -672,12 +685,12 @@ describe('snapshot', () => {
       }),
     ]);
     const feed = feedOf(s, withTasks(task('t', 'failed', NOW - 100)));
-    expect(feed.lines.map((l) => [l.key, l.markdown, l.message])).toEqual([
-      ['task:t', 'Task t', null],
-      ['rep', broke, { sessionId: MAIN, id: 'rep', truncated: false }],
-      ['u2', 'Ship it…', { sessionId: MAIN, id: 'u2', truncated: true }],
-      ['a0', 'Shipped to stag…', { sessionId: MAIN, id: 'a0', truncated: true }],
-      ['a1', 'All done.', { sessionId: MAIN, id: 'a1', truncated: false }],
+    expect(feed.lines.map((l) => [l.key, l.markdown, l.cut])).toEqual([
+      ['task:t', 'Task t', []],
+      ['rep', broke, []],
+      ['u2', 'Ship it…', [{ sessionId: MAIN, id: 'u2' }]],
+      ['a0', 'Shipped to stag…', [{ sessionId: MAIN, id: 'a0' }]],
+      ['a1', 'All done.', []],
     ]);
   });
 
@@ -695,9 +708,9 @@ describe('snapshot', () => {
       WS,
       { ...withParts('a1', text('All done.'), tool('c1'), text('Shipped.')), createdAt: BigInt(NOW - 20) }
     );
-    expect(feedOf(whole).lines.map((l) => [l.markdown, l.at, l.message?.truncated])).toEqual([
-      ['Ship it.', NOW - 30, false],
-      ['All done.\n\nShipped.', NOW - 20, false],
+    expect(feedOf(whole).lines.map((l) => [l.markdown, l.at, l.cut])).toEqual([
+      ['Ship it.', NOW - 30, []],
+      ['All done.\n\nShipped.', NOW - 20, []],
     ]);
     expect(card(whole).said.map((m) => m.runId)).toEqual([null, 'r1']);
     // Already whole, or not on the card: nothing changes.

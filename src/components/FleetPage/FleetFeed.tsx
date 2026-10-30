@@ -204,15 +204,17 @@ const Row = ({ line, now, faces, open }: { line: FleetLine; now: number; faces: 
   );
 };
 
-/** A message the snapshot cut, fetched whole into its card while a bubble or zoom shows it; its preview until then. */
-const useWhole = (workspaceId: string, line: FleetLine) => {
-  const cut = line.message?.truncated ? line.message : null;
-  const sessionId = cut?.sessionId;
-  const messageId = cut?.id;
+/** A message the snapshot cut, fetched whole into its card while a bubble or zoom shows it; showing it again retries a failed fetch. */
+const Whole = ({ workspaceId, sessionId, id }: { workspaceId: string; sessionId: string; id: string }) => {
   useEffect(() => {
-    if (sessionId && messageId) useFleetStore.getState().loadWhole(workspaceId, sessionId, messageId);
-  }, [workspaceId, sessionId, messageId]);
+    useFleetStore.getState().loadWhole(workspaceId, sessionId, id);
+  }, [workspaceId, sessionId, id]);
+  return null;
 };
+
+/** Each message of `line` the snapshot cut, fetched whole (`Whole`); its preview until then. */
+const Wholes = ({ workspaceId, line }: { workspaceId: string; line: FleetLine }) =>
+  line.cut.map((m) => <Whole key={m.id} workspaceId={workspaceId} sessionId={m.sessionId} id={m.id} />);
 
 /**
  * A bubble's words: the whole message, as markdown, and its pictures. They
@@ -220,11 +222,11 @@ const useWhole = (workspaceId: string, line: FleetLine) => {
  * grows (`useFollowEnd`), an older one shows its start.
  */
 const Words = ({ workspaceId, line, now, route, newest }: { workspaceId: string; line: FleetLine; now: number; route: boolean; newest: boolean }) => {
-  useWhole(workspaceId, line);
   const scroller = useFollowEnd(newest, line.markdown);
   useWheelLines(scroller, true);
   return (
     <>
+      <Wholes workspaceId={workspaceId} line={line} />
       <div ref={scroller} className={styles.bubbleText}>
         <div>
           {line.blocks.map((block, i) => (
@@ -374,9 +376,9 @@ const useFit = (lines: readonly FleetLine[]) => {
 
 /** The zoomed highlight: who said it to whom and when, then the whole message as markdown and its pictures; charts as its bubble draws them. */
 const Zoomed = ({ workspaceId, line, now }: { workspaceId: string; line: FleetLine; now: number }) => {
-  useWhole(workspaceId, line);
   return (
     <div className={styles.zoomText}>
+      <Wholes workspaceId={workspaceId} line={line} />
       <p className={styles.zoomStamp}>
         <Route line={line} />
       </p>
@@ -394,7 +396,7 @@ const Zoomed = ({ workspaceId, line, now }: { workspaceId: string; line: FleetLi
 };
 
 interface Zoom {
-  /** As zoomed; the feed's copy, fetched whole or grown since, is shown while the feed has it. */
+  /** As zoomed; the card's copy, fetched whole or grown since, is shown while the card holds it (`held`). */
   line: FleetLine;
   origin: HTMLElement;
   start: ZoomStart;
@@ -437,7 +439,7 @@ const FleetFeed = ({
       return { line, origin, since, start: faceFor(line.from, faces) ? start : { ...start, look: { ...YOU_LOOK, ...start.look } } };
     });
   const closed = useCallback(() => setZoom(null), []);
-  const zoomed = shown(zoom) ? { ...zoom, line: feed.lines.find((line) => line.key === zoom.line.key) ?? zoom.line } : null;
+  const zoomed = shown(zoom) ? { ...zoom, line: feed.held.find((line) => line.key === zoom.line.key) ?? zoom.line } : null;
   const split = feed.lines.length - count;
   const rows = feed.lines.slice(Math.max(0, split - rowCount), split);
   const bubbles = feed.lines.slice(split);

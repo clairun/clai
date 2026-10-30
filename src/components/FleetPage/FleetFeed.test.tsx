@@ -20,7 +20,7 @@ import { invoke } from '@tauri-apps/api/core';
 import FleetFeed from './FleetFeed';
 import { castFor } from './FleetFace';
 import { EMPTY_FLEET, applyAssistantEvent, applyUserSent, applyWholeMessage, seedFleet, type FleetLive, type FleetState } from '../../fleet/fleetModel';
-import { cardFeed } from '../../fleet/fleetFeed';
+import { FEED_LIMIT, cardFeed } from '../../fleet/fleetFeed';
 import { useFleetStore } from '../../fleet/fleetStore';
 
 const WS = 'ws-1';
@@ -109,6 +109,89 @@ describe("Main's bubble", () => {
       fetched.mockImplementation(async () => undefined);
       useFleetStore.setState({ fleet: EMPTY_FLEET });
     }
+  });
+
+  describe('a bubble joining replies the snapshot cut', () => {
+    /** Main's long reply `id`, as the snapshot cut it to 600 characters, and whole. */
+    const long = (id: string, at: number) => {
+      const whole = `${id} starts. ${'Lorem ipsum dolor sit amet. '.repeat(120)}${id} ends here.`;
+      const createdAt = BigInt(at);
+      return {
+        length: whole.length,
+        whole: { ...message(id, [text(whole)]), createdAt },
+        preview: { message: { ...message(id, [text(whole.slice(0, 600))]), createdAt }, runId: 'r1', truncated: true },
+      };
+    };
+    const first = long('m1', NOW - 2000);
+    const second = long('m2', NOW - 1000);
+    const Live = () => {
+      const card = useFleetStore((s) => s.fleet.cards[WS]);
+      return card ? <FleetFeed workspaceId={WS} feed={cardFeed(card, IDLE, NOW)} shouts={new Set()} now={NOW} faces={castFor({}, null)} onOpen={() => {}} /> : null;
+    };
+    /** Serves each whole reply, failing the first `failures` fetches. */
+    const serve = (failures: number) => {
+      let failed = 0;
+      return vi.mocked(invoke).mockImplementation(async (cmd, args) => {
+        if (cmd !== 'assistant_get_message') return undefined;
+        if (failed++ < failures) throw new Error('offline');
+        return [first.whole, second.whole].find((m) => m.id === (args as { messageId: string }).messageId);
+      });
+    };
+    const fetchesOf = (fetched: ReturnType<typeof serve>) =>
+      fetched.mock.calls.flatMap(([cmd, args]) => (cmd === 'assistant_get_message' ? [(args as { messageId: string }).messageId] : []));
+    beforeEach(() => {
+      vi.mocked(invoke).mockClear();
+      useFleetStore.setState({ fleet: seedFleet(EMPTY_FLEET, [snapshotWith(first.preview, second.preview)]), buffer: null });
+    });
+    afterEach(() => {
+      vi.mocked(invoke).mockImplementation(async () => undefined);
+      useFleetStore.setState({ fleet: EMPTY_FLEET });
+    });
+
+    it('fetches each of them, so its zoom says both whole, past the preview', async () => {
+      const fetched = serve(0);
+      render(<Live />);
+      await act(async () => {});
+      expect(new Set(fetchesOf(fetched))).toEqual(new Set(['m1', 'm2']));
+      fireEvent.click(bubbleOf(/m1 starts/));
+      const zoom = screen.getByRole('dialog', { name: 'Message from Main' });
+      expect(zoom).toHaveTextContent('m1 ends here.');
+      expect(zoom).toHaveTextContent('m2 ends here.');
+      expect(zoom).not.toHaveTextContent('…');
+      expect(zoom.textContent!.length).toBeGreaterThan(first.length + second.length);
+    });
+
+    it('fetches again when zoomed after a fetch failed', async () => {
+      const fetched = serve(2);
+      render(<Live />);
+      await act(async () => {});
+      expect(bubbleOf(/m1 starts/)).toHaveTextContent('…');
+      await act(async () => {
+        fireEvent.click(bubbleOf(/m1 starts/));
+      });
+      expect(fetchesOf(fetched).sort()).toEqual(['m1', 'm1', 'm2', 'm2']);
+      expect(screen.getByRole('dialog')).toHaveTextContent('m2 ends here.');
+    });
+
+    it("says them whole in a zoom whose line left the card's newest lines before they arrived", async () => {
+      const pending: (() => void)[] = [];
+      vi.mocked(invoke).mockImplementation((cmd, args) =>
+        cmd === 'assistant_get_message'
+          ? new Promise((resolve) => pending.push(() => resolve([first.whole, second.whole].find((m) => m.id === (args as { messageId: string }).messageId))))
+          : Promise.resolve(undefined)
+      );
+      render(<Live />);
+      fireEvent.click(bubbleOf(/m1 starts/));
+      await act(async () => {
+        for (let i = 0; i < FEED_LIMIT; i++) {
+          const later = { ...message(`n${i}`, [text(`Later ${i}.`)]), createdAt: BigInt(NOW + i) };
+          useFleetStore.getState().dispatch((s) => applyAssistantEvent(s, { ...event({ type: 'assistant_message_completed', payload: { message: later } } as AssistantUiEvent, NOW + i), runId: `later-${i}` }));
+        }
+      });
+      expect(screen.queryByText(/m1 starts/, { selector: '[data-bubble] *' })).toBeNull();
+      await act(async () => pending.forEach((settle) => settle()));
+      expect(screen.getByRole('dialog')).toHaveTextContent('m2 ends here.');
+    });
   });
 
   it('says its words as markdown, in its bubble and its zoom', () => {

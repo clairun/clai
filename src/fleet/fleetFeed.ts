@@ -49,8 +49,8 @@ export interface FleetLine {
   blocks: readonly { at: number; start: number; end: number }[];
   /** The pictures attached to the message. */
   images: readonly ImagePart[];
-  /** The message said, to fetch in full when `truncated`; `null` for a task's own line. */
-  message: { sessionId: string; id: string; truncated: boolean } | null;
+  /** The messages it says that the snapshot cut, to fetch whole; none once whole, or for a task's own line. */
+  cut: readonly { sessionId: string; id: string }[];
   /** The first sentence, for a one-line row. */
   headline: string;
   /** A task's result. */
@@ -70,6 +70,8 @@ export interface FleetFeed {
   mood: FleetMood;
   caption: FleetCaption;
   lines: FleetLine[];
+  /** Every line the card holds, oldest first: `lines` are its last `FEED_LIMIT`; a zoom's line stays current here after it leaves them. */
+  held: FleetLine[];
   /** `FleetCard.youSaidAt`: a word since a zoom opened closes it, so your word shows. */
   youSaidAt: number;
 }
@@ -166,24 +168,24 @@ const resultOf = (task: WorkspaceTaskResponse): string =>
   (task.status === 'failed' ? taskDisplayStatus(task).label : task.title);
 
 type LineParts = Pick<FleetLine, 'key' | 'at' | 'from' | 'to' | 'markdown'> &
-  Partial<Pick<FleetLine, 'images' | 'outcome' | 'live' | 'message' | 'blocks'>>;
+  Partial<Pick<FleetLine, 'images' | 'outcome' | 'live' | 'cut' | 'blocks'>>;
 
-const line = ({ markdown, images = [], outcome = null, live = null, message = null, blocks, ...said }: LineParts): FleetLine => ({
+const line = ({ markdown, images = [], outcome = null, live = null, cut = [], blocks, ...said }: LineParts): FleetLine => ({
   ...said,
   text: plainText(markdown),
   markdown,
   blocks: blocks ?? [{ at: said.at, start: 0, end: markdown.length }],
   images,
-  message,
+  cut,
   headline: firstSentence(markdown),
   outcome,
   live,
 });
 
-const messageOf = (said: FleetSaid): FleetLine['message'] => ({ sessionId: said.sessionId, id: said.id, truncated: said.truncated });
+const cutOf = (said: FleetSaid): FleetLine['cut'] => (said.truncated ? [{ sessionId: said.sessionId, id: said.id }] : []);
 
 const fromSaid = (said: FleetSaid, from: FleetSpeaker, to: FleetSpeaker, outcome: FleetOutcome | null = null) =>
-  line({ key: said.id, at: said.at, from, to, markdown: said.text, images: said.images, outcome, message: messageOf(said) });
+  line({ key: said.id, at: said.at, from, to, markdown: said.text, images: said.images, outcome, cut: cutOf(said) });
 
 /** A block of Main's words to you, before `speak` joins it into a bubble. */
 interface Stretch {
@@ -191,7 +193,8 @@ interface Stretch {
   at: number;
   run: string | null;
   markdown: string;
-  message: FleetLine['message'];
+  id: string;
+  cut: FleetLine['cut'];
 }
 
 const isStretch = (item: FleetLine | Stretch): item is Stretch => 'run' in item;
@@ -200,7 +203,7 @@ const isStretch = (item: FleetLine | Stretch): item is Stretch => 'run' in item;
 const stretches = (said: FleetSaid): Stretch[] =>
   said.marks.flatMap((mark, i) => {
     const markdown = said.text.slice(i ? said.marks[i - 1]!.end : 0, mark.end).trim();
-    return markdown ? [{ key: i ? `${said.id}:${i}` : said.id, at: mark.at, run: said.runId, markdown, message: messageOf(said) }] : [];
+    return markdown ? [{ key: i ? `${said.id}:${i}` : said.id, at: mark.at, run: said.runId, markdown, id: said.id, cut: cutOf(said) }] : [];
   });
 
 /**
@@ -215,7 +218,7 @@ const speak = (items: readonly (FleetLine | Stretch)[], asked: readonly number[]
   const close = () => {
     const first = bubble[0];
     if (!first) return;
-    const message = bubble.every((s) => s.message?.id === first.message?.id) ? first.message : null;
+    const cut = bubble.flatMap((s) => s.cut);
     const markdown = bubble.map((s) => s.markdown).join('\n\n');
     let start = 0;
     const blocks: { at: number; start: number; end: number }[] = [];
@@ -223,15 +226,15 @@ const speak = (items: readonly (FleetLine | Stretch)[], asked: readonly number[]
     for (const stretch of bubble) {
       const end = start + stretch.markdown.length;
       const previous = blocks.at(-1);
-      if (previous && previousMessageId === stretch.message?.id) {
+      if (previous && previousMessageId === stretch.id) {
         previous.end = end;
       } else {
         blocks.push({ at: stretch.at, start, end });
       }
-      previousMessageId = stretch.message?.id;
+      previousMessageId = stretch.id;
       start = end + 2;
     }
-    lines.push(line({ key: first.key, at: bubble.at(-1)!.at, from: MAIN, to: YOU, markdown, blocks, message }));
+    lines.push(line({ key: first.key, at: bubble.at(-1)!.at, from: MAIN, to: YOU, markdown, blocks, cut }));
     bubble = [];
   };
   for (const item of items) {
@@ -296,7 +299,8 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
     }
   }
   lines.sort((a, b) => a.at - b.at);
-  const shown = speak(lines, card.asked).slice(-FEED_LIMIT);
+  const held = speak(lines, card.asked);
+  const shown = held.slice(-FEED_LIMIT);
 
   const working = tasks.filter((t) => isTaskLive(t.status)).length;
   const ended = [...shown].reverse().find((l) => l.outcome === 'done' || l.outcome === 'failed');
@@ -317,7 +321,7 @@ export const cardFeed = (card: FleetCard, live: FleetLive, now: number): FleetFe
         : lastWord > 0
           ? { kind: mood, at: lastWord }
           : { kind: 'empty' };
-  return { mood, caption, lines: shown, youSaidAt: card.youSaidAt };
+  return { mood, caption, lines: shown, held, youSaidAt: card.youSaidAt };
 };
 
 /** Bubbles a miniature draws before it keeps room for a row of what came before. */
