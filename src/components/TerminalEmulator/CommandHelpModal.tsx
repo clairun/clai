@@ -1,5 +1,6 @@
 import React, { useEffect } from 'react';
 import ReactDOM from 'react-dom';
+import { PICKER_SHORTCUT } from './WorkspacePicker';
 import styles from './CommandHelpModal.module.css';
 
 interface CommandEntry {
@@ -25,7 +26,7 @@ const COMMANDS: CommandEntry[] = [
   },
   {
     command: '/settings',
-    description: "Open the current workspace's settings.",
+    description: "Open the current workspace's settings, or the app's outside a workspace.",
     scope: 'workspace',
   },
   {
@@ -46,6 +47,13 @@ const SHORTCUTS: { keys: string; description: string }[] = [
   { keys: 'Shift+Enter', description: 'New line' },
   { keys: 'Ctrl/Cmd+L', description: 'Focus the input' },
   { keys: 'Ctrl/Cmd+\\', description: 'Toggle terminal mode' },
+  { keys: PICKER_SHORTCUT, description: "Choose the Fleet terminal's workspace" },
+  { keys: 'Ctrl/Cmd+Shift+F', description: 'Open Fleet; from Fleet, open the selected workspace (requires a selected card)' },
+  { keys: 'Ctrl+Tab / Ctrl+Shift+Tab', description: 'Switch Fleet workspaces (release Ctrl or press Enter to select)' },
+  { keys: 'Enter (Fleet)', description: 'Open the selected workspace when no input or dialog is using Enter' },
+  { keys: 'Escape (Fleet)', description: 'Deselect the card when no dialog or other control uses Escape' },
+  { keys: 'Ctrl/Cmd+Shift+Enter', description: 'Toggle fullscreen while the terminal is open' },
+  { keys: 'Ctrl+C', description: 'Stop an active Workspace run outside the terminal when no text is selected' },
   { keys: 'Ctrl+Shift+C / V', description: 'Copy / paste in the terminal (Cmd+C/V on macOS)' },
 ];
 

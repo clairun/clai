@@ -6,6 +6,7 @@
 pub mod app_info;
 pub mod app_updates;
 pub mod assistant;
+pub mod fleet;
 pub mod global_agents;
 pub mod mcp_servers;
 pub mod path_grants;

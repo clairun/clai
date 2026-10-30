@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+import { act } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -324,5 +326,65 @@ describe('AskUserPanel — collapse', () => {
     // Expand restores the full body.
     await user.click(screen.getByRole('button', { name: /expand question/i }));
     expect(screen.getByText('Option A')).toBeInTheDocument();
+  });
+});
+
+describe('AskUserPanel — a new question', () => {
+  it('starts with a fresh draft, expanded', async () => {
+    const user = userEvent.setup();
+    mountWithPending(askUserRequest({ options: null }));
+    await user.type(screen.getByRole('textbox'), 'half an answer');
+    await user.click(screen.getByRole('button', { name: /collapse question/i }));
+
+    act(() => {
+      useAssistantStore.setState((state) => ({
+        sessions: {
+          [SESSION.id]: {
+            ...state.sessions[SESSION.id]!,
+            pendingAskUser: askUserRequest({ pendingId: 'pending-next', options: null }),
+          },
+        },
+      }));
+    });
+
+    expect(screen.getByRole('textbox')).toHaveValue('');
+  });
+});
+
+describe('AskUserPanel — spoken (the Fleet)', () => {
+  const ask: PendingAskUser = {
+    pendingId: 'ask-1',
+    question: 'Where should I deploy?',
+    extraContext: 'Staging was rebuilt yesterday.',
+    options: [
+      { label: 'Staging', description: 'Rebuilt yesterday' },
+      { label: 'Canary', description: null },
+      { label: 'Production', description: 'Freeze until Monday' },
+    ],
+  };
+  const speaker = (prompt: ReactNode) => <div>{prompt}</div>;
+
+  it('drops the chip and collapse, and answers a single-select question with one chip', async () => {
+    render(<AskUserPanel ask={ask} speaker={speaker} />);
+    expect(screen.queryByText('AGENT IS ASKING')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /collapse/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Send answer' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Production' })).toHaveAttribute('title', 'Freeze until Monday');
+    await userEvent.click(screen.getByRole('button', { name: 'Canary' }));
+    expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
+      request: { pendingId: 'ask-1', answer: 'Canary', selectedOptionIndex: 1, selectedOptionIndexes: null },
+    });
+  });
+
+  it('toggles multi-select chips and sends them together', async () => {
+    render(<AskUserPanel ask={{ ...ask, multiSelect: true }} speaker={speaker} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Staging' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Production' }));
+    expect(screen.getByRole('button', { name: 'Staging' })).toHaveAttribute('aria-pressed', 'true');
+    await userEvent.click(screen.getByRole('button', { name: 'Send answer' }));
+    expect(mockInvoke).toHaveBeenCalledWith('assistant_submit_user_input', {
+      request: { pendingId: 'ask-1', answer: 'Staging, Production', selectedOptionIndex: null, selectedOptionIndexes: [0, 2] },
+    });
   });
 });

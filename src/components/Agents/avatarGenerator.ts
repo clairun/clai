@@ -35,6 +35,10 @@ export type EyeKind = 'dots' | 'rings' | 'visor' | 'wedges' | 'odd' | 'tall';
 export type MouthKind = 'none' | 'line' | 'smile' | 'o' | 'flat';
 export type MarkerKind = 'antenna' | 'fin' | 'tuft' | 'none';
 
+/** Worn by a workspace's Main only (`accessory` option), so members' faces never change. */
+const ACCESSORIES = ['headband', 'glasses', 'cap', 'bow', 'scarf', 'earphones', 'scar', 'flower'] as const;
+type AccessoryKind = (typeof ACCESSORIES)[number];
+
 // Repeated entries are weights: blobs and antennae are the "house look".
 const BODIES: readonly BodyKind[] = ['blob', 'blob', 'squircle', 'pill', 'tall'];
 const EYES: readonly EyeKind[] = ['dots', 'rings', 'visor', 'wedges', 'odd', 'tall'];
@@ -58,6 +62,8 @@ export interface AvatarOptions {
   background?: boolean;
   /** Override the seed-derived hue (OKLCH degrees). Used for the Main's fixed indigo. */
   hue?: number;
+  /** Draw the accessory the seed picks (`accessoryFor`). Only the Main wears one. */
+  accessory?: boolean;
   /** Saved generator version. Recorded for a future v2; every version renders as v1 today. */
   version?: number;
 }
@@ -126,7 +132,7 @@ export const hueIndexFor = (seed: string): number => rngFor(seed).hueIndex;
 
 // ---- colour -------------------------------------------------------------------
 
-const oklchToHex = (L: number, C: number, hueDeg: number): string => {
+export const oklchToHex = (L: number, C: number, hueDeg: number): string => {
   const h = (hueDeg * Math.PI) / 180;
   const a = C * Math.cos(h);
   const b = C * Math.sin(h);
@@ -335,6 +341,56 @@ const drawMarker = (
   }
 };
 
+const ACC_INK = '#0a0e14';
+const ACC_PAPER = '#f5f1e8';
+
+/** Drawn over the face in its 100 × 100 box: the body spans 18–82 across, 22–86 down; the visor sits at 44–50. */
+const drawAccessory = (kind: AccessoryKind, theme: AvatarTheme): string => {
+  switch (kind) {
+    case 'headband':
+      return (
+        rect(17, 29, 66, 8, 3, ACC_INK) +
+        `<path d="M82 33 L96 26 M82 34 L95 42" ${stroke(ACC_INK, 4)}/>`
+      );
+    case 'glasses':
+      return (
+        `<g fill="rgba(245,241,232,.35)" stroke="${ACC_INK}" stroke-width="3.5">` +
+        circle(38, 47, 10, '') +
+        circle(62, 47, 10, '') +
+        `<path d="M48 46 h4" fill="none"/></g>`
+      );
+    case 'cap':
+      return `<path d="M17 38 C17 14 83 14 83 38 Z" fill="${ACC_INK}"/><path d="M60 34 h34 a4 4 0 0 1 0 8 h-34 z" fill="${ACC_INK}"/>`;
+    case 'bow':
+      return (
+        `<g fill="${ACC_PAPER}" stroke="${ACC_INK}" stroke-width="2.5" stroke-linejoin="round">` +
+        `<path d="M72 22 L58 13 L60 31 Z M72 22 L86 13 L84 31 Z"/>` +
+        circle(72, 22, 4, `fill="${ACC_INK}"`) +
+        `</g>`
+      );
+    case 'scarf':
+      return `<path d="M16 78 Q50 92 84 78 L84 90 Q50 104 16 90 Z" fill="${ACC_INK}"/><path d="M62 88 l4 14 h8 l-3 -16 z" fill="${ACC_INK}"/>`;
+    case 'earphones':
+      return (
+        `<path d="M17 50 C17 4 83 4 83 50" fill="none" stroke="${ACC_INK}" stroke-width="4"/>` +
+        rect(9, 44, 11, 18, 4, ACC_INK) +
+        rect(80, 44, 11, 18, 4, ACC_INK)
+      );
+    case 'scar':
+      return `<path d="M60 56 L72 68 M72 56 L60 68" ${stroke(ACC_INK, 3)}/>`;
+    case 'flower':
+      return (
+        `<g stroke="${ACC_INK}" stroke-width="2">` +
+        [0, 72, 144, 216, 288]
+          .map((a) => circle(24 + 7 * Math.cos((a * Math.PI) / 180), 26 + 7 * Math.sin((a * Math.PI) / 180), 5.5, `fill="${ACC_PAPER}"`))
+          .join('') +
+        // `--color-warning` of each theme.
+        circle(24, 26, 4, `fill="${theme === 'dark' ? '#e3b341' : '#d97706'}"`) +
+        `</g>`
+      );
+  }
+};
+
 // ---- public API ---------------------------------------------------------------
 
 /** The discrete parts a seed resolves to. Cheap; used by tests and the candidate picker. */
@@ -349,6 +405,10 @@ export const avatarParts = (seed: string): AvatarParts => {
   };
 };
 
+/** The accessory a seed picks when it is worn. Its own bits of the hash: the parts' draws are untouched. */
+const accessoryFor = (seed: string): AccessoryKind =>
+  ACCESSORIES[(rngFor(seed).hash >>> 16) % ACCESSORIES.length] as AccessoryKind;
+
 /**
  * Render the avatar for `seed` as an SVG string.
  *
@@ -356,7 +416,7 @@ export const avatarParts = (seed: string): AvatarParts => {
  * hashed, never echoed — so it is safe to inject as HTML.
  */
 export const agentAvatar = (seed: string, options: AvatarOptions = {}): string => {
-  const { size = 64, theme = 'dark', mood = 'neutral', background = true, hue } = options;
+  const { size = 64, theme = 'dark', mood = 'neutral', background = true, hue, accessory = false } = options;
   // Only one version exists. When v2 lands, dispatch on `options.version` here.
   const rng = rngFor(seed);
   const { rand, pick, range } = rng;
@@ -419,6 +479,8 @@ export const agentAvatar = (seed: string, options: AvatarOptions = {}): string =
     `<defs><clipPath id="${clipId}">${circle(50, 50, 50, '')}</clipPath></defs>` +
     bg +
     `<g clip-path="url(#${clipId})">${inner}</g>` +
+    // Unclipped: a cap's peak or a headband's tails may leave the disc.
+    (accessory ? drawAccessory(accessoryFor(seed), theme) : '') +
     `</svg>`
   );
 };

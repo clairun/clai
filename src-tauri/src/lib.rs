@@ -440,6 +440,7 @@ pub fn run() {
             commands::assistant::assistant_get_session,
             commands::assistant::assistant_delete_session,
             commands::assistant::assistant_load_session_messages_page,
+            commands::assistant::assistant_get_message,
             commands::assistant::assistant_list_runs,
             commands::assistant::assistant_get_tool_call_result,
             commands::assistant::assistant_get_tool_call_input,
@@ -449,7 +450,10 @@ pub fn run() {
             commands::assistant::assistant_delete_queued_message,
             commands::assistant::assistant_edit_queued_message,
             commands::assistant::assistant_submit_user_input,
+            commands::assistant::assistant_list_pending_asks,
             commands::assistant::assistant_cancel_run,
+            // Fleet page startup state
+            commands::fleet::fleet_snapshot,
             // App-level agent library and workspace assignments.
             commands::global_agents::agent_definitions_list,
             commands::global_agents::agent_definition_save,
@@ -507,6 +511,7 @@ pub fn run() {
             commands::workspace::workspace_move_path,
             commands::workspace::workspace_store_image,
             commands::workspace::workspace_pick_and_store_image,
+            commands::workspace::workspace_pick_image,
             commands::workspace::workspace_download_file,
             commands::workspace::workspace_update_session_mcp,
             commands::workspace::workspace_set_provider,

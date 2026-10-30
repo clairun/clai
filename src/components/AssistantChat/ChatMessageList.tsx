@@ -9,8 +9,10 @@ import React, { useState, useCallback, useEffect, useMemo, memo } from 'react';
 import MarkdownMessage from '../Chat/MarkdownMessage';
 import StreamingMarkdown from '../Chat/StreamingMarkdown';
 import { WorkspaceFileContext, useDocumentLocation } from '../Chat/WorkspaceFileContext';
-import ImageLightbox from '../Chat/ImageLightbox';
 import VirtualizedList from '../common/VirtualizedList';
+import { isRunMarkerText } from '../../assistant/runMarker';
+import type { RunFailure } from '../../assistant/runErrors';
+import RunFailureBanner from '../RunFailureBanner/RunFailureBanner';
 import type {
   AssistantMessage,
   ContentPart,
@@ -45,7 +47,8 @@ import { TaskCardContext, useTaskCardSurface, type TaskCardSurface } from './tas
 import { useTask } from '../../workspace/taskStore';
 import styles from './AssistantChat.module.css';
 import { onScrollChatToBottom } from '../../utils/workspaceUiEvents';
-import { readWorkspaceFileBase64 } from '../../workspace/client';
+import ImageAttachment from './ImageAttachment';
+import { imageParts, type ImagePart } from '../../assistant/imageParts';
 import { useToolCallInput, useToolCallResult } from '../../assistant/toolCallResult';
 
 // Tools beyond this count collapse behind a "show N earlier" toggle so a turn
@@ -58,7 +61,6 @@ const MAX_VISIBLE_TOOLS = 2;
 // are accessible after a `type ===` guard.
 type TextPart = Extract<ContentPart, { type: 'text' }>;
 type ToolUsePart = Extract<ContentPart, { type: 'tool_use' }>;
-type ImagePart = Extract<ContentPart, { type: 'image' }>;
 
 // A tool_use enriched with the matching ToolInvocation record for rendering.
 // `result` is the compact view: only charts and task cards keep one.
@@ -114,63 +116,8 @@ const getToolUses = (message: AssistantMessage): ToolUsePart[] => {
 
 const getImageContent = (message: AssistantMessage): ImagePart[] => {
   if (!message.content || !Array.isArray(message.content)) return [];
-  return message.content.filter((part): part is ImagePart => part.type === 'image');
+  return imageParts(message.content);
 };
-
-/**
- * Lazily loads an image part's bytes from the workspace image store and
- * renders a thumbnail. The fetch fires only when this component mounts —
- * i.e. when its message scrolls into the virtualized view — so a long
- * history with many images never loads them all at once.
- */
-const ImageAttachment = memo(({ workspaceId, part }: { workspaceId: string; part: ImagePart }) => {
-  const [src, setSrc] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-  const [zoomed, setZoomed] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    readWorkspaceFileBase64(workspaceId, part.path)
-      .then((bytes) => {
-        if (!cancelled) setSrc(`data:${bytes.mime};base64,${bytes.base64}`);
-      })
-      .catch(() => {
-        if (!cancelled) setFailed(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId, part.path]);
-
-  if (failed) {
-    return <div className={styles.imageAttachmentError}>Image unavailable</div>;
-  }
-  if (!src) {
-    return <div className={styles.imageAttachmentLoading} />;
-  }
-  const alt = part.filename ?? 'attached image';
-  return (
-    <>
-      <img
-        className={styles.imageAttachment}
-        src={src}
-        alt={alt}
-        role="button"
-        tabIndex={0}
-        title="Click to zoom"
-        onClick={() => setZoomed(true)}
-        onKeyDown={(event) => {
-          if (event.key === 'Enter' || event.key === ' ') {
-            event.preventDefault();
-            setZoomed(true);
-          }
-        }}
-      />
-      {zoomed && <ImageLightbox src={src} alt={alt} onClose={() => setZoomed(false)} />}
-    </>
-  );
-});
-ImageAttachment.displayName = 'ImageAttachment';
 
 /**
  * Collapsible "thinking" block — renders the model's reasoning_content
@@ -308,9 +255,7 @@ const isHiddenMessage = (message: AssistantMessage | undefined): boolean => {
 
   if (message.role !== 'user') return false;
   const text = getTextContent(message);
-  if (text.startsWith('--- New scheduled run at') || text.startsWith('--- Manual run at')) {
-    return true;
-  }
+  if (isRunMarkerText(text)) return true;
   // Hide only when there's nothing to show — neither text nor image parts. An
   // image-only user message (no caption) must still render its thumbnail.
   return !text && getImageContent(message).length === 0;
@@ -539,12 +484,10 @@ interface ChatMessageListProps {
   streamingText?: Record<string, string>;
   isStreaming?: boolean;
   toolCalls?: ToolInvocation[];
-  // Error message of the most recent run if it failed, shown inline at the
-  // end of the conversation (directly under the failed turn). Null when the
-  // last run didn't fail. `runErrorIsLimit` selects a calmer style for
-  // usage/rate limits, which resolve on their own at a stated reset time.
-  runError?: string | null;
-  runErrorIsLimit?: boolean;
+  // Failure of the most recent run, shown inline at the end of the
+  // conversation (directly under the failed turn). Null when the last run
+  // didn't fail.
+  runFailure?: RunFailure | null;
   // Epoch ms when the in-flight run started, for the running indicator's
   // elapsed-time readout.
   runStartedAt?: number | null;
@@ -584,8 +527,7 @@ const ChatMessageList = ({
   streamingText = EMPTY_STREAMING,
   isStreaming = false,
   toolCalls = EMPTY_TOOL_CALLS,
-  runError = null,
-  runErrorIsLimit = false,
+  runFailure = null,
   runStartedAt = null,
   runningIdentity = null,
   queuedMessageIds,
@@ -778,11 +720,8 @@ const ChatMessageList = ({
     runningIdentity ? (
       <RunningIndicator identity={runningIdentity} runStartedAt={runStartedAt} />
     ) : null
-  ) : runError ? (
-    <div className={runErrorIsLimit ? styles.runLimitBanner : styles.runErrorBanner} role="alert">
-      <span className={styles.runErrorIcon}>{runErrorIsLimit ? '⏳' : '⚠'}</span>
-      <span>{runError}</span>
-    </div>
+  ) : runFailure ? (
+    <RunFailureBanner failure={runFailure} className={styles.runFailure} />
   ) : null;
 
   return (
@@ -861,13 +800,7 @@ const UserMessageBlock = ({
   const imageParts = getImageContent(message);
   if (!textContent && imageParts.length === 0) return null;
 
-  // Hide run boundary markers (persisted trigger messages for the LLM, not for the user)
-  if (
-    textContent.startsWith('--- New scheduled run at') ||
-    textContent.startsWith('--- Manual run at')
-  ) {
-    return null;
-  }
+  if (isRunMarkerText(textContent)) return null;
 
   const isEditing = editDraft !== null;
   const trimmedDraft = (editDraft ?? '').trim();

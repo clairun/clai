@@ -295,3 +295,59 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* ── Spoken (the Fleet): the request is the agent's bubble, drawn by the
+ * caller; the card is bare, dense, and fills its parent, the decision at the
+ * bottom; warnings kept. ── */
+.spoken {
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  gap: 6px;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.spoken .cardBody {
+  flex: 1;
+  min-height: 0;
+  gap: 6px;
+  max-height: none;
+  overflow: visible;
+}
+
+.spoken .cardBody > :nth-child(2) {
+  margin-top: auto;
+}
+
+.spokenPath {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 0.9em;
+  overflow-wrap: anywhere;
+}
+
+.spokenReason {
+  display: block;
+  margin-top: 6px;
+  font-size: 0.85em;
+  font-weight: 400;
+  color: var(--color-text-secondary);
+}
+
+.spoken .warning {
+  padding: 4px 8px;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.spoken .buttonRow {
+  gap: 4px;
+}
+
+.spoken .btn {
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  line-height: 18px;
+}

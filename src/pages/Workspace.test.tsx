@@ -566,7 +566,7 @@ describe('Workspace navigation', () => {
 describe('Workspace switch chrome', () => {
   const beta = detailsFor(
     { includeFiles: true },
-    { workspaceId: 'b', title: 'Beta', memories: [], session: sessionFor('b', 10n) }
+    { workspaceId: 'b', title: 'Beta', memories: [], artifactCount: 0n, session: sessionFor('b', 10n) }
   );
 
   it("keeps the previous workspace's title and run controls out of the header", async () => {
@@ -606,6 +606,28 @@ describe('Workspace switch chrome', () => {
     expect(await screen.findByTitle('Click to rename')).toHaveTextContent('Beta');
   });
 
+  it('does not show zero tasks before the new workspace task count loads', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [FAILED_TASK] })
+    );
+    renderSwitchableWorkspace();
+    expect(await screen.findByRole('button', { name: /1 tasks/ })).toBeInTheDocument();
+
+    const betaTasks = [
+      { ...FAILED_TASK, id: 'task-b-1', workspaceId: 'b' },
+      { ...FAILED_TASK, id: 'task-b-2', workspaceId: 'b' },
+    ];
+    const releaseBeta = holdBetaDetails({ ...beta, tasks: betaTasks });
+    await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
+    await screen.findByText('Loading conversation…');
+
+    expect(screen.getByRole('button', { name: /… tasks/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /0 tasks/ })).toBeNull();
+
+    await releaseBeta();
+    expect(await screen.findByRole('button', { name: /2 tasks/ })).toBeInTheDocument();
+  });
+
   it("keeps the previous workspace's counts off the page", async () => {
     getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
       detailsFor(options, { tasks: [FAILED_TASK] })
@@ -619,11 +641,19 @@ describe('Workspace switch chrome', () => {
     await userEvent.click(screen.getByRole('button', { name: 'go to beta' }));
     await screen.findByText('Loading conversation…');
 
+    expect(screen.getByRole('button', { name: /… tasks/ })).toBeInTheDocument();
+    expect(screen.getByText('… msgs')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /… agents/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /… memories/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /… artifacts/ })).toBeInTheDocument();
+
+    await releaseBeta();
+    expect(await screen.findByTitle('Click to rename')).toHaveTextContent('Beta');
+    expect(screen.getByText('0 msgs')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /0 agents/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /0 tasks/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /0 memories/ })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /0 artifacts/ })).toBeInTheDocument();
-
-    await releaseBeta();
   });
 
   it('drops a late reply for the workspace the user already left', async () => {
@@ -1177,6 +1207,21 @@ describe('Workspace task transcript', () => {
 
     await waitFor(() => expect(panel).toHaveTextContent('Completed'));
     expect(panel).not.toHaveTextContent('Running');
+  });
+
+  it('opens the task a route arrives with', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { tasks: [FAILED_TASK] })
+    );
+    vi.mocked(workspaceClient.getWorkspaceTask).mockResolvedValueOnce(FAILED_TASK);
+    render(
+      <MemoryRouter initialEntries={[{ pathname: '/workspace/a', state: { openTaskId: FAILED_TASK.id } }]}>
+        <Routes>
+          <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        </Routes>
+      </MemoryRouter>
+    );
+    await screen.findByRole('region', { name: `Transcript for ${FAILED_TASK.title}` });
   });
 });
 

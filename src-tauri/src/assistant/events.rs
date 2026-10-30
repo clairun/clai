@@ -95,12 +95,10 @@ pub enum AssistantUiEvent {
     AskUserRequested {
         pending_id: String,
         question: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
         options: Option<Vec<AskUserOption>>,
         /// When true the user may pick any number of options.
         #[serde(default)]
         multi_select: bool,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
         extra_context: Option<String>,
     },
     /// The `ask_user` tool has received the user's answer; the inline

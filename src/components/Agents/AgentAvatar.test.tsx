@@ -1,7 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render } from '@testing-library/react';
 import AgentAvatar from './AgentAvatar';
-import { avatarRefFor, identityFor, mainIdentity } from './agentIdentity';
+import { MAIN_AVATAR_HUE, avatarRefFor, identityFor, mainIdentity } from './agentIdentity';
+import { agentAvatar } from './avatarGenerator';
+
+/** The generator's markup as the DOM serialises it. */
+const asHtml = (svg: string) => {
+  const div = document.createElement('div');
+  div.innerHTML = svg;
+  return div.innerHTML;
+};
 
 // Built the way call sites build it: a fresh object per render.
 const reviewer = () =>
@@ -101,14 +109,21 @@ describe('AgentAvatar', () => {
     expect(container.innerHTML).toBe(first);
   });
 
-  it('the Main gets its fixed indigo face regardless of the agent record', () => {
-    const a = render(<AgentAvatar identity={identityFor({ id: 'ws-1', isDefault: true })} />);
-    const b = render(
-      <AgentAvatar identity={identityFor({ id: 'ws-2', avatar: avatarRefFor('other'), isDefault: true })} />,
+  it("draws each workspace's Main from its own seed, in purple, with the accessory the seed picks", () => {
+    const main = identityFor({ id: 'ws-1', isDefault: true });
+    const a = render(<AgentAvatar identity={main} />).container.innerHTML;
+    const b = render(<AgentAvatar identity={identityFor({ id: 'ws-2', isDefault: true })} />).container.innerHTML;
+    expect(a).not.toBe(b);
+    expect(a).toContain(asHtml(agentAvatar('ws-1', { size: 32, theme: 'light', hue: MAIN_AVATAR_HUE, accessory: true })));
+    // The accessory is what the Main adds over the plain face.
+    expect(agentAvatar('ws-1', { size: 32, theme: 'light', hue: MAIN_AVATAR_HUE, accessory: true })).not.toBe(
+      agentAvatar('ws-1', { size: 32, hue: MAIN_AVATAR_HUE }),
     );
-    expect(a.container.innerHTML).toBe(b.container.innerHTML);
-    expect(a.container.innerHTML).toBe(
-      render(<AgentAvatar identity={mainIdentity()} />).container.innerHTML,
-    );
+  });
+
+  it('draws no accessory for a member', () => {
+    const { container } = render(<AgentAvatar identity={reviewer()} />);
+    expect(container.innerHTML).toContain(asHtml(agentAvatar('Code Reviewer', { size: 32, theme: 'light' })));
+    expect(container.innerHTML).not.toContain(asHtml(agentAvatar('Code Reviewer', { size: 32, theme: 'light', accessory: true })));
   });
 });

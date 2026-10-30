@@ -266,3 +266,118 @@
   text-overflow: ellipsis;
   word-break: normal;
 }
+
+/* ── Spoken (the Fleet): the command is the agent's bubble, drawn by the
+ * caller; the card is bare, dense, and fills its parent, decisions at the
+ * bottom. ── */
+.spoken {
+  flex: 1;
+  min-height: 0;
+  padding: 0;
+  gap: 6px;
+  border: 0;
+  background: none;
+  box-shadow: none;
+}
+
+.spoken .cardBody {
+  flex: 1;
+  min-height: 0;
+  gap: 4px;
+  max-height: none;
+  overflow: visible;
+}
+
+.spoken .cardBody > :nth-child(2) {
+  margin-top: auto;
+}
+
+.spoken .segments {
+  gap: 2px;
+}
+
+/* Each part on one line (its tooltip has it whole). */
+.spoken .segmentText code {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+  overflow: hidden;
+  min-width: 0;
+  border: none;
+  line-height: 1.35;
+  word-break: break-all;
+}
+
+.spoken .segmentRow {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: 6px;
+  padding: 0;
+  border: none;
+  background: transparent;
+}
+
+.spoken .segmentText {
+  flex: 1 1 10ch;
+  min-width: 0;
+  align-items: flex-start;
+}
+
+/* The decisions stay on one row: an "always" chip's prefix gives way first. */
+.spoken .segmentButtons {
+  flex-wrap: nowrap;
+  gap: 4px;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.spoken .btn {
+  flex: none;
+  padding: 1px 8px;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.spoken .btn:has(code) {
+  display: inline-flex;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+/* The prefix an "always" chip saves; whole in its tooltip. */
+.spoken .btn code {
+  display: inline-block;
+  min-width: 2ch;
+  max-width: 14ch;
+  margin-left: 0.25em;
+  padding: 0;
+  line-height: inherit;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  vertical-align: bottom;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+}
+
+.spoken .cardFooter {
+  justify-content: flex-start;
+  gap: 4px;
+}
+
+/* Long commands wrap anywhere and scroll inside the bubble once it is out of room. */
+.spokenCommand {
+  display: block;
+  min-height: 0;
+  margin-top: 4px;
+  padding: 4px 8px;
+  overflow: auto;
+  font-size: 12.5px;
+  font-weight: 400;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: anywhere;
+}

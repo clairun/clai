@@ -1,0 +1,1155 @@
+/*
+ * The Fleet. Static by design: on WebKitGTK any animation repaints the
+ * whole window every frame, and even a short transition blinks, so nothing
+ * on the board animates; only the zoom, which is a portal outside `.page`,
+ * does. Flat surfaces, no gradients, no backdrop-filter. Every card
+ * has the same border width; only the selected and working cards colour it.
+ */
+
+/* Bubbles in two neutrals, the user's and every agent's: the face says who speaks.
+ * The zoom is outside the page, so it gets them too. */
+.page,
+.zoomLayer {
+  --fleet-you-bubble: color-mix(in srgb, var(--color-text-primary) 45%, transparent);
+  --fleet-agent-bubble: color-mix(in srgb, var(--color-text-primary) 25%, transparent);
+}
+
+:global([data-theme='light']) .page {
+  --fleet-run-text: var(--color-primary-dark);
+  --fleet-ok-text: var(--color-healthy-darker);
+  --fleet-warn-text: var(--color-warning-dark);
+  --fleet-bad-text: var(--color-critical-dark);
+  /* A faded bubble on white keeps ≥4.5:1 only down to about 0.72. */
+  --fleet-stale-fade: 0.75;
+}
+
+.page {
+  /* Coloured small text on a card. The light theme's own green, amber, red
+   * and indigo are under 4.5:1 on white, so it takes their darker steps. */
+  --fleet-run-text: var(--color-primary);
+  --fleet-ok-text: var(--color-success);
+  --fleet-warn-text: var(--color-warning);
+  --fleet-bad-text: var(--color-critical-light);
+  --fleet-stale-fade: 0.62;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  background: var(--color-bg-primary);
+}
+
+/* Every box from the viewport down to a card's content is sized by flexing,
+ * never by a percentage height: if any link resolved as indefinite, the grid's
+ * rows would be sized from the cards' content. */
+
+/* The shared parts the Fleet mounts (top bar, request cards) bring their own fades and slide-ins: off here. A 0s single
+ * run paints only the end state. */
+.page *,
+.page *::before,
+.page *::after {
+  animation-duration: 0s !important;
+  animation-iteration-count: 1 !important;
+  transition: none !important;
+}
+
+.gridArea {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  /* Room for the floating terminal: its height with a one-line input (a longer
+     input grows over the grid instead of shrinking every card), its 12px offset
+     from the window's bottom, and the grid's 16px gap between them. */
+  padding: 4px 20px calc(var(--terminal-rest-height, 80px) + 12px + 16px);
+}
+
+.board {
+  container-type: size;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* `--rows` of cards, filling the board; it never scrolls (`boardSlots`
+ * picks the cards). Sized against the board (`cqh`), so their content never
+ * sizes them. */
+.cards {
+  display: grid;
+  gap: 16px;
+  min-height: 100%;
+  grid-template-columns: repeat(var(--cols), minmax(0, 1fr));
+  grid-auto-rows: calc((100cqh - (var(--rows) - 1) * 16px) / var(--rows));
+}
+
+/* Active cards left off the board: one quiet line in the gap above the terminal. */
+.offBoard {
+  position: absolute;
+  left: 20px;
+  right: 20px;
+  bottom: calc(var(--terminal-rest-height, 80px) + 12px);
+  margin: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--color-text-secondary);
+  text-align: center;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.notice {
+  position: absolute;
+  top: 0;
+  left: 20px;
+  right: 20px;
+  margin: 0;
+  z-index: 2;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  background: var(--color-critical-bg);
+  color: var(--color-critical);
+  font-size: 12px;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  flex: 1;
+  text-align: center;
+  color: var(--color-text-secondary);
+}
+
+.empty h2 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  color: var(--color-text-primary);
+}
+
+.empty p {
+  margin: 0;
+  font-size: 13px;
+}
+
+/* ── Cards ─────────────────────────────────────────────────────────────── */
+
+.card {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--color-text-primary) 6%, transparent);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Every card keeps the same 1px border; state changes only its colour. The
+ * selected card's second pixel is an inset shadow, so nothing shifts. */
+.cardWorking {
+  border-color: var(--color-primary-alpha-40);
+}
+
+/* The "Needs you" color. */
+.cardWaiting {
+  border-color: var(--color-warning);
+}
+
+.cardSelected {
+  border-color: var(--color-primary);
+  box-shadow:
+    inset 0 0 0 1px var(--color-primary),
+    var(--shadow-xl);
+}
+
+.cardInner {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px;
+  min-height: 0;
+  cursor: pointer;
+}
+
+/* Child selector: outranks the banner's own padding and type size. */
+.cardInner > .cardRunError {
+  flex-shrink: 0;
+  max-height: 88px;
+  overflow: auto;
+  padding: 8px 10px;
+  font-size: 12px;
+}
+
+.cardHeader {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 28px;
+  min-width: 0;
+  flex-shrink: 0;
+}
+
+.cardTitle {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--color-text-primary);
+  font-size: 14px;
+  font-weight: 700;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.cardTitle:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+.cardIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 24px;
+  height: 24px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: none;
+  color: var(--color-text-secondary);
+  cursor: pointer;
+}
+
+.cardIcon:last-child {
+  margin-right: -4px;
+}
+
+.cardIcon:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.cardIcon:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 1px;
+}
+
+.phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-past);
+  white-space: nowrap;
+}
+
+.phase[data-phase='working'] {
+  color: var(--fleet-run-text);
+}
+
+.phase[data-phase='waiting'] {
+  color: var(--fleet-warn-text);
+}
+
+.faces {
+  display: inline-flex;
+  flex-shrink: 0;
+}
+
+.faces > * + * {
+  margin-left: -5px;
+}
+
+/* ── The crew strip: every member under the title, one sticker each ──
+ * A fixed height, so the scene below always knows its room; busy faces
+ * come with their task's first words, which shrink before any face does. */
+.crew {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 26px;
+  margin: -2px 0 0;
+  padding: 0;
+  flex-shrink: 0;
+  min-width: 0;
+  overflow: hidden;
+  list-style: none;
+}
+
+.crewMember {
+  display: flex;
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.crewMember[data-status='running'] {
+  flex-shrink: 1;
+}
+
+.crewButton {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin: 0;
+  padding: 0 2px 0 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: var(--color-text-secondary);
+  font: inherit;
+  cursor: inherit;
+}
+
+button.crewButton {
+  cursor: zoom-in;
+}
+
+.crewButton:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 1px;
+}
+
+.crewFace {
+  position: relative;
+  display: inline-flex;
+  flex-shrink: 0;
+  padding: 2px 6px 0 0;
+}
+
+.crewMember[data-status='queued'] .crewFace > :first-child {
+  opacity: 0.5;
+}
+
+.crewSticker {
+  position: absolute;
+  top: -1px;
+  right: 0;
+  display: grid;
+  place-items: center;
+  min-width: 13px;
+  height: 13px;
+  padding: 0 2px;
+  border: 1px solid var(--color-bg-elevated);
+  border-radius: 7px;
+  background: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  font-size: 8px;
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.02em;
+}
+
+.crewMember[data-status='running'] .crewSticker {
+  background: var(--ws-accent-text);
+  color: var(--ws-sticker-ink);
+}
+
+.crewMember[data-status='needs'] .crewSticker {
+  background: var(--color-warning);
+  /* Ink on amber: 6:1 in both themes. */
+  color: var(--fx-ink);
+  font-size: 10px;
+}
+
+.crewMember[data-status='done'] .crewSticker {
+  background: var(--color-success);
+  color: var(--fx-ink);
+}
+
+.crewSticker[data-level='half'] {
+  opacity: 0.55;
+}
+
+.crewWords {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.crewMore {
+  flex-shrink: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.crewZoomText {
+  margin: 0;
+}
+
+/* ── A small card as a comic panel ───────────────────────────────────────
+ * Read top to bottom in the order things happened: caption box (when), the
+ * older highlights as one-line rows, then the newest as bubbles, as many as
+ * fit (`splitFeed`, measured in `FleetFeed`). */
+.scene {
+  container-type: size;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.scene > * {
+  width: 100%;
+  flex-shrink: 0;
+}
+
+/* Narration box: square, like a manga caption. */
+.captionRow {
+  display: flex;
+  margin: 0;
+}
+
+.caption {
+  padding: 1px 8px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: 2px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-secondary);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.caption[data-mood='working'] {
+  border-color: var(--ws-accent);
+  color: var(--ws-accent-text);
+}
+
+.caption[data-mood='fresh'] {
+  border-color: var(--color-success);
+  color: var(--fleet-ok-text);
+}
+
+/* ── Faces ── */
+.who {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  margin: 0;
+}
+
+.who figcaption {
+  max-width: 100%;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--color-text-past);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* No CSS animation: it would keep WebKitGTK repainting for as long as the
+ * task runs (see the note at the top of this file). `useThoughtBeat` steps
+ * the bright dot instead; without it the dots are drawn still. */
+.think {
+  position: absolute;
+  top: -20px;
+  right: -4px;
+  display: block;
+}
+
+.thinkCloud {
+  fill: var(--color-bg-primary);
+  stroke: var(--color-text-past);
+  stroke-width: 1.6;
+}
+
+.thinkDot {
+  fill: var(--color-text-primary);
+}
+
+.thinkDot:nth-of-type(1) {
+  opacity: 0.4;
+}
+
+.thinkDot:nth-of-type(2) {
+  opacity: 0.7;
+}
+
+.think[data-beat] .thinkDot {
+  opacity: 0.35;
+}
+
+.think[data-beat='0'] .thinkDot:nth-of-type(1),
+.think[data-beat='1'] .thinkDot:nth-of-type(2),
+.think[data-beat='2'] .thinkDot:nth-of-type(3) {
+  opacity: 1;
+}
+
+/* ── Bubbles ── */
+.say {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.bubble {
+  --bubble-border: var(--fleet-agent-bubble);
+  position: relative;
+  padding: 8px 12px;
+  border: 2px solid var(--bubble-border);
+  border-radius: 16px;
+  background: var(--color-bg-primary);
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+
+.tail {
+  position: absolute;
+  top: calc(50% - 12px);
+  left: -22px;
+  z-index: 1;
+}
+
+.tailRight {
+  left: auto;
+  right: -22px;
+  transform: scaleX(-1);
+}
+
+.tailFill {
+  fill: var(--color-bg-primary);
+}
+
+.tailStroke {
+  fill: none;
+  stroke: var(--bubble-border);
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+/* A bubble's words, `--lines` tall at most; past that they scroll (`useFollowEnd`). */
+.bubbleText {
+  --lines: 2;
+  max-height: calc(var(--lines) * 1lh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* A thin classic scrollbar beside the words, not WebKitGTK's overlay one over them. */
+.bubbleText::-webkit-scrollbar {
+  width: 6px;
+}
+
+.bubbleText::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.bubbleText::-webkit-scrollbar-thumb {
+  background: var(--color-overlay-14);
+  border-radius: var(--radius-full);
+}
+
+/* Every block on the bubble's line grid, so the clip falls between lines. */
+.speechText :is(p, ul, ol, li, blockquote, pre, div, h1, h2, h3, h4, h5, h6) {
+  margin: 0;
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.speechText :is(h1, h2, h3, h4, h5, h6) {
+  padding: 0;
+  border: none;
+}
+
+.speechText :is(ul, ol) {
+  padding-left: 1.25em;
+}
+
+.speechText blockquote {
+  padding: 0 0 0 8px;
+  border-left-width: 2px;
+}
+
+.speechText :is(table, th, td) {
+  font-size: inherit;
+}
+
+.speechText :is(th, td) {
+  padding: 0 6px;
+}
+
+.speechText img {
+  max-width: 100%;
+  max-height: calc(3 * 1lh);
+}
+
+/* A code block in a bubble: its source, never drawn or highlighted. */
+.source {
+  margin: 0 0 12px;
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  font-size: 0.9em;
+  white-space: pre-wrap;
+}
+
+/* A chart in a bubble: a chip that opens the workspace, where it is drawn. */
+.chartChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 4px;
+  padding: 0 8px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-sm);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.chartChip:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-focus);
+}
+
+.chartChip:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 1px;
+}
+
+.messageTime {
+  color: var(--color-text-past);
+  font-size: 11px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.speechText .messageTime {
+  /* Copying a paragraph copies its words, not the time leading it. */
+  user-select: none;
+}
+
+.messageTime b {
+  font-weight: 650;
+  color: var(--color-text-secondary);
+}
+
+/* ── A highlight as a bubble: who says it (left), to whom (right) ── */
+.said {
+  position: relative;
+  display: grid;
+  grid-template-columns: 36px minmax(0, 1fr) 40px;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 4px 2px;
+  border-radius: var(--radius-md);
+}
+
+.said .bubble {
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+/* Room above the face for the thought cloud of the agent a task went to. */
+.said[data-thinking] {
+  padding-top: 16px;
+}
+
+/* The newest says more where the panel has room. */
+.said:last-child .bubbleText {
+  --lines: 3;
+}
+
+@container (min-height: 340px) {
+  .said:last-child .bubbleText {
+    --lines: 5;
+  }
+}
+
+/* A short miniature keeps three bubbles and a row or two: tighter bubbles, the older ones on one line. */
+@container (max-height: 260px) {
+  .said .bubbleText,
+  .fromYou .bubbleText {
+    --lines: 1;
+  }
+
+  .said {
+    padding: 2px 2px 0;
+  }
+
+  .said[data-thinking] {
+    padding-top: 12px;
+  }
+
+  .said .bubble,
+  .fromYou .bubble {
+    padding: 4px 10px;
+    font-size: 13px;
+    line-height: 1.4;
+  }
+
+  .said:last-child .bubbleText,
+  .fromYou:last-child .bubbleText {
+    --lines: 2;
+  }
+}
+
+/* The user's own words, on the right. */
+.fromYou {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  padding-right: 22px;
+}
+
+.fromYou .bubble {
+  --bubble-border: var(--fleet-you-bubble);
+  max-width: 85%;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+/* A bubble's pictures: fixed boxes, so a picture loading never changes the bubble's height. */
+.thumbs {
+  --thumb: 48px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.thumb {
+  display: flex;
+  align-items: center;
+  flex: none;
+  width: var(--thumb);
+  height: var(--thumb);
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--color-overlay-02);
+  font-size: 9px;
+  color: var(--color-text-secondary);
+  text-align: center;
+}
+
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.thumbMore {
+  display: inline-flex;
+  align-items: center;
+  height: var(--thumb);
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-text-secondary);
+}
+
+@container (max-height: 260px) {
+  .thumbs {
+    --thumb: 32px;
+  }
+}
+
+/* A row's pictures: a mark, and how many when more than one. */
+.imageMark {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-right: 4px;
+  vertical-align: -1px;
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
+.nothing {
+  margin: 0;
+  font-size: 13px;
+  color: var(--color-text-past);
+}
+
+/* Stale: fade the drawing, not the caption, so it stays readable. */
+.scene[data-mood='stale'] :is(.face, .bubble) {
+  opacity: var(--fleet-stale-fade);
+  filter: grayscale(0.6);
+}
+
+/* ── Older highlights: one line each, the newest nearest the bubbles ── */
+.rows {
+  display: contents;
+}
+
+.row {
+  display: flex;
+  flex-shrink: 0;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-text-past);
+}
+
+.row:last-child {
+  padding-bottom: 2px;
+  height: 25px;
+  border-bottom: 1px dashed var(--color-border-light);
+}
+
+.rowButton {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: zoom-in;
+}
+
+/* A bubble or a row zooms out to the whole message. */
+.scene [role='button'] {
+  cursor: zoom-in;
+}
+
+.scene [role='button']:focus-visible,
+.rowButton:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 2px;
+}
+
+.rowFaces {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 2px;
+  opacity: 0.7;
+}
+
+.rowFace {
+  display: inline-flex;
+}
+
+.rowText {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rowText b {
+  font-weight: 650;
+  color: var(--color-text-secondary);
+}
+
+.lineStatus {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.lineStatus[data-outcome='done'],
+.messageTime[data-outcome='done'] {
+  color: var(--fleet-ok-text);
+}
+
+.lineStatus[data-outcome='failed'],
+.messageTime[data-outcome='failed'] {
+  color: var(--fleet-bad-text);
+}
+
+.lineStatus[data-live='running'],
+.messageTime[data-live='running'] {
+  color: var(--fleet-run-text);
+}
+
+/* ── A card that needs you: the agent asking, the answer below ──
+ * The request takes the whole card and scrolls inside it when taller. */
+.requestFrame {
+  position: relative;
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.request {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 0;
+  overflow-y: auto;
+  cursor: default;
+}
+
+.request .captionRow {
+  align-items: center;
+  gap: 8px;
+}
+
+.caption[data-mood='waiting'] {
+  border-color: var(--color-warning);
+  color: var(--fleet-warn-text);
+}
+
+.requestCount {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-past);
+}
+
+/* The asker's face, the question in its bubble: as tall as its words while
+ * the card has room, then it gives way to the answer and scrolls inside. */
+.asks {
+  display: grid;
+  grid-template-columns: 44px minmax(0, 1fr);
+  grid-template-rows: minmax(0, auto);
+  align-items: start;
+  gap: 18px;
+  flex: 0 1 auto;
+  min-height: 0;
+}
+
+.asks .who {
+  margin-top: 4px;
+}
+
+/* The asker's name wraps under its face rather than being cut. */
+.asks figcaption {
+  width: 64px;
+  white-space: normal;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.asks .tail {
+  top: 14px;
+}
+
+.asks .bubble {
+  --bubble-border: var(--color-warning);
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  max-height: 100%;
+  padding: 6px 12px;
+}
+
+.askText {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  font-size: 14px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: pre-wrap;
+}
+
+/* ── Ctrl+Tab switcher: static, no blur ──────────────────────────────── */
+
+.switcherBackdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--color-bg-primary) 55%, transparent);
+}
+
+.switcher {
+  list-style: none;
+  margin: 0;
+  padding: 8px;
+  width: min(520px, calc(100% - 40px));
+  max-height: 70%;
+  overflow: hidden;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-xl);
+}
+
+.switcherRow {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+}
+
+.switcherRow[aria-selected='true'] {
+  border-color: var(--color-primary);
+  background: var(--color-primary-alpha-15);
+}
+
+.switcherTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.switcherRow .phase {
+  margin-left: 0;
+}
+
+.switcherDismissed {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+}
+
+/* ── A highlight zoomed out of its card ──────────────────────────────────
+ * A page-level layer: the speaker's face stays put over the dimmed Fleet and
+ * the bubble grows out of it (`FleetZoom` places it), then shrinks back into
+ * it. `--zoom-ms` is `CLOSE_MS` in `FleetZoom`; the two move together. */
+.zoomLayer {
+  --zoom-ms: 220ms;
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
+.zoomScrim {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, #000 22%, transparent);
+  transition: opacity 200ms ease-out;
+  cursor: zoom-out;
+}
+
+.zoomScrim[data-phase] {
+  opacity: 0;
+}
+
+.zoomFace {
+  position: absolute;
+  display: flex;
+  pointer-events: none;
+}
+
+.zoomPanel {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  margin: 0;
+  box-shadow: 0 8px 28px color-mix(in srgb, #000 22%, transparent);
+  transition:
+    left var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1),
+    top var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1),
+    width var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1),
+    height var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+/* The tail moves inside the bubble as the bubble grows past it, so it stays on the face. */
+.zoomPanel > .tail {
+  transition: top var(--zoom-ms) cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.zoomPanel:focus {
+  outline: none;
+}
+
+.zoomPanel[data-phase='from'],
+.zoomPanel[data-phase='from'] > .tail {
+  transition: none;
+}
+
+.zoomText {
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  overflow-y: auto;
+}
+
+/* A picture in the zoom, larger: a fixed box, so the zoom's measured height holds as it loads. */
+.zoomImage {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 240px;
+  margin-top: 8px;
+  border-radius: var(--radius-md);
+  background: var(--color-overlay-02);
+  font-size: 13px;
+  color: var(--color-text-secondary);
+}
+
+.zoomImage img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
+.zoomStamp {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0 0 6px;
+  font-size: 12px;
+  color: var(--color-text-past);
+}
+
+.zoomStamp b {
+  font-weight: 650;
+  color: var(--color-text-secondary);
+}
+
+.zoomMessage + .zoomMessage {
+  margin-top: 1em;
+}
+
+.zoomMessage .messageTime {
+  display: block;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .zoomPanel,
+  .zoomPanel > .tail,
+  .zoomScrim {
+    transition: none;
+  }
+}

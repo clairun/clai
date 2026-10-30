@@ -1,0 +1,160 @@
+import { memo, useMemo, useRef } from 'react';
+import type { AgentIdentity } from '../Agents/agentIdentity';
+import {
+  cardAttention,
+  cardPhase,
+  type FleetAttention,
+  type FleetCard as FleetCardModel,
+  type FleetLive,
+  type FleetPhase,
+} from '../../fleet/fleetModel';
+import type { FleetFeed as Feed } from '../../fleet/fleetFeed';
+import { cardCrew, requestScene, type FleetLoudness, type FleetRequestScene } from '../../fleet/fleetCrew';
+import { castFor } from './FleetFace';
+import { runFailure } from '../../assistant/runErrors';
+import RunFailureBanner from '../RunFailureBanner/RunFailureBanner';
+import FleetCrew from './FleetCrew';
+import FleetRequestPanel from './FleetRequestPanel';
+import FleetFeed, { endsSelection } from './FleetFeed';
+import { useWheelLines } from './useWheelLines';
+import fx from './FleetEffects';
+import styles from './FleetPage.module.css';
+
+const plural = (n: number, one: string, many: string) => `${n} ${n === 1 ? one : many}`;
+
+const attentionLabel = (a: FleetAttention): string =>
+  [
+    a.asks ? plural(a.asks, 'question', 'questions') : '',
+    a.approvals ? plural(a.approvals, 'approval', 'approvals') : '',
+    a.grants ? plural(a.grants, 'access request', 'access requests') : '',
+  ]
+    .filter(Boolean)
+    .join(', ');
+
+export const phaseLabel = (phase: FleetPhase, attention: FleetAttention): string =>
+  phase === 'waiting' ? `Needs you · ${attentionLabel(attention)}` : phase === 'working' ? 'Working' : 'Idle';
+
+/**
+ * The header's phase. On the card that needs you it is also a skewed amber
+ * sticker in two words; the full label stays for screen readers.
+ */
+const PhaseLabel = ({ phase, attention, sticker }: { phase: FleetPhase; attention: FleetAttention; sticker: string | null }) => {
+  const label = phaseLabel(phase, attention);
+  return (
+    <span className={styles.phase} data-phase={phase}>
+      {sticker ? (
+        <>
+          <span className={fx.sticker} aria-hidden="true">
+            {sticker}
+          </span>
+          <span className={fx.stickerLabel}>{label}</span>
+        </>
+      ) : (
+        <>
+          {phase === 'waiting' && (
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" aria-hidden="true">
+              <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" />
+            </svg>
+          )}
+          {label}
+        </>
+      )}
+    </span>
+  );
+};
+
+/** The sticker of a loud card that needs you, by what its first request asks. */
+const stickerFor = (loud: FleetLoudness, request: FleetRequestScene | null): string | null =>
+  loud === 'needs' && request ? (request.request.kind === 'approval' ? 'Approve?' : 'Needs you') : null;
+
+interface FleetCardProps {
+  card: FleetCardModel;
+  /** What the miniature says (`cardFeed`); `null` while it shows an open request. */
+  feed: Feed | null;
+  /** Keys of the lines that shout (`fleetLoudness`). */
+  shouts: ReadonlySet<string>;
+  live: FleetLive;
+  /** Picked agent faces, by agent definition id. */
+  faces: Record<string, AgentIdentity>;
+  /** The page's clock: the last Fleet event or the minute tick, whichever is later. */
+  now: number;
+  /** Drawn loud: it needs you, or a task on it just finished. */
+  loud: FleetLoudness;
+  onSelect: (workspaceId: string) => void;
+  onOpen: (workspaceId: string) => void;
+  onDismiss: (workspaceId: string) => void;
+}
+
+/** A miniature: the workspace's conversation as highlights, or its open request, answerable in place. */
+const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpen, onDismiss }: FleetCardProps) => {
+  const cast = useMemo(() => castFor(faces, card.main), [faces, card.main]);
+  const crew = useMemo(() => cardCrew(card, live, now), [card, live, now]);
+  const phase = cardPhase(card, live);
+  const attention = cardAttention(card);
+  const request = useMemo(() => requestScene(card, live), [card, live]);
+  const title = card.title || 'Workspace';
+  const failure = runFailure(card.lastMainRun);
+  const failureRef = useRef<HTMLDivElement>(null);
+  useWheelLines(failureRef, !!failure);
+
+  return (
+    // Not a click from the zoom, a portal React bubbles here, nor one ending a
+    // drag that selects words: either would select the card and lose the selection.
+    <div
+      className={styles.cardInner}
+      onClick={(e) => {
+        if (e.currentTarget.contains(e.target as Node) && !endsSelection(e)) onSelect(card.workspaceId);
+      }}
+    >
+      <header className={styles.cardHeader}>
+        <button
+          type="button"
+          className={styles.cardTitle}
+          data-card-title
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelect(card.workspaceId);
+          }}
+          aria-label={`Select ${title}`}
+        >
+          {title}
+        </button>
+        <PhaseLabel phase={phase} attention={attention} sticker={stickerFor(loud, request)} />
+        <button
+          type="button"
+          className={styles.cardIcon}
+          title="Open workspace"
+          aria-label={`Open ${title}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpen(card.workspaceId);
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5" />
+          </svg>
+        </button>
+        <button
+          type="button"
+          className={styles.cardIcon}
+          title="Dismiss until something happens"
+          aria-label={`Dismiss ${title}`}
+          onClick={(e) => {
+            e.stopPropagation();
+            onDismiss(card.workspaceId);
+          }}
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" />
+          </svg>
+        </button>
+      </header>
+      <FleetCrew crew={crew} cast={cast} />
+      {failure && <RunFailureBanner ref={failureRef} failure={failure} className={styles.cardRunError} />}
+      {feed && <FleetFeed workspaceId={card.workspaceId} feed={feed} shouts={shouts} now={now} faces={cast} onOpen={onOpen} />}
+      {request && <FleetRequestPanel scene={request} faces={cast} loud={loud === 'needs'} now={now} />}
+    </div>
+  );
+};
+
+export default memo(FleetCard);

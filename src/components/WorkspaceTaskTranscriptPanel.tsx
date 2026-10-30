@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { assistantClient, useAssistantStore } from '../assistant';
+import { MESSAGE_PAGE_LIMIT } from '../assistant/sessionChat';
 import type {
   AssistantMessage,
   ToolInvocation,
@@ -25,7 +26,6 @@ const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_IDS: string[] = [];
 const EMPTY_STREAMING: Record<string, string> = {};
-const MESSAGE_PAGE_LIMIT = 100;
 
 const errorText = (err: unknown): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to send message.';
@@ -229,7 +229,7 @@ export default function WorkspaceTaskTranscriptPanel({
             identity={taskIdentity(task, roster)}
             size={20}
             activity={taskActivity(task)}
-            label={task.assignedAgentDisplayName}
+            label={agentName}
           />
           <span className={styles.title} title={task.title}>{task.title}</span>
           <span className={`${styles.statusPill} ${statusClass}`}>{statusLabel}</span>

@@ -84,7 +84,7 @@ export type AssistantUiEvent = { "type": "session_created", "payload": { session
 /**
  * When true the user may pick any number of options.
  */
-multi_select: boolean, extra_context?: string | null, } } | { "type": "ask_user_resolved", "payload": { pending_id: string, } } | { "type": "task_updated", "payload": { task: WorkspaceTaskResponse, } } | { "type": "run_skipped", "payload": { reason: RunSkipReason, activeRunId: string | null, } };
+multi_select: boolean, extra_context: string | null, } } | { "type": "ask_user_resolved", "payload": { pending_id: string, } } | { "type": "task_updated", "payload": { task: WorkspaceTaskResponse, } } | { "type": "run_skipped", "payload": { reason: RunSkipReason, activeRunId: string | null, } };
 
 export type AttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
@@ -151,6 +151,59 @@ export type FilesystemPathGrant = { path: string, access: FilesystemPathAccess,
  * `None`; the UI shows those as `Manual`.
  */
 origin?: GrantOrigin | null, };
+
+/**
+ * A message of the workspace's conversation, cut to a preview, with the
+ * run that wrote it.
+ */
+export type FleetHighlight = { message: AssistantMessage, runId: string | null, 
+/**
+ * The message's text was cut: the whole message has to be fetched.
+ */
+truncated: boolean, };
+
+export type FleetWorkspace = { workspaceId: string, title: string, 
+/**
+ * When any session (main, task or other) was last touched; 0 when the
+ * workspace has no session yet.
+ */
+lastActivityAt: bigint, 
+/**
+ * When the user last opened the workspace; 0 when never opened.
+ */
+lastOpenedAt: bigint, 
+/**
+ * The manager's conversation; `None` until someone talks to it.
+ */
+mainSessionId: string | null, 
+/**
+ * The main session's newest run, including its failure when one occurred.
+ */
+lastMainRun: AssistantRun | null, 
+/**
+ * Non-terminal runs (queued, running or waiting for a tool) in any
+ * session of the workspace, not only the main one; empty when nothing
+ * runs.
+ */
+activeRunIds: Array<string>, 
+/**
+ * Unfinished tasks plus the most recently finished ones, newest first.
+ */
+tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingAsks: Array<PendingAsk>, 
+/**
+ * The main session's newest assistant reply with text.
+ */
+lastAssistantMessage: FleetHighlight | null, 
+/**
+ * The newest user and assistant messages with text or an image across
+ * every session, oldest first; tool rows and tool-only replies are left
+ * out.
+ */
+recentMessages: Array<FleetHighlight>, 
+/**
+ * The enabled agents, Main first, then teammates in roster order.
+ */
+agents: Array<AgentRefSnapshot>, };
 
 /**
  * Provenance for a `FilesystemPathGrant`. Lets the agent-settings UI tell
@@ -271,6 +324,12 @@ path: string,
 access: FilesystemPathAccess, } | { "kind": "allowAlways", path: string, access: FilesystemPathAccess, scope: PermissionScope, };
 
 export type PathGrantRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, requestedPath: string, requestedAccess: FilesystemPathAccess, reason: string, };
+
+/**
+ * A question awaiting the human: the `AskUserRequested` payload plus where
+ * it was asked. Kept so a reloaded webview can re-render the answer panel.
+ */
+export type PendingAsk = { pendingId: string, workspaceId: string, sessionId: string, question: string, options: Array<AskUserOption> | null, multiSelect: boolean, extraContext: string | null, requestedAt: bigint, };
 
 export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, segments: Array<SegmentApproval>, 
 /**

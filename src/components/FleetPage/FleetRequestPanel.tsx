@@ -1,0 +1,89 @@
+import type { CSSProperties, MouseEvent, ReactNode } from 'react';
+import { useAppTheme } from '../../hooks/useAppTheme';
+import {
+  faceOf,
+  identityRingColor,
+} from '../Agents/agentIdentity';
+import AskUserPanel from '../AskUserPanel/AskUserPanel';
+import { ApprovalCard } from '../InlineApprovalCard';
+import { PathGrantCard } from '../InlinePathGrantCard';
+import type { FleetRequest } from '../../fleet/fleetModel';
+import type { FleetRequestScene } from '../../fleet/fleetCrew';
+import fx, { Sfx } from './FleetEffects';
+import { Caption, MAIN_FACE, Who, type Cast } from './FleetFace';
+import { Tail } from './FleetZoom';
+import styles from './FleetPage.module.css';
+
+/** Clicks inside the request answer it; they never select the card. */
+const stop = (e: MouseEvent) => e.stopPropagation();
+
+/** The request, answered with the workspace chat's own UI; `speaker` draws its words. */
+const RequestAnswer = ({ request, speaker }: { request: FleetRequest; speaker: (prompt: ReactNode) => ReactNode }) =>
+  request.kind === 'ask' ? (
+    <AskUserPanel ask={request.ask} speaker={speaker} />
+  ) : request.kind === 'approval' ? (
+    <ApprovalCard key={request.request.requestId} req={request.request} speaker={speaker} />
+  ) : (
+    <PathGrantCard key={request.request.requestId} req={request.request} speaker={speaker} />
+  );
+
+interface FleetRequestPanelProps {
+  scene: FleetRequestScene;
+  faces: Cast;
+  /** Draw it loud: the amber burst, and "!?" or "!!". Never on the selected card. */
+  loud: boolean;
+  /** The page's clock: the last Fleet event or the minute tick, whichever is later. */
+  now: number;
+}
+
+/**
+ * A card that needs the user, as the agent asking: its face, the question,
+ * command or path as its bubble, and the answer below. It takes the whole
+ * card, which the panel scrolls if the request is taller.
+ */
+const FleetRequestPanel = ({
+  scene,
+  faces,
+  loud,
+  now,
+}: FleetRequestPanelProps) => {
+  const theme = useAppTheme();
+  const { request, asker, count, caption } = scene;
+  const identity = asker ? faceOf(faces, asker.seed) : faces[MAIN_FACE];
+  const name = asker?.name ?? 'Main';
+  const speaker = (prompt: ReactNode) => (
+    <div className={styles.asks}>
+      <Who
+        identity={identity}
+        name={name}
+        size={44}
+        activity="running"
+        expression="asking"
+      />
+      <div className={styles.bubble}>
+        <Tail />
+        <div className={styles.askText}>{prompt}</div>
+      </div>
+    </div>
+  );
+  return (
+    <div className={`${styles.requestFrame} ${fx.burstFrame}`} data-loud-frame={loud || undefined}>
+      {loud && <span className={fx.burst} aria-hidden="true" />}
+      <section
+        className={styles.request}
+        style={{ '--agent-color': identityRingColor(identity, theme) } as CSSProperties}
+        aria-label={`${name} needs you`}
+        onClick={stop}
+      >
+        <p className={styles.captionRow}>
+          <Caption caption={caption} mood="waiting" now={now} />
+          {count > 1 && <span className={styles.requestCount}>1 of {count}</span>}
+          {loud && <Sfx word={request.kind === 'ask' ? '!?' : '!!'} tone="warn" />}
+        </p>
+        <RequestAnswer request={request} speaker={speaker} />
+      </section>
+    </div>
+  );
+};
+
+export default FleetRequestPanel;

@@ -1,17 +1,27 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import {
-  listPendingPermissionRequests,
-  submitPermissionDecision,
-} from '../permissions/client';
+import { listPendingPermissionRequests, submitPermissionDecision } from '../permissions/client';
 import type { PermissionRequest, SegmentDecision } from '../generated/bindings';
+import { chipText } from './requestChips';
 import styles from './InlineApprovalCard.module.css';
 
 const PERMISSION_REQUEST_EVENT = 'permissions://request';
-// Backend cleared a pending request without a user decision (the run was
-// cancelled or ended, or a re-asked command superseded it). Drop the
-// now-useless card. Payload: { requestId }.
+// A pending request left the queue: a decision (here or in another view), a
+// cancelled or ended run, or a re-asked command superseded it. Drop the
+// card. Payload: { requestId }.
 const PERMISSION_RESOLVED_EVENT = 'permissions://resolved';
+
+const allowOnce = (): SegmentDecision => ({ kind: 'allowOnce' });
+const denyOnce = (): SegmentDecision => ({ kind: 'denyOnce' });
+const allowAlways = (prefix: string): SegmentDecision => ({ kind: 'allowAlways', scope: 'agent', prefix });
+const denyAlways = (prefix: string): SegmentDecision => ({ kind: 'denyAlways', scope: 'agent', prefix });
+
+/** A spoken chip names its prefix by its first words; its tooltip has it whole. */
+const CHIP_PREFIX_CHARS = 16;
+const chipPrefix = (prefix: string): string => {
+  const line = prefix.split('\n', 1)[0]!.trim();
+  return line.length > CHIP_PREFIX_CHARS || line !== prefix.trim() ? `${line.slice(0, CHIP_PREFIX_CHARS - 1)}…` : line;
+};
 
 // Local UI alias matching the discriminator on SegmentDecision. Kept
 // in its own type because the per-segment radio buttons need a flat
@@ -26,22 +36,275 @@ interface SegmentCellState {
 
 type CardState = Record<number, SegmentCellState>;
 
-const allowOnce = (): SegmentDecision => ({ kind: 'allowOnce' });
-const denyOnce = (): SegmentDecision => ({ kind: 'denyOnce' });
-const allowAlways = (prefix: string): SegmentDecision => ({
-  kind: 'allowAlways',
-  scope: 'agent',
-  prefix,
-});
-const denyAlways = (prefix: string): SegmentDecision => ({
-  kind: 'denyAlways',
-  scope: 'agent',
-  prefix,
-});
-
-interface InlineApprovalCardProps {
-  workspaceId: string | null;
+interface ApprovalCardProps {
+  req: PermissionRequest;
+  /**
+   * Draw the command as the agent saying it (the Fleet's asking face and
+   * bubble): no tag or collapse, each part on one line, and short decision
+   * chips (full labels in the tooltips) below. No prefix editing: an
+   * "always" chip saves the suggested prefix and shows it (`Always · cargo`).
+   */
+  speaker?: (prompt: ReactNode) => ReactNode;
+  /** The decision was accepted. */
+  onDecided?: (requestId: string) => void;
+  ref?: Ref<HTMLElement>;
 }
+
+/** One permission request and its decisions. */
+export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps) => {
+  const [cells, setCells] = useState<CardState>(() =>
+    Object.fromEntries(req.segments.map((seg, idx) => [idx, { prefix: seg.suggestedPrefix || '', decision: null }]))
+  );
+  const [isSubmitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Collapse: squish the card to a one-line summary so a tall (or stacked)
+  // request can't swallow the conversation. Default expanded.
+  const [isCollapsed, setCollapsed] = useState(false);
+  const spoken = Boolean(speaker);
+
+  const sendDecisions = async (decisions: SegmentDecision[]) => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await submitPermissionDecision(req.requestId, decisions);
+      onDecided?.(req.requestId);
+    } catch (e) {
+      setError(typeof e === 'string' ? e : e instanceof Error ? e.message : 'Failed to submit decision');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const setSegmentPrefix = (idx: number, prefix: string) =>
+    setCells((current) => ({ ...current, [idx]: { decision: current[idx]?.decision ?? null, prefix } }));
+
+  const handleSegmentDecision = (idx: number, kind: DecisionKind) => {
+    const next: CardState = { ...cells, [idx]: { prefix: cells[idx]?.prefix ?? '', decision: kind } };
+    setCells(next);
+    if (!req.segments.every((_, i) => next[i]?.decision)) return;
+    sendDecisions(
+      req.segments.map((seg, i) => {
+        const cell = next[i]!; // every segment is decided
+        const prefix = (cell.prefix || '').trim() || seg.text;
+        switch (cell.decision) {
+          case 'allowOnce':
+            return allowOnce();
+          case 'allowAlways':
+            return allowAlways(prefix);
+          case 'denyAlways':
+            return denyAlways(prefix);
+          default:
+            return denyOnce();
+        }
+      })
+    );
+  };
+
+  const denyAll = () => sendDecisions(req.segments.map(() => denyOnce()));
+
+  // Batch "trust this whole command" shortcut. For each segment that
+  // has a suggestedPrefix (either Simple or Opaque whose head is
+  // recognized), submits AllowAlways with the user's edited prefix or
+  // the suggestion; segments without a stable prefix fall back to
+  // AllowOnce so the run still proceeds. Mirrors the per-row
+  // "Always allow" buttons collapsed into a single click for multi-
+  // segment commands like `cd && go run foo` or `which … || find …`.
+  const allowAllAlways = () =>
+    sendDecisions(
+      req.segments.map((seg, idx) => {
+        const prefix = (cells[idx]?.prefix ?? seg.suggestedPrefix ?? '').trim();
+        return prefix ? allowAlways(prefix) : allowOnce();
+      })
+    );
+
+  // A shared teammate keeps its command decisions on its library
+  // definition, so "always" applies wherever that agent works — here,
+  // in the workspaces listed, and in any that add it later.
+  const isSharedAgent = req.persistsToSharedAgent;
+  const sharedReach = req.alsoAffectsWorkspaces || [];
+  const savedOn = isSharedAgent
+    ? 'Saved on the shared agent, so it applies wherever this agent works'
+    : 'Saved on this workspace\'s own agent';
+  const reach = isSharedAgent ? 'every workspace' : 'this agent';
+  // An "always" decision: the spoken chip names the prefix it saves.
+  const alwaysChip = (verb: 'allow' | 'deny', prefix: string) =>
+    spoken
+      ? {
+          title: `Always ${verb} commands starting with \`${prefix}\` (${reach})`,
+          children: (
+            <>
+              {verb === 'allow' ? 'Always' : 'Never'} · <code>{chipPrefix(prefix)}</code>
+            </>
+          ),
+        }
+      : { title: savedOn, children: `Always ${verb} (${reach})` };
+
+  return (
+    <article
+      ref={ref}
+      className={spoken ? `${styles.card} ${styles.spoken}` : styles.card}
+      aria-label="Permission requested"
+    >
+      {!spoken && (
+        <header className={styles.cardHeader}>
+          <div className={styles.cardHeaderLeft}>
+            <span className={styles.tag}>Permission requested</span>
+            <span className={styles.cardSubtitle}>
+              {req.agentName ? `Agent "${req.agentName}" wants to run:` : 'An agent wants to run:'}
+            </span>
+          </div>
+          <button
+            type="button"
+            className={styles.collapseBtn}
+            onClick={() => setCollapsed((c) => !c)}
+            aria-expanded={!isCollapsed}
+            aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
+            title={isCollapsed ? 'Expand' : 'Collapse'}
+          >
+            {isCollapsed ? '▸' : '▾'}
+          </button>
+        </header>
+      )}
+      {isCollapsed ? (
+        <pre className={`${styles.command} ${styles.collapsedSummary}`}>{req.command}</pre>
+      ) : (
+        <div className={styles.cardBody}>
+          {/* Spoken too: the parts leave out separators and parts that need no decision. */}
+          {speaker ? (
+            speaker(
+              <>
+                May I run this?
+                <pre className={`${styles.command} ${styles.spokenCommand}`} tabIndex={0} role="region" aria-label="Command">
+                  {req.command}
+                </pre>
+              </>
+            )
+          ) : (
+            <pre className={styles.command}>{req.command}</pre>
+          )}
+          <section className={styles.segments}>
+            {isSharedAgent && !spoken && (
+              <p className={styles.segmentsLabel}>
+                {sharedReach.length > 0
+                  ? `An "always" decision is saved on this shared agent, so it also applies to it in: ${sharedReach.join(', ')}.`
+                  : 'An "always" decision is saved on this shared agent, so it applies wherever this agent is added.'}
+              </p>
+            )}
+            {!spoken && (
+              <p className={styles.segmentsLabel}>
+                {req.segments.length === 1
+                  ? 'Choose how to handle this command:'
+                  : `${req.segments.length} parts need a decision (submits as soon as every part is decided):`}
+              </p>
+            )}
+            {req.segments.map((seg, idx) => {
+              const cell: SegmentCellState = cells[idx] || { prefix: '', decision: null };
+              const isOpaque = seg.kind === 'opaque';
+              // The backend now fills `suggestedPrefix` for Opaque
+              // segments too (the binary head IS a stable identifier
+              // even when the surrounding syntax is opaque). The
+              // persistence affordances key off the prefix being
+              // non-empty rather than the kind tag, so any Opaque
+              // segment whose head was recognized gets the same
+              // "Always allow" workflow as Simple ones.
+              const canPersist = Boolean(seg.suggestedPrefix);
+              return (
+                <div key={idx} className={styles.segmentRow}>
+                  {(req.segments.length > 1 || isOpaque) && (
+                    <div className={styles.segmentText}>
+                      {req.segments.length > 1 && <code title={spoken ? seg.text : undefined}>{seg.text}</code>}
+                      {isOpaque && (
+                        <span
+                          className={styles.opaqueTag}
+                          title="Uses a substitution, redirect, pipe-to-shell or control flow, so what it does isn't just the command it starts. Read it carefully before allowing."
+                        >
+                          complex
+                        </span>
+                      )}
+                    </div>
+                  )}
+                  {canPersist && !spoken && (
+                    <label className={styles.prefixField}>
+                      Save as prefix:
+                      <input
+                        type="text"
+                        value={cell.prefix || ''}
+                        onChange={(e) => setSegmentPrefix(idx, e.target.value)}
+                        disabled={isSubmitting}
+                        spellCheck={false}
+                        autoComplete="off"
+                      />
+                    </label>
+                  )}
+                  <div className={styles.segmentButtons}>
+                    <button
+                      type="button"
+                      className={`${styles.btn} ${styles.btnAllowOnce} ${cell.decision === 'allowOnce' ? styles.btnSelected : ''}`}
+                      onClick={() => handleSegmentDecision(idx, 'allowOnce')}
+                      disabled={isSubmitting}
+                      {...chipText(spoken, 'Allow once', 'Once')}
+                    />
+                    {canPersist && (
+                      <button
+                        type="button"
+                        className={`${styles.btn} ${styles.btnAllow} ${cell.decision === 'allowAlways' ? styles.btnSelected : ''}`}
+                        onClick={() => handleSegmentDecision(idx, 'allowAlways')}
+                        disabled={isSubmitting}
+                        {...alwaysChip('allow', seg.suggestedPrefix)}
+                      />
+                    )}
+                    {(canPersist || !spoken) && (
+                      <button
+                        type="button"
+                        className={`${styles.btn} ${styles.btnDeny} ${cell.decision === 'denyAlways' ? styles.btnSelected : ''}`}
+                        onClick={() => handleSegmentDecision(idx, 'denyAlways')}
+                        disabled={isSubmitting}
+                        {...alwaysChip('deny', seg.suggestedPrefix)}
+                      />
+                    )}
+                    <button
+                      type="button"
+                      className={`${styles.btn} ${styles.btnDenyOnce} ${cell.decision === 'denyOnce' ? styles.btnSelected : ''}`}
+                      onClick={() => handleSegmentDecision(idx, 'denyOnce')}
+                      disabled={isSubmitting}
+                      {...chipText(spoken, 'Deny once', 'Deny')}
+                    />
+                  </div>
+                </div>
+              );
+            })}
+          </section>
+          {error && !isSubmitting && <div className={styles.error}>{error}</div>}
+          {req.segments.length > 1 && (
+            <footer className={styles.cardFooter}>
+              {(!spoken || req.segments.some((seg) => seg.suggestedPrefix)) && (
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnAllow}`}
+                  onClick={allowAllAlways}
+                  disabled={isSubmitting}
+                  {...chipText(
+                    spoken,
+                    'Allow all (always)',
+                    'All always',
+                    'Persist every persistable prefix and run. Segments without a stable prefix fall back to allow-once.'
+                  )}
+                />
+              )}
+              <button
+                type="button"
+                className={`${styles.btn} ${styles.btnDenyAll}`}
+                onClick={denyAll}
+                disabled={isSubmitting}
+                {...chipText(spoken, 'Deny entire command', 'Deny all', 'Deny every part of this pipeline in one click')}
+              />
+            </footer>
+          )}
+        </div>
+      )}
+    </article>
+  );
+};
 
 /**
  * Inline permission-approval UI, rendered directly inside a workspace's
@@ -56,16 +319,10 @@ interface InlineApprovalCardProps {
  * chip near the input bar surfaces the count whenever there are
  * pending requests, with click-to-scroll into view.
  */
-const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
+const InlineApprovalCard = ({ workspaceId }: { workspaceId: string | null }) => {
   const [requests, setRequests] = useState<PermissionRequest[]>([]);
-  const [perCardState, setPerCardState] = useState<Record<string, CardState>>({});
-  const [submittingId, setSubmittingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const firstCardRef = useRef<HTMLElement | null>(null);
   const previousCountRef = useRef(0);
-  // Per-card collapse: squish a card to a one-line summary so a tall (or
-  // stacked) request can't swallow the conversation. Default expanded.
-  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
 
   // Subscribe to backend approval-request events AND seed from the
   // backend's pending list on mount. The seed catches requests that
@@ -84,9 +341,6 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
     // per-workspace state to workspaceId.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- subscription+seed effect: clear stale per-workspace state on workspaceId change (component instance is reused across workspace navigation), then seed from pending list and subscribe to backend events. Effect is required for the listener registration + cleanup; the lint rule cannot model the seed/listen interaction.
     setRequests([]);
-    setPerCardState({});
-    setError(null);
-    setSubmittingId(null);
     previousCountRef.current = 0;
 
     if (!workspaceId) return undefined;
@@ -125,7 +379,7 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
       });
     });
 
-    // Remove a card the backend cleared without a user decision. requestId
+    // Remove the card once its request leaves the queue. requestId
     // is globally unique, so no workspace filter is needed — if it isn't in
     // this card's list, the filter is a no-op.
     const unlistenResolvedPromise = listen<{ requestId?: string }>(
@@ -145,35 +399,6 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
     };
   }, [workspaceId]);
 
-  // Initialize per-segment editable state for each new card.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- derive per-card editable state from the requests list: add entries for new requests, drop entries for resolved ones, and no-op when nothing changed. The functional updater + 'return current' early-out is the canonical React 18 derivation pattern; the [requests] dep is correct.
-    setPerCardState((current) => {
-      const next = { ...current };
-      let changed = false;
-      for (const req of requests) {
-        if (next[req.requestId]) continue;
-        const initial: CardState = {};
-        req.segments.forEach((seg, idx) => {
-          initial[idx] = {
-            prefix: seg.suggestedPrefix || '',
-            decision: null,
-          };
-        });
-        next[req.requestId] = initial;
-        changed = true;
-      }
-      // Clean up stale state for requests that disappeared.
-      for (const id of Object.keys(next)) {
-        if (!requests.some((r) => r.requestId === id)) {
-          delete next[id];
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, [requests]);
-
   // Auto-scroll into view on first arrival (0 → 1+ transition only —
   // we don't yank the page back every time a subsequent request lands).
   useEffect(() => {
@@ -185,291 +410,23 @@ const InlineApprovalCard = ({ workspaceId }: InlineApprovalCardProps) => {
     }
   }, [requests.length]);
 
-  const toggleCollapsed = useCallback((requestId: string) => {
-    setCollapsedIds((current) => {
-      const next = new Set(current);
-      if (next.has(requestId)) next.delete(requestId);
-      else next.add(requestId);
-      return next;
-    });
-  }, []);
-
-  const dismissRequest = useCallback((requestId: string) => {
-    setRequests((current) => current.filter((q) => q.requestId !== requestId));
-  }, []);
-
-  const sendDecisions = useCallback(
-    async (requestId: string, decisions: SegmentDecision[]) => {
-      if (submittingId) return;
-      setSubmittingId(requestId);
-      setError(null);
-      try {
-        await submitPermissionDecision(requestId, decisions);
-        dismissRequest(requestId);
-      } catch (e) {
-        const message =
-          typeof e === 'string' ? e : e instanceof Error ? e.message : 'Failed to submit decision';
-        setError(message);
-      } finally {
-        setSubmittingId(null);
-      }
-    },
-    [submittingId, dismissRequest],
-  );
-
-  const setSegmentPrefix = useCallback((requestId: string, idx: number, prefix: string) => {
-    setPerCardState((current) => ({
-      ...current,
-      [requestId]: {
-        ...current[requestId],
-        [idx]: { ...current[requestId]?.[idx], decision: current[requestId]?.[idx]?.decision ?? null, prefix },
-      },
-    }));
-  }, []);
-
-  const handleSegmentDecision = useCallback(
-    (req: PermissionRequest, idx: number, kind: DecisionKind) => {
-      if (submittingId) return;
-      setPerCardState((current) => {
-        const cardState: CardState = current[req.requestId] || {};
-        const updatedCell: SegmentCellState = {
-          prefix: cardState[idx]?.prefix ?? '',
-          decision: kind,
-        };
-        const updatedCard: CardState = { ...cardState, [idx]: updatedCell };
-        const updated = { ...current, [req.requestId]: updatedCard };
-
-        const allDecided = req.segments.every((_, i) => updatedCard[i]?.decision);
-        if (allDecided) {
-          const decisions = req.segments.map((seg, i) => {
-            const cell = updatedCard[i]!; // allDecided guarantees every segment has a cell
-            const prefix = (cell.prefix || '').trim() || seg.text;
-            switch (cell.decision) {
-              case 'allowOnce':
-                return allowOnce();
-              case 'denyOnce':
-                return denyOnce();
-              case 'allowAlways':
-                return allowAlways(prefix);
-              case 'denyAlways':
-                return denyAlways(prefix);
-              default:
-                return denyOnce();
-            }
-          });
-          sendDecisions(req.requestId, decisions);
-        }
-        return updated;
-      });
-    },
-    [submittingId, sendDecisions],
-  );
-
-  const denyAll = useCallback(
-    (req: PermissionRequest) => {
-      const decisions = req.segments.map(() => denyOnce());
-      sendDecisions(req.requestId, decisions);
-    },
-    [sendDecisions],
-  );
-
-  // Batch "trust this whole command" shortcut. For each segment that
-  // has a suggestedPrefix (either Simple or Opaque whose head is
-  // recognized), submits AllowAlways with the user's edited prefix or
-  // the suggestion; segments without a stable prefix fall back to
-  // AllowOnce so the run still proceeds. Mirrors the per-row
-  // "Always allow" buttons collapsed into a single click for multi-
-  // segment commands like `cd && go run foo` or `which … || find …`.
-  const allowAllAlways = useCallback(
-    (req: PermissionRequest) => {
-      const cardState = perCardState[req.requestId] || {};
-      const decisions = req.segments.map((seg, idx) => {
-        const cell = cardState[idx];
-        const prefix = (cell?.prefix ?? seg.suggestedPrefix ?? '').trim();
-        return prefix ? allowAlways(prefix) : allowOnce();
-      });
-      sendDecisions(req.requestId, decisions);
-    },
-    [perCardState, sendDecisions],
-  );
-
   if (requests.length === 0) {
     return null;
   }
 
+  const dismissRequest = (requestId: string) =>
+    setRequests((current) => current.filter((q) => q.requestId !== requestId));
+
   return (
     <div className={styles.stack} aria-live="polite">
-        {requests.map((req, cardIndex) => {
-          const cardState = perCardState[req.requestId] || {};
-          const isSubmitting = submittingId === req.requestId;
-          const isCollapsed = collapsedIds.has(req.requestId);
-          // A shared teammate keeps its command decisions on its library
-          // definition, so "always" applies wherever that agent works — here,
-          // in the workspaces listed, and in any that add it later.
-          const isSharedAgent = req.persistsToSharedAgent;
-          const sharedReach = req.alsoAffectsWorkspaces || [];
-          return (
-            <article
-              key={req.requestId}
-              ref={cardIndex === 0 ? firstCardRef : null}
-              className={styles.card}
-              aria-label="Permission requested"
-            >
-              <header className={styles.cardHeader}>
-                <div className={styles.cardHeaderLeft}>
-                  <span className={styles.tag}>Permission requested</span>
-                  <span className={styles.cardSubtitle}>
-                    {req.agentName
-                      ? `Agent "${req.agentName}" wants to run:`
-                      : 'An agent wants to run:'}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  className={styles.collapseBtn}
-                  onClick={() => toggleCollapsed(req.requestId)}
-                  aria-expanded={!isCollapsed}
-                  aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
-                  title={isCollapsed ? 'Expand' : 'Collapse'}
-                >
-                  {isCollapsed ? '▸' : '▾'}
-                </button>
-              </header>
-              {isCollapsed ? (
-                <pre className={`${styles.command} ${styles.collapsedSummary}`}>{req.command}</pre>
-              ) : (
-                <div className={styles.cardBody}>
-              <pre className={styles.command}>{req.command}</pre>
-              <section className={styles.segments}>
-                {isSharedAgent && (
-                  <p className={styles.segmentsLabel}>
-                    {sharedReach.length > 0
-                      ? `An "always" decision is saved on this shared agent, so it also applies to it in: ${sharedReach.join(', ')}.`
-                      : 'An "always" decision is saved on this shared agent, so it applies wherever this agent is added.'}
-                  </p>
-                )}
-                <p className={styles.segmentsLabel}>
-                  {req.segments.length === 1
-                    ? 'Choose how to handle this command:'
-                    : `${req.segments.length} parts need a decision (submits as soon as every part is decided):`}
-                </p>
-                {req.segments.map((seg, idx) => {
-                  const cell: SegmentCellState = cardState[idx] || { prefix: '', decision: null };
-                  const isOpaque = seg.kind === 'opaque';
-                  // The backend now fills `suggestedPrefix` for Opaque
-                  // segments too (the binary head IS a stable identifier
-                  // even when the surrounding syntax is opaque). The
-                  // persistence affordances key off the prefix being
-                  // non-empty rather than the kind tag, so any Opaque
-                  // segment whose head was recognized gets the same
-                  // "Always allow" workflow as Simple ones.
-                  const canPersist = Boolean(seg.suggestedPrefix);
-                  return (
-                    <div key={idx} className={styles.segmentRow}>
-                      {req.segments.length > 1 && (
-                        <div className={styles.segmentText}>
-                          <code>{seg.text}</code>
-                          {isOpaque && (
-                            <span
-                              className={styles.opaqueTag}
-                              title="Contains substitution, executor, redirect, or control-flow — review carefully before allowing."
-                            >
-                              opaque
-                            </span>
-                          )}
-                        </div>
-                      )}
-                      {canPersist && (
-                        <label className={styles.prefixField}>
-                          Save as prefix:
-                          <input
-                            type="text"
-                            value={cell.prefix || ''}
-                            onChange={(e) => setSegmentPrefix(req.requestId, idx, e.target.value)}
-                            disabled={isSubmitting}
-                            spellCheck={false}
-                            autoComplete="off"
-                          />
-                        </label>
-                      )}
-                      <div className={styles.segmentButtons}>
-                        <button
-                          type="button"
-                          className={`${styles.btn} ${styles.btnAllowOnce} ${cell.decision === 'allowOnce' ? styles.btnSelected : ''}`}
-                          onClick={() => handleSegmentDecision(req, idx, 'allowOnce')}
-                          disabled={isSubmitting}
-                        >
-                          Allow once
-                        </button>
-                        {canPersist && (
-                          <button
-                            type="button"
-                            className={`${styles.btn} ${styles.btnAllow} ${cell.decision === 'allowAlways' ? styles.btnSelected : ''}`}
-                            onClick={() => handleSegmentDecision(req, idx, 'allowAlways')}
-                            disabled={isSubmitting}
-                            title={isSharedAgent
-                              ? 'Saved on the shared agent, so it applies wherever this agent works'
-                              : 'Saved on this workspace\'s own agent'}
-                          >
-                            {isSharedAgent
-                              ? 'Always allow (every workspace)'
-                              : 'Always allow (this agent)'}
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          className={`${styles.btn} ${styles.btnDeny} ${cell.decision === 'denyAlways' ? styles.btnSelected : ''}`}
-                          onClick={() => handleSegmentDecision(req, idx, 'denyAlways')}
-                          disabled={isSubmitting}
-                          title={isSharedAgent
-                            ? 'Saved on the shared agent, so it applies wherever this agent works'
-                            : 'Saved on this workspace\'s own agent'}
-                        >
-                          {isSharedAgent ? 'Always deny (every workspace)' : 'Always deny (this agent)'}
-                        </button>
-                        <button
-                          type="button"
-                          className={`${styles.btn} ${styles.btnDenyOnce} ${cell.decision === 'denyOnce' ? styles.btnSelected : ''}`}
-                          onClick={() => handleSegmentDecision(req, idx, 'denyOnce')}
-                          disabled={isSubmitting}
-                        >
-                          Deny once
-                        </button>
-                      </div>
-                    </div>
-                  );
-                })}
-              </section>
-              {error && submittingId === null && (
-                <div className={styles.error}>{error}</div>
-              )}
-              {req.segments.length > 1 && (
-                <footer className={styles.cardFooter}>
-                  <button
-                    type="button"
-                    className={`${styles.btn} ${styles.btnAllow}`}
-                    onClick={() => allowAllAlways(req)}
-                    disabled={isSubmitting}
-                    title="Persist every persistable prefix and run. Segments without a stable prefix fall back to allow-once."
-                  >
-                    Allow all (always)
-                  </button>
-                  <button
-                    type="button"
-                    className={`${styles.btn} ${styles.btnDenyAll}`}
-                    onClick={() => denyAll(req)}
-                    disabled={isSubmitting}
-                    title="Deny every part of this pipeline in one click"
-                  >
-                    Deny entire command
-                  </button>
-                </footer>
-              )}
-                </div>
-              )}
-            </article>
-          );
-        })}
+      {requests.map((req, cardIndex) => (
+        <ApprovalCard
+          key={req.requestId}
+          ref={cardIndex === 0 ? firstCardRef : null}
+          req={req}
+          onDecided={dismissRequest}
+        />
+      ))}
     </div>
   );
 };

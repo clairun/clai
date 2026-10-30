@@ -244,6 +244,15 @@ pub async fn get_session(
     row.as_ref().map(map_session_row).transpose()
 }
 
+/// When any session in this workspace database was last touched (a message,
+/// a run start, or an explicit touch), or `None` when it has no sessions.
+pub async fn last_session_activity(pool: &DbPool) -> Result<Option<i64>, String> {
+    sqlx::query_scalar("SELECT MAX(updated_at) FROM assistant_sessions")
+        .fetch_one(pool)
+        .await
+        .map_err(|e| format!("Failed to read session activity: {}", e))
+}
+
 /// Canonical conversation session for a workspace manager: the newest session
 /// whose `automationId` is `manager_id`, excluding sessions
 /// linked from `workspace_tasks.session_id` (a self-assigned task carries the
@@ -440,6 +449,85 @@ pub async fn list_messages_before(
     };
 
     rows.iter().map(map_message_row).collect()
+}
+
+/// Rows with non-blank text or an image (only a user message carries one)
+/// that no run in flight is still writing: an active run's text is
+/// partial. Expects the message table aliased `m`.
+fn completed_content_filter() -> String {
+    format!(
+        r#"EXISTS (
+              SELECT 1 FROM json_each(m.content_json) AS part
+              WHERE json_extract(part.value, '$.type') = 'image'
+                 OR (json_extract(part.value, '$.type') = 'text'
+                     AND trim(json_extract(part.value, '$.text'), char(32, 9, 10, 13)) <> '')
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM assistant_runs AS r
+              WHERE r.id = m.run_id AND r.status IN {ACTIVE_RUN_STATUSES}
+          )"#
+    )
+}
+
+/// The session's newest assistant message with non-blank text and the run
+/// that wrote it, skipping rows of a run still in flight.
+pub async fn last_completed_assistant_text(
+    pool: &DbPool,
+    session_id: &str,
+) -> Result<Option<(AssistantMessage, Option<String>)>, String> {
+    let row = sqlx::query(&format!(
+        r#"
+        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json,
+               created_at, run_id
+        FROM assistant_messages AS m
+        WHERE session_id = ?
+          AND role = 'assistant'
+          AND {}
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+        completed_content_filter()
+    ))
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to load the last assistant message: {}", e))?;
+
+    row.map(|row| Ok((map_message_row(&row)?, row.get("run_id"))))
+        .transpose()
+}
+
+/// The newest `limit` user and assistant messages with text or an image
+/// across every session, oldest first, each with the run that wrote it.
+/// Skips tool rows, tool-only replies and runs in flight, like
+/// `last_completed_assistant_text`.
+pub async fn recent_conversation_messages(
+    pool: &DbPool,
+    limit: i64,
+) -> Result<Vec<(AssistantMessage, Option<String>)>, String> {
+    // Walks `idx_assistant_messages_created` backwards and stops after
+    // `limit` matches, so the cost doesn't grow with the transcript.
+    let rows = sqlx::query(&format!(
+        r#"
+        SELECT id, session_id, role, content_json, provider_metadata_json, origin_json,
+               created_at, run_id
+        FROM assistant_messages AS m
+        WHERE role IN ('user', 'assistant')
+          AND {}
+        ORDER BY created_at DESC, id DESC
+        LIMIT ?
+        "#,
+        completed_content_filter()
+    ))
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| format!("Failed to load recent messages: {}", e))?;
+
+    rows.iter()
+        .rev()
+        .map(|row| Ok((map_message_row(row)?, row.get("run_id"))))
+        .collect()
 }
 
 pub async fn count_session_messages(pool: &DbPool, session_id: &str) -> Result<u32, String> {
@@ -702,10 +790,9 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
         .ok_or_else(|| format!("Assistant session {session_id} already has an active run"))
 }
 
-/// At most two rows, newest first: the newest run and, if different, the
-/// newest non-terminal run. Older history is never returned.
-pub async fn current_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantRun>, String> {
-    let latest = sqlx::query(
+/// The session's newest run, whatever its status.
+pub async fn latest_run(pool: &DbPool, session_id: &str) -> Result<Option<AssistantRun>, String> {
+    let row = sqlx::query(
         r#"
         SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
         FROM assistant_runs
@@ -718,7 +805,13 @@ pub async fn current_runs(pool: &DbPool, session_id: &str) -> Result<Vec<Assista
     .fetch_optional(pool)
     .await
     .map_err(|e| format!("Failed to load latest assistant run: {}", e))?;
-    let Some(latest) = latest.as_ref().map(map_run_row).transpose()? else {
+    row.as_ref().map(map_run_row).transpose()
+}
+
+/// At most two rows, newest first: the newest run and, if different, the
+/// newest non-terminal run. Older history is never returned.
+pub async fn current_runs(pool: &DbPool, session_id: &str) -> Result<Vec<AssistantRun>, String> {
+    let Some(latest) = latest_run(pool, session_id).await? else {
         return Ok(Vec::new());
     };
 
@@ -751,18 +844,21 @@ pub async fn active_run_id(pool: &DbPool, session_id: &str) -> Result<Option<Str
 /// Whether the workspace database contains any non-terminal run. Workspace
 /// deletion uses this as a coarse guard before removing the root directory.
 pub async fn workspace_has_active_run(pool: &DbPool) -> Result<bool, String> {
-    let (count,): (i64,) = sqlx::query_as(&format!(
+    Ok(!workspace_active_run_ids(pool).await?.is_empty())
+}
+
+/// Non-terminal runs in any session of this workspace database.
+pub async fn workspace_active_run_ids(pool: &DbPool) -> Result<Vec<String>, String> {
+    sqlx::query_scalar(&format!(
         r#"
-        SELECT COUNT(*)
+        SELECT id
         FROM assistant_runs
         WHERE status IN {ACTIVE_RUN_STATUSES}
         "#
     ))
-    .fetch_one(pool)
+    .fetch_all(pool)
     .await
-    .map_err(|e| format!("Failed to check workspace for active runs: {}", e))?;
-
-    Ok(count > 0)
+    .map_err(|e| format!("Failed to check workspace for active runs: {}", e))
 }
 
 pub async fn get_active_run(

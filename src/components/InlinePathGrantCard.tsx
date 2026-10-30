@@ -1,30 +1,37 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import {
-  listPendingPathGrantRequests,
-  submitPathGrantDecision,
-} from '../permissions/pathGrantsClient';
+import { listPendingPathGrantRequests, submitPathGrantDecision } from '../permissions/pathGrantsClient';
 import type {
   FilesystemPathAccess,
   PathGrantDecision,
   PathGrantRequest,
 } from '../generated/bindings';
+import { chipText } from './requestChips';
 import styles from './InlinePathGrantCard.module.css';
 
 const PATH_GRANT_REQUEST_EVENT = 'path-grants://request';
-// Backend cleared a pending grant without a user decision (run cancelled
-// or ended, or a re-asked grant superseded it). Drop the stale card.
+// A pending grant left the queue: a decision (here or in another view), a
+// cancelled or ended run, or a re-asked grant superseded it. Drop the card.
 const PATH_GRANT_RESOLVED_EVENT = 'path-grants://resolved';
 
 type PathAccess = FilesystemPathAccess;
 
+const denyDecision = (): PathGrantDecision => ({ kind: 'deny' });
+const allowOnceDecision = (path: string, access: PathAccess): PathGrantDecision => ({
+  kind: 'allowOnce',
+  path,
+  access,
+});
+const allowAlwaysDecision = (path: string, access: PathAccess): PathGrantDecision => ({
+  kind: 'allowAlways',
+  path,
+  access,
+  scope: 'agent',
+});
+
 interface PathGrantCardState {
   path: string;
   access: PathAccess;
-}
-
-interface InlinePathGrantCardProps {
-  workspaceId: string | null;
 }
 
 // Paths that historically hold credentials or secrets. Surfacing this in
@@ -67,21 +74,227 @@ const isOverlyBroadPath = (path: string | null | undefined): boolean => {
   return homeRootMatch;
 };
 
-const denyDecision = (): PathGrantDecision => ({ kind: 'deny' });
-const allowOnceDecision = (path: string, access: PathAccess): PathGrantDecision => ({
-  kind: 'allowOnce',
-  path,
-  access,
-});
-const allowAlwaysDecision = (path: string, access: PathAccess): PathGrantDecision => ({
-  kind: 'allowAlways',
-  path,
-  access,
-  scope: 'agent',
-});
 
 const accessLabel = (access: PathAccess): string =>
   access === 'read_write' ? 'Read + write' : 'Read only';
+
+interface PathGrantCardProps {
+  req: PathGrantRequest;
+  /**
+   * Draw the request as the agent saying it (the Fleet's asking face and
+   * bubble): no tag or collapse, and short decision chips (full labels in
+   * the tooltips) below. The warnings stay; narrowing the path is left to
+   * the full card.
+   */
+  speaker?: (prompt: ReactNode) => ReactNode;
+  /** The decision was accepted. */
+  onDecided?: (requestId: string) => void;
+  ref?: Ref<HTMLElement>;
+}
+
+/** One path-grant request and its decision. */
+export const PathGrantCard = ({ req, speaker, onDecided, ref }: PathGrantCardProps) => {
+  const [card, setCard] = useState<PathGrantCardState>({ path: req.requestedPath, access: req.requestedAccess });
+  const [isSubmitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  // Collapse: squish the card to a one-line summary so a tall (or stacked)
+  // request can't swallow the conversation. Default expanded.
+  const [isCollapsed, setCollapsed] = useState(false);
+  const spoken = Boolean(speaker);
+
+  const sendDecision = async (decision: PathGrantDecision) => {
+    setSubmitting(true);
+    setError(null);
+    try {
+      await submitPathGrantDecision(req.requestId, decision);
+      onDecided?.(req.requestId);
+    } catch (e) {
+      setError(typeof e === 'string' ? e : e instanceof Error ? e.message : 'Failed to submit decision');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  // Validation: edited path must be the original or a descendant
+  // (component-wise prefix). Edited access must be no stronger
+  // than requested.
+  const requestedPath = req.requestedPath;
+  const isNarrower =
+    card.path === requestedPath ||
+    card.path.startsWith(`${requestedPath}${requestedPath.endsWith('/') ? '' : '/'}`);
+  const accessIsAllowed =
+    !(req.requestedAccess === 'read_only' && card.access === 'read_write');
+
+  const pathInvalid = !card.path.trim() || !isNarrower;
+  const accessInvalid = !accessIsAllowed;
+  const canSubmit = !pathInvalid && !accessInvalid && !isSubmitting;
+
+  const sensitive = isSensitivePath(card.path);
+  const overlyBroad = isOverlyBroadPath(card.path);
+
+  return (
+    <article
+      ref={ref}
+      className={spoken ? `${styles.card} ${styles.spoken}` : styles.card}
+      aria-label="Path grant requested"
+    >
+      {!spoken && (
+        <header className={styles.cardHeader}>
+          <div className={styles.cardHeaderLeft}>
+            <span className={styles.tag}>Path access requested</span>
+            <span className={styles.cardSubtitle}>
+              {req.agentName
+                ? `Agent "${req.agentName}" wants to extend its filesystem grants:`
+                : 'An agent wants to extend its filesystem grants:'}
+            </span>
+          </div>
+          <button
+            type="button"
+            className={styles.collapseBtn}
+            onClick={() => setCollapsed((c) => !c)}
+            aria-expanded={!isCollapsed}
+            aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
+            title={isCollapsed ? 'Expand' : 'Collapse'}
+          >
+            {isCollapsed ? '▸' : '▾'}
+          </button>
+        </header>
+      )}
+
+      {isCollapsed ? (
+        <div className={styles.collapsedSummary}>{card.path}</div>
+      ) : (
+        <div className={styles.cardBody}>
+          {speaker ? (
+            speaker(
+              <>
+                May I {req.requestedAccess === 'read_write' ? 'read and write' : 'read'}{' '}
+                <code className={styles.spokenPath}>{req.requestedPath}</code>?
+                <span className={styles.spokenReason}>{req.reason || '(no reason given)'}</span>
+              </>
+            )
+          ) : (
+            <>
+              <div className={styles.reasonBlock}>
+                <span className={styles.reasonLabel}>Reason from agent:</span>
+                <div className={styles.reasonText}>{req.reason || '(no reason given)'}</div>
+              </div>
+
+              <section className={styles.fields}>
+                <label className={styles.fieldLabel}>
+                  Path (you can narrow to a more specific subpath, but not widen)
+                  <input
+                    type="text"
+                    className={`${styles.pathInput} ${pathInvalid ? styles.inputInvalid : ''}`}
+                    value={card.path}
+                    onChange={(e) => setCard({ ...card, path: e.target.value })}
+                    disabled={isSubmitting}
+                    spellCheck={false}
+                    autoComplete="off"
+                  />
+                </label>
+                {pathInvalid && card.path.trim() && (
+                  <div className={styles.validationError}>
+                    Path must be the requested path or a descendant of it. Requested:{' '}
+                    <code>{requestedPath}</code>
+                  </div>
+                )}
+
+                <div className={styles.accessRow}>
+                  <span className={styles.fieldLabelInline}>Access:</span>
+                  <label className={styles.radio}>
+                    <input
+                      type="radio"
+                      name={`access-${req.requestId}`}
+                      value="read_only"
+                      checked={card.access === 'read_only'}
+                      onChange={() => setCard({ ...card, access: 'read_only' })}
+                      disabled={isSubmitting}
+                    />
+                    Read only
+                  </label>
+                  <label
+                    className={`${styles.radio} ${
+                      req.requestedAccess === 'read_only' ? styles.radioDisabled : ''
+                    }`}
+                    title={
+                      req.requestedAccess === 'read_only'
+                        ? "The agent asked for read-only; you can't upgrade it here."
+                        : undefined
+                    }
+                  >
+                    <input
+                      type="radio"
+                      name={`access-${req.requestId}`}
+                      value="read_write"
+                      checked={card.access === 'read_write'}
+                      onChange={() => setCard({ ...card, access: 'read_write' })}
+                      disabled={isSubmitting || req.requestedAccess === 'read_only'}
+                    />
+                    Read + write
+                  </label>
+                  <span className={styles.requestedHint}>
+                    Agent requested:{' '}
+                    <strong>{accessLabel(req.requestedAccess)}</strong>
+                  </span>
+                </div>
+              </section>
+            </>
+          )}
+
+          {(sensitive || overlyBroad) && (
+            <div className={styles.warningStack}>
+              {overlyBroad && (
+                <div className={`${styles.warning} ${styles.warningCritical}`}>
+                  ⚠ This is a very broad path. It exposes the user's entire account or
+                  system to the agent. Consider narrowing to a specific subdirectory.
+                </div>
+              )}
+              {sensitive && !overlyBroad && (
+                <div className={`${styles.warning} ${styles.warningCaution}`}>
+                  ⚠ This path typically holds credentials or secrets (e.g. SSH keys,
+                  cloud tokens). With network enabled, anything readable here can be
+                  exfiltrated by tools the agent runs. Grant carefully.
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className={styles.buttonRow}>
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.btnAllowOnce}`}
+              onClick={() => sendDecision(allowOnceDecision(card.path.trim(), card.access))}
+              disabled={!canSubmit}
+              {...chipText(spoken, 'Allow once', 'Once', 'Grant for the rest of this run only. Vanishes when the run ends.')}
+            />
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.btnAllowAlways}`}
+              onClick={() => sendDecision(allowAlwaysDecision(card.path.trim(), card.access))}
+              disabled={!canSubmit}
+              {...chipText(
+                spoken,
+                'Always allow (this agent)',
+                'Always',
+                "Add to this agent's permanent grant list. Survives across runs."
+              )}
+            />
+            <button
+              type="button"
+              className={`${styles.btn} ${styles.btnDeny}`}
+              onClick={() => sendDecision(denyDecision())}
+              disabled={isSubmitting}
+              {...chipText(spoken, 'Deny', 'Deny')}
+            />
+          </div>
+
+          {error && !isSubmitting && <div className={styles.error}>{error}</div>}
+        </div>
+      )}
+    </article>
+  );
+};
 
 /**
  * Inline path-grant approval card. Mirrors the structure of
@@ -94,16 +307,10 @@ const accessLabel = (access: PathAccess): string =>
  *   - enforces the narrowing invariants client-side (no widening, no
  *     upgrading RO→RW) so the user never gets a confusing backend rejection.
  */
-const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
+const InlinePathGrantCard = ({ workspaceId }: { workspaceId: string | null }) => {
   const [requests, setRequests] = useState<PathGrantRequest[]>([]);
-  const [perCardState, setPerCardState] = useState<Record<string, PathGrantCardState>>({});
-  const [submittingId, setSubmittingId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
   const firstCardRef = useRef<HTMLElement | null>(null);
   const previousCountRef = useRef(0);
-  // Per-card collapse: squish a card to a one-line summary so a tall (or
-  // stacked) request can't swallow the conversation. Default expanded.
-  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     // Switching workspaces reuses this component instance — the Workspace
@@ -114,9 +321,6 @@ const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
     // happens to resolve.
     // eslint-disable-next-line react-hooks/set-state-in-effect -- subscription+seed effect: clear stale per-workspace state on workspaceId change (component instance is reused across workspace navigation), then seed from pending list and subscribe to backend events. Effect is required for the listener registration + cleanup; the lint rule cannot model the seed/listen interaction.
     setRequests([]);
-    setPerCardState({});
-    setError(null);
-    setSubmittingId(null);
     previousCountRef.current = 0;
 
     if (!workspaceId) return undefined;
@@ -154,9 +358,8 @@ const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
       });
     });
 
-    // Remove a card the backend cleared without a user decision (tool call
-    // abandoned mid-wait). requestId is globally unique, so no
-    // workspace filter is needed.
+    // Remove the card once its grant leaves the queue. requestId is
+    // globally unique, so no workspace filter is needed.
     const unlistenResolvedPromise = listen<{ requestId?: string }>(
       PATH_GRANT_RESOLVED_EVENT,
       (event) => {
@@ -174,30 +377,6 @@ const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
     };
   }, [workspaceId]);
 
-  // Initialize per-card editable state when a new request arrives.
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- derive per-card editable state from the requests list: add entries for new requests, drop entries for resolved ones, and no-op when nothing changed. The functional updater + 'return current' early-out is the canonical React 18 derivation pattern; the [requests] dep is correct.
-    setPerCardState((current) => {
-      const next = { ...current };
-      let changed = false;
-      for (const req of requests) {
-        if (next[req.requestId]) continue;
-        next[req.requestId] = {
-          path: req.requestedPath,
-          access: req.requestedAccess,
-        };
-        changed = true;
-      }
-      for (const id of Object.keys(next)) {
-        if (!requests.some((r) => r.requestId === id)) {
-          delete next[id];
-          changed = true;
-        }
-      }
-      return changed ? next : current;
-    });
-  }, [requests]);
-
   // Auto-scroll on 0→1 transition only (don't yank the page on every new request).
   useEffect(() => {
     const prev = previousCountRef.current;
@@ -208,239 +387,23 @@ const InlinePathGrantCard = ({ workspaceId }: InlinePathGrantCardProps) => {
     }
   }, [requests.length]);
 
-  const toggleCollapsed = useCallback((requestId: string) => {
-    setCollapsedIds((current) => {
-      const next = new Set(current);
-      if (next.has(requestId)) next.delete(requestId);
-      else next.add(requestId);
-      return next;
-    });
-  }, []);
-
-  const dismissRequest = useCallback((requestId: string) => {
-    setRequests((current) => current.filter((q) => q.requestId !== requestId));
-  }, []);
-
-  const sendDecision = useCallback(
-    async (requestId: string, decision: PathGrantDecision) => {
-      if (submittingId) return;
-      setSubmittingId(requestId);
-      setError(null);
-      try {
-        await submitPathGrantDecision(requestId, decision);
-        dismissRequest(requestId);
-      } catch (e) {
-        const message =
-          typeof e === 'string' ? e : e instanceof Error ? e.message : 'Failed to submit decision';
-        setError(message);
-      } finally {
-        setSubmittingId(null);
-      }
-    },
-    [submittingId, dismissRequest],
-  );
-
-  const updateCardField = useCallback(
-    <K extends keyof PathGrantCardState>(
-      requestId: string,
-      field: K,
-      value: PathGrantCardState[K],
-    ) => {
-      setPerCardState((current) => ({
-        ...current,
-        [requestId]: { ...current[requestId], [field]: value } as PathGrantCardState,
-      }));
-    },
-    [],
-  );
-
   if (requests.length === 0) {
     return null;
   }
 
+  const dismissRequest = (requestId: string) =>
+    setRequests((current) => current.filter((q) => q.requestId !== requestId));
+
   return (
     <div className={styles.stack} aria-live="polite">
-      {requests.map((req, cardIndex) => {
-        const card = perCardState[req.requestId] || {
-          path: req.requestedPath,
-          access: req.requestedAccess,
-        };
-        const isSubmitting = submittingId === req.requestId;
-        const isCollapsed = collapsedIds.has(req.requestId);
-
-        // Validation: edited path must be the original or a descendant
-        // (component-wise prefix). Edited access must be no stronger
-        // than requested.
-        const requestedPath = req.requestedPath;
-        const isNarrower =
-          card.path === requestedPath ||
-          card.path.startsWith(`${requestedPath}${requestedPath.endsWith('/') ? '' : '/'}`);
-        const accessIsAllowed =
-          !(req.requestedAccess === 'read_only' && card.access === 'read_write');
-
-        const pathInvalid = !card.path.trim() || !isNarrower;
-        const accessInvalid = !accessIsAllowed;
-        const canSubmit = !pathInvalid && !accessInvalid && !isSubmitting;
-
-        const sensitive = isSensitivePath(card.path);
-        const overlyBroad = isOverlyBroadPath(card.path);
-
-        return (
-          <article
-            key={req.requestId}
-            ref={cardIndex === 0 ? firstCardRef : null}
-            className={styles.card}
-            aria-label="Path grant requested"
-          >
-            <header className={styles.cardHeader}>
-              <div className={styles.cardHeaderLeft}>
-                <span className={styles.tag}>Path access requested</span>
-                <span className={styles.cardSubtitle}>
-                  {req.agentName
-                    ? `Agent "${req.agentName}" wants to extend its filesystem grants:`
-                    : 'An agent wants to extend its filesystem grants:'}
-                </span>
-              </div>
-              <button
-                type="button"
-                className={styles.collapseBtn}
-                onClick={() => toggleCollapsed(req.requestId)}
-                aria-expanded={!isCollapsed}
-                aria-label={isCollapsed ? 'Expand request' : 'Collapse request'}
-                title={isCollapsed ? 'Expand' : 'Collapse'}
-              >
-                {isCollapsed ? '▸' : '▾'}
-              </button>
-            </header>
-
-            {isCollapsed ? (
-              <div className={styles.collapsedSummary}>{card.path}</div>
-            ) : (
-              <div className={styles.cardBody}>
-            <div className={styles.reasonBlock}>
-              <span className={styles.reasonLabel}>Reason from agent:</span>
-              <div className={styles.reasonText}>{req.reason || '(no reason given)'}</div>
-            </div>
-
-            <section className={styles.fields}>
-              <label className={styles.fieldLabel}>
-                Path (you can narrow to a more specific subpath, but not widen)
-                <input
-                  type="text"
-                  className={`${styles.pathInput} ${pathInvalid ? styles.inputInvalid : ''}`}
-                  value={card.path}
-                  onChange={(e) => updateCardField(req.requestId, 'path', e.target.value)}
-                  disabled={isSubmitting}
-                  spellCheck={false}
-                  autoComplete="off"
-                />
-              </label>
-              {pathInvalid && card.path.trim() && (
-                <div className={styles.validationError}>
-                  Path must be the requested path or a descendant of it. Requested:{' '}
-                  <code>{requestedPath}</code>
-                </div>
-              )}
-
-              <div className={styles.accessRow}>
-                <span className={styles.fieldLabelInline}>Access:</span>
-                <label className={styles.radio}>
-                  <input
-                    type="radio"
-                    name={`access-${req.requestId}`}
-                    value="read_only"
-                    checked={card.access === 'read_only'}
-                    onChange={() => updateCardField(req.requestId, 'access', 'read_only')}
-                    disabled={isSubmitting}
-                  />
-                  Read only
-                </label>
-                <label
-                  className={`${styles.radio} ${
-                    req.requestedAccess === 'read_only' ? styles.radioDisabled : ''
-                  }`}
-                  title={
-                    req.requestedAccess === 'read_only'
-                      ? "The agent asked for read-only; you can't upgrade it here."
-                      : undefined
-                  }
-                >
-                  <input
-                    type="radio"
-                    name={`access-${req.requestId}`}
-                    value="read_write"
-                    checked={card.access === 'read_write'}
-                    onChange={() => updateCardField(req.requestId, 'access', 'read_write')}
-                    disabled={isSubmitting || req.requestedAccess === 'read_only'}
-                  />
-                  Read + write
-                </label>
-                <span className={styles.requestedHint}>
-                  Agent requested:{' '}
-                  <strong>{accessLabel(req.requestedAccess)}</strong>
-                </span>
-              </div>
-            </section>
-
-            {(sensitive || overlyBroad) && (
-              <div className={styles.warningStack}>
-                {overlyBroad && (
-                  <div className={`${styles.warning} ${styles.warningCritical}`}>
-                    ⚠ This is a very broad path. It exposes the user's entire account or
-                    system to the agent. Consider narrowing to a specific subdirectory.
-                  </div>
-                )}
-                {sensitive && !overlyBroad && (
-                  <div className={`${styles.warning} ${styles.warningCaution}`}>
-                    ⚠ This path typically holds credentials or secrets (e.g. SSH keys,
-                    cloud tokens). With network enabled, anything readable here can be
-                    exfiltrated by tools the agent runs. Grant carefully.
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className={styles.buttonRow}>
-              <button
-                type="button"
-                className={`${styles.btn} ${styles.btnAllowOnce}`}
-                onClick={() =>
-                  sendDecision(req.requestId, allowOnceDecision(card.path.trim(), card.access))
-                }
-                disabled={!canSubmit}
-                title="Grant for the rest of this run only. Vanishes when the run ends."
-              >
-                Allow once
-              </button>
-              <button
-                type="button"
-                className={`${styles.btn} ${styles.btnAllowAlways}`}
-                onClick={() =>
-                  sendDecision(req.requestId, allowAlwaysDecision(card.path.trim(), card.access))
-                }
-                disabled={!canSubmit}
-                title="Add to this agent's permanent grant list. Survives across runs."
-              >
-                Always allow (this agent)
-              </button>
-              <button
-                type="button"
-                className={`${styles.btn} ${styles.btnDeny}`}
-                onClick={() => sendDecision(req.requestId, denyDecision())}
-                disabled={isSubmitting}
-              >
-                Deny
-              </button>
-            </div>
-
-            {error && submittingId === null && (
-              <div className={styles.error}>{error}</div>
-            )}
-              </div>
-            )}
-          </article>
-        );
-      })}
+      {requests.map((req, cardIndex) => (
+        <PathGrantCard
+          key={req.requestId}
+          ref={cardIndex === 0 ? firstCardRef : null}
+          req={req}
+          onDecided={dismissRequest}
+        />
+      ))}
     </div>
   );
 };

@@ -118,6 +118,175 @@
   transition: all 0.2s ease;
 }
 
+/* The Fleet's target, always shown: typed text never hides it. A button:
+   it opens the workspace picker. Both modes keep the same box (the border
+   is always there), so switching never moves the input. */
+.fleetTarget {
+  flex-shrink: 0;
+  align-self: center;
+  max-width: 40%;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary-alpha-15);
+  color: var(--color-primary);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.fleetTarget:hover,
+.fleetTarget:focus-visible {
+  border-color: var(--color-primary);
+  outline: none;
+}
+
+/* Creating, not targeting: never mistaken for a workspace named "New Workspace". */
+.fleetTarget[data-new] {
+  border-style: dashed;
+  border-color: var(--color-accent);
+  background: transparent;
+  color: var(--color-accent);
+}
+
+/* Opens the /help overlay. Exactly one text line tall: it sits in the
+   input row and must not grow it. */
+.helpButton {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-full);
+  background: transparent;
+  color: var(--color-text-tertiary);
+  font: inherit;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.helpButton:hover,
+.helpButton:focus-visible {
+  border-color: var(--color-primary);
+  color: var(--color-primary);
+  outline: none;
+}
+
+/* ── Workspace picker (opens above the input; adds no height) ─────── */
+.picker {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 6px);
+  z-index: var(--z-dropdown);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(480px, 100%);
+  padding: 8px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-lg);
+  background: var(--color-bg-elevated);
+  box-shadow: var(--shadow-xl);
+}
+
+.pickerSearch {
+  padding: 6px 8px;
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-md);
+  background: var(--color-overlay-02);
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: 13px;
+  outline: none;
+}
+
+.pickerSearch:focus {
+  border-color: var(--color-primary);
+}
+
+.pickerList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+.pickerOption {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+}
+
+.pickerOption[aria-selected='true'] {
+  border-color: var(--color-primary);
+  background: var(--color-primary-alpha-15);
+}
+
+.pickerTitle {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--color-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.pickerDetail {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--color-text-tertiary);
+}
+
+.pickerCreate .pickerTitle {
+  color: var(--color-accent);
+}
+
+.createIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border: 1px dashed var(--color-accent);
+  border-radius: var(--radius-full);
+  color: var(--color-accent);
+  font-weight: 700;
+  line-height: 1;
+}
+
+.confirmCreate {
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-warning);
+  /* One line: it shares the toolbar row, which must keep its height. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.confirmCreate kbd {
+  font-family: inherit;
+  font-weight: 700;
+}
+
 .terminalInputWrapper:focus-within {
   background: var(--color-bg-elevated);
   border-color: var(--color-primary);

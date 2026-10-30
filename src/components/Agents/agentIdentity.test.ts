@@ -18,17 +18,28 @@ import {
 import { HUES, agentAvatar, hueIndexFor } from './avatarGenerator';
 
 describe('identityFor', () => {
-  it('gives every Main the same fixed face regardless of ids or saved seed', () => {
-    const a = identityFor({ id: 'ws-1-main', agentDefinitionId: 'def-1', isDefault: true });
-    const b = identityFor({
-      id: 'ws-2-main',
-      avatar: { seed: 'custom', generatorVersion: 1 },
-      isDefault: true,
-    });
-    expect(a).toEqual(mainIdentity());
-    expect(b).toEqual(mainIdentity());
-    expect(a.seed).toBe(MAIN_AVATAR_SEED);
-    expect(a.hue).toBe(MAIN_AVATAR_HUE);
+  it("gives each workspace's Main its own face, always purple and wearing an accessory", () => {
+    const a = identityFor({ id: 'ws-1-main', agentDefinitionId: 'def-main', isDefault: true });
+    const b = identityFor({ id: 'ws-2-main', agentDefinitionId: 'def-main', isDefault: true });
+    expect(a).toEqual({ seed: 'ws-1-main', hue: MAIN_AVATAR_HUE, generatorVersion: GENERATOR_VERSION, main: true });
+    expect(b.seed).toBe('ws-2-main');
+    expect(b.hue).toBe(MAIN_AVATAR_HUE);
+  });
+
+  it("honours a Main's picked face, still in purple", () => {
+    const picked = identityFor({ id: 'ws-1-main', avatar: { seed: 'custom', generatorVersion: 1 }, isDefault: true });
+    expect(picked).toEqual({ seed: 'custom', hue: MAIN_AVATAR_HUE, generatorVersion: 1, main: true });
+  });
+
+  it('falls back to the fixed seed only when no Main agent is known', () => {
+    expect(mainIdentity()).toEqual({ seed: MAIN_AVATAR_SEED, hue: MAIN_AVATAR_HUE, generatorVersion: GENERATOR_VERSION, main: true });
+    expect(mainIdentity(null).seed).toBe(MAIN_AVATAR_SEED);
+  });
+
+  it("a member's identity is unchanged: no accessory, its own seed and hue", () => {
+    const member = identityFor({ id: 'l', agentDefinitionId: 'def-1' });
+    expect(member).toEqual({ seed: 'def-1', generatorVersion: GENERATOR_VERSION });
+    expect(renderIdentity(member, { size: 20 })).toBe(agentAvatar('def-1', { size: 20 }));
   });
 
   it('prefers the picked face, then the definition id, then the local id', () => {
@@ -80,7 +91,7 @@ describe('identityHue / identityRingColor / renderIdentity', () => {
     const id = identityFor({ id: 'l', avatar: avatarRefFor('Code Reviewer') });
     expect(renderIdentity(id, { size: 20 })).toBe(agentAvatar('Code Reviewer', { size: 20 }));
     expect(renderIdentity(mainIdentity())).toBe(
-      agentAvatar(MAIN_AVATAR_SEED, { hue: MAIN_AVATAR_HUE })
+      agentAvatar(MAIN_AVATAR_SEED, { hue: MAIN_AVATAR_HUE, accessory: true })
     );
   });
 });
@@ -140,7 +151,7 @@ describe('taskIdentity', () => {
         { assignedToWorkspaceAgentId: 'wa-main', assignedAgentDefinitionId: 'def-main' },
         roster
       )
-    ).toEqual(mainIdentity());
+    ).toEqual(mainIdentity({ id: 'wa-main' }));
     expect(
       taskIdentity(
         { assignedToWorkspaceAgentId: 'wa-review', assignedAgentDefinitionId: 'def-review' },

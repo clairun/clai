@@ -2393,30 +2393,24 @@ fn image_media_type_from_extension(path: &Path) -> Option<&'static str> {
     }
 }
 
-/// Persist an image chosen via the native file dialog and return a
-/// ready-to-attach [`ContentPart::Image`].
+/// An image file the user chose in the native dialog, read but not stored.
+struct PickedImage {
+    bytes: Vec<u8>,
+    media_type: &'static str,
+    filename: Option<String>,
+}
+
+/// Open the native image dialog and read the chosen file; `None` if cancelled.
 ///
-/// This is the reliable cross-platform attach path: clipboard image paste is
-/// unreliable in the Linux WebKitGTK webview, so the composer also offers a
-/// file picker that routes here. Reads the host file the user explicitly
-/// selected, infers the MIME from its extension, then reuses the same image
-/// store (size cap, MIME allowlist, workspace-root sandbox) as the paste path.
-#[tauri::command]
-pub async fn workspace_pick_and_store_image(
-    workspace_id: String,
-    app: AppHandle,
-    state: State<'_, AppState>,
-) -> Result<Option<ContentPart>, String> {
+/// The dialog runs in the backend, so the chosen path comes from a genuine
+/// OS user selection — never a renderer-supplied string. A compromised
+/// renderer can `invoke` the commands below, but cannot dictate which file is
+/// read (it can only pop the picker), so it can't exfiltrate arbitrary
+/// files (e.g. `~/.ssh/id_rsa`). The commands are async, so
+/// `blocking_pick_file` runs off the main thread (required by the plugin).
+async fn pick_image(app: &AppHandle) -> Result<Option<PickedImage>, String> {
     use tauri_plugin_dialog::DialogExt;
 
-    let root_path = resolve_agent_workspace_root(state.inner(), &workspace_id)?;
-
-    // The dialog runs in the backend, so the chosen path comes from a genuine
-    // OS user selection — never a renderer-supplied string. A compromised
-    // renderer can `invoke` this command, but cannot dictate which file is
-    // read (it can only pop the picker), so it can't exfiltrate arbitrary
-    // files (e.g. `~/.ssh/id_rsa`) into the image store. This command is async,
-    // so `blocking_pick_file` runs off the main thread (required by the plugin).
     let picked = app
         .dialog()
         .file()
@@ -2429,24 +2423,83 @@ pub async fn workspace_pick_and_store_image(
     let source = file_path
         .into_path()
         .map_err(|error| format!("Invalid file path: {}", error))?;
+    read_image_file(&source).await.map(Some)
+}
 
-    let media_type = image_media_type_from_extension(&source)
+/// Read an image file, refusing one over the image store's size limit before
+/// reading it, so the error shows when the image is picked.
+async fn read_image_file(source: &Path) -> Result<PickedImage, String> {
+    use crate::assistant::image_store::MAX_IMAGE_BYTES;
+
+    let media_type = image_media_type_from_extension(source)
         .ok_or_else(|| "Unsupported image type. Use PNG, JPEG, GIF, or WebP.".to_string())?;
     let filename = source
         .file_name()
         .and_then(|n| n.to_str())
         .map(|n| n.to_string());
 
-    let bytes = tokio::fs::read(&source)
-        .await
-        .map_err(|error| format!("Could not read image file: {}", error))?;
+    let read_error = |error: std::io::Error| format!("Could not read image file: {}", error);
+    let size = tokio::fs::metadata(source).await.map_err(read_error)?.len();
+    if size > MAX_IMAGE_BYTES as u64 {
+        return Err(format!(
+            "Image is too large ({} bytes, max {})",
+            size, MAX_IMAGE_BYTES
+        ));
+    }
+    let bytes = tokio::fs::read(source).await.map_err(read_error)?;
 
-    Ok(Some(store_workspace_image(
-        root_path.as_path(),
-        &bytes,
+    Ok(PickedImage {
+        bytes,
         media_type,
         filename,
+    })
+}
+
+/// Persist an image chosen via the native file dialog and return a
+/// ready-to-attach [`ContentPart::Image`].
+///
+/// This is the reliable cross-platform attach path: clipboard image paste is
+/// unreliable in the Linux WebKitGTK webview, so the composer also offers a
+/// file picker that routes here. Reuses the same image store (size cap, MIME
+/// allowlist, workspace-root sandbox) as the paste path.
+#[tauri::command]
+pub async fn workspace_pick_and_store_image(
+    workspace_id: String,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<ContentPart>, String> {
+    let root_path = resolve_agent_workspace_root(state.inner(), &workspace_id)?;
+    let Some(image) = pick_image(&app).await? else {
+        return Ok(None);
+    };
+    Ok(Some(store_workspace_image(
+        root_path.as_path(),
+        &image.bytes,
+        image.media_type,
+        image.filename,
     )?))
+}
+
+/// A picked image for `workspace_store_image`, shaped like its request.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PickedImageResponse {
+    pub data_base64: String,
+    pub media_type: String,
+    pub filename: Option<String>,
+}
+
+/// Pick an image for a prompt whose workspace does not exist yet (the Fleet's
+/// new-workspace prompt). The frontend stores it with `workspace_store_image`
+/// once the workspace is created.
+#[tauri::command]
+pub async fn workspace_pick_image(app: AppHandle) -> Result<Option<PickedImageResponse>, String> {
+    use base64::Engine as _;
+    Ok(pick_image(&app).await?.map(|image| PickedImageResponse {
+        data_base64: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+        media_type: image.media_type.to_string(),
+        filename: image.filename,
+    }))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -4111,6 +4164,23 @@ mod tests {
         assert!(resolve_artifact_destination_dir(root.path(), "proj/.git").is_err());
         assert!(resolve_artifact_destination_dir(root.path(), "proj/.git/inner").is_err());
         assert!(resolve_artifact_destination_dir(root.path(), "proj/file.txt").is_err());
+    }
+
+    #[tokio::test]
+    async fn read_image_file_refuses_an_image_over_the_limit() {
+        use crate::assistant::image_store::MAX_IMAGE_BYTES;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("shot.png");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_IMAGE_BYTES as u64).unwrap();
+        let image = read_image_file(&path).await.unwrap();
+        assert_eq!(image.bytes.len(), MAX_IMAGE_BYTES);
+        assert_eq!(image.filename.as_deref(), Some("shot.png"));
+
+        file.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
+        let error = read_image_file(&path).await.err().unwrap();
+        assert!(error.starts_with("Image is too large"), "{error}");
     }
 
     #[tokio::test]
