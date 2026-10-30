@@ -129,8 +129,7 @@ struct Heredoc {
     delim: String,
     /// `<<-`: the closing line may be indented with tabs.
     strip_tabs: bool,
-    /// Part of the delimiter was quoted, so the body has no line
-    /// continuations.
+    /// Part of the delimiter was quoted, so body lines are not joined.
     quoted: bool,
     /// The segment of the command that reads it.
     owner: usize,
@@ -243,26 +242,37 @@ impl Commands {
 
     /// Reads the bodies of the heredocs opened on the line that ended just
     /// before `i`, appends each to the command that reads it, and returns
-    /// where lexing resumes. A body is data, not commands. `None` when an
-    /// unquoted body has a line continuation, which can join lines into
-    /// the closing line.
-    fn read_heredoc_bodies(&mut self, input: &str, mut i: usize) -> Option<usize> {
+    /// where lexing resumes. A body is data, not commands.
+    ///
+    /// Under an unquoted delimiter, bash first joins a line ending in an odd
+    /// run of backslashes with the next one, dropping that last backslash and
+    /// the newline; `<<-` then strips tabs from the start of the joined line.
+    fn read_heredoc_bodies(&mut self, input: &str, mut i: usize) -> usize {
         for heredoc in std::mem::take(&mut self.heredocs) {
             let start = i;
-            for line in input[start..].split_inclusive('\n') {
-                i += line.len();
-                let line = line.strip_suffix('\n').unwrap_or(line);
-                let line = if heredoc.strip_tabs {
+            let mut line = String::new();
+            for physical in input[start..].split_inclusive('\n') {
+                i += physical.len();
+                match physical.strip_suffix('\n') {
+                    Some(text)
+                        if !heredoc.quoted
+                            && (text.len() - text.trim_end_matches('\\').len()) % 2 == 1 =>
+                    {
+                        line.push_str(&text[..text.len() - 1]);
+                        continue;
+                    }
+                    Some(text) => line.push_str(text),
+                    None => line.push_str(physical),
+                }
+                let closer = if heredoc.strip_tabs {
                     line.trim_start_matches('\t')
                 } else {
-                    line
+                    &line
                 };
-                if line == heredoc.delim {
+                if closer == heredoc.delim {
                     break;
                 }
-                if !heredoc.quoted && line.ends_with('\\') {
-                    return None;
-                }
+                line.clear();
             }
             if let Some(Segment::Simple(text) | Segment::Opaque(text)) =
                 self.segments.get_mut(heredoc.owner)
@@ -271,7 +281,7 @@ impl Commands {
                 text.push_str(input[start..i].trim_end_matches('\n'));
             }
         }
-        Some(i)
+        i
     }
 }
 
@@ -531,7 +541,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
             } else {
                 out.end();
             }
-            i = out.read_heredoc_bodies(input, i + 1)?;
+            i = out.read_heredoc_bodies(input, i + 1);
             continue;
         }
 
@@ -1689,18 +1699,16 @@ mod tests {
 
     #[test]
     fn syntax_whose_end_bash_reads_differently_is_unparsed() {
-        // bash runs the `touch PWN` in each: it ends the heredoc at a
-        // `$'…'` delimiter or a continued line, and re-reads a `((` whose
-        // `)`s are not adjacent as subshells.
+        // bash runs the `touch PWN` in each: it reads a heredoc delimiter
+        // holding `$`, a backtick or a line continuation differently, and
+        // re-reads a `((` whose `)`s are not adjacent as subshells.
         for input in [
             "cat <<$'E'\nE\ntouch PWN",
             "cat <<$\"E\"\nE\ntouch PWN",
             "cat <<$\\\n'E'\nE\ntouch PWN",
             "cat <<$(x)\n$(x)\ntouch PWN\n$",
             "cat <<`a`\n`a`\ntouch PWN",
-            "cat <<E\nE\\\n\ntouch PWN\nE",
             "cat <<E\\\nX\nEX\\\n\ntouch PWN\nEX",
-            "cat <<-E\n\tE\\\n\ntouch PWN\nE",
             "echo x\n((echo a) ; touch PWN )",
             "((touch PWN) )",
             "echo $((echo a) ; touch PWN )",
@@ -1708,13 +1716,45 @@ mod tests {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
         assert_eq!(
-            split("cat <<\"E\"\nE\\\n\ntouch PWN\nE"),
-            vec![opaque("cat <<\"E\"\nE\\\n\ntouch PWN\nE")]
-        );
-        assert_eq!(
             split("(( (1+2) * 3 )) ; echo $((1+2))"),
             vec![opaque("(( (1+2) * 3 ))"), simple("echo $((1+2))")]
         );
+    }
+
+    #[test]
+    fn unquoted_heredoc_joins_continued_lines_before_the_closer() {
+        let dockerfile =
+            "cat <<EOF > Dockerfile\nRUN apt-get update && \\\n    apt-get install -y curl\nEOF";
+        assert_eq!(split(dockerfile), vec![opaque(dockerfile)]);
+        // `E\` and the empty line join into the closer `E`.
+        assert_eq!(
+            split("cat <<E\nE\\\n\ntouch PWN\nE"),
+            vec![opaque("cat <<E\nE\\"), simple("touch PWN"), simple("E")]
+        );
+        assert_eq!(
+            split("cat <<-E\n\tE\\\n\ntouch PWN\nE"),
+            vec![opaque("cat <<-E\n\tE\\"), simple("touch PWN"), simple("E")]
+        );
+        // `<<-` strips tabs from the joined line.
+        assert_eq!(
+            split("cat <<-E\n\t\\\n\tE\ntouch PWN"),
+            vec![opaque("cat <<-E\n\t\\\n\tE"), simple("touch PWN")]
+        );
+        // An even run of backslashes joins nothing; an odd one does.
+        assert_eq!(
+            split("cat <<E\na\\\\\nE\ntouch PWN"),
+            vec![opaque("cat <<E\na\\\\\nE"), simple("touch PWN")]
+        );
+        let odd = "cat <<E\na\\\\\\\nE\ntouch PWN\nE";
+        assert_eq!(split(odd), vec![opaque(odd)]);
+        // A continued last line, or a backslash at the end of input, closes
+        // nothing.
+        for input in ["cat <<E\nhi\\\nE", "cat <<E\nhi\\"] {
+            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
+        }
+        // A quoted delimiter joins no lines.
+        let quoted = "cat <<\"E\"\nE\\\n\ntouch PWN\nE";
+        assert_eq!(split(quoted), vec![opaque(quoted)]);
     }
 
     #[test]
