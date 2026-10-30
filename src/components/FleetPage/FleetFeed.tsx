@@ -71,6 +71,12 @@ const statusOf = (line: FleetLine): 'done' | 'failed' | 'stopped' | 'working' | 
 
 type Open = (line: FleetLine, origin: HTMLElement) => void;
 
+/** The click ends a drag (or shift-click) selecting words in `e.currentTarget`: it is the reader's, not a press. */
+export const endsSelection = (e: MouseEvent<HTMLElement>) => {
+  const selection = getSelection();
+  return !!selection && !selection.isCollapsed && e.currentTarget.contains(selection.focusNode);
+};
+
 /**
  * A bubble pressed by a click, Enter or Space; the card under it is not
  * selected. A link or button in it keeps its click and keys untouched: a
@@ -80,10 +86,6 @@ type Open = (line: FleetLine, origin: HTMLElement) => void;
  */
 const pressable = (onPress: (target: HTMLElement) => void) => {
   const ownedInside = (e: SyntheticEvent<HTMLElement>) => e.target instanceof Element && e.target.closest('a, button') !== null;
-  const selecting = (e: MouseEvent<HTMLElement>) => {
-    const selection = getSelection();
-    return !!selection && !selection.isCollapsed && e.currentTarget.contains(selection.focusNode);
-  };
   const onScrollbar = (e: MouseEvent<HTMLElement>) =>
     e.target instanceof HTMLElement && e.target.scrollHeight > e.target.clientHeight && e.nativeEvent.offsetX >= e.target.clientWidth;
   return {
@@ -92,7 +94,7 @@ const pressable = (onPress: (target: HTMLElement) => void) => {
     onClick: (e: MouseEvent<HTMLElement>) => {
       if (ownedInside(e)) return;
       e.stopPropagation();
-      if (!onScrollbar(e) && !selecting(e)) onPress(e.currentTarget);
+      if (!onScrollbar(e) && !endsSelection(e)) onPress(e.currentTarget);
     },
     onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
       if ((e.key !== 'Enter' && e.key !== ' ') || ownedInside(e)) return;

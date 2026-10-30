@@ -82,6 +82,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  getSelection()?.removeAllRanges();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   mockInvoke.mockImplementation(async () => undefined);
@@ -389,6 +390,28 @@ describe('FleetPage', () => {
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     });
 
+    it('keeps words selected in it: a click in the zoom, or a drag ending outside it, neither selects the card nor readies the terminal', async () => {
+      seed();
+      renderFleet();
+      const terminal = screen.getByRole('textbox', { name: 'Terminal' });
+      const origin = await bubble(/^Shipped v2/);
+      fireEvent.click(origin);
+      const zoom = screen.getByRole('dialog', { name: 'Message from Scout' });
+      getSelection()!.selectAllChildren(within(zoom).getByText('v2'));
+      for (const target of [within(zoom).getByText('v2'), zoom.parentElement!]) {
+        fireEvent.mouseUp(target);
+        fireEvent.click(target);
+        expect(zoom).toHaveFocus();
+        expect(terminal).not.toHaveFocus();
+        expect(useFleetStore.getState().selectedId).toBeNull();
+      }
+      // A click outside zooms back, and the keyboard goes back to the bubble.
+      fireEvent.click(zoom.parentElement!.firstElementChild!);
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(origin).toHaveFocus();
+      expect(useFleetStore.getState().selectedId).toBeNull();
+    });
+
     /** The card's bubbles and tails at fixed places: a bubble at `bubble`, its tail 20px down its side. */
     const layout = (bubble: { left: number; top: number; width: number; height: number }) =>
       vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
@@ -536,6 +559,25 @@ describe('FleetPage', () => {
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(useFleetStore.getState().selectedId).toBeNull();
     expect(terminal).not.toHaveFocus();
+  });
+
+  it('keeps words selected in a bubble when the drag ends outside it: the card is not selected, the terminal not readied', async () => {
+    fleetSnapshot.mockResolvedValue([{ ...workspace('a', 'Alpha'), mainSessionId: 'main-a', recentMessages: [said('u1', 'Ship it.', 60_000)] }]);
+    renderFleet();
+    const terminal = screen.getByRole('textbox', { name: 'Terminal' });
+    const words = await screen.findByText('Ship it.');
+    const card = words.closest('article')!.firstElementChild!;
+    // The drag ends past the bubble: its click lands on what holds both ends.
+    getSelection()!.selectAllChildren(words);
+    fireEvent.mouseUp(card);
+    fireEvent.click(card);
+    expect(useFleetStore.getState().selectedId).toBeNull();
+    expect(terminal).not.toHaveFocus();
+    // A plain click there still selects the card.
+    getSelection()!.removeAllRanges();
+    fireEvent.click(card);
+    expect(useFleetStore.getState().selectedId).toBe('a');
+    expect(terminal).toHaveFocus();
   });
 
   it("leaves a link in Main's bubble its own click: no zoom, and it goes on like any click on the card", async () => {

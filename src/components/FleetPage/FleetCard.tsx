@@ -15,7 +15,7 @@ import { runFailure } from '../../assistant/runErrors';
 import RunFailureBanner from '../RunFailureBanner/RunFailureBanner';
 import FleetCrew from './FleetCrew';
 import FleetRequestPanel from './FleetRequestPanel';
-import FleetFeed from './FleetFeed';
+import FleetFeed, { endsSelection } from './FleetFeed';
 import { useWheelLines } from './useWheelLines';
 import fx from './FleetEffects';
 import styles from './FleetPage.module.css';
@@ -98,7 +98,14 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpe
   useWheelLines(failureRef, !!failure);
 
   return (
-    <div className={styles.cardInner} onClick={() => onSelect(card.workspaceId)}>
+    // Not a click from the zoom, a portal React bubbles here, nor one ending a
+    // drag that selects words: either would select the card and lose the selection.
+    <div
+      className={styles.cardInner}
+      onClick={(e) => {
+        if (e.currentTarget.contains(e.target as Node) && !endsSelection(e)) onSelect(card.workspaceId);
+      }}
+    >
       <header className={styles.cardHeader}>
         <button
           type="button"

@@ -590,6 +590,15 @@ describe('a link in a bubble', () => {
     expect(opened).toEqual(['https://example.com/scout']);
     expect(screen.queryByRole('dialog')).toBeNull();
   });
+
+  it('in a zoom opens on a click, through to the opener, and the zoom stays open', () => {
+    render(<Feed state={state()} now={NOW + 2000} />);
+    fireEvent.click(bubbleOf(/Scout:/));
+    const zoom = screen.getByRole('dialog');
+    fireEvent.click(within(zoom).getByRole('link', { name: 'https://example.com/scout' }));
+    expect(opened).toEqual(['https://example.com/scout']);
+    expect(screen.getByRole('dialog')).toBe(zoom);
+  });
 });
 
 describe('a zoom, as more is said on its card', () => {
