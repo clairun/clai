@@ -379,10 +379,12 @@ pub(crate) fn evaluate_command_policy(
         // Blocklist applies to every segment. Durable blocklist is checked
         // first; run-scoped blocklist (this run's accepted `DenyAlways`
         // decisions) is checked next so a fresh deny-always takes effect
-        // mid-run.
-        if let Some(matched) = find_matching_prefix(&execution.shell.blocked_command_prefixes, text)
-            .or_else(|| find_matching_prefix(extra_blocked_prefixes, text))
-        {
+        // mid-run. A blocked name also blocks it run by path.
+        let blocked = |text: &str| {
+            find_matching_prefix(&execution.shell.blocked_command_prefixes, text)
+                .or_else(|| find_matching_prefix(extra_blocked_prefixes, text))
+        };
+        if let Some(matched) = blocked(text).or_else(|| blocked(&without_command_dir(text))) {
             return PolicyResult::Block {
                 segment_text: text.to_string(),
                 matched_prefix: matched,
@@ -531,6 +533,19 @@ fn is_pure_assignment_token(tok: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `text` with the directory dropped from its command name, after any
+/// leading assignments: `FOO=1 /usr/bin/rm -rf x` → `FOO=1 rm -rf x`.
+fn without_command_dir(text: &str) -> String {
+    let mut words: Vec<&str> = text.split(' ').collect();
+    if let Some(name) = words
+        .iter_mut()
+        .find(|word| !word.is_empty() && !is_pure_assignment_token(word))
+    {
+        *name = name.rsplit('/').next().unwrap_or(name);
+    }
+    words.join(" ")
 }
 
 /// Cleans up an abandoned permission request when the approval-wait future
@@ -2210,6 +2225,23 @@ mod tests {
         let exec = restricted_execution_config(&["git log"], &["rm"]);
         let err = enforce_command_policy(&exec, None, "FOO=bar rm -rf /tmp/x").unwrap_err();
         assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
+    }
+
+    #[test]
+    fn policy_blocklist_blocks_a_command_run_by_path() {
+        let exec = restricted_execution_config(&["git log"], &["rm"]);
+        for command in [
+            "/usr/bin/rm -rf x",
+            "./rm x",
+            "FOO=1 /bin/rm x",
+            "ls; ../bin/rm x",
+        ] {
+            let err = enforce_command_policy(&exec, None, command).unwrap_err();
+            assert!(
+                matches!(err, CommandDenial::ExplicitlyBlocked(_)),
+                "{command}"
+            );
+        }
     }
 
     #[test]

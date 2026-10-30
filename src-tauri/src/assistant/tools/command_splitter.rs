@@ -15,8 +15,9 @@
 //! anything else, or a construct whose effect depends on runtime values bash
 //! may evaluate as code (arithmetic on variables, indirect expansion) makes
 //! the whole input one [`Segment::Unparsed`]. So does a command that runs
-//! another command from its arguments (`xargs`, `env`, `time`, `bash -c`, …)
-//! or whose name is not a plain word (`\rm`, `"$cmd"`).
+//! another command or a string as code from its arguments (`xargs`, `env`,
+//! `bash -c`, `trap`, …), an assignment to a variable bash expands as code
+//! (`PS4`), or a command whose name is not a plain word (`\rm`, `"$cmd"`).
 //!
 //! - [`Segment::Simple`] — a plain command.
 //! - [`Segment::Opaque`] — a command with a redirect, heredoc, here-string,
@@ -87,11 +88,44 @@ fn split(input: &str) -> Option<Vec<Segment>> {
     Some(walker.out)
 }
 
-/// Commands that run another command named in their arguments.
+/// Commands that run another command, or a string as code, from their
+/// arguments.
 const WRAPPERS: &[&str] = &[
-    "bash", "sh", "zsh", "dash", "ksh", "fish", "xargs", "eval", "watch", "nohup", "time",
-    "timeout", "nice", "taskset", "env", "exec", "source", ".", "command", "builtin", "coproc",
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "ksh",
+    "fish",
+    "xargs",
+    "eval",
+    "watch",
+    "nohup",
+    "time",
+    "timeout",
+    "nice",
+    "taskset",
+    "env",
+    "exec",
+    "source",
+    ".",
+    "command",
+    "builtin",
+    "coproc",
+    "trap",
+    "alias",
+    "let",
+    "mapfile",
+    "readarray",
+    "compgen",
+    "complete",
+    "hash",
+    "enable",
+    "fc",
 ];
+
+/// Variables whose value bash, or a bash it starts, expands as code.
+const CODE_VARIABLES: &[&str] = &["PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV"];
 
 /// Tokens that only sequence or group commands.
 const GRAMMAR_TOKENS: &[&str] = &[
@@ -145,7 +179,7 @@ impl<'src> Walker<'src> {
             | "function_definition" => self.grammar(node),
             "command" | "declaration_command" | "unset_command" => self.command(node, node),
             "variable_assignment" | "variable_assignments" => {
-                self.words(node)?;
+                self.word(node)?;
                 self.out.push(Segment::Simple(self.row_text(node)));
                 Some(())
             }
@@ -288,25 +322,33 @@ impl<'src> Walker<'src> {
     /// A word, or part of one. Substituted commands are pushed as segments.
     fn word(&mut self, node: Node) -> Option<()> {
         match node.kind() {
-            "word"
-            | "number"
+            // Tree-sitter leaves some substitutions inside these leaves
+            // (`${x#$(cmd)}`, `${x:-`cmd`}`, nested backticks).
+            "word" | "string_content" | "extglob_pattern" | "regex" | "heredoc_content" => {
+                (!has_substitution(self.text(node))).then_some(())
+            }
+            "number"
             | "raw_string"
             | "ansi_c_string"
-            | "string_content"
             | "variable_name"
             | "special_variable_name"
-            | "extglob_pattern"
-            | "regex"
             | "test_operator"
             | "file_descriptor"
-            | "heredoc_content"
             | "heredoc_end" => Some(()),
+            "variable_assignment"
+                if node
+                    .child_by_field_name("name")
+                    .is_some_and(|name| CODE_VARIABLES.contains(&self.text(name))) =>
+            {
+                None
+            }
             "command_name"
             | "string"
             | "concatenation"
             | "simple_expansion"
             | "array"
             | "variable_assignment"
+            | "variable_assignments"
             | "file_redirect"
             | "herestring_redirect"
             | "binary_expression"
@@ -416,7 +458,10 @@ impl<'src> Walker<'src> {
                     {
                         return None;
                     }
-                    self.word(child)?;
+                    // A quoted delimiter keeps the body literal.
+                    if !quoted {
+                        self.word(child)?;
+                    }
                 }
                 "heredoc_end" => {
                     let (word, _) = delim.as_ref()?;
@@ -756,6 +801,14 @@ mod tests {
         assert!(segs[0].is_opaque());
         assert!(segs[0].text().contains("//! comment"));
         assert!(segs[0].text().contains("pub mod x"));
+    }
+
+    #[test]
+    fn quoted_heredoc_body_runs_nothing() {
+        assert_eq!(
+            split("cat <<'EOF'\n$(rm x) `rm y`\nEOF"),
+            vec![opaque("cat <<'EOF'\n$(rm x) `rm y`\nEOF")]
+        );
     }
 
     #[test]
