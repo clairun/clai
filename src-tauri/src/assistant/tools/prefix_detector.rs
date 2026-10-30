@@ -360,6 +360,21 @@ pub fn canonicalize_for_match(segment: &str) -> Option<String> {
     Some(rebuilt)
 }
 
+/// `segment` as the words the shell runs, joined by single spaces, without
+/// leading `VAR=value` assignments and with the directory dropped from the
+/// command name: `FOO='a b' /usr/bin/rm\t-rf x` → `rm -rf x`.
+pub fn by_command_name(segment: &str) -> String {
+    let tokens = tokenize(segment);
+    let mut words = tokens.iter().skip_while(|tok| is_env_assignment(tok));
+    let Some(name) = words.next() else {
+        return String::new();
+    };
+    std::iter::once(name.rsplit('/').next().unwrap_or(name))
+        .chain(words.map(String::as_str))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn lookup_style(binary: &str) -> Style {
     if NO_SUBCOMMAND.contains(&binary) {
         Style::None
