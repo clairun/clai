@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import {
   MemoryRouter,
@@ -8,6 +8,8 @@ import {
   useParams,
 } from 'react-router';
 import AppRoutes from './Routes';
+import { listWorkspaces } from './workspace/client';
+import type { WorkspaceListEntry } from './generated/bindings';
 
 // The real layouts and pages pull in the workspace stores, Tauri `invoke`, and
 // the xterm terminal. None of that is the subject here: this file pins the
@@ -53,6 +55,17 @@ vi.mock('./pages/NotFound', () => ({
   default: () => <div data-testid="not-found" />,
 }));
 
+vi.mock('./workspace/client', () => ({ listWorkspaces: vi.fn() }));
+
+/** A `localStorage` of its own: Node's global one, without a file, has none. */
+const memoryStorage = () => {
+  const items = new Map<string, string>();
+  return { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) };
+};
+
+const existingWorkspaces = (...ids: string[]) =>
+  vi.mocked(listWorkspaces).mockResolvedValue(ids.map((id) => ({ id }) as WorkspaceListEntry));
+
 // Reports where the router ended up and can walk history back, so the tests
 // can distinguish a redirect that REPLACED the entry from one that pushed.
 const HistoryProbe = () => {
@@ -78,10 +91,55 @@ const renderEntries = (entries: string[]) =>
 
 const renderAt = (path: string) => renderEntries([path]);
 
+// One app session that ends on `path`.
+const visit = (path: string) => renderAt(path).unmount();
+
 describe('AppRoutes', () => {
-  it('opens on the fleet page', () => {
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', memoryStorage());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('opens on the fleet page on first launch', () => {
     renderAt('/');
     expect(screen.getByTestId('fleet-page')).toBeInTheDocument();
+  });
+
+  it('reopens in the workspace the user was last in', async () => {
+    existingWorkspaces('ws-1', 'ws-123');
+    visit('/workspace/ws-123');
+
+    renderAt('/');
+    expect(await screen.findByTestId('workspace')).toHaveTextContent('ws-123');
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace/ws-123');
+  });
+
+  it('reopens on the fleet when the user left a workspace for the fleet', () => {
+    visit('/workspace/ws-123');
+    visit('/fleet');
+
+    renderAt('/');
+    expect(screen.getByTestId('fleet-page')).toBeInTheDocument();
+    expect(listWorkspaces).not.toHaveBeenCalled();
+  });
+
+  it('opens the fleet when the last workspace was deleted', async () => {
+    existingWorkspaces('ws-1');
+    visit('/workspace/ws-123');
+
+    renderAt('/');
+    expect(await screen.findByTestId('fleet-page')).toBeInTheDocument();
+    expect(screen.queryByTestId('workspace')).not.toBeInTheDocument();
+  });
+
+  it('opens the fleet when the workspaces cannot be listed', async () => {
+    vi.mocked(listWorkspaces).mockRejectedValue(new Error('backend down'));
+    visit('/workspace/ws-123');
+
+    renderAt('/');
+    expect(await screen.findByTestId('fleet-page')).toBeInTheDocument();
   });
 
   it('renders the fleet page without the workspace rail', () => {
