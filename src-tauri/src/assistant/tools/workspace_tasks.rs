@@ -2649,6 +2649,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.starts_with("budget_exceeded:"), "{error}");
+        assert!(error.contains("you already sent 60"), "{error}");
         assert_eq!(task_count(&pool).await, signals::AGENT_SENDS_PER_HOUR);
     }
 
@@ -2690,10 +2691,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.starts_with("budget_exceeded:"), "{error}");
+        assert!(error.contains("you already sent 60"), "{error}");
         let error = delegate(&pool, &parent, "run-2", "task-2")
             .await
             .unwrap_err();
         assert!(error.starts_with("budget_exceeded:"), "{error}");
+        assert!(error.contains("you already sent 60"), "{error}");
         assert_eq!(message_count(&pool).await, before);
         assert_eq!(task_count(&pool).await, 1);
 
