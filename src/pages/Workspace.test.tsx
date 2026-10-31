@@ -64,6 +64,7 @@ vi.mock('../assistant/client', () => ({
   sendMessage: vi.fn(async () => {}),
   deleteQueuedMessage: vi.fn(async () => {}),
   editQueuedMessage: vi.fn(async () => {}),
+  listPendingAsks: vi.fn(async () => []),
 }));
 
 const workspaceClient = await import('../workspace/client');
@@ -1174,6 +1175,30 @@ describe('Workspace file preview', () => {
 
     expect(await screen.findByRole('region', { name: 'Artifact: bisect.sh' })).toBeInTheDocument();
     expect(readWorkspaceFile.mock.calls.map((call) => call[1])).toContain('scratch/bisect.sh');
+  });
+
+  it('returns to a source line when the same chat link is opened again', async () => {
+    loadSessionMessagesPage.mockResolvedValue(messagePage([{
+      ...streamingAssistantMessage('sess-a', 'm1'),
+      content: [{ type: 'text', text: 'See [report](/tmp/a/report.html:2)' }],
+    }]));
+    readWorkspaceFile.mockResolvedValue({
+      path: 'report.html',
+      viewer: 'html',
+      content: '<p>first</p>\n<p>second</p>',
+    });
+    renderWorkspace();
+
+    const link = await screen.findByRole('link', { name: 'report' });
+    await userEvent.click(link);
+    const panel = await screen.findByRole('region', { name: 'Artifact: report.html' });
+    expect(await within(panel).findByText('second')).toBeInTheDocument();
+    expect(panel.querySelector('[data-preview-line="2"]')).toBeInTheDocument();
+
+    await userEvent.click(within(panel).getByRole('button', { name: 'Preview' }));
+    expect(panel.querySelector('[data-preview-line="2"]')).toBeNull();
+    await userEvent.click(link);
+    expect(panel.querySelector('[data-preview-line="2"]')).toBeInTheDocument();
   });
 });
 

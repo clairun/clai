@@ -203,6 +203,28 @@ describe('MarkdownMessage — workspace file links', () => {
     expect(openFile).toHaveBeenCalledWith(expected);
   });
 
+  it.each([
+    ['[code](/home/u/ws/src/a.ts:78)', 'src/a.ts', 78],
+    ['[code](</home/u/ws/src/my file.ts:12>)', 'src/my file.ts', 12],
+    ['[code](src/a.ts:3)', 'src/a.ts', 3],
+  ])('opens a local link at its source line: %s', (content, path, line) => {
+    renderIn(CHAT, content);
+    expect(fireEvent.click(screen.getByRole('link', { name: 'code' }))).toBe(false);
+    expect(openFile).toHaveBeenCalledWith(path, line);
+  });
+
+  it('keeps malformed line suffixes as ordinary file names', () => {
+    renderIn(CHAT, '[code](src/a.ts:0)');
+    fireEvent.click(screen.getByRole('link', { name: 'code' }));
+    expect(openFile).toHaveBeenCalledWith('src/a.ts:0');
+  });
+
+  it('opens a filename ending in digits when its colon is percent-encoded', () => {
+    renderIn(CHAT, '[report](/home/u/ws/reports/final%3A2026)');
+    fireEvent.click(screen.getByRole('link', { name: 'report' }));
+    expect(openFile).toHaveBeenCalledWith('reports/final:2026');
+  });
+
   it('resolves a relative link against the previewed document', () => {
     renderIn({ ...CHAT, basePath: 'reports/weekly.md' }, '[q3](q3.md)');
     fireEvent.click(screen.getByRole('link', { name: 'q3' }));
