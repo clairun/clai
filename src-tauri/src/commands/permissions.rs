@@ -494,11 +494,10 @@ pub async fn submit_permission_decision(
 
 fn normalize_denial_reasons(decisions: &mut [SegmentDecision]) -> Result<(), String> {
     for decision in decisions.iter_mut() {
-        let reason = match decision {
-            SegmentDecision::DenyOnce { reason } | SegmentDecision::DenyAlways { reason, .. } => {
-                reason
-            }
-            _ => continue,
+        let (SegmentDecision::DenyOnce { reason } | SegmentDecision::DenyAlways { reason, .. }) =
+            decision
+        else {
+            continue;
         };
         if let Some(value) = reason {
             let trimmed = value.trim();

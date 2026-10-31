@@ -2507,7 +2507,7 @@ mod tests {
         }
         match evaluate_command_policy(&exec, "curl x", &[], &[]) {
             PolicyResult::Block { reason, .. } => {
-                assert_eq!(reason.as_deref(), Some("Persisted reason"))
+                assert_eq!(reason.as_deref(), Some("Persisted reason"));
             }
             _ => panic!("expected block"),
         }
