@@ -385,7 +385,9 @@ pub(crate) fn evaluate_command_policy(
             find_matching_prefix(&execution.shell.blocked_command_prefixes, text)
                 .or_else(|| find_matching_prefix(extra_blocked_prefixes, text))
         };
-        if let Some(matched) = blocked(text).or_else(|| blocked(&by_command_name(text))) {
+        if let Some(matched) =
+            blocked(text).or_else(|| by_command_name(text).and_then(|name| blocked(&name)))
+        {
             return PolicyResult::Block {
                 segment_text: text.to_string(),
                 matched_prefix: matched,
@@ -2228,6 +2230,9 @@ mod tests {
             "FOO='a b' /usr/bin/rm x",
             "rm\tx",
             "/bin/rm\t-rf x",
+            "A=$'\\'' rm x",
+            "FOO=$'a\\' b' /usr/bin/rm x/y",
+            "A+=x A[1 + 1]=y rm x",
         ] {
             let err = enforce_command_policy(&exec, None, command).unwrap_err();
             assert!(
@@ -2235,6 +2240,17 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn policy_allowlist_matches_the_command_bash_runs() {
+        // Bash reads `$'\''` as one quoted `'`, so this runs `rm`.
+        let exec = restricted_execution_config(&["git status"], &[]);
+        let command = "A=$'\\'' rm -rf x ' git status '";
+        assert!(matches!(
+            evaluate_command_policy(&exec, command, &[], &[]),
+            PolicyResult::NeedsApproval(_)
+        ));
     }
 
     #[test]

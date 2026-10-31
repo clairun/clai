@@ -73,21 +73,52 @@ fn split(input: &str) -> Option<Vec<Segment>> {
     if !lexes_like_bash(input) || names_code_variable(input) {
         return None;
     }
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(&tree_sitter_bash::LANGUAGE.into())
-        .ok()?;
-    let tree = parser.parse(input, None)?;
+    let tree = parse(input)?;
     let root = tree.root_node();
-    if root.has_error() {
-        return None;
-    }
     let mut walker = Walker {
         src: input,
         out: Vec::new(),
     };
     walker.node(root)?;
     Some(walker.out)
+}
+
+fn parse(input: &str) -> Option<tree_sitter::Tree> {
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_bash::LANGUAGE.into())
+        .ok()?;
+    let tree = parser.parse(input, None)?;
+    (!tree.root_node().has_error()).then_some(tree)
+}
+
+/// The words of `row` when it holds one command: its name and arguments as
+/// written, without leading assignments, redirects or heredoc bodies
+/// (`A=$'\'' /bin/rm -rf x > f` → `/bin/rm`, `-rf`, `x`).
+pub fn command_words(row: &str) -> Option<Vec<&str>> {
+    let tree = parse(row)?;
+    let root = tree.root_node();
+    let mut cursor = root.walk();
+    let [mut node] = root.named_children(&mut cursor).collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    if node.kind() == "redirected_statement" {
+        node = node.child_by_field_name("body")?;
+    }
+    command_node_words(row, node)
+}
+
+/// The name and arguments of a command node, as written in `src`.
+fn command_node_words<'src>(src: &'src str, node: Node) -> Option<Vec<&'src str>> {
+    let mut cursor = node.walk();
+    let words: Vec<Node> = match node.kind() {
+        "command" => std::iter::once(node.child_by_field_name("name")?)
+            .chain(node.children_by_field_name("argument", &mut cursor))
+            .collect(),
+        "declaration_command" | "unset_command" => node.children(&mut cursor).collect(),
+        _ => return None,
+    };
+    Some(words.iter().map(|n| &src[n.byte_range()]).collect())
 }
 
 /// Commands that run another command, or a string as code, from their
@@ -245,6 +276,11 @@ impl<'src> Walker<'src> {
         let opaque = self.words(node)?;
         self.out.insert(start, Segment::Simple(String::new()));
         let text = self.row_text(row, node.start_byte());
+        // Policy reads the command from the row text alone, so it must hold
+        // the same words.
+        if command_words(&text)? != command_node_words(self.src, node)? {
+            return None;
+        }
         self.out[start] = if opaque || row != node {
             Segment::Opaque(text)
         } else {

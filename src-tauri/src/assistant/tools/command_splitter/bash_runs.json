@@ -378,5 +378,13 @@
   {"input": "declare 'PS4=$(touch PWN)'; set -x; echo", "runs": ["touch"]},
   {"input": "declare -n r=PS4; r='$(touch PWN)'; set -x; echo", "runs": ["touch"]},
   {"input": "read -r PS4 <<< '$(touch PWN)'; set -x; echo", "runs": ["touch"]},
-  {"input": "touch\tPWN", "runs": ["touch"]}
+  {"input": "touch\tPWN", "runs": ["touch"]},
+  {"input": "A=$'\\'' touch PWN", "runs": ["touch"]},
+  {"input": "FOO=$'a\\' b' touch x/y", "runs": ["touch"]},
+  {"input": "A=$'\\'' rm -rf x ' git status '", "runs": ["rm"]},
+  {"input": "A=$'\\'' git status", "runs": ["git"]},
+  {"input": "A+=x touch PWN", "runs": ["touch"]},
+  {"input": "A[0]=x touch PWN", "runs": ["touch"]},
+  {"input": "A[1 + 1]=x touch PWN", "runs": ["touch"]},
+  {"input": "A=x \\\ntouch PWN", "runs": ["touch"]}
 ]
