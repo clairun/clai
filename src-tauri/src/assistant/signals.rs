@@ -176,7 +176,7 @@ pub(crate) async fn insert_event(
 }
 
 /// Agent-to-agent messages one workspace agent may send per rolling hour.
-pub(crate) const AGENT_SENDS_PER_HOUR: i64 = 40;
+pub(crate) const AGENT_SENDS_PER_HOUR: i64 = 60;
 const HOUR_MS: i64 = 60 * 60 * 1000;
 
 /// Fails with `budget_exceeded` when `sender_id` already sent
