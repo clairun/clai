@@ -5,7 +5,7 @@ import CodeBlock from './CodeBlock';
 import MermaidDiagram from './MermaidDiagram';
 import VegaChart, { isVegaLiteSpecPath } from './VegaChart';
 import WorkspaceImage from './WorkspaceImage';
-import { resolveWorkspaceHref, useWorkspaceFileLocation } from './WorkspaceFileContext';
+import { resolveWorkspaceFileLink, useWorkspaceFileLocation } from './WorkspaceFileContext';
 import { isWorkspaceRelativeHref } from '../../utils/htmlBundle';
 import styles from './MarkdownMessage.module.css';
 
@@ -60,7 +60,7 @@ const containsChartLink = (node: HastNodeLike | undefined): boolean =>
 // Without an opener (no workspace UI around) it renders as plain text.
 const WorkspaceLink = ({ href, children }: { href: string; children: React.ReactNode }) => {
   const location = useWorkspaceFileLocation();
-  const path = resolveWorkspaceHref(location, href);
+  const { path, line } = resolveWorkspaceFileLink(location, href);
   const openFile = location?.openFile;
   if (!openFile || !path) {
     return <span title={href}>{children}</span>;
@@ -72,7 +72,8 @@ const WorkspaceLink = ({ href, children }: { href: string; children: React.React
       title={path}
       onClick={(event) => {
         event.preventDefault();
-        openFile(path);
+        if (line) openFile(path, line);
+        else openFile(path);
       }}
       onAuxClick={(event) => event.preventDefault()}
     >

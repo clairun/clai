@@ -23,7 +23,7 @@ export interface WorkspaceFileLocation {
   workspaceId: string;
   basePath: string;
   rootPath?: string;
-  openFile?: (path: string) => void;
+  openFile?: (path: string, line?: number) => void;
 }
 
 export const WorkspaceFileContext = createContext<WorkspaceFileLocation | null>(null);
@@ -39,7 +39,7 @@ export const useWorkspaceFileLocation = (): WorkspaceFileLocation | null =>
 export const useDocumentLocation = (
   workspaceId: string,
   basePath: string,
-  openFile?: (path: string) => void,
+  openFile?: (path: string, line?: number) => void,
 ): WorkspaceFileLocation => {
   const parent = useWorkspaceFileLocation();
   const inherited = parent?.workspaceId === workspaceId ? parent : null;
@@ -79,4 +79,19 @@ export const resolveWorkspaceHref = (
     return resolveWorkspacePath('', target.slice(root.length));
   }
   return resolveWorkspacePath(location?.basePath ?? '', target);
+};
+
+/** A literal trailing `:line` is link metadata; `%3A` keeps a filename colon. */
+export const resolveWorkspaceFileLink = (
+  location: Pick<WorkspaceFileLocation, 'basePath' | 'rootPath'> | null,
+  href: string,
+): { path: string; line?: number } => {
+  const target = href.trim().replace(/[?#].*$/, '');
+  const match = /^(.*):([1-9]\d*)$/.exec(target);
+  const line = match ? Number(match[2]) : undefined;
+  // decodeURI preserves encoded reserved characters, including a filename colon.
+  if (match?.[1] && Number.isSafeInteger(line)) {
+    return { path: resolveWorkspaceHref(location, match[1].replace(/%3a/gi, ':')), line };
+  }
+  return { path: resolveWorkspaceHref(location, href.replace(/%3a/gi, ':')) };
 };

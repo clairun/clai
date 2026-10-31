@@ -186,6 +186,10 @@
   background: var(--color-bg-primary);
 }
 
+.targetLine {
+  background: var(--color-overlay-08, rgba(0, 0, 0, 0.06));
+}
+
 .bodyMeta {
   display: flex;
   align-items: center;

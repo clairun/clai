@@ -81,7 +81,7 @@ const ARTIFACT_ADD_MENU_MARGIN = 8;
 const ARTIFACT_ADD_MENU_MIN_WIDTH = 116;
 
 type ActivePanel = 'agents' | 'tasks' | 'memories' | 'artifacts' | null;
-type PreviewEntry = { kind: 'memory' | 'artifact'; entry: WorkspaceFileEntry };
+type PreviewEntry = { kind: 'memory' | 'artifact'; entry: WorkspaceFileEntry; line?: number; navigationId?: number };
 type ArtifactImportKind = 'files' | 'folders';
 
 // A minimal entry for a workspace-relative path the page has no listing for;
@@ -2054,10 +2054,10 @@ const Workspace = () => {
   // preview only shows under the memories/artifacts drawer, so open the one
   // that owns the file unless one of them already is.
   const navigatePreviewFile = useCallback(
-    (path: string) => {
-      const next = previewEntryForPath(path);
+    (path: string, line?: number) => {
       setUiByWorkspace((prev) => {
         const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
+        const next = { ...previewEntryForPath(path), line, navigationId: (current.previewEntry?.navigationId ?? 0) + 1 };
         const showsPreview = current.activePanel === 'memories' || current.activePanel === 'artifacts';
         return {
           ...prev,
@@ -2428,6 +2428,8 @@ const Workspace = () => {
             workspaceId={workspaceId}
             kind={previewEntry.kind}
             entry={previewEntry.entry}
+            line={previewEntry.line}
+            navigationId={previewEntry.navigationId}
             onClose={closePreview}
             onNavigate={navigatePreviewFile}
             onDelete={previewEntry.kind === 'artifact' ? handlePreviewDelete : undefined}

@@ -28,6 +28,8 @@ interface WorkspaceFilePreviewPanelProps {
   workspaceId: string;
   kind: 'memory' | 'artifact';
   entry: WorkspaceFileEntry | null;
+  line?: number;
+  navigationId?: number;
   onClose: () => void;
   // Called when a link inside an HTML preview points at another file in the
   // same workspace; receives the resolved workspace-relative path so the
@@ -151,19 +153,32 @@ const detectLanguage = (path: string | null | undefined): string | null => {
   return EXT_TO_LANG[name.slice(dot + 1)] || null;
 };
 
-const CodeView = ({ content, language }: { content: string; language: string | null }) => (
-  <SyntaxHighlighter
-    language={language || 'text'}
-    style={oneLight}
-    showLineNumbers
-    wrapLongLines={false}
-    customStyle={PREVIEW_CODE_STYLE}
-    codeTagProps={{ style: PREVIEW_CODE_TAG_STYLE }}
-    lineNumberStyle={PREVIEW_LINE_NUMBER_STYLE}
-  >
-    {content}
-  </SyntaxHighlighter>
-);
+export const CodeView = ({ content, language, line, navigationId }: { content: string; language: string | null; line?: number; navigationId?: number }) => {
+  const containerRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (line) containerRef.current?.querySelector(`[data-preview-line="${line}"]`)?.scrollIntoView({ block: 'center' });
+  }, [content, line, navigationId]);
+  return (
+    <div ref={containerRef}>
+      <SyntaxHighlighter
+        language={language || 'text'}
+        style={oneLight}
+        showLineNumbers
+        wrapLines={Boolean(line)}
+        wrapLongLines={false}
+        customStyle={PREVIEW_CODE_STYLE}
+        codeTagProps={{ style: PREVIEW_CODE_TAG_STYLE }}
+        lineNumberStyle={PREVIEW_LINE_NUMBER_STYLE}
+        lineProps={(number) => ({
+          'data-preview-line': number,
+          className: number === line ? styles.targetLine : undefined,
+        })}
+      >
+        {content}
+      </SyntaxHighlighter>
+    </div>
+  );
+};
 
 // postMessage `type` used by the HTML-preview iframe to ask the parent
 // to open an external URL in the OS default browser. Keep in sync with
@@ -308,6 +323,8 @@ const renderBody = (
   htmlBundle: string | null,
   bundling: boolean,
   onOpenExternal: () => void,
+  line?: number,
+  navigationId?: number,
 ) => {
   if (!file) return null;
   if (file.error) {
@@ -330,7 +347,7 @@ const renderBody = (
   if (!file.content) {
     return <div className={styles.empty}>This file is empty.</div>;
   }
-  if (looksLikeMarkdown(file.viewer, file.path)) {
+  if (looksLikeMarkdown(file.viewer, file.path) && !line) {
     return (
       <div className={styles.markdownBody}>
         <WorkspaceFileContext.Provider value={fileLocation}>
@@ -380,24 +397,28 @@ const renderBody = (
   }
   if (looksLikeHtml(file.viewer, file.path)) {
     // Source-mode HTML — render the raw markup with syntax highlighting.
-    return <CodeView content={file.content} language="markup" />;
+    return <CodeView content={file.content} language="markup" line={line} navigationId={navigationId} />;
   }
   if (isJsonLike(file.viewer, file.path)) {
     let pretty = file.content;
-    try {
-      pretty = JSON.stringify(JSON.parse(file.content), null, 2);
-    } catch {
-      // Leave raw content if parse fails.
+    if (!line) {
+      try {
+        pretty = JSON.stringify(JSON.parse(file.content), null, 2);
+      } catch {
+        // Leave raw content if parse fails.
+      }
     }
-    return <CodeView content={pretty} language="json" />;
+    return <CodeView content={pretty} language="json" line={line} navigationId={navigationId} />;
   }
-  return <CodeView content={file.content} language={detectLanguage(file.path)} />;
+  return <CodeView content={file.content} language={detectLanguage(file.path)} line={line} navigationId={navigationId} />;
 };
 
 export default function WorkspaceFilePreviewPanel({
   workspaceId,
   kind,
   entry,
+  line,
+  navigationId,
   onClose,
   onNavigate,
   onDelete,
@@ -492,11 +513,11 @@ export default function WorkspaceFilePreviewPanel({
   }, [workspaceId, entry?.path, entry?.viewer]);
 
   useEffect(() => {
-// eslint-disable-next-line react-hooks/set-state-in-effect -- Resets viewMode/justCopied/copiedField when the entry path changes; 3-field prop→state mirror cannot be expressed as a useMemo without re-rendering on every copy click.
-    setViewMode('preview');
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Resets viewMode/justCopied/copiedField when the file target changes; 3-field prop→state mirror cannot be expressed as a useMemo without re-rendering on every copy click.
+    setViewMode(line ? 'source' : 'preview');
     setJustCopied(false);
     setCopiedField(null);
-  }, [entry?.path]);
+  }, [entry?.path, line, navigationId]);
 
   // Build the self-contained preview bundle once a loaded file turns out to
   // be HTML and the user is in preview mode. Runs off the main load so the
@@ -807,7 +828,7 @@ export default function WorkspaceFilePreviewPanel({
         )}
         {loading && <div className={styles.empty}>Loading…</div>}
         {!loading && error && <div className={styles.error}>{error}</div>}
-        {!loading && !error && renderBody(file, fileLocation, viewMode, htmlBundle, bundling, handleOpenExternal)}
+        {!loading && !error && renderBody(file, fileLocation, viewMode, htmlBundle, bundling, handleOpenExternal, line, navigationId)}
       </div>
     </aside>
   );
