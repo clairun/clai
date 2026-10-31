@@ -1,3 +1,4 @@
+import type { StreamedPart } from '../assistant/sessionStore';
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { assistantClient, useAssistantStore } from '../assistant';
 import { MESSAGE_PAGE_LIMIT } from '../assistant/sessionChat';
@@ -25,7 +26,7 @@ const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
 const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_IDS: string[] = [];
-const EMPTY_STREAMING: Record<string, string> = {};
+const EMPTY_STREAMING: Record<string, StreamedPart[]> = {};
 
 const errorText = (err: unknown): string =>
   typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to send message.';
@@ -55,8 +56,8 @@ export default function WorkspaceTaskTranscriptPanel({
   const sessionState = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId] : null
   );
-  const streamingText = useAssistantStore(
-    (state) => (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
+  const streamingParts = useAssistantStore(
+    (state) => (sessionId && state.streamingParts[sessionId]) || EMPTY_STREAMING
   );
   // Keyed on the assignee, not the task: the poll hands a new task object
   // every 5s, and a new owner would repaint the whole transcript.
@@ -281,7 +282,7 @@ export default function WorkspaceTaskTranscriptPanel({
               messages={messages}
               workspaceId={workspaceId}
               toolCalls={toolCalls}
-              streamingText={streamingText}
+              streamingParts={streamingParts}
               isStreaming={isStreaming}
               // No running footer here: the header face above already shows
               // this agent running, and the store only knows `isStreaming` /

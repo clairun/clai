@@ -30,6 +30,8 @@ export interface PendingAskUser {
   extraContext: string | null;
 }
 
+export type StreamedPart = { type: 'text' | 'thinking'; text: string };
+
 export interface SessionState {
   session: AssistantSession;
   messages: AssistantMessage[];
@@ -63,7 +65,7 @@ export interface SessionState {
 export interface AssistantStoreState {
   sessions: Record<string, SessionState>;
   /**
-   * Per-message accumulator for streaming text deltas, keyed by session id
+   * Per-message accumulator for ordered streaming text and thinking, keyed by session id
    * then message id.
    *
    * Kept OUTSIDE `SessionState` on purpose. Deltas arrive many times per
@@ -71,13 +73,13 @@ export interface AssistantStoreState {
    * gives `sessions[sessionId]` a new identity on every delta (immer
    * structural sharing) — re-rendering every whole-session subscriber (the
    * Workspace page shell) once per token chunk. As a top-level sibling map,
-   * a delta only invalidates `streamingText` subscribers, while actions that
+   * a delta only invalidates `streamingParts` subscribers, while actions that
    * must touch both (e.g. `completeMessage` swapping the accumulator for the
    * final message) still update them atomically inside a single `set()`, so
    * there is no flicker frame between "streamed text gone" and "final
    * message present".
    */
-  streamingText: Record<string, Record<string, string>>;
+  streamingParts: Record<string, Record<string, StreamedPart[]>>;
   /**
    * Ids of queued messages the backend has confirmed delivered, keyed by
    * session. Tombstones, not live state: a chip whose id is in here must
@@ -123,6 +125,7 @@ export interface AssistantStoreState {
   ) => void;
   setOlderMessagesLoading: (sessionId: string, loading: boolean) => void;
   appendDelta: (sessionId: string, messageId: string, text: string) => void;
+  appendThinkingDelta: (sessionId: string, messageId: string, text: string) => void;
   completeMessage: (sessionId: string, message: AssistantMessage) => void;
   updateMessageContent: (sessionId: string, message: AssistantMessage) => void;
   setRunStatus: (sessionId: string, run: AssistantRun) => void;
@@ -166,6 +169,22 @@ const DELIVERED_QUEUE_TOMBSTONE_LIMIT = 200;
 const TERMINAL_STATUSES = ['completed', 'completed_with_warnings', 'failed', 'cancelled'] as const;
 const ACTIVE_STATUSES = ['queued', 'running', 'waiting_for_tool'] as const;
 
+const appendStreamPart = (
+  state: AssistantStoreState,
+  sessionId: string,
+  messageId: string,
+  type: StreamedPart['type'],
+  text: string,
+) => {
+  const session = state.sessions[sessionId];
+  if (!session || !text) return;
+  const parts = (state.streamingParts[sessionId] ??= {})[messageId] ??= [];
+  const last = parts[parts.length - 1];
+  if (last?.type === type) last.text += text;
+  else parts.push({ type, text });
+  if (!session.isStreaming) session.isStreaming = true;
+};
+
 export const isRunActive = (run: AssistantRun): boolean =>
   (ACTIVE_STATUSES as readonly string[]).includes(run.status);
 
@@ -174,7 +193,7 @@ const endLiveRun = (state: AssistantStoreState, sessionId: string) => {
   const s = state.sessions[sessionId];
   if (!s) return;
   s.isStreaming = false;
-  delete state.streamingText[sessionId];
+  delete state.streamingParts[sessionId];
   s.runStartedAt = null;
   s.pendingAskUser = null;
 };
@@ -183,7 +202,7 @@ const useAssistantStore = create<AssistantStoreState>()(
   devtools(
     immer((set) => ({
       sessions: {},
-      streamingText: {},
+      streamingParts: {},
       deliveredQueuedMessageIds: {},
       activeSessionByTab: {},
       recoverablePrompts: {},
@@ -217,7 +236,7 @@ const useAssistantStore = create<AssistantStoreState>()(
 
       // Backend retracted a message — e.g. a user message whose run failed
       // before the provider produced anything (no point showing a message
-      // that never got an answer). Also drops any streaming-text remnant
+      // that never got an answer). Also drops any streaming-content remnant
       // keyed by the message.
       removeMessage: (sessionId, messageId) =>
         set((state) => {
@@ -243,7 +262,7 @@ const useAssistantStore = create<AssistantStoreState>()(
             s.totalMessageCount = Math.max(0, s.totalMessageCount - 1);
           }
           s.queuedMessageIds = s.queuedMessageIds.filter((id) => id !== messageId);
-          const acc = state.streamingText[sessionId];
+          const acc = state.streamingParts[sessionId];
           if (acc) delete acc[messageId];
         }),
 
@@ -334,15 +353,12 @@ const useAssistantStore = create<AssistantStoreState>()(
 
       appendDelta: (sessionId, messageId, text) =>
         set((state) => {
-          const s = state.sessions[sessionId];
-          if (!s) return;
-          const acc = (state.streamingText[sessionId] ??= {});
-          acc[messageId] = (acc[messageId] || '') + text;
-          // Guarded write: assigning `true` unconditionally would mark the
-          // session draft modified on every delta, changing the identity of
-          // `sessions[sessionId]` per token chunk — exactly what keeping the
-          // accumulator outside the session object is meant to prevent.
-          if (!s.isStreaming) s.isStreaming = true;
+          appendStreamPart(state, sessionId, messageId, 'text', text);
+        }),
+
+      appendThinkingDelta: (sessionId, messageId, text) =>
+        set((state) => {
+          appendStreamPart(state, sessionId, messageId, 'thinking', text);
         }),
 
       completeMessage: (sessionId, message) =>
@@ -353,7 +369,7 @@ const useAssistantStore = create<AssistantStoreState>()(
           if (idx >= 0) {
             s.messages[idx] = message;
           }
-          const acc = state.streamingText[sessionId];
+          const acc = state.streamingParts[sessionId];
           if (acc) delete acc[message.id];
           // Intentionally do NOT clear `isStreaming` here. A run typically
           // alternates between assistant text turns and tool-execution
@@ -367,12 +383,11 @@ const useAssistantStore = create<AssistantStoreState>()(
       // Mid-turn content swap: replaces the message's persisted content
       // (Claude Code emits tool_use parts as the run progresses, so we
       // flush them to the assistant message immediately for live
-      // rendering). Also clears `streamingText` for the message — by
+      // rendering). Also clears `streamingParts` for the message — by
       // the time the backend flushes, the prior text block is closed
       // and its content has been persisted into message.content; the
-      // streamingText accumulator must reset so subsequent deltas for
-      // the *next* text block don't render alongside the persisted
-      // text and double the visible content.
+      // streamingParts accumulator must reset so subsequent deltas for
+      // the *next* block don't render alongside persisted content.
       updateMessageContent: (sessionId, message) =>
         set((state) => {
           const s = state.sessions[sessionId];
@@ -381,7 +396,7 @@ const useAssistantStore = create<AssistantStoreState>()(
           if (idx >= 0) {
             s.messages[idx] = message;
           }
-          const acc = state.streamingText[sessionId];
+          const acc = state.streamingParts[sessionId];
           if (acc) delete acc[message.id];
         }),
 
@@ -498,11 +513,10 @@ const useAssistantStore = create<AssistantStoreState>()(
                 ? totalMessageCount
                 : existing?.totalMessageCount ?? null,
             // Preserve in-flight streaming state across snapshot refreshes.
-            // The DB only persists assistant text at end-of-run, so a poll
-            // tick that lands mid-stream would otherwise wipe the deltas the
-            // user is watching arrive, making text flicker on and off.
-            // (The streaming-text accumulator itself lives in the top-level
-            // `streamingText` map, so a session replacement here cannot wipe
+            // A poll snapshot can predate live deltas. Replacing the session
+            // mid-stream must not wipe content the user is watching arrive.
+            // (The streaming accumulator itself lives in the top-level
+            // `streamingParts` map, so a session replacement here cannot wipe
             // it by construction.)
             isStreaming: !!existing?.isStreaming,
             // Run start is FE-only live state the BE snapshot doesn't carry;
@@ -521,7 +535,7 @@ const useAssistantStore = create<AssistantStoreState>()(
       removeSession: (sessionId) =>
         set((state) => {
           delete state.sessions[sessionId];
-          delete state.streamingText[sessionId];
+          delete state.streamingParts[sessionId];
           // Callers remove a session that was deleted or superseded by a
           // config change; neither re-seeds queue ids from a snapshot, so the
           // tombstones have no one left to protect.

@@ -3385,36 +3385,60 @@ fn emit_assistant_update(
     }
 }
 
-/// Emits a text delta, preceded by any held update for the run. The frontend
-/// drops its delta accumulator on `AssistantMessageUpdated`, so a held update
-/// sent after this delta would erase the streamed text.
+/// A streamed piece of assistant content.
+///
+/// Kept apart from [`AssistantUiEvent`] so a delta cannot be built as a
+/// full-message update by mistake: the only way to put one on the wire is
+/// [`emit_assistant_delta`], which owns the ordering rule.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AssistantDelta {
+    Text { message_id: String, text: String },
+    Thinking { message_id: String, text: String },
+}
+
+impl AssistantDelta {
+    fn into_event(self) -> AssistantUiEvent {
+        match self {
+            AssistantDelta::Text { message_id, text } => {
+                AssistantUiEvent::AssistantDelta { message_id, text }
+            }
+            AssistantDelta::Thinking { message_id, text } => {
+                AssistantUiEvent::AssistantThinkingDelta { message_id, text }
+            }
+        }
+    }
+}
+
+/// Emits a delta, preceded by any held update for the run.
+///
+/// The frontend drops its delta accumulator on `AssistantMessageUpdated`, so a
+/// held update sent after this delta would erase the streamed text. EVERY
+/// delta must go through this function: it is the only place that knows the
+/// ordering rule, and a delta emitted anywhere else can be erased by the held
+/// update that follows it.
 fn emit_assistant_delta(
     deps: &AssistantDeps,
     session: &AssistantSession,
     run_id: &str,
     throttle: &mut UpdateThrottle<AssistantMessage>,
-    message_id: &str,
-    text: &str,
+    delta: AssistantDelta,
 ) {
-    for event in delta_events(throttle, std::time::Instant::now(), message_id, text) {
+    for event in delta_events(throttle, std::time::Instant::now(), delta) {
         let _ = deps.emit(session, Some(run_id), event);
     }
 }
 
+/// The events a delta produces: the held update first (if any), then the delta
+/// itself.
 fn delta_events(
     throttle: &mut UpdateThrottle<AssistantMessage>,
     now: std::time::Instant,
-    message_id: &str,
-    text: &str,
+    delta: AssistantDelta,
 ) -> impl Iterator<Item = AssistantUiEvent> {
     let held = throttle
         .flush(now)
         .map(|message| AssistantUiEvent::AssistantMessageUpdated { message });
-    held.into_iter()
-        .chain(std::iter::once(AssistantUiEvent::AssistantDelta {
-            message_id: message_id.to_string(),
-            text: text.to_string(),
-        }))
+    held.into_iter().chain(std::iter::once(delta.into_event()))
 }
 
 /// On an error exit, emit the held update so the UI is not left behind the
@@ -3562,8 +3586,10 @@ async fn handle_opencode_event(
                     session,
                     run_id,
                     &mut state.update_throttle,
-                    &assistant_message.id,
-                    text,
+                    AssistantDelta::Text {
+                        message_id: assistant_message.id.clone(),
+                        text: text.to_string(),
+                    },
                 );
             }
         }
@@ -3578,10 +3604,12 @@ async fn handle_opencode_event(
                     text: text.to_string(),
                     signature: None,
                 });
-                let _ = deps.emit(
+                emit_assistant_delta(
+                    deps,
                     session,
-                    Some(run_id),
-                    AssistantUiEvent::AssistantThinkingDelta {
+                    run_id,
+                    &mut state.update_throttle,
+                    AssistantDelta::Thinking {
                         message_id: assistant_message.id.clone(),
                         text: text.to_string(),
                     },
@@ -3896,8 +3924,10 @@ async fn handle_codex_item(
                     session,
                     run_id,
                     &mut state.update_throttle,
-                    &assistant_message.id,
-                    text,
+                    AssistantDelta::Text {
+                        message_id: assistant_message.id.clone(),
+                        text: text.to_string(),
+                    },
                 );
             }
         }
@@ -3907,10 +3937,12 @@ async fn handle_codex_item(
                     text: text.to_string(),
                     signature: None,
                 });
-                let _ = deps.emit(
+                emit_assistant_delta(
+                    deps,
                     session,
-                    Some(run_id),
-                    AssistantUiEvent::AssistantThinkingDelta {
+                    run_id,
+                    &mut state.update_throttle,
+                    AssistantDelta::Thinking {
                         message_id: assistant_message.id.clone(),
                         text: text.to_string(),
                     },
@@ -3939,10 +3971,12 @@ async fn handle_codex_item(
                     text: summary.clone(),
                     signature: None,
                 });
-                let _ = deps.emit(
+                emit_assistant_delta(
+                    deps,
                     session,
-                    Some(run_id),
-                    AssistantUiEvent::AssistantThinkingDelta {
+                    run_id,
+                    &mut state.update_throttle,
+                    AssistantDelta::Thinking {
                         message_id: assistant_message.id.clone(),
                         text: summary,
                     },
@@ -4274,8 +4308,10 @@ async fn handle_claude_event(
                         session,
                         run_id,
                         &mut state.update_throttle,
-                        &assistant_message.id,
-                        text,
+                        AssistantDelta::Text {
+                            message_id: assistant_message.id.clone(),
+                            text: text.to_string(),
+                        },
                     );
                 }
             }
@@ -4336,8 +4372,10 @@ async fn handle_stream_event(
                                 session,
                                 run_id,
                                 &mut state.update_throttle,
-                                &assistant_message.id,
-                                separator,
+                                AssistantDelta::Text {
+                                    message_id: assistant_message.id.clone(),
+                                    text: separator.to_string(),
+                                },
                             );
                         }
                         let parts_index = state.parts.len() - 1;
@@ -4420,8 +4458,10 @@ async fn handle_stream_event(
                             session,
                             run_id,
                             &mut state.update_throttle,
-                            &assistant_message.id,
-                            text,
+                            AssistantDelta::Text {
+                                message_id: assistant_message.id.clone(),
+                                text: text.to_string(),
+                            },
                         );
                     }
                 }
@@ -4453,10 +4493,12 @@ async fn handle_stream_event(
                                 t.push_str(text);
                             }
                         }
-                        let _ = deps.emit(
+                        emit_assistant_delta(
+                            deps,
                             session,
-                            Some(run_id),
-                            AssistantUiEvent::AssistantThinkingDelta {
+                            run_id,
+                            &mut state.update_throttle,
+                            AssistantDelta::Thinking {
                                 message_id: assistant_message.id.clone(),
                                 text: text.to_string(),
                             },
@@ -6286,7 +6328,15 @@ mod tests {
         assert!(throttle.offer(t0, snapshot("a")).is_some());
         assert!(throttle.offer(t0 + ms(5), snapshot("ab")).is_none());
 
-        let events: Vec<_> = delta_events(&mut throttle, t0 + ms(10), "m1", "c").collect();
+        let events: Vec<_> = delta_events(
+            &mut throttle,
+            t0 + ms(10),
+            AssistantDelta::Text {
+                message_id: "m1".into(),
+                text: "c".into(),
+            },
+        )
+        .collect();
         assert!(matches!(
             events.as_slice(),
             [
@@ -6296,11 +6346,88 @@ mod tests {
         ));
         assert_eq!(throttle.due(), None, "nothing left to emit after the delta");
 
-        let events: Vec<_> = delta_events(&mut throttle, t0 + ms(15), "m1", "d").collect();
+        let events: Vec<_> = delta_events(
+            &mut throttle,
+            t0 + ms(15),
+            AssistantDelta::Text {
+                message_id: "m1".into(),
+                text: "d".into(),
+            },
+        )
+        .collect();
         assert!(matches!(
             events.as_slice(),
             [AssistantUiEvent::AssistantDelta { .. }]
         ));
+    }
+
+    #[test]
+    fn thinking_delta_flushes_held_update_once_before_streaming() {
+        let mut throttle = UpdateThrottle::default();
+        let t0 = std::time::Instant::now();
+        let ms = std::time::Duration::from_millis;
+        let snapshot = |thinking: &str| {
+            test_message(
+                "m1",
+                MessageRole::Assistant,
+                vec![ContentPart::Thinking {
+                    text: thinking.into(),
+                    signature: None,
+                }],
+            )
+        };
+        assert!(throttle.offer(t0, snapshot("first")).is_some());
+        assert!(throttle
+            .offer(t0 + ms(5), snapshot("first second"))
+            .is_none());
+
+        let thinking_delta = |text: &str| AssistantDelta::Thinking {
+            message_id: "m1".into(),
+            text: text.into(),
+        };
+        let events: Vec<_> =
+            delta_events(&mut throttle, t0 + ms(10), thinking_delta(" third")).collect();
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AssistantUiEvent::AssistantMessageUpdated { message },
+                AssistantUiEvent::AssistantThinkingDelta { message_id, text },
+            ] if serde_json::to_value(&message.content).ok() == serde_json::to_value(snapshot("first second").content).ok() && message_id == "m1" && text == " third"
+        ));
+        assert_eq!(throttle.due(), None);
+        assert!(throttle.take_due(t0 + window()).is_none());
+
+        let events: Vec<_> =
+            delta_events(&mut throttle, t0 + ms(15), thinking_delta(" fourth")).collect();
+        assert!(matches!(
+            events.as_slice(),
+            [AssistantUiEvent::AssistantThinkingDelta { text, .. }] if text == " fourth"
+        ));
+    }
+
+    /// Every delta must reach the UI through `emit_assistant_delta`: a delta
+    /// emitted anywhere else can be erased by the held update that follows
+    /// it. The delta events are therefore built in exactly one place — the
+    /// `AssistantDelta::into_event` conversion — and this test fails if a
+    /// direct emission is added next to it.
+    #[test]
+    fn delta_events_are_built_in_one_place_only() {
+        let source = include_str!("local_agent.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        assert_eq!(
+            production
+                .matches("AssistantUiEvent::AssistantDelta")
+                .count(),
+            1,
+            "a delta event is built outside AssistantDelta::into_event"
+        );
+        assert_eq!(
+            production
+                .matches("AssistantUiEvent::AssistantThinkingDelta")
+                .count(),
+            1,
+            "a thinking delta event is built outside AssistantDelta::into_event"
+        );
     }
 
     /// Parallel tool calls persisted a few ms apart: the UI must end up with

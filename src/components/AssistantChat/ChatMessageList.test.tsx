@@ -620,6 +620,141 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('the answer is 42')).toBeInTheDocument();
   });
 
+  it('renders live thinking in order and swaps to persisted content without duplication', async () => {
+    const placeholder = msg({ id: 'm1', role: 'assistant', content: [{ type: 'text', text: '' }] });
+    const live = [
+      { type: 'text' as const, text: 'before' },
+      { type: 'thinking' as const, text: 'checking the code' },
+      { type: 'text' as const, text: 'after' },
+    ];
+    const { container, rerender } = render(
+      <ChatMessageList workspaceId="ws-1" messages={[placeholder]} streamingParts={{ m1: live }} isStreaming />
+    );
+    expect(Array.from(container.querySelectorAll('[data-testid="streaming"]')).map((el) => el.textContent)).toEqual(['before', 'after']);
+    expect(screen.getByRole('button', { name: /Thinking.*checking the code/ })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /Thinking.*checking the code/ }));
+    expect(screen.getByText('checking the code')).toBeInTheDocument();
+
+    rerender(<ChatMessageList workspaceId="ws-1" messages={[{
+      ...placeholder,
+      content: live,
+    }]} />);
+    expect(screen.getAllByRole('button', { name: /Thinking/ })).toHaveLength(1);
+    expect(screen.getByText('checking the code')).toBeInTheDocument();
+  });
+
+  it('keeps live thinking visible between adjacent tool-use messages', () => {
+    const messages: AssistantMessage[] = [
+      msg({ id: 'm1', role: 'assistant', content: [{ type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'first_tool', arguments: {} }] }),
+      msg({ id: 'm2', role: 'assistant', content: [{ type: 'tool_use', tool_call_id: 'tc-2', tool_name: 'second_tool', arguments: {} }] }),
+    ];
+    const { rerender } = render(<ChatMessageList workspaceId="ws-1" messages={messages} />);
+    expect(screen.queryByRole('button', { name: /Thinking/ })).toBeNull();
+
+    rerender(<ChatMessageList workspaceId="ws-1" messages={messages} streamingParts={{ m2: [{ type: 'thinking', text: 'live reasoning' }] }} isStreaming />);
+    fireEvent.click(screen.getByRole('button', { name: /Thinking.*live reasoning/ }));
+    expect(screen.getByText('live reasoning')).toBeInTheDocument();
+    expect(screen.getByText('first_tool')).toBeInTheDocument();
+    expect(screen.getByText('second_tool')).toBeInTheDocument();
+  });
+
+  it('keeps persisted thinking visible between adjacent tool-use messages', () => {
+    const messages: AssistantMessage[] = [
+      msg({ id: 'm1', role: 'assistant', content: [{ type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'first_tool', arguments: {} }] }),
+      msg({ id: 'm2', role: 'assistant', content: [
+        { type: 'thinking', text: 'persisted reasoning' },
+        { type: 'tool_use', tool_call_id: 'tc-2', tool_name: 'second_tool', arguments: {} },
+      ] }),
+    ];
+    render(<ChatMessageList workspaceId="ws-1" messages={messages} />);
+    fireEvent.click(screen.getByRole('button', { name: /Thinking.*persisted reasoning/ }));
+    expect(screen.getByText('persisted reasoning')).toBeInTheDocument();
+    expect(screen.getByText('first_tool')).toBeInTheDocument();
+    expect(screen.getByText('second_tool')).toBeInTheDocument();
+  });
+
+  it('merges a live thinking part into the persisted block it continues', () => {
+    const messages: AssistantMessage[] = [
+      msg({ id: 'm1', role: 'assistant', content: [{ type: 'thinking', text: 'persisted reasoning' }] }),
+    ];
+    render(
+      <ChatMessageList
+        workspaceId="ws-1"
+        messages={messages}
+        streamingParts={{ m1: [{ type: 'thinking', text: ' and live reasoning' }] }}
+        isStreaming
+      />
+    );
+    // One block, not two: the persisted view merges consecutive same-kind
+    // parts too, so the live view has to match it.
+    expect(screen.getAllByRole('button', { name: /Thinking/ })).toHaveLength(1);
+    fireEvent.click(screen.getByRole('button', { name: /Thinking/ }));
+    expect(screen.getByText('persisted reasoning and live reasoning')).toBeInTheDocument();
+  });
+
+  it('merges a live text part into the persisted text block it continues', () => {
+    const messages: AssistantMessage[] = [
+      msg({ id: 'm1', role: 'assistant', content: [{ type: 'text', text: 'Hello' }] }),
+    ];
+    const { container } = render(
+      <ChatMessageList
+        workspaceId="ws-1"
+        messages={messages}
+        streamingParts={{ m1: [{ type: 'text', text: ' world' }] }}
+        isStreaming
+      />
+    );
+    expect(
+      Array.from(container.querySelectorAll('[data-testid="streaming"]')).map((el) => el.textContent)
+    ).toEqual(['Hello world']);
+  });
+
+  it('keeps a live part separate when the persisted block ends with another kind', () => {
+    const messages: AssistantMessage[] = [
+      msg({
+        id: 'm1',
+        role: 'assistant',
+        content: [
+          { type: 'thinking', text: 'persisted reasoning' },
+          { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'first_tool', arguments: {} },
+        ],
+      }),
+    ];
+    render(
+      <ChatMessageList
+        workspaceId="ws-1"
+        messages={messages}
+        streamingParts={{ m1: [{ type: 'thinking', text: 'live reasoning' }] }}
+        isStreaming
+      />
+    );
+    expect(screen.getAllByRole('button', { name: /Thinking/ })).toHaveLength(2);
+  });
+
+  it('renders an assistant message whose content array holds a malformed entry', () => {
+    const malformed = {
+      ...msg({ id: 'm1', role: 'assistant', content: [] }),
+      content: [null, { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'first_tool', arguments: {} }],
+    } as unknown as AssistantMessage;
+    render(<ChatMessageList workspaceId="ws-1" messages={[malformed]} />);
+    expect(screen.getByText('first_tool')).toBeInTheDocument();
+  });
+
+  it('renders an assistant message whose content is not an array', () => {
+    const notAnArray = {
+      ...msg({ id: 'm1', role: 'assistant', content: [] }),
+      content: 'oops',
+    } as unknown as AssistantMessage;
+    const nullContent = {
+      ...msg({ id: 'm2', role: 'assistant', content: [] }),
+      content: null,
+    } as unknown as AssistantMessage;
+    render(<ChatMessageList workspaceId="ws-1" messages={[notAnArray, nullContent]} />);
+    // Nothing renderable, but the list must survive the malformed payloads.
+    expect(screen.getByTestId('virtual-list')).toBeInTheDocument();
+    expect(screen.queryByText('oops')).toBeNull();
+  });
+
   it('hides scheduled-run boundary marker messages', () => {
     const messages: AssistantMessage[] = [
       msg({
@@ -1045,7 +1180,7 @@ describe('ChatMessageList', () => {
         messages={messages}
         isStreaming
         runningIdentity={RUNNING_IDENTITY}
-        streamingText={{ m2: 'on it' }}
+        streamingParts={{ m2: [{ type: 'text', text: 'on it' }] }}
       />
     );
     expect(screen.getByText('on it')).toBeInTheDocument();

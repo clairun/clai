@@ -41,7 +41,7 @@ const fire = (event: unknown, runId: string | null = null, workspaceId = 'ws-1')
 };
 
 beforeEach(() => {
-  useAssistantStore.setState({ sessions: {}, activeSessionByTab: {} });
+  useAssistantStore.setState({ sessions: {}, activeSessionByTab: {}, streamingParts: {} });
   useFleetActivityStore.setState({ activeRunsByWorkspace: {}, runNowSkipped: [] });
   capturedHandler = null;
   unlisten = vi.fn();
@@ -113,7 +113,7 @@ describe('useAssistantEvents — run lifecycle', () => {
 
   // R3.2 regression, at the level the user actually experiences it. Pressing
   // Stop mid-answer used to leave the assistant row as the empty placeholder
-  // it was created with, so the visible text lived only in `streamingText` —
+  // it was created with, so the visible text lived only in `streamingParts` —
   // and `run_cancelled` wipes that accumulator wholesale. The answer vanished
   // the instant the run went terminal. The backend now persists whatever was
   // streamed and emits `assistant_message_completed` *before* `run_cancelled`;
@@ -131,7 +131,7 @@ describe('useAssistantEvents — run lifecycle', () => {
       },
     });
     fire({ type: 'assistant_delta', payload: { message_id: 'msg-1', text: 'Half a th' } });
-    expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe('Half a th');
+    expect(useAssistantStore.getState().streamingParts[SESSION.id]!['msg-1']).toEqual([{ type: 'text', text: 'Half a th' }]);
 
     // The backend finalizes the row from what it streamed, then marks the run
     // cancelled. Order matters: the second event clears the accumulator.
@@ -156,7 +156,7 @@ describe('useAssistantEvents — run lifecycle', () => {
     expect(s.isStreaming).toBe(false);
     // The accumulator is gone, so the surviving text comes from the persisted
     // message and nothing renders twice.
-    expect(useAssistantStore.getState().streamingText[SESSION.id]).toBeUndefined();
+    expect(useAssistantStore.getState().streamingParts[SESSION.id]).toBeUndefined();
   });
 
   it('assistant_delta accumulates streaming text under message_id', async () => {
@@ -173,9 +173,57 @@ describe('useAssistantEvents — run lifecycle', () => {
       payload: { message_id: 'msg-1', text: 'world' },
     });
     expect(
-      useAssistantStore.getState().streamingText[SESSION.id]!['msg-1'],
-    ).toBe('Hello world');
+      useAssistantStore.getState().streamingParts[SESSION.id]!['msg-1'],
+    ).toEqual([{ type: 'text', text: 'Hello world' }]);
   });
+});
+
+it('routes live thinking deltas into the assistant message stream', async () => {
+  useAssistantStore.getState().initSession(SESSION);
+  mount();
+  await Promise.resolve();
+  fire({ type: 'assistant_thinking_delta', payload: { message_id: 'msg-1', text: 'checking ' } });
+  fire({ type: 'assistant_thinking_delta', payload: { message_id: 'msg-1', text: 'the path' } });
+  expect(useAssistantStore.getState().streamingParts[SESSION.id]!['msg-1']).toEqual([
+    { type: 'thinking', text: 'checking the path' },
+  ]);
+});
+
+it('keeps thinking after a delayed tool-use update until it is persisted', async () => {
+  useAssistantStore.getState().initSession(SESSION);
+  mount();
+  await Promise.resolve();
+  fire({ type: 'message_created', payload: { message: {
+    id: 'msg-1', role: 'assistant', content: [{ type: 'text', text: '' }],
+  } } });
+  fire({ type: 'assistant_thinking_delta', payload: { message_id: 'msg-1', text: 'before tool' } });
+
+  // The emitter must flush its held update before a newer thinking delta.
+  fire({ type: 'assistant_message_updated', payload: { message: {
+    id: 'msg-1', role: 'assistant', content: [
+      { type: 'thinking', text: 'before tool' },
+      { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'inspect', arguments: {} },
+    ],
+  } } });
+  fire({ type: 'assistant_thinking_delta', payload: { message_id: 'msg-1', text: ' after tool' } });
+  const current = useAssistantStore.getState();
+  expect(current.sessions[SESSION.id]!.messages[0]!.content).toEqual([
+    { type: 'thinking', text: 'before tool' },
+    { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'inspect', arguments: {} },
+  ]);
+  expect(current.streamingParts[SESSION.id]!['msg-1']).toEqual([
+    { type: 'thinking', text: ' after tool' },
+  ]);
+
+  fire({ type: 'assistant_message_completed', payload: { message: {
+    id: 'msg-1', role: 'assistant', content: [
+      { type: 'thinking', text: 'before tool' },
+      { type: 'tool_use', tool_call_id: 'tc-1', tool_name: 'inspect', arguments: {} },
+      { type: 'thinking', text: ' after tool' },
+    ],
+  } } });
+  expect(useAssistantStore.getState().streamingParts[SESSION.id]!['msg-1']).toBeUndefined();
+  expect(useAssistantStore.getState().sessions[SESSION.id]!.messages[0]!.content).toHaveLength(3);
 });
 
 describe('useAssistantEvents — run_skipped', () => {

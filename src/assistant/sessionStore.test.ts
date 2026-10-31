@@ -23,7 +23,7 @@ beforeEach(() => {
   // every test below mutates. Avoids cross-test bleed.
   useAssistantStore.setState({
     sessions: {},
-    streamingText: {},
+    streamingParts: {},
     deliveredQueuedMessageIds: {},
     activeSessionByTab: {},
     recoverablePrompts: {},
@@ -110,9 +110,7 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     store.appendDelta(SESSION.id, 'msg-1', 'Hello ');
     store.appendDelta(SESSION.id, 'msg-1', 'world');
     store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'running')], []);
-    expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe(
-      'Hello world',
-    );
+    expect(useAssistantStore.getState().streamingParts[SESSION.id]!['msg-1']).toEqual([{ type: 'text', text: 'Hello world' }]);
     expect(useAssistantStore.getState().sessions[SESSION.id]!.isStreaming).toBe(true);
   });
 
@@ -129,7 +127,7 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     expect(s.isStreaming).toBe(false);
     expect(s.runStartedAt).toBeNull();
     expect(s.pendingAskUser).toBeNull();
-    expect(state.streamingText[SESSION.id]).toBeUndefined();
+    expect(state.streamingParts[SESSION.id]).toBeUndefined();
   });
 
   it.each(['running', 'waiting_for_tool', 'queued'])(
@@ -159,7 +157,7 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     expect(s.isStreaming).toBe(true);
     expect(s.runStartedAt).toBe(startedAt);
     expect(s.runs.map((r) => r.id)).toEqual(['run-1', 'run-2']);
-    expect(state.streamingText[SESSION.id]!['msg-2']).toBe('Hi');
+    expect(state.streamingParts[SESSION.id]!['msg-2']).toEqual([{ type: 'text', text: 'Hi' }]);
     expect(s.pendingAskUser).toEqual(ASK_REQUEST);
   });
 
@@ -176,7 +174,7 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     const s = state.sessions[SESSION.id]!;
     expect(s.isStreaming).toBe(true);
     expect(s.runStartedAt).toBe(startedAt);
-    expect(state.streamingText[SESSION.id]!['msg-2']).toBe('Hi');
+    expect(state.streamingParts[SESSION.id]!['msg-2']).toEqual([{ type: 'text', text: 'Hi' }]);
     expect(s.pendingAskUser).toEqual(ASK_REQUEST);
   });
 
@@ -400,7 +398,7 @@ describe('setRunStatus', () => {
     store.setRunStatus(SESSION.id, run('run-1', 'completed'));
     const s = useAssistantStore.getState().sessions[SESSION.id]!;
     expect(s.isStreaming).toBe(false);
-    expect(useAssistantStore.getState().streamingText[SESSION.id]).toBeUndefined();
+    expect(useAssistantStore.getState().streamingParts[SESSION.id]).toBeUndefined();
   });
 
   it('sets streaming on queued/running/waiting_for_tool', () => {
@@ -458,14 +456,48 @@ describe('appendDelta — session identity stability (streaming perf contract)',
   // re-render every whole-session subscriber (the Workspace page shell)
   // many times per second. These tests pin that contract.
 
-  it('accumulates text in the top-level streamingText map', () => {
+  it('accumulates text in the top-level streamingParts map', () => {
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
     store.appendDelta(SESSION.id, 'msg-1', 'Hello ');
     store.appendDelta(SESSION.id, 'msg-1', 'world');
-    expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe(
-      'Hello world',
-    );
+    expect(useAssistantStore.getState().streamingParts[SESSION.id]!['msg-1']).toEqual([{ type: 'text', text: 'Hello world' }]);
+  });
+
+  it('keeps text and thinking in arrival order and isolates sessions', () => {
+    const store = useAssistantStore.getState();
+    const other = { id: 'sess-2' } as AssistantSession;
+    store.initSession(SESSION);
+    store.initSession(other);
+    store.appendDelta(SESSION.id, 'msg-1', 'Before');
+    store.appendThinkingDelta(SESSION.id, 'msg-1', 'why ');
+    store.appendThinkingDelta(SESSION.id, 'msg-1', 'it works');
+    store.appendDelta(SESSION.id, 'msg-1', 'After');
+    store.appendThinkingDelta(other.id, 'msg-2', 'another task');
+    expect(useAssistantStore.getState().streamingParts[SESSION.id]!['msg-1']).toEqual([
+      { type: 'text', text: 'Before' },
+      { type: 'thinking', text: 'why it works' },
+      { type: 'text', text: 'After' },
+    ]);
+    expect(useAssistantStore.getState().streamingParts[other.id]!['msg-2']).toEqual([
+      { type: 'thinking', text: 'another task' },
+    ]);
+  });
+
+  it('replaces live thinking with persisted content on a mid-turn update', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.addMessage(SESSION.id, msg('msg-1'));
+    store.appendThinkingDelta(SESSION.id, 'msg-1', 'thinking');
+    store.updateMessageContent(SESSION.id, {
+      ...msg('msg-1'),
+      content: [{ type: 'thinking', text: 'thinking' }],
+    });
+    expect(useAssistantStore.getState().streamingParts[SESSION.id]!['msg-1']).toBeUndefined();
+    store.appendDelta(SESSION.id, 'msg-1', 'answer');
+    expect(useAssistantStore.getState().streamingParts[SESSION.id]!['msg-1']).toEqual([
+      { type: 'text', text: 'answer' },
+    ]);
   });
 
   it('does not change the session object identity after the first delta', () => {
@@ -482,7 +514,7 @@ describe('appendDelta — session identity stability (streaming perf contract)',
 
   it('is a no-op for an unknown session (no orphan accumulator)', () => {
     useAssistantStore.getState().appendDelta('ghost', 'msg-1', 'x');
-    expect(useAssistantStore.getState().streamingText['ghost']).toBeUndefined();
+    expect(useAssistantStore.getState().streamingParts['ghost']).toBeUndefined();
   });
 
   it('completeMessage atomically clears the accumulator for that message', () => {
@@ -492,9 +524,9 @@ describe('appendDelta — session identity stability (streaming perf contract)',
     store.appendDelta(SESSION.id, 'msg-1', 'partial');
     store.appendDelta(SESSION.id, 'msg-2', 'other');
     store.completeMessage(SESSION.id, msg('msg-1'));
-    const streaming = useAssistantStore.getState().streamingText[SESSION.id]!;
+    const streaming = useAssistantStore.getState().streamingParts[SESSION.id]!;
     expect(streaming['msg-1']).toBeUndefined();
-    expect(streaming['msg-2']).toBe('other');
+    expect(streaming['msg-2']).toEqual([{ type: 'text', text: 'other' }]);
   });
 
   it('removeSession drops the session accumulator', () => {
@@ -502,6 +534,6 @@ describe('appendDelta — session identity stability (streaming perf contract)',
     store.initSession(SESSION);
     store.appendDelta(SESSION.id, 'msg-1', 'x');
     store.removeSession(SESSION.id);
-    expect(useAssistantStore.getState().streamingText[SESSION.id]).toBeUndefined();
+    expect(useAssistantStore.getState().streamingParts[SESSION.id]).toBeUndefined();
   });
 });
