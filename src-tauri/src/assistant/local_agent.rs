@@ -372,6 +372,7 @@ pub async fn run_session_turn(
     let session_grants = Arc::new(Mutex::new(Vec::new()));
     let session_allowed_command_prefixes = Arc::new(Mutex::new(Vec::new()));
     let session_blocked_command_prefixes = Arc::new(Mutex::new(Vec::new()));
+    let session_blocked_command_reasons = Arc::new(Mutex::new(Default::default()));
     // `binding_guard` removes the bearer token from the MCP runtime on
     // drop, including on panic or early return. Keep it alive until
     // after the CLI subprocess has finished making MCP calls.
@@ -386,6 +387,7 @@ pub async fn run_session_turn(
         session_grants,
         session_allowed_command_prefixes,
         session_blocked_command_prefixes,
+        session_blocked_command_reasons,
     });
 
     // A single assistant message is reused across attempts (see

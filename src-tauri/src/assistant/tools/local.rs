@@ -126,16 +126,19 @@ async fn execute_bash_exec(
 
     let run_allowed = context.session_allowed_command_prefixes_snapshot();
     let run_blocked = context.session_blocked_command_prefixes_snapshot();
-    match evaluate_command_policy(
+    let run_blocked_reasons = context.session_blocked_command_reasons_snapshot();
+    match evaluate_command_policy_with_reasons(
         &context.run_context.execution,
         &params.command,
         &run_allowed,
         &run_blocked,
+        &run_blocked_reasons,
     ) {
         PolicyResult::Allow => { /* proceed */ }
         PolicyResult::Block {
             segment_text,
             matched_prefix,
+            reason,
         } => {
             let message = if segment_text.is_empty() {
                 "Shell command cannot be empty".to_string()
@@ -145,7 +148,7 @@ async fn execute_bash_exec(
                     segment_text, matched_prefix
                 )
             };
-            return Err(message);
+            return Err(with_denial_reason(message, reason.as_deref()));
         }
         PolicyResult::NeedsApproval(segments) => {
             await_user_permission(deps, context, &params.command, segments).await?;
@@ -316,6 +319,33 @@ impl CommandDenial {
     }
 }
 
+fn denied_segments_message(
+    segments: &[crate::commands::permissions::SegmentApproval],
+    decisions: &[crate::commands::permissions::SegmentDecision],
+) -> String {
+    use crate::commands::permissions::SegmentDecision;
+    let mut message = "User denied one or more command segments".to_string();
+    for (segment, decision) in segments.iter().zip(decisions) {
+        let reason = match decision {
+            SegmentDecision::DenyOnce { reason } | SegmentDecision::DenyAlways { reason, .. } => {
+                reason.as_deref()
+            }
+            _ => None,
+        };
+        if let Some(reason) = reason.filter(|reason| !reason.is_empty()) {
+            message.push_str(&format!(". Reason for `{}`: {}", segment.text, reason));
+        }
+    }
+    message
+}
+
+fn with_denial_reason(message: String, reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) if !reason.is_empty() => format!("{message}. User's reason: {reason}"),
+        _ => message,
+    }
+}
+
 /// Richer per-segment policy evaluation result. Distinguishes a hard
 /// block (any segment matched the blocklist) from "needs approval"
 /// (some segments aren't in the allowlist but aren't blocked either).
@@ -328,6 +358,7 @@ pub(crate) enum PolicyResult {
     Block {
         segment_text: String,
         matched_prefix: String,
+        reason: Option<String>,
     },
     /// Segments that need user approval (Simple-not-in-allowlist or any
     /// Opaque in Restricted mode). Each carries the smart-prefix
@@ -341,6 +372,22 @@ pub(crate) fn evaluate_command_policy(
     extra_allowed_prefixes: &[String],
     extra_blocked_prefixes: &[String],
 ) -> PolicyResult {
+    evaluate_command_policy_with_reasons(
+        execution,
+        command,
+        extra_allowed_prefixes,
+        extra_blocked_prefixes,
+        &Default::default(),
+    )
+}
+
+fn evaluate_command_policy_with_reasons(
+    execution: &ExecutionCapabilityConfig,
+    command: &str,
+    extra_allowed_prefixes: &[String],
+    extra_blocked_prefixes: &[String],
+    extra_blocked_reasons: &std::collections::BTreeMap<String, String>,
+) -> PolicyResult {
     use crate::assistant::tools::command_splitter::{split_command, Segment};
     use crate::assistant::tools::prefix_detector::suggest_prefix;
     use crate::commands::permissions::{SegmentApproval, SegmentKind};
@@ -350,6 +397,7 @@ pub(crate) fn evaluate_command_policy(
         return PolicyResult::Block {
             segment_text: String::new(),
             matched_prefix: "<empty>".to_string(),
+            reason: None,
         };
     }
 
@@ -372,6 +420,10 @@ pub(crate) fn evaluate_command_policy(
         {
             return PolicyResult::Block {
                 segment_text: text.to_string(),
+                reason: extra_blocked_reasons
+                    .get(&matched)
+                    .or_else(|| execution.shell.blocked_command_reasons.get(&matched))
+                    .cloned(),
                 matched_prefix: matched,
             };
         }
@@ -734,17 +786,17 @@ async fn await_user_permission(
             SegmentDecision::AllowOnce => {
                 context.add_session_allowed_command_prefix(segment.text.clone());
             }
-            SegmentDecision::DenyAlways { prefix, .. } => {
+            SegmentDecision::DenyAlways { prefix, reason, .. } => {
+                context.set_session_blocked_command_reason(prefix, reason.as_deref());
                 context.add_session_blocked_command_prefix(prefix.clone());
             }
-            SegmentDecision::DenyOnce => {}
+            SegmentDecision::DenyOnce { .. } => {}
         }
     }
 
     if decisions.iter().any(|d| !d.is_allow()) {
-        let msg = "User denied one or more command segments";
         context.note_warning();
-        return Err(msg.to_string());
+        return Err(denied_segments_message(&segments, &decisions));
     }
 
     Ok(())
@@ -1019,15 +1071,19 @@ fn enforce_command_policy(
         PolicyResult::Block {
             segment_text,
             matched_prefix,
+            reason,
         } => {
             if segment_text.is_empty() {
                 Err(CommandDenial::ExplicitlyBlocked(
                     "Shell command cannot be empty".to_string(),
                 ))
             } else {
-                Err(CommandDenial::ExplicitlyBlocked(format!(
-                    "Command `{}` is blocked for this agent (matched prefix `{}`)",
-                    segment_text, matched_prefix
+                Err(CommandDenial::ExplicitlyBlocked(with_denial_reason(
+                    format!(
+                        "Command `{}` is blocked for this agent (matched prefix `{}`)",
+                        segment_text, matched_prefix
+                    ),
+                    reason.as_deref(),
                 )))
             }
         }
@@ -1570,6 +1626,9 @@ mod tests {
             session_blocked_command_prefixes: std::sync::Arc::new(
                 std::sync::Mutex::new(Vec::new()),
             ),
+            session_blocked_command_reasons: std::sync::Arc::new(std::sync::Mutex::new(
+                Default::default(),
+            )),
         }
     }
 
@@ -1927,6 +1986,7 @@ mod tests {
                 mode: ShellAccessMode::Restricted,
                 allowed_command_prefixes: allowed.iter().map(|s| s.to_string()).collect(),
                 blocked_command_prefixes: blocked.iter().map(|s| s.to_string()).collect(),
+                blocked_command_reasons: Default::default(),
             },
             ..Default::default()
         }
@@ -2048,6 +2108,7 @@ mod tests {
                 mode: ShellAccessMode::Full,
                 allowed_command_prefixes: vec![],
                 blocked_command_prefixes: vec![],
+                blocked_command_reasons: Default::default(),
             },
             ..Default::default()
         };
@@ -2405,6 +2466,52 @@ mod tests {
     // Run-scoped blocklist — populated by DenyAlways so a fresh deny
     // takes effect mid-run instead of waiting for the next session.
     // -------------------------------------------------------------------
+
+    #[test]
+    fn denied_segment_message_includes_only_supplied_reasons() {
+        use crate::commands::permissions::{
+            PermissionScope, SegmentApproval, SegmentDecision, SegmentKind,
+        };
+        let segments = vec![SegmentApproval {
+            text: "curl x".into(),
+            kind: SegmentKind::Simple,
+            suggested_prefix: "curl".into(),
+        }];
+        let once = SegmentDecision::DenyOnce {
+            reason: Some("No network upload".into()),
+        };
+        assert!(denied_segments_message(&segments, &[once]).contains("No network upload"));
+        let always = SegmentDecision::DenyAlways {
+            scope: PermissionScope::Agent,
+            prefix: "curl".into(),
+            reason: Some("No network upload".into()),
+        };
+        assert!(denied_segments_message(&segments, &[always]).contains("No network upload"));
+        let no_reason = SegmentDecision::DenyOnce { reason: None };
+        assert_eq!(
+            denied_segments_message(&segments, &[no_reason]),
+            "User denied one or more command segments"
+        );
+    }
+
+    #[test]
+    fn automatic_block_uses_persisted_or_run_reason() {
+        let mut exec = restricted_execution_config(&[], &["curl"]);
+        exec.shell
+            .blocked_command_reasons
+            .insert("curl".into(), "Persisted reason".into());
+        let run_reasons = std::collections::BTreeMap::from([("curl".into(), "Run reason".into())]);
+        match evaluate_command_policy_with_reasons(&exec, "curl x", &[], &[], &run_reasons) {
+            PolicyResult::Block { reason, .. } => assert_eq!(reason.as_deref(), Some("Run reason")),
+            _ => panic!("expected block"),
+        }
+        match evaluate_command_policy(&exec, "curl x", &[], &[]) {
+            PolicyResult::Block { reason, .. } => {
+                assert_eq!(reason.as_deref(), Some("Persisted reason"))
+            }
+            _ => panic!("expected block"),
+        }
+    }
 
     #[test]
     fn policy_run_scoped_blocklist_blocks_simple_segment() {

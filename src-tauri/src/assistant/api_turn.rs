@@ -346,6 +346,8 @@ async fn start_api_turn(
     let session_grants = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let session_allowed_command_prefixes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let session_blocked_command_prefixes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let session_blocked_command_reasons =
+        std::sync::Arc::new(std::sync::Mutex::new(Default::default()));
 
     // === Tool execution loop ===
     // Build system prompt (prepended to every API call, not persisted).
@@ -362,6 +364,7 @@ async fn start_api_turn(
         session_grants,
         session_allowed_command_prefixes,
         session_blocked_command_prefixes,
+        session_blocked_command_reasons,
     };
 
     // The run's conversation, read from the database once. Every row this run

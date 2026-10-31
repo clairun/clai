@@ -95,6 +95,7 @@ pub struct ToolBinding {
     /// cached: that decision is one-shot by definition, and re-prompting
     /// on retry lets the user reconsider.
     pub session_blocked_command_prefixes: Arc<Mutex<Vec<String>>>,
+    pub session_blocked_command_reasons: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
 }
 
 impl LocalMcpRuntime {
@@ -410,6 +411,7 @@ async fn execute_bound_tool(
         session_grants: binding.session_grants.clone(),
         session_allowed_command_prefixes: binding.session_allowed_command_prefixes.clone(),
         session_blocked_command_prefixes: binding.session_blocked_command_prefixes.clone(),
+        session_blocked_command_reasons: binding.session_blocked_command_reasons.clone(),
     };
 
     tokio::select! {
@@ -583,6 +585,9 @@ mod tests {
             session_grants: Arc::new(Mutex::new(Vec::new())),
             session_allowed_command_prefixes: Arc::new(Mutex::new(Vec::new())),
             session_blocked_command_prefixes: Arc::new(Mutex::new(Vec::new())),
+            session_blocked_command_reasons: std::sync::Arc::new(std::sync::Mutex::new(
+                Default::default(),
+            )),
         }
     }
 

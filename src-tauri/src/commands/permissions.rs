@@ -189,10 +189,17 @@ pub enum SegmentDecision {
         scope: PermissionScope,
         prefix: String,
     },
-    DenyOnce,
+    DenyOnce {
+        #[serde(default)]
+        #[ts(optional)]
+        reason: Option<String>,
+    },
     DenyAlways {
         scope: PermissionScope,
         prefix: String,
+        #[serde(default)]
+        #[ts(optional)]
+        reason: Option<String>,
     },
 }
 
@@ -456,8 +463,9 @@ pub async fn submit_permission_decision(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     request_id: String,
-    decisions: Vec<SegmentDecision>,
+    mut decisions: Vec<SegmentDecision>,
 ) -> Result<(), String> {
+    normalize_denial_reasons(&mut decisions)?;
     let Some((entry, remaining)) = state.pending_approvals.take(&request_id).await else {
         return Err(format!(
             "No pending approval with request_id `{}` (already resolved or cleared)",
@@ -481,6 +489,26 @@ pub async fn submit_permission_decision(
     let _ = entry
         .sender
         .send(PendingApprovalOutcome::Decision(decisions));
+    Ok(())
+}
+
+fn normalize_denial_reasons(decisions: &mut [SegmentDecision]) -> Result<(), String> {
+    for decision in decisions.iter_mut() {
+        let reason = match decision {
+            SegmentDecision::DenyOnce { reason } | SegmentDecision::DenyAlways { reason, .. } => {
+                reason
+            }
+            _ => continue,
+        };
+        if let Some(value) = reason {
+            let trimmed = value.trim();
+            if trimmed.chars().count() > 500 {
+                return Err("Denial reason must be at most 500 characters".to_string());
+            }
+            let normalized = (!trimmed.is_empty()).then(|| trimmed.to_string());
+            *reason = normalized;
+        }
+    }
     Ok(())
 }
 
@@ -586,7 +614,7 @@ fn apply_decisions_to_shell_policy(
                     changed = true;
                 }
             }
-            SegmentDecision::DenyAlways { prefix, .. } => {
+            SegmentDecision::DenyAlways { prefix, reason, .. } => {
                 let prefix = prefix.trim();
                 if prefix.is_empty() {
                     continue;
@@ -605,8 +633,38 @@ fn apply_decisions_to_shell_policy(
                         .push(prefix.to_string());
                     changed = true;
                 }
+                match reason.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+                    Some(reason) => {
+                        if agent
+                            .execution
+                            .shell
+                            .blocked_command_reasons
+                            .get(prefix)
+                            .map(String::as_str)
+                            != Some(reason)
+                        {
+                            agent
+                                .execution
+                                .shell
+                                .blocked_command_reasons
+                                .insert(prefix.to_string(), reason.to_string());
+                            changed = true;
+                        }
+                    }
+                    None => {
+                        if agent
+                            .execution
+                            .shell
+                            .blocked_command_reasons
+                            .remove(prefix)
+                            .is_some()
+                        {
+                            changed = true;
+                        }
+                    }
+                }
             }
-            SegmentDecision::AllowOnce | SegmentDecision::DenyOnce => {}
+            SegmentDecision::AllowOnce | SegmentDecision::DenyOnce { .. } => {}
         }
     }
 
@@ -654,6 +712,7 @@ mod tests {
         SegmentDecision::DenyAlways {
             scope: PermissionScope::Agent,
             prefix: prefix.to_string(),
+            reason: None,
         }
     }
 
@@ -706,6 +765,78 @@ mod tests {
     }
 
     #[test]
+    fn denial_reasons_are_trimmed_and_bounded() {
+        let mut decisions = vec![
+            SegmentDecision::DenyOnce {
+                reason: Some("  use offline data  ".into()),
+            },
+            SegmentDecision::DenyAlways {
+                scope: PermissionScope::Agent,
+                prefix: "curl".into(),
+                reason: Some("  ".into()),
+            },
+        ];
+        normalize_denial_reasons(&mut decisions).unwrap();
+        assert!(
+            matches!(&decisions[0], SegmentDecision::DenyOnce { reason: Some(reason) } if reason == "use offline data")
+        );
+        assert!(matches!(
+            &decisions[1],
+            SegmentDecision::DenyAlways { reason: None, .. }
+        ));
+        let mut too_long = vec![SegmentDecision::DenyOnce {
+            reason: Some("x".repeat(501)),
+        }];
+        assert!(normalize_denial_reasons(&mut too_long).is_err());
+    }
+
+    #[test]
+    fn denial_reasons_are_optional_in_existing_decisions_and_policy() {
+        let once: SegmentDecision = serde_json::from_str(r#"{"kind":"denyOnce"}"#).unwrap();
+        assert!(matches!(once, SegmentDecision::DenyOnce { reason: None }));
+        let always: SegmentDecision =
+            serde_json::from_str(r#"{"kind":"denyAlways","scope":"agent","prefix":"curl"}"#)
+                .unwrap();
+        assert!(matches!(
+            always,
+            SegmentDecision::DenyAlways { reason: None, .. }
+        ));
+        let old_policy: crate::config::types::ShellCapabilityConfig =
+            serde_json::from_str(r#"{"mode":"restricted","blockedCommandPrefixes":["curl"]}"#)
+                .unwrap();
+        assert!(old_policy.blocked_command_reasons.is_empty());
+    }
+
+    #[test]
+    fn deny_always_reason_persists_and_can_be_replaced() {
+        let mut agent = fake_agent();
+        let decision = SegmentDecision::DenyAlways {
+            scope: PermissionScope::Agent,
+            prefix: "curl".to_string(),
+            reason: Some("Do not send data externally".to_string()),
+        };
+        assert!(apply_decisions_to_shell_policy(&mut agent, &[decision]));
+        assert_eq!(
+            agent
+                .execution
+                .shell
+                .blocked_command_reasons
+                .get("curl")
+                .unwrap(),
+            "Do not send data externally"
+        );
+        assert!(apply_decisions_to_shell_policy(
+            &mut agent,
+            &[deny_always("curl")]
+        ));
+        assert!(!agent
+            .execution
+            .shell
+            .blocked_command_reasons
+            .contains_key("curl"));
+    }
+
+    #[test]
     fn apply_decisions_is_idempotent_and_reports_no_change() {
         let mut agent = fake_agent();
         assert!(apply_decisions_to_shell_policy(
@@ -739,7 +870,7 @@ mod tests {
             &mut agent,
             &[
                 SegmentDecision::AllowOnce,
-                SegmentDecision::DenyOnce,
+                SegmentDecision::DenyOnce { reason: None },
                 allow_always("   "),
                 deny_always(""),
             ],

@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 // Tauri invoke (submit_permission_decision) + the event-bus listen are
@@ -42,13 +42,13 @@ beforeEach(() => {
 const fireRequest = (req: unknown) => {
   const handler = listenHandlers['permissions://request'];
   if (!handler) throw new Error('request listener not registered');
-  handler({ payload: req });
+  act(() => handler({ payload: req }));
 };
 
 const fireResolved = (requestId: string) => {
   const handler = listenHandlers['permissions://resolved'];
   if (!handler) throw new Error('resolved listener not registered');
-  handler({ payload: { requestId } });
+  act(() => handler({ payload: { requestId } }));
 };
 
 describe('InlineApprovalCard — where an "always" decision is saved', () => {
@@ -193,6 +193,140 @@ describe('InlineApprovalCard', () => {
     // Expand restores the decision buttons.
     await user.click(screen.getByRole('button', { name: /expand request/i }));
     expect(screen.getByRole('button', { name: /allow once/i })).toBeInTheDocument();
+  });
+});
+
+describe('ApprovalCard — denial reasons', () => {
+  it('submits a trimmed optional reason for deny once', async () => {
+    const user = userEvent.setup();
+    render(<ApprovalCard req={SINGLE_SEGMENT_REQUEST as PermissionRequest} />);
+
+    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Deny once' }));
+    expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
+
+    const reason = screen.getByRole('textbox', { name: /reason for denying this command/i });
+    await user.tab();
+    expect(reason).toHaveFocus();
+    await user.type(reason, '  Unsafe in this workspace  ');
+    await user.click(screen.getByRole('button', { name: 'Deny command' }));
+
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'req-1',
+      decisions: [{ kind: 'denyOnce', reason: 'Unsafe in this workspace' }],
+    });
+  });
+
+  it('submits deny always with the saved prefix and reason', async () => {
+    const user = userEvent.setup();
+    render(<ApprovalCard req={SINGLE_SEGMENT_REQUEST as PermissionRequest} />);
+    await user.click(screen.getByRole('button', { name: 'Always deny (this agent)' }));
+    await user.type(screen.getByRole('textbox', { name: /reason for denying this command/i }), 'Use a safer command');
+    await user.click(screen.getByRole('button', { name: 'Deny command' }));
+
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'req-1',
+      decisions: [{ kind: 'denyAlways', scope: 'agent', prefix: 'rg', reason: 'Use a safer command' }],
+    });
+  });
+
+  it('accepts 500 Unicode characters in a segment reason and truncates the next', async () => {
+    const user = userEvent.setup();
+    render(<ApprovalCard req={SINGLE_SEGMENT_REQUEST as PermissionRequest} />);
+    await user.click(screen.getByRole('button', { name: 'Deny once' }));
+    const reason = screen.getByRole('textbox', { name: /reason for denying this command/i });
+    const emojis = '😀'.repeat(500);
+    expect(reason).not.toHaveAttribute('maxlength');
+    fireEvent.change(reason, { target: { value: `${emojis}😀` } });
+    expect(reason).toHaveValue(emojis);
+    await user.click(screen.getByRole('button', { name: 'Deny command' }));
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'req-1',
+      decisions: [{ kind: 'denyOnce', reason: emojis }],
+    });
+  });
+
+  it('submits a denial without a reason and keeps allow decisions unchanged', async () => {
+    const user = userEvent.setup();
+    render(<ApprovalCard req={SINGLE_SEGMENT_REQUEST as PermissionRequest} />);
+    await user.click(screen.getByRole('button', { name: 'Deny once' }));
+    await user.type(screen.getByRole('textbox', { name: /reason for denying this command/i }), '   ');
+    await user.click(screen.getByRole('button', { name: 'Deny command' }));
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'req-1',
+      decisions: [{ kind: 'denyOnce' }],
+    });
+  });
+
+  it('waits for every segment when one is denied, then sends only that segment’s reason', async () => {
+    const user = userEvent.setup();
+    render(<ApprovalCard req={PIPELINE} />);
+    await user.click(screen.getAllByRole('button', { name: 'Deny once' })[0]!);
+    const reason = screen.getByRole('textbox', { name: /reason for denying “cd \/srv\/app”/i });
+    await user.type(reason, 'Stay in project root');
+    expect(screen.getByRole('button', { name: 'Submit decisions' })).toBeDisabled();
+    await user.click(screen.getAllByRole('button', { name: 'Allow once' })[1]!);
+    expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
+    await user.click(screen.getByRole('button', { name: 'Submit decisions' }));
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'perm-1',
+      decisions: [{ kind: 'denyOnce', reason: 'Stay in project root' }, { kind: 'allowOnce' }],
+    });
+  });
+
+  it('keeps the reason editable after a failed submission', async () => {
+    const user = userEvent.setup();
+    let reject: (reason: unknown) => void = () => {};
+    mockInvoke.mockImplementation((cmd: string) =>
+      cmd === 'submit_permission_decision'
+        ? new Promise((_, no) => { reject = no; })
+        : Promise.resolve([])
+    );
+    render(<ApprovalCard req={SINGLE_SEGMENT_REQUEST as PermissionRequest} />);
+    await user.click(screen.getByRole('button', { name: 'Deny once' }));
+    const reason = screen.getByRole('textbox', { name: /reason for denying this command/i });
+    await user.type(reason, 'Wrong target');
+    await user.click(screen.getByRole('button', { name: 'Deny command' }));
+    expect(reason).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Submitting…' })).toBeDisabled();
+
+    reject('Approval channel closed');
+    expect(await screen.findByText('Approval channel closed')).toBeInTheDocument();
+    expect(reason).toHaveValue('Wrong target');
+    expect(reason).toBeEnabled();
+    expect(screen.getByRole('button', { name: 'Deny command' })).toBeEnabled();
+  });
+
+  it('lets deny all add one optional reason for every segment', async () => {
+    const user = userEvent.setup();
+    render(<ApprovalCard req={PIPELINE} speaker={speaker} />);
+    await user.click(screen.getByRole('button', { name: 'Deny all' }));
+    await user.type(screen.getByRole('textbox', { name: /reason for denying the entire command/i }), 'Wrong target');
+    await user.click(screen.getByRole('button', { name: 'Deny entire command' }));
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'perm-1',
+      decisions: [{ kind: 'denyOnce', reason: 'Wrong target' }, { kind: 'denyOnce', reason: 'Wrong target' }],
+    });
+  });
+
+  it('applies the Unicode character limit to the deny-all reason', async () => {
+    const user = userEvent.setup();
+    render(<ApprovalCard req={PIPELINE} speaker={speaker} />);
+    await user.click(screen.getByRole('button', { name: 'Deny all' }));
+    const reason = screen.getByRole('textbox', { name: /reason for denying the entire command/i });
+    const emojis = '😀'.repeat(500);
+    fireEvent.change(reason, { target: { value: `${emojis}😀` } });
+    expect(reason).toHaveValue(emojis);
+    await user.click(screen.getByRole('button', { name: 'Deny entire command' }));
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'perm-1',
+      decisions: [{ kind: 'denyOnce', reason: emojis }, { kind: 'denyOnce', reason: emojis }],
+    });
+  });
+
+  it('explains that grouped denials require confirmation', () => {
+    render(<ApprovalCard req={PIPELINE} />);
+    expect(screen.getByText('2 parts need a decision (confirm after choosing any denial):')).toBeInTheDocument();
   });
 });
 

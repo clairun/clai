@@ -493,7 +493,7 @@ timezone: string, };
 
 export type SegmentApproval = { text: string, kind: SegmentKind, suggestedPrefix: string, };
 
-export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways", scope: PermissionScope, prefix: string, } | { "kind": "denyOnce" } | { "kind": "denyAlways", scope: PermissionScope, prefix: string, };
+export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways", scope: PermissionScope, prefix: string, } | { "kind": "denyOnce", reason?: string, } | { "kind": "denyAlways", scope: PermissionScope, prefix: string, reason?: string, };
 
 export type SegmentKind = "simple" | "opaque";
 
@@ -515,7 +515,7 @@ export type SetSkillSourceEnabledRequest = { id: string, enabled: boolean, };
 
 export type ShellAccessMode = "off" | "restricted" | "full";
 
-export type ShellCapabilityConfig = { mode: ShellAccessMode, allowedCommandPrefixes: Array<string>, blockedCommandPrefixes: Array<string>, };
+export type ShellCapabilityConfig = { mode: ShellAccessMode, allowedCommandPrefixes: Array<string>, blockedCommandPrefixes: Array<string>, blockedCommandReasons: { [key in string]: string }, };
 
 export type SkillCatalogResponse = { sources: Array<SkillSourceResponse>, skills: Array<SkillDefinition>, diagnostics: Array<SkillSourceDiagnostic>, };
 

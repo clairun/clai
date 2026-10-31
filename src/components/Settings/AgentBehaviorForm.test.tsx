@@ -47,7 +47,7 @@ const REVIEWER: AgentDetail = {
   execution: {
     sandbox: { network: 'enabled', sessionBus: 'allow' },
     filesystem: { extraPaths: [HOME_GRANT] },
-    shell: { mode: 'restricted', allowedCommandPrefixes: ['git status'], blockedCommandPrefixes: ['rm'] },
+    shell: { mode: 'restricted', allowedCommandPrefixes: ['git status'], blockedCommandPrefixes: ['rm'], blockedCommandReasons: { rm: 'Avoid deleting files' } },
     web: { enabled: true },
   },
 };
@@ -81,7 +81,7 @@ const sentUpdate = () => api.workspaceUpdateAgent.mock.calls.at(-1)![0] as {
   providerConnectionIds: string[];
   execution: {
     filesystem: { extraPaths: FilesystemPathGrant[] };
-    shell: { mode: string; allowedCommandPrefixes: string[]; blockedCommandPrefixes: string[] };
+    shell: { mode: string; allowedCommandPrefixes: string[]; blockedCommandPrefixes: string[]; blockedCommandReasons: Record<string, string> };
     web: { enabled: boolean };
     sandbox: { sessionBus: string };
   };
@@ -126,13 +126,33 @@ describe('AgentBehaviorForm', () => {
       execution: {
         sandbox: { network: 'enabled', sessionBus: 'allow' },
         filesystem: { extraPaths: [HOME_GRANT] },
-        shell: { mode: 'restricted', allowedCommandPrefixes: ['git status'], blockedCommandPrefixes: ['rm'] },
+        shell: { mode: 'restricted', allowedCommandPrefixes: ['git status'], blockedCommandPrefixes: ['rm'], blockedCommandReasons: { rm: 'Avoid deleting files' } },
         web: { enabled: true },
       },
       enabled: true,
     });
     // The saved values are the new baseline, without the host re-rendering.
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('keeps a saved denial reason when a library agent changes other settings', async () => {
+    const saveBehavior = vi.fn().mockResolvedValue(undefined);
+    const { ref } = renderForm({ agentId: 'agent-1', initialAgent: REVIEWER, saveBehavior });
+    await screen.findByDisplayValue('Reviewer');
+
+    await userEvent.type(screen.getByLabelText('Instructions'), ' carefully');
+    await submit(ref);
+
+    expect(saveBehavior).toHaveBeenCalledWith(
+      expect.objectContaining({
+        execution: expect.objectContaining({
+          shell: expect.objectContaining({
+            blockedCommandPrefixes: ['rm'],
+            blockedCommandReasons: { rm: 'Avoid deleting files' },
+          }),
+        }),
+      })
+    );
   });
 
   it('create flow waits for the backend defaults, validates, then sends the pre-populated grant', async () => {
@@ -170,7 +190,7 @@ describe('AgentBehaviorForm', () => {
     const request = api.workspaceCreateAgent.mock.calls[0]![0] as {
       name: string;
       providerConnectionIds: string[];
-      execution: { filesystem: { extraPaths: unknown[] }; shell: { mode: string; blockedCommandPrefixes: string[] } };
+      execution: { filesystem: { extraPaths: unknown[] }; shell: { mode: string; blockedCommandPrefixes: string[]; blockedCommandReasons: Record<string, string> } };
     };
     expect(request.name).toBe('Scout');
     expect(request.providerConnectionIds).toEqual(['conn-b']);
@@ -179,6 +199,7 @@ describe('AgentBehaviorForm', () => {
     expect(request.execution.shell.blockedCommandPrefixes).toEqual([
       'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
     ]);
+    expect(request.execution.shell.blockedCommandReasons).toEqual({});
     expect(api.workspaceUpdateAgent).not.toHaveBeenCalled();
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
@@ -401,9 +422,31 @@ describe('AgentBehaviorForm', () => {
       await submit(ref);
       const { execution } = sentUpdate();
       expect(execution.filesystem.extraPaths).toEqual([HOME_GRANT, { path: '/srv/data', access: 'read_write', origin: null }]);
-      expect(execution.shell).toEqual({ mode: 'full', allowedCommandPrefixes: ['git status'], blockedCommandPrefixes: ['rm'] });
+      expect(execution.shell).toEqual({ mode: 'full', allowedCommandPrefixes: ['git status'], blockedCommandPrefixes: ['rm'], blockedCommandReasons: { rm: 'Avoid deleting files' } });
       expect(execution.web.enabled).toBe(false);
       expect(execution.sandbox.sessionBus).toBe('deny');
+    });
+
+    it('drops a saved denial reason when its blocked prefix is removed', async () => {
+      const { ref } = renderForm({ agentId: 'agent-1' });
+      await screen.findByDisplayValue('Reviewer');
+      await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Remove rm' }));
+
+      await submit(ref);
+      expect(sentUpdate().execution.shell).toEqual({
+        mode: 'restricted',
+        allowedCommandPrefixes: ['git status'],
+        blockedCommandPrefixes: [],
+        blockedCommandReasons: {},
+      });
+
+      await userEvent.type(
+        screen.getByRole('textbox', { name: 'New entry for blocked command prefixes' }),
+        'rm{enter}'
+      );
+      await submit(ref);
+      expect(sentUpdate().execution.shell.blockedCommandReasons).toEqual({});
     });
 
     it('hides both prefix lists when the shell is off', async () => {
