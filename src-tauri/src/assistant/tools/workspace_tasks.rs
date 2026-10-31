@@ -2636,7 +2636,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forty_first_assignment_rejected_budget_exceeded() {
+    async fn sixty_first_assignment_rejected_budget_exceeded() {
         let (_tmp, pool) = workspace_pool().await;
         let parent = parent_session(&pool).await;
         for n in 1..=signals::AGENT_SENDS_PER_HOUR {
@@ -2645,10 +2645,11 @@ mod tests {
                 .unwrap_or_else(|error| panic!("assignment {n}: {error}"));
         }
 
-        let error = delegate(&pool, &parent, "run-1", "task-41")
+        let error = delegate(&pool, &parent, "run-1", "task-61")
             .await
             .unwrap_err();
         assert!(error.starts_with("budget_exceeded:"), "{error}");
+        assert!(error.contains("you already sent 60"), "{error}");
         assert_eq!(task_count(&pool).await, signals::AGENT_SENDS_PER_HOUR);
     }
 
@@ -2676,7 +2677,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn forty_first_agent_send_rejected_budget_exceeded_nothing_stored() {
+    async fn sixty_first_agent_send_rejected_budget_exceeded_nothing_stored() {
         let (_tmp, pool) = workspace_pool().await;
         let parent = parent_session(&pool).await;
         // The assignment is the sender's first agent message of the hour.
@@ -2690,10 +2691,12 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.starts_with("budget_exceeded:"), "{error}");
+        assert!(error.contains("you already sent 60"), "{error}");
         let error = delegate(&pool, &parent, "run-2", "task-2")
             .await
             .unwrap_err();
         assert!(error.starts_with("budget_exceeded:"), "{error}");
+        assert!(error.contains("you already sent 60"), "{error}");
         assert_eq!(message_count(&pool).await, before);
         assert_eq!(task_count(&pool).await, 1);
 
