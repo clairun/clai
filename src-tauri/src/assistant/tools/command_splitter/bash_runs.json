@@ -386,5 +386,10 @@
   {"input": "A+=x touch PWN", "runs": ["touch"]},
   {"input": "A[0]=x touch PWN", "runs": ["touch"]},
   {"input": "A[1 + 1]=x touch PWN", "runs": ["touch"]},
-  {"input": "A=x \\\ntouch PWN", "runs": ["touch"]}
+  {"input": "A=x \\\ntouch PWN", "runs": ["touch"]},
+  {"input": "time make build", "runs": ["make"]},
+  {"input": "nice -n 5 touch PWN", "runs": ["nice"]},
+  {"input": "env FOO=1 touch PWN", "runs": ["env"]},
+  {"input": "timeout --signal=KILL 60 touch PWN", "runs": ["timeout"]},
+  {"input": "taskset -c 0 touch PWN", "runs": ["taskset"]}
 ]

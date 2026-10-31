@@ -343,7 +343,7 @@ pub(crate) fn evaluate_command_policy(
     extra_blocked_prefixes: &[String],
 ) -> PolicyResult {
     use crate::assistant::tools::command_splitter::{split_command, Segment};
-    use crate::assistant::tools::prefix_detector::{by_command_name, suggest_prefix};
+    use crate::assistant::tools::prefix_detector::{by_head_name, by_run_command, suggest_prefix};
     use crate::commands::permissions::SegmentApproval;
 
     if command.trim().is_empty() {
@@ -385,8 +385,12 @@ pub(crate) fn evaluate_command_policy(
             find_matching_prefix(&execution.shell.blocked_command_prefixes, text)
                 .or_else(|| find_matching_prefix(extra_blocked_prefixes, text))
         };
-        if let Some(matched) =
-            blocked(text).or_else(|| by_command_name(text).and_then(|name| blocked(&name)))
+        // The blocklist sees the command the segment runs, and the head it
+        // runs it with: `timeout 60 rm -rf x` is blocked by `rm` and by
+        // `timeout`.
+        if let Some(matched) = blocked(text)
+            .or_else(|| by_head_name(text).and_then(|head| blocked(&head)))
+            .or_else(|| by_run_command(text).and_then(|cmd| blocked(&cmd)))
         {
             return PolicyResult::Block {
                 segment_text: text.to_string(),
@@ -2240,6 +2244,54 @@ mod tests {
                 "{command}"
             );
         }
+    }
+
+    #[test]
+    fn policy_blocklist_sees_the_command_a_wrapper_runs() {
+        // `timeout` only changes how the command runs, so the blocklist sees
+        // the command itself.
+        let exec = restricted_execution_config(&["git log"], &["rm"]);
+        for command in [
+            "timeout 60 rm -rf x",
+            "timeout --signal=KILL 60 rm -rf x",
+            "nice -n 5 rm -rf x",
+            "env FOO=1 rm -rf x",
+        ] {
+            let err = enforce_command_policy(&exec, None, command).unwrap_err();
+            assert!(
+                matches!(err, CommandDenial::ExplicitlyBlocked(_)),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_blocklist_sees_the_wrapper_too() {
+        let exec = restricted_execution_config(&["git log"], &["timeout"]);
+        let err = enforce_command_policy(&exec, None, "timeout 60 cargo build").unwrap_err();
+        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
+    }
+
+    #[test]
+    fn policy_suggests_the_command_a_wrapper_runs() {
+        // The row the user approves is the whole wrapper, but the prefix it
+        // offers is the command inside it, so the grant is specific and
+        // covers the row it came from.
+        let exec = restricted_execution_config(&[], &[]);
+        let rows = approval_texts(&exec, "timeout 600 cargo build 2>&1 | tail -20");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "timeout 600 cargo build 2>&1".to_string(),
+                    "cargo build".to_string()
+                ),
+                ("tail -20".to_string(), "tail".to_string()),
+            ]
+        );
+        // The saved prefix covers the row it came from.
+        let exec = restricted_execution_config(&["cargo build"], &[]);
+        assert!(enforce_command_policy(&exec, None, "timeout 600 cargo build 2>&1").is_ok());
     }
 
     #[test]

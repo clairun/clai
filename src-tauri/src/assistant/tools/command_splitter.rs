@@ -16,10 +16,14 @@
 //! did not parse (`Walker::leaf`). A parse error, anything else, or a
 //! construct whose effect depends on runtime values bash may evaluate as code
 //! (arithmetic on variables, indirect expansion) makes the whole input one
-//! [`Segment::Unparsed`]. So does a command that runs another command or a
-//! string as code from its arguments (`xargs`, `/usr/bin/env`, `bash -c`,
-//! `trap`, …), input that names a variable bash expands as code (`PS4`), or a
-//! command whose name is not a plain word (`\rm`, `"$cmd"`).
+//! [`Segment::Unparsed`]. So does a command whose argument is a command or a
+//! string of code that is not written out (`xargs`, `bash -c`, `trap`, …),
+//! input that names a variable bash expands as code (`PS4`), or a command
+//! whose name is not a plain word (`\rm`, `"$cmd"`).
+//!
+//! A wrapper that only changes how a command runs still names the command it
+//! runs (`timeout 600 cargo build` runs `cargo build`), so its row keeps that
+//! command: the policy can allowlist it, and the blocklist sees it.
 //!
 //! - [`Segment::Simple`] — a plain command.
 //! - [`Segment::Opaque`] — a command with a redirect, heredoc, here-string,
@@ -95,7 +99,7 @@ fn parse(input: &str) -> Option<tree_sitter::Tree> {
 /// The words of `row` when it holds one command: its name and arguments as
 /// written, without leading assignments, redirects or heredoc bodies
 /// (`A=$'\'' /bin/rm -rf x > f` → `/bin/rm`, `-rf`, `x`).
-pub fn command_words(row: &str) -> Option<Vec<&str>> {
+pub fn row_words(row: &str) -> Option<Vec<&str>> {
     let tree = parse(row)?;
     let root = tree.root_node();
     let mut cursor = root.walk();
@@ -106,6 +110,15 @@ pub fn command_words(row: &str) -> Option<Vec<&str>> {
         node = node.child_by_field_name("body")?;
     }
     command_node_words(row, node)
+}
+
+/// The command `row` runs: the words of the command itself, looking through
+/// the wrappers that only change how it runs (`timeout 600 cargo build` →
+/// `cargo build`). `None` when the command is not written out (`bash -c
+/// 'rm -rf /'`) or when the wrapper's own arguments cannot be told from the
+/// command.
+pub fn command_words(row: &str) -> Option<Vec<&str>> {
+    effective_words(&row_words(row)?)
 }
 
 /// The name and arguments of a command node, as written in `src`.
@@ -121,9 +134,10 @@ fn command_node_words<'src>(src: &'src str, node: Node) -> Option<Vec<&'src str>
     Some(words.iter().map(|n| &src[n.byte_range()]).collect())
 }
 
-/// Commands that run another command, or a string as code, from their
-/// arguments. Matched on the last part of the command's path.
-const WRAPPERS: &[&str] = &[
+/// Commands whose argument is a command or a string of code that is not
+/// written out, so the command they run cannot be named. Matched on the last
+/// part of the command's path.
+const CODE_WRAPPERS: &[&str] = &[
     "bash",
     "sh",
     "zsh",
@@ -133,12 +147,6 @@ const WRAPPERS: &[&str] = &[
     "xargs",
     "eval",
     "watch",
-    "nohup",
-    "time",
-    "timeout",
-    "nice",
-    "taskset",
-    "env",
     "exec",
     "source",
     ".",
@@ -156,6 +164,140 @@ const WRAPPERS: &[&str] = &[
     "enable",
     "fc",
 ];
+
+/// A wrapper that only changes how a command runs: the command it runs is
+/// written out after it, so the policy can still name it.
+struct ModifierWrapper {
+    /// The wrapper's name, as it is written.
+    name: &'static str,
+    /// The options whose value is the next argument.
+    value_options: &'static [&'static str],
+    /// The plain arguments the wrapper takes before the command
+    /// (`timeout`'s duration).
+    plain_args: usize,
+}
+
+const MODIFIER_WRAPPERS: &[ModifierWrapper] = &[
+    ModifierWrapper {
+        name: "timeout",
+        value_options: &["-s", "--signal", "-k", "--kill-after"],
+        plain_args: 1,
+    },
+    ModifierWrapper {
+        name: "time",
+        value_options: &[],
+        plain_args: 0,
+    },
+    ModifierWrapper {
+        name: "nice",
+        value_options: &["-n", "--adjustment"],
+        plain_args: 0,
+    },
+    ModifierWrapper {
+        name: "nohup",
+        value_options: &[],
+        plain_args: 0,
+    },
+    ModifierWrapper {
+        name: "taskset",
+        value_options: &["-c", "--cpu-list", "-p", "--pid"],
+        plain_args: 0,
+    },
+    ModifierWrapper {
+        name: "stdbuf",
+        value_options: &["-i", "--input", "-o", "--output", "-e", "--error"],
+        plain_args: 0,
+    },
+    ModifierWrapper {
+        name: "ionice",
+        value_options: &["-c", "--class", "-n", "--classdata"],
+        plain_args: 0,
+    },
+    ModifierWrapper {
+        name: "chrt",
+        value_options: &["--rr"],
+        plain_args: 0,
+    },
+    ModifierWrapper {
+        name: "setsid",
+        value_options: &[],
+        plain_args: 0,
+    },
+    ModifierWrapper {
+        name: "env",
+        value_options: &["-u", "--unset", "-C", "--chdir"],
+        plain_args: 0,
+    },
+];
+
+/// The command the words name, looking through the wrappers that only change
+/// how it runs: `timeout 600 cargo build` names `cargo build`. `None` when
+/// the words name a command that is not written out (`bash -c 'rm -rf /'`),
+/// or when the wrapper's own arguments cannot be told from the command.
+fn effective_words<'a>(words: &[&'a str]) -> Option<Vec<&'a str>> {
+    let (name, rest) = words.split_first()?;
+    let base = name.rsplit('/').next().unwrap_or(name);
+    if CODE_WRAPPERS.contains(&base) {
+        return None;
+    }
+    let Some(wrapper) = MODIFIER_WRAPPERS.iter().find(|w| w.name == base) else {
+        return Some(words.to_vec());
+    };
+    if name.contains('/') {
+        // A wrapper run by path: its own arguments are not the ones the
+        // table describes, so the command it runs is not ours to name.
+        return None;
+    }
+    // The wrapper's own options come first.
+    let mut at = 0;
+    while let Some(arg) = rest.get(at) {
+        if *arg == "--" {
+            at += 1;
+            break;
+        }
+        if !arg.starts_with('-') || *arg == "-" {
+            break;
+        }
+        if arg.contains('=') {
+            at += 1;
+        } else if wrapper.value_options.contains(arg) {
+            at += 2;
+        } else {
+            at += 1;
+        }
+    }
+    // Then the arguments the wrapper takes before the command.
+    for _ in 0..wrapper.plain_args {
+        let arg = *rest.get(at)?;
+        if arg.starts_with('-') && arg != "-" {
+            return None;
+        }
+        at += 1;
+    }
+    // `env` takes assignments before the command.
+    while rest.get(at).is_some_and(|arg| is_assignment(arg)) {
+        at += 1;
+    }
+    effective_words(rest.get(at..)?)
+}
+
+/// A `NAME=value` token, as `env` takes before the command it runs.
+fn is_assignment(token: &str) -> bool {
+    let Some(eq) = token.find('=') else {
+        return false;
+    };
+    if eq == 0 {
+        return false;
+    }
+    let mut chars = token[..eq].chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
 
 /// Variables whose value bash, or a bash it starts, expands as code.
 const CODE_VARIABLES: &[&str] = &["PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV"];
@@ -253,14 +395,18 @@ impl<'src> Walker<'src> {
 
     /// A command; `row` is the node whose text the user approves.
     fn command(&mut self, node: Node, row: Node) -> Option<()> {
+        let mut wrapped = false;
         if node.kind() == "command" {
             let name = node.child_by_field_name("name")?;
             let word = name.named_child(0)?;
             let text = self.text(word);
             let basename = text.rsplit('/').next().unwrap_or(text);
-            if word.kind() != "word" || !is_plain_name(text) || WRAPPERS.contains(&basename) {
+            if word.kind() != "word" || !is_plain_name(text) || CODE_WRAPPERS.contains(&basename) {
                 return None;
             }
+            // A wrapper runs the command written after it: the row is opaque
+            // and the command it runs is the one the policy names.
+            wrapped = MODIFIER_WRAPPERS.iter().any(|w| w.name == basename);
             // A redirect before the name would head the row, hiding the
             // command from prefix rules: `2>&1 rm -rf x`.
             let mut cursor = node.walk();
@@ -273,12 +419,14 @@ impl<'src> Walker<'src> {
             }
         }
         let start = self.out.len();
-        let opaque = self.words(node)?;
+        let opaque = self.words(node)? || wrapped;
         self.out.insert(start, Segment::Simple(String::new()));
         let text = self.row_text(row, node.start_byte());
-        // Policy reads the command from the row text alone, so it must hold
-        // the same words.
-        if command_words(&text)? != command_node_words(self.src, node)? {
+        // Policy reads the command from the row text alone, so it must name
+        // the same command.
+        let row_command = command_words(&text)?;
+        let node_command = effective_words(&command_node_words(self.src, node)?)?;
+        if row_command != node_command {
             return None;
         }
         self.out[start] = if opaque || row != node {
@@ -1242,16 +1390,14 @@ mod tests {
 
     #[test]
     fn command_that_runs_its_arguments_is_unparsed() {
+        // The command these run is not written out, so the row cannot name
+        // it and is asked as its exact text.
         for input in [
             r#"bash -c "rm -rf /""#,
             r#"sh -c "echo hi""#,
             "find . -name '*.tmp' | xargs rm",
             r#"eval "$cmd""#,
             "watch -n 1 'ls'",
-            "time make build",
-            "timeout 60 cargo test",
-            "nohup touch PWN",
-            "env -i mycmd",
             "command touch PWN",
             "exec touch PWN",
             "source ./setup.sh",
@@ -1259,6 +1405,38 @@ mod tests {
             "\\touch PWN",
             "\"touch\" PWN",
         ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn wrapper_that_only_changes_how_a_command_runs_keeps_the_command() {
+        // The command the wrapper runs is written out, so the row names it
+        // and the policy can allowlist it.
+        for (input, command) in [
+            ("timeout 60 cargo test", "cargo test"),
+            ("timeout --signal=KILL 60 cargo test", "cargo test"),
+            ("timeout -s KILL 60 cargo test", "cargo test"),
+            ("timeout 60 cargo test --lib", "cargo test --lib"),
+            ("time make build", "make build"),
+            ("nice -n 5 cargo build", "cargo build"),
+            ("nohup cargo build", "cargo build"),
+            ("env FOO=1 cargo build", "cargo build"),
+            ("env -i cargo build", "cargo build"),
+            ("taskset -c 0 cargo build", "cargo build"),
+        ] {
+            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
+            assert_eq!(
+                command_words(input).map(|words| words.join(" ")),
+                Some(command.to_string()),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrapper_without_a_command_written_out_stays_unparsed() {
+        for input in ["timeout 60", "env", "env -i", "nice -n", "timeout --signal"] {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
     }

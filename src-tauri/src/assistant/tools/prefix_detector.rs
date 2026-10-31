@@ -29,7 +29,7 @@
 
 #![allow(dead_code)] // wired into the approval flow in commit 7
 
-use crate::assistant::tools::command_splitter::command_words;
+use crate::assistant::tools::command_splitter::{command_words, row_words};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Style {
@@ -326,11 +326,25 @@ pub fn canonicalize_for_match(segment: &str) -> Option<String> {
     )
 }
 
-/// `segment` as the words the shell runs, joined by single spaces, without
-/// leading `VAR=value` assignments and with the directory dropped from the
-/// command name: `FOO='a b' /usr/bin/rm\t-rf x` → `rm -rf x`. `None` when
-/// `segment` is not one command.
-pub fn by_command_name(segment: &str) -> Option<String> {
+/// The head of `segment` as the shell runs it, joined by single spaces, with
+/// the directory dropped from the command name: `FOO='a b' /usr/bin/rm\t-rf
+/// x` → `rm -rf x`. `None` when `segment` is not one command.
+pub fn by_head_name(segment: &str) -> Option<String> {
+    let words = row_words(segment)?;
+    let name = words[0].rsplit('/').next().unwrap_or(words[0]);
+    Some(
+        std::iter::once(name)
+            .chain(words[1..].iter().copied())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+/// The command `segment` runs, joined by single spaces, with the directory
+/// dropped from the command name: `timeout 60 rm -rf x` → `rm -rf x`. `None`
+/// when the command is not written out (`bash -c 'rm -rf /'`), so the
+/// blocklist cannot see into it.
+pub fn by_run_command(segment: &str) -> Option<String> {
     let words = command_words(segment)?;
     let name = words[0].rsplit('/').next().unwrap_or(words[0]);
     Some(
@@ -823,5 +837,54 @@ mod tests {
     #[test]
     fn canonicalize_all_assignment_segment_returns_none() {
         assert_eq!(canonicalize_for_match("FOO=bar BAZ=1"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Wrappers that only change how a command runs
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn wrapper_suggests_the_command_it_runs() {
+        assert_eq!(suggest_prefix("timeout 600 cargo build"), "cargo build");
+        assert_eq!(suggest_prefix("time make build"), "make build");
+        assert_eq!(suggest_prefix("env FOO=1 cargo build"), "cargo build");
+    }
+
+    #[test]
+    fn wrapper_canonicalizes_to_the_command_it_runs() {
+        // The prefix the user saves must match the row it came from, or the
+        // grant never covers it and the user is asked again.
+        assert_eq!(
+            canonicalize_for_match("timeout 600 cargo build 2>&1").as_deref(),
+            Some("cargo build")
+        );
+        // The policy matches a row, not the whole command: the row of the
+        // wrapper is the command with its redirect.
+        assert_eq!(
+            canonicalize_for_match("timeout 600 cargo build 2>&1").as_deref(),
+            Some("cargo build")
+        );
+    }
+
+    #[test]
+    fn wrapper_of_code_has_no_command_to_name() {
+        assert_eq!(suggest_prefix("bash -c 'rm -rf /'"), "");
+        assert_eq!(by_run_command("bash -c 'rm -rf /'"), None);
+    }
+
+    #[test]
+    fn by_head_name_keeps_the_wrapper_and_by_run_command_the_command() {
+        assert_eq!(
+            by_head_name("/usr/bin/timeout 2 rm -rf x").as_deref(),
+            Some("timeout 2 rm -rf x")
+        );
+        assert_eq!(
+            by_run_command("timeout 60 rm -rf x").as_deref(),
+            Some("rm -rf x")
+        );
+        assert_eq!(
+            by_head_name("FOO=1 /usr/bin/rm -rf x").as_deref(),
+            Some("rm -rf x")
+        );
     }
 }
