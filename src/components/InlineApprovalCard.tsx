@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
+import React, { useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { listPendingPermissionRequests, submitPermissionDecision } from '../permissions/client';
 import type { PermissionRequest, SegmentDecision } from '../generated/bindings';
@@ -10,6 +10,9 @@ const PERMISSION_REQUEST_EVENT = 'permissions://request';
 // cancelled or ended run, or a re-asked command superseded it. Drop the
 // card. Payload: { requestId }.
 const PERMISSION_RESOLVED_EVENT = 'permissions://resolved';
+
+// The backend accepts at most 500 characters and rejects the whole
+// decision beyond that, so the field stops there.
 const MAX_REASON_LENGTH = 500;
 const limitReason = (value: string) => Array.from(value).slice(0, MAX_REASON_LENGTH).join('');
 
@@ -31,10 +34,12 @@ const chipPrefix = (prefix: string): string => {
 // at submit time).
 type DecisionKind = 'allowOnce' | 'denyOnce' | 'allowAlways' | 'denyAlways';
 
+const isDenial = (decision: DecisionKind | null): boolean =>
+  decision === 'denyOnce' || decision === 'denyAlways';
+
 interface SegmentCellState {
   prefix: string;
   decision: DecisionKind | null;
-  reason: string;
 }
 
 type CardState = Record<number, SegmentCellState>;
@@ -56,24 +61,38 @@ interface ApprovalCardProps {
 /** One permission request and its decisions. */
 export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps) => {
   const [cells, setCells] = useState<CardState>(() =>
-    Object.fromEntries(req.segments.map((seg, idx) => [idx, { prefix: seg.suggestedPrefix || '', decision: null, reason: '' }]))
+    Object.fromEntries(req.segments.map((seg, idx) => [idx, { prefix: seg.suggestedPrefix || '', decision: null }]))
   );
   const [isSubmitting, setSubmitting] = useState(false);
+  // Latched once the decision is sent, so it cannot be sent twice.
+  const sent = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  const [denyAllSelected, setDenyAllSelected] = useState(false);
-  const [denyAllReason, setDenyAllReason] = useState('');
+  // One reason for the whole request: it travels with this response and
+  // nowhere else, so it is not kept anywhere after the decision.
+  const [reason, setReason] = useState('');
+  const reasonId = useId();
+  const reasonHintId = `${reasonId}-hint`;
+  const reasonCountId = `${reasonId}-count`;
+  // The backend counts code points, so the count does too.
+  const reasonLength = Array.from(reason).length;
   // Collapse: squish the card to a one-line summary so a tall (or stacked)
   // request can't swallow the conversation. Default expanded.
   const [isCollapsed, setCollapsed] = useState(false);
   const spoken = Boolean(speaker);
 
   const sendDecisions = async (decisions: SegmentDecision[]) => {
+    // One decision per request: a click that lands after the send must not
+    // send the decision again.
+    if (sent.current) return;
+    sent.current = true;
     setSubmitting(true);
     setError(null);
     try {
       await submitPermissionDecision(req.requestId, decisions);
       onDecided?.(req.requestId);
     } catch (e) {
+      // A decision that failed can be sent again.
+      sent.current = false;
       setError(typeof e === 'string' ? e : e instanceof Error ? e.message : 'Failed to submit decision');
     } finally {
       setSubmitting(false);
@@ -81,44 +100,59 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
   };
 
   const setSegmentPrefix = (idx: number, prefix: string) =>
-    setCells((current) => ({ ...current, [idx]: { ...current[idx]!, prefix } }));
+    setCells((current) => ({ ...current, [idx]: { decision: current[idx]?.decision ?? null, prefix } }));
 
-  const setSegmentReason = (idx: number, reason: string) =>
-    setCells((current) => ({ ...current, [idx]: { ...current[idx]!, reason: limitReason(reason) } }));
-
-  const decisionsFrom = (selected: CardState): SegmentDecision[] =>
-    req.segments.map((seg, i) => {
-      const cell = selected[i]!;
-      const prefix = cell.prefix.trim() || seg.text;
-      const reason = cell.reason.trim() || undefined;
+  // The reason rides along with the denial it belongs to; an allow never
+  // carries one.
+  const decisionsFrom = (selected: CardState, why: string): SegmentDecision[] => {
+    const trimmedReason = why.trim() || undefined;
+    return req.segments.map((seg, i) => {
+      const cell = selected[i]!; // every segment is decided
+      const prefix = (cell.prefix || '').trim() || seg.text;
       switch (cell.decision) {
         case 'allowOnce':
           return allowOnce();
         case 'allowAlways':
           return allowAlways(prefix);
         case 'denyAlways':
-          return denyAlways(prefix, reason);
+          return denyAlways(prefix, trimmedReason);
         default:
-          return denyOnce(reason);
+          return denyOnce(trimmedReason);
       }
     });
+  };
 
   const handleSegmentDecision = (idx: number, kind: DecisionKind) => {
-    setDenyAllSelected(false);
-    const next: CardState = { ...cells, [idx]: { ...cells[idx]!, decision: kind } };
+    const next: CardState = { ...cells, [idx]: { prefix: cells[idx]?.prefix ?? '', decision: kind } };
     setCells(next);
     if (!req.segments.every((_, i) => next[i]?.decision)) return;
-    if (req.segments.some((_, i) => next[i]?.decision?.startsWith('deny'))) return;
-    sendDecisions(decisionsFrom(next));
+    // A denial waits for the confirm button below: the reason is typed
+    // there, and only the denial carries it.
+    if (req.segments.some((_, i) => isDenial(next[i]?.decision ?? null))) return;
+    sendDecisions(decisionsFrom(next, reason));
   };
 
-  const confirmDenial = () => sendDecisions(decisionsFrom(cells));
-  const confirmDenyAll = () => {
-    const reason = denyAllReason.trim() || undefined;
-    sendDecisions(req.segments.map(() => denyOnce(reason)));
-  };
-  const hasDenial = req.segments.some((_, i) => cells[i]?.decision?.startsWith('deny'));
+  // Deny every part; the one reason field applies to all of them.
+  const denyAll = () =>
+    setCells((current) => {
+      const next: CardState = {};
+      req.segments.forEach((_, idx) => {
+        next[idx] = { prefix: current[idx]?.prefix ?? '', decision: 'denyOnce' };
+      });
+      return next;
+    });
+
+  const confirmDenial = () => sendDecisions(decisionsFrom(cells, reason));
+
+  const hasDenial = req.segments.some((_, i) => isDenial(cells[i]?.decision ?? null));
   const allDecided = req.segments.every((_, i) => cells[i]?.decision);
+  // "Deny always" writes a block rule that lasts, so the confirm says so.
+  const blocksAlways = req.segments.some((_, i) => cells[i]?.decision === 'denyAlways');
+  const confirmLabel = (): string => {
+    if (isSubmitting) return 'Submitting…';
+    if (req.segments.length > 1) return 'Submit decisions';
+    return blocksAlways ? 'Deny and block always' : 'Deny command';
+  };
 
   // Batch "trust this whole command" shortcut. For each segment that
   // has a suggestedPrefix (either Simple or Opaque whose head is
@@ -211,12 +245,12 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
             {!spoken && (
               <p className={styles.segmentsLabel}>
                 {req.segments.length === 1
-                  ? 'Choose how to handle this command:'
+                  ? 'Choose how to handle this command (a denial needs a confirm):'
                   : `${req.segments.length} parts need a decision (confirm after choosing any denial):`}
               </p>
             )}
             {req.segments.map((seg, idx) => {
-              const cell: SegmentCellState = cells[idx] || { prefix: '', decision: null, reason: '' };
+              const cell: SegmentCellState = cells[idx] || { prefix: '', decision: null };
               const isOpaque = seg.kind === 'opaque';
               // The backend now fills `suggestedPrefix` for Opaque
               // segments too (the binary head IS a stable identifier
@@ -288,33 +322,43 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                       {...chipText(spoken, 'Deny once', 'Deny')}
                     />
                   </div>
-                  {cell.decision?.startsWith('deny') && !denyAllSelected && (
-                    <label className={styles.reasonField}>
-                      Reason for denying {req.segments.length > 1 ? `“${seg.text}”` : 'this command'} (optional)
-                      <textarea
-                        value={cell.reason}
-                        onChange={(e) => setSegmentReason(idx, e.target.value)}
-                        rows={2}
-                        disabled={isSubmitting}
-                        placeholder="Tell the agent why"
-                      />
-                    </label>
-                  )}
                 </div>
               );
             })}
           </section>
-          {hasDenial && !denyAllSelected && (
-            <div className={styles.denialActions}>
-              <button
-                type="button"
-                className={`${styles.btn} ${styles.btnConfirmDeny}`}
-                onClick={confirmDenial}
-                disabled={isSubmitting || !allDecided}
-              >
-                {isSubmitting ? 'Submitting…' : req.segments.length > 1 ? 'Submit decisions' : 'Deny command'}
-              </button>
-              {!allDecided && <span className={styles.denialHint}>Choose for every part to continue</span>}
+          {hasDenial && (
+            <div className={styles.denialArea}>
+              <div className={styles.reasonField}>
+                <label htmlFor={reasonId}>Reason for denying (optional)</label>
+                <textarea
+                  id={reasonId}
+                  value={reason}
+                  onChange={(e) => setReason(limitReason(e.target.value))}
+                  rows={2}
+                  disabled={isSubmitting}
+                  placeholder="Tell the agent why"
+                  aria-describedby={`${reasonHintId} ${reasonCountId}`}
+                />
+                <div className={styles.reasonMeta}>
+                  <span className={styles.mutedHint} id={reasonHintId}>
+                    Sent to the agent with this response.
+                  </span>
+                  <span className={styles.mutedHint} id={reasonCountId}>
+                    {reasonLength}/{MAX_REASON_LENGTH} characters
+                  </span>
+                </div>
+              </div>
+              <div className={styles.denialActions}>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnConfirmDeny}`}
+                  onClick={confirmDenial}
+                  disabled={isSubmitting || !allDecided}
+                >
+                  {confirmLabel()}
+                </button>
+                {!allDecided && <span className={styles.mutedHint}>Choose for every part to continue</span>}
+              </div>
             </div>
           )}
           {error && !isSubmitting && <div className={styles.error}>{error}</div>}
@@ -337,31 +381,11 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
               <button
                 type="button"
                 className={`${styles.btn} ${styles.btnDenyAll}`}
-                onClick={() => setDenyAllSelected(true)}
+                onClick={denyAll}
                 disabled={isSubmitting}
                 {...chipText(spoken, 'Deny entire command', 'Deny all', 'Deny every part of this pipeline')}
               />
             </footer>
-          )}
-          {denyAllSelected && (
-            <div className={styles.denyAllPanel}>
-              <label className={styles.reasonField}>
-                Reason for denying the entire command (optional)
-                <textarea
-                  value={denyAllReason}
-                  onChange={(e) => setDenyAllReason(limitReason(e.target.value))}
-                  rows={2}
-                  disabled={isSubmitting}
-                  placeholder="Tell the agent why"
-                />
-              </label>
-              <div className={styles.denialActions}>
-                <button type="button" className={`${styles.btn} ${styles.btnConfirmDeny}`} onClick={confirmDenyAll} disabled={isSubmitting}>
-                  {isSubmitting ? 'Submitting…' : 'Deny entire command'}
-                </button>
-                <button type="button" className={styles.btn} onClick={() => setDenyAllSelected(false)} disabled={isSubmitting}>Cancel</button>
-              </div>
-            </div>
           )}
         </div>
       )}

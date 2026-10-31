@@ -475,20 +475,34 @@ pub async fn submit_permission_decision(
     // The request has left the queue, so say so even if persisting fails.
     emit_permission_resolved(&app, &request_id);
     emit_attention(&app, entry.workspace_id.clone(), remaining);
+    deliver_decisions(state.inner(), entry, decisions)
+}
 
+/// Persists the durable part of the decisions and hands them to the tool
+/// waiting on the approval. Split out of the Tauri command so the delivery
+/// path — the one that carries a denial reason to the model — can be tested
+/// without a Tauri app handle.
+fn deliver_decisions(
+    state: &AppState,
+    entry: PendingEntry,
+    decisions: Vec<SegmentDecision>,
+) -> Result<(), String> {
+    let PendingEntry {
+        sender,
+        workspace_id,
+        request,
+        ..
+    } = entry;
     // Persist always-decisions before delivering so the grant survives a
     // crash between user click and command execution. If a request lacks
     // workspace/agent identity, there is intentionally no legacy fallback:
     // "always" decisions degrade to the current approval round only.
-    if let (Some(workspace_id), Some(agent_id)) = (
-        entry.workspace_id.as_deref(),
-        entry.request.agent_id.as_deref(),
-    ) {
-        persist_decisions_to_agent(state.inner(), workspace_id, agent_id, &decisions)?;
+    if let (Some(workspace_id), Some(agent_id)) =
+        (workspace_id.as_deref(), request.agent_id.as_deref())
+    {
+        persist_decisions_to_agent(state, workspace_id, agent_id, &decisions)?;
     }
-    let _ = entry
-        .sender
-        .send(PendingApprovalOutcome::Decision(decisions));
+    let _ = sender.send(PendingApprovalOutcome::Decision(decisions));
     Ok(())
 }
 
@@ -613,7 +627,7 @@ fn apply_decisions_to_shell_policy(
                     changed = true;
                 }
             }
-            SegmentDecision::DenyAlways { prefix, reason, .. } => {
+            SegmentDecision::DenyAlways { prefix, .. } => {
                 let prefix = prefix.trim();
                 if prefix.is_empty() {
                     continue;
@@ -631,36 +645,6 @@ fn apply_decisions_to_shell_policy(
                         .blocked_command_prefixes
                         .push(prefix.to_string());
                     changed = true;
-                }
-                match reason.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
-                    Some(reason) => {
-                        if agent
-                            .execution
-                            .shell
-                            .blocked_command_reasons
-                            .get(prefix)
-                            .map(String::as_str)
-                            != Some(reason)
-                        {
-                            agent
-                                .execution
-                                .shell
-                                .blocked_command_reasons
-                                .insert(prefix.to_string(), reason.to_string());
-                            changed = true;
-                        }
-                    }
-                    None => {
-                        if agent
-                            .execution
-                            .shell
-                            .blocked_command_reasons
-                            .remove(prefix)
-                            .is_some()
-                        {
-                            changed = true;
-                        }
-                    }
                 }
             }
             SegmentDecision::AllowOnce | SegmentDecision::DenyOnce { .. } => {}
@@ -790,7 +774,7 @@ mod tests {
     }
 
     #[test]
-    fn denial_reasons_are_optional_in_existing_decisions_and_policy() {
+    fn denial_reasons_are_optional_in_existing_decisions() {
         let once: SegmentDecision = serde_json::from_str(r#"{"kind":"denyOnce"}"#).unwrap();
         assert!(matches!(once, SegmentDecision::DenyOnce { reason: None }));
         let always: SegmentDecision =
@@ -800,39 +784,62 @@ mod tests {
             always,
             SegmentDecision::DenyAlways { reason: None, .. }
         ));
-        let old_policy: crate::config::types::ShellCapabilityConfig =
-            serde_json::from_str(r#"{"mode":"restricted","blockedCommandPrefixes":["curl"]}"#)
-                .unwrap();
-        assert!(old_policy.blocked_command_reasons.is_empty());
     }
 
     #[test]
-    fn deny_always_reason_persists_and_can_be_replaced() {
-        let mut agent = fake_agent();
-        let decision = SegmentDecision::DenyAlways {
-            scope: PermissionScope::Agent,
-            prefix: "curl".to_string(),
-            reason: Some("Do not send data externally".to_string()),
-        };
-        assert!(apply_decisions_to_shell_policy(&mut agent, &[decision]));
-        assert_eq!(
-            agent
-                .execution
-                .shell
-                .blocked_command_reasons
-                .get("curl")
-                .unwrap(),
-            "Do not send data externally"
-        );
+    fn deny_always_with_reason_persists_only_the_prefix() {
+        // The reason belongs to the response that carries it, never to the
+        // agent config on disk. A denial with a reason and one without must
+        // leave the same bytes behind.
+        let reason = "Do not send data externally";
+        let mut with_reason = fake_agent();
         assert!(apply_decisions_to_shell_policy(
-            &mut agent,
+            &mut with_reason,
+            &[SegmentDecision::DenyAlways {
+                scope: PermissionScope::Agent,
+                prefix: "curl".to_string(),
+                reason: Some(reason.to_string()),
+            }]
+        ));
+        let mut without_reason = fake_agent();
+        assert!(apply_decisions_to_shell_policy(
+            &mut without_reason,
             &[deny_always("curl")]
         ));
-        assert!(!agent
+
+        assert!(with_reason
             .execution
             .shell
-            .blocked_command_reasons
-            .contains_key("curl"));
+            .blocked_command_prefixes
+            .contains(&"curl".to_string()));
+        let serialized = serde_json::to_string(&with_reason).unwrap();
+        assert!(
+            !serialized.contains(reason),
+            "reason leaked into config: {serialized}"
+        );
+        assert!(!serialized.contains("blockedCommandReasons"));
+        assert_eq!(
+            serde_json::to_value(&with_reason.execution.shell).unwrap(),
+            serde_json::to_value(&without_reason.execution.shell).unwrap()
+        );
+    }
+
+    #[test]
+    fn old_config_with_blocked_command_reasons_still_loads() {
+        // Configs written by the draft build carry `blockedCommandReasons`.
+        // The field is gone from the type, so serde must ignore it instead
+        // of rejecting the whole config.
+        let old_policy: crate::config::types::ShellCapabilityConfig = serde_json::from_str(
+            r#"{"mode":"restricted","blockedCommandPrefixes":["curl"],"blockedCommandReasons":{"curl":"old reason"}}"#,
+        )
+        .expect("old config must still deserialize");
+        assert_eq!(
+            old_policy.blocked_command_prefixes,
+            vec!["curl".to_string()]
+        );
+        let serialized = serde_json::to_string(&old_policy).unwrap();
+        assert!(!serialized.contains("blockedCommandReasons"));
+        assert!(!serialized.contains("old reason"));
     }
 
     #[test]
@@ -1225,5 +1232,84 @@ mod approval_routing_tests {
         .expect("persist");
 
         assert_eq!(fixture.definition().revision, 1);
+    }
+}
+
+#[cfg(test)]
+mod denial_reason_tests {
+    //! A denial reason reaches the model through the tool error, and is not
+    //! written to any structured state on the way.
+
+    use super::*;
+    use crate::commands::path_grants::approval_destination_tests::*;
+
+    #[tokio::test]
+    async fn a_submitted_reason_reaches_the_tool_error_and_is_not_persisted() {
+        let fixture = Fixture::new();
+
+        let segments = vec![SegmentApproval {
+            text: "curl x".to_string(),
+            kind: SegmentKind::Simple,
+            suggested_prefix: "curl".to_string(),
+        }];
+        let request = PermissionRequest {
+            request_id: "req-1".to_string(),
+            workspace_id: Some(WORKSPACE_ID.to_string()),
+            agent_id: Some(MAIN_ID.to_string()),
+            agent_name: None,
+            command: "curl x".to_string(),
+            segments: segments.clone(),
+            persists_to_shared_agent: false,
+            also_affects_workspaces: Vec::new(),
+        };
+        // The bash tool registers the request and waits on the oneshot.
+        let (rx, _count) = fixture
+            .state
+            .pending_approvals
+            .register(request.clone(), "run-1".to_string())
+            .await;
+
+        // The user denies always and gives a reason.
+        let mut decisions = vec![SegmentDecision::DenyAlways {
+            scope: PermissionScope::Agent,
+            prefix: "curl".to_string(),
+            reason: Some("no network upload".to_string()),
+        }];
+        normalize_denial_reasons(&mut decisions).expect("normalize reasons");
+
+        // The submit command removes the request from the queue and hands the
+        // decision to the waiting tool.
+        let (entry, _remaining) = fixture
+            .state
+            .pending_approvals
+            .take(&request.request_id)
+            .await
+            .expect("pending approval");
+        deliver_decisions(&fixture.state, entry, decisions).expect("deliver");
+
+        // The tool turns the decision into the error the model reads.
+        let PendingApprovalOutcome::Decision(received) = rx.await.expect("decision") else {
+            panic!("expected a decision");
+        };
+        let error = crate::assistant::tools::local::denied_segments_message(&segments, &received);
+        assert!(error.contains("no network upload"), "{error}");
+
+        // The reason lives only in that error: the agent config keeps the
+        // blocked prefix and says nothing about the reason.
+        let config = fixture.config();
+        assert!(config
+            .main_agent
+            .as_ref()
+            .expect("main")
+            .execution
+            .shell
+            .blocked_command_prefixes
+            .contains(&"curl".to_string()));
+        let serialized = serde_json::to_string(&config).expect("serialize config");
+        assert!(!serialized.contains("no network upload"), "{serialized}");
+        assert!(
+            !serialized.contains("blockedCommandReasons"),
+            "{serialized}"
+        );
     }
 }

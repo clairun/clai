@@ -317,8 +317,6 @@ pub struct ShellCapabilityConfig {
     pub allowed_command_prefixes: Vec<String>,
     #[serde(default = "default_restricted_shell_blocklist")]
     pub blocked_command_prefixes: Vec<String>,
-    #[serde(default)]
-    pub blocked_command_reasons: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for ShellCapabilityConfig {
@@ -327,7 +325,6 @@ impl Default for ShellCapabilityConfig {
             mode: ShellAccessMode::Off,
             allowed_command_prefixes: Vec::new(),
             blocked_command_prefixes: default_restricted_shell_blocklist(),
-            blocked_command_reasons: Default::default(),
         }
     }
 }

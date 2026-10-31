@@ -1664,3 +1664,54 @@ mod agent_face_tests {
         assert!(!out.contains("avatar"), "{out}");
     }
 }
+
+#[cfg(test)]
+mod denial_reason_compat_tests {
+    //! A workspace config written by a build that persisted per-prefix
+    //! denial reasons must still load. The reason belongs to the response
+    //! that carries it, so the field is gone from the config; serde drops
+    //! the unknown key and the file loads unchanged.
+
+    use super::*;
+
+    #[test]
+    fn a_config_with_blocked_command_reasons_still_loads() {
+        let value = serde_json::json!({
+            "version": 1,
+            "id": "ws",
+            "title": "Legacy",
+            "createdAt": 1,
+            "updatedAt": 2,
+            "mainAgent": {
+                "id": "main-1",
+                "name": "Manager",
+                "description": "",
+                "enabled": true,
+                "execution": {
+                    "shell": {
+                        "mode": "restricted",
+                        "blockedCommandPrefixes": ["curl"],
+                        "blockedCommandReasons": { "curl": "old reason" }
+                    }
+                },
+                "createdAt": 1,
+                "updatedAt": 2
+            }
+        });
+
+        let config: WorkspaceConfig =
+            serde_json::from_value(value).expect("an old config with reasons must still load");
+        let main = config.main_agent.as_ref().expect("main agent");
+        assert_eq!(
+            main.execution.shell.blocked_command_prefixes,
+            vec!["curl".to_string()]
+        );
+
+        let serialized = serde_json::to_string(&config).expect("serializes");
+        assert!(
+            !serialized.contains("blockedCommandReasons"),
+            "{serialized}"
+        );
+        assert!(!serialized.contains("old reason"), "{serialized}");
+    }
+}

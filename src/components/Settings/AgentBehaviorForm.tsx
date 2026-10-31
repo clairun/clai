@@ -84,12 +84,7 @@ const DEFAULT_BLOCKED = ['rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 
 
 const clean = (items: string[] = []): string[] => items.map((item) => item.trim()).filter(Boolean);
 
-type AccessWithReasons = AccessDraft & { blockedCommandReasons: Record<string, string> };
-
-const retainedReasons = (reasons: Record<string, string>, blocked: string[]): Record<string, string> =>
-  Object.fromEntries(Object.entries(reasons).filter(([prefix]) => blocked.includes(prefix)));
-
-const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessWithReasons => ({
+const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessDraft => ({
   grants: (execution.filesystem?.extraPaths || [])
     .map((grant: FilesystemPathGrant) => ({
       path: grant.path?.trim() || '',
@@ -100,19 +95,17 @@ const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessW
   shellMode: execution.shell?.mode || 'off',
   allowed: clean(execution.shell?.allowedCommandPrefixes || []),
   blocked: clean(execution.shell?.blockedCommandPrefixes || DEFAULT_BLOCKED),
-  blockedCommandReasons: { ...execution.shell?.blockedCommandReasons },
   web: execution.web?.enabled || false,
   sessionBus: (execution.sandbox?.sessionBus || 'allow') === 'allow',
 });
 
-const executionFrom = (access: AccessWithReasons): ExecutionCapabilityConfig => ({
+const executionFrom = (access: AccessDraft): ExecutionCapabilityConfig => ({
   sandbox: { network: 'enabled', sessionBus: access.sessionBus ? 'allow' : 'deny' },
   filesystem: { extraPaths: access.grants },
   shell: {
     mode: access.shellMode,
     allowedCommandPrefixes: access.allowed,
     blockedCommandPrefixes: access.blocked,
-    blockedCommandReasons: retainedReasons(access.blockedCommandReasons, access.blocked),
   },
   web: { enabled: access.web },
 });
@@ -123,7 +116,7 @@ interface Draft {
   skillIds: string[];
   mcpIds: string[];
   connectionIds: string[];
-  access: AccessWithReasons;
+  access: AccessDraft;
   enabled: boolean;
 }
 
@@ -161,7 +154,7 @@ const blankAgent = (execution?: Partial<ExecutionCapabilityConfig>): AgentDetail
   selectedSkillIds: [],
   selectedMcpServerIds: [],
   providerConnectionIds: [],
-  execution: execution || { shell: { mode: 'off', allowedCommandPrefixes: [], blockedCommandPrefixes: DEFAULT_BLOCKED, blockedCommandReasons: {} } },
+  execution: execution || { shell: { mode: 'off', allowedCommandPrefixes: [], blockedCommandPrefixes: DEFAULT_BLOCKED } },
   enabled: true,
 });
 
@@ -412,15 +405,7 @@ export const AgentBehaviorForm = ({
       <div className={form.page} ref={rootRef}>
         <AccessView
           draft={draft.access}
-          onChange={(change) => patch({
-            access: {
-              ...draft.access,
-              ...change,
-              blockedCommandReasons: change.blocked
-                ? retainedReasons(draft.access.blockedCommandReasons, change.blocked)
-                : draft.access.blockedCommandReasons,
-            },
-          })}
+          onChange={(change) => patch({ access: { ...draft.access, ...change } })}
           disabled={busy}
           headingRef={viewHeading}
           onBack={backToOverview}

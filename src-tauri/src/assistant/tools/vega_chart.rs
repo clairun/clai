@@ -611,9 +611,6 @@ mod tests {
             session_grants: Arc::new(Mutex::new(vec![])),
             session_allowed_command_prefixes: Arc::new(Mutex::new(vec![])),
             session_blocked_command_prefixes: Arc::new(Mutex::new(vec![])),
-            session_blocked_command_reasons: std::sync::Arc::new(std::sync::Mutex::new(
-                Default::default(),
-            )),
         }
     }
 

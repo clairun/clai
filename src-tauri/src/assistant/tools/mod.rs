@@ -106,7 +106,6 @@ pub struct ToolExecutionContext {
     /// it's a one-shot decision by design, and re-prompting on retry
     /// lets the user reconsider.
     pub session_blocked_command_prefixes: Arc<Mutex<Vec<String>>>,
-    pub session_blocked_command_reasons: Arc<Mutex<std::collections::BTreeMap<String, String>>>,
 }
 
 impl ToolExecutionContext {
@@ -176,25 +175,6 @@ impl ToolExecutionContext {
                 prefixes.push(trimmed.to_string());
             }
         }
-    }
-
-    pub fn set_session_blocked_command_reason(&self, prefix: &str, reason: Option<&str>) {
-        let prefix = prefix.trim();
-        if prefix.is_empty() {
-            return;
-        }
-        if let Ok(mut reasons) = self.session_blocked_command_reasons.lock() {
-            reasons.insert(prefix.to_string(), reason.unwrap_or_default().to_string());
-        }
-    }
-
-    pub fn session_blocked_command_reasons_snapshot(
-        &self,
-    ) -> std::collections::BTreeMap<String, String> {
-        self.session_blocked_command_reasons
-            .lock()
-            .map(|r| r.clone())
-            .unwrap_or_default()
     }
 
     /// Snapshot of run-scoped blocked command prefixes for merging with
