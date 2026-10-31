@@ -89,7 +89,11 @@ describe('FleetRequestPanel', () => {
     expect(within(section).getByLabelText('Command').tagName).toBe('PRE');
     expect(within(section).getByLabelText('Command')).toHaveTextContent('cd /srv/app && cargo test');
     expect(within(section).queryByText('Permission requested')).not.toBeInTheDocument();
+    // The chip only opens the denial panel: the decision waits for the confirm.
     await userEvent.click(within(section).getByRole('button', { name: /Deny all/ }));
+    expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
+    await userEvent.click(within(section).getByRole('button', { name: 'Deny entire command' }));
+    // No reason typed, so none is sent.
     expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', { requestId: 'perm-1', decisions: [{ kind: 'denyOnce' }, { kind: 'denyOnce' }] });
   });
 });
