@@ -85,7 +85,7 @@ pub struct ToolBinding {
     /// re-prompted for the same (or descendant) command for the rest of
     /// the run. `AllowAlways` is additionally persisted by the submit
     /// command into the agent's durable `allowed_command_prefixes`.
-    pub session_allowed_command_prefixes: Arc<Mutex<Vec<String>>>,
+    pub session_allowed_command_prefixes: Arc<Mutex<Vec<crate::assistant::tools::RunCommandGrant>>>,
     /// Run-scoped blocked command prefixes — mirror of the allow cache
     /// for `DenyAlways` decisions. Without this, a `DenyAlways` would be
     /// honored on the next session (durable persistence) but the current
