@@ -189,10 +189,17 @@ pub enum SegmentDecision {
         scope: PermissionScope,
         prefix: String,
     },
-    DenyOnce,
+    DenyOnce {
+        #[serde(default)]
+        #[ts(optional)]
+        reason: Option<String>,
+    },
     DenyAlways {
         scope: PermissionScope,
         prefix: String,
+        #[serde(default)]
+        #[ts(optional)]
+        reason: Option<String>,
     },
 }
 
@@ -456,8 +463,9 @@ pub async fn submit_permission_decision(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     request_id: String,
-    decisions: Vec<SegmentDecision>,
+    mut decisions: Vec<SegmentDecision>,
 ) -> Result<(), String> {
+    normalize_denial_reasons(&mut decisions)?;
     let Some((entry, remaining)) = state.pending_approvals.take(&request_id).await else {
         return Err(format!(
             "No pending approval with request_id `{}` (already resolved or cleared)",
@@ -467,38 +475,55 @@ pub async fn submit_permission_decision(
     // The request has left the queue, so say so even if persisting fails.
     emit_permission_resolved(&app, &request_id);
     emit_attention(&app, entry.workspace_id.clone(), remaining);
-
-    // An incomplete decision list must never authorize the whole command.
-    let valid_count = !decisions.is_empty() && decisions.len() == entry.request.segments.len();
-    if valid_count {
-        // Persist before delivery so an always-grant survives a crash.
-        if let (Some(workspace_id), Some(agent_id)) = (
-            entry.workspace_id.as_deref(),
-            entry.request.agent_id.as_deref(),
-        ) {
-            persist_decisions_to_agent(state.inner(), workspace_id, agent_id, &decisions)?;
-        }
-    }
-    let workspace_id = entry.workspace_id.clone();
-    let result = deliver_decisions(entry, decisions);
-    emit_attention(&app, workspace_id, remaining);
-    result
+    deliver_decisions(state.inner(), entry, decisions)
 }
 
-fn deliver_decisions(entry: PendingEntry, decisions: Vec<SegmentDecision>) -> Result<(), String> {
+/// Validate the complete decision list before persisting any rule, then
+/// deliver it to the tool waiting on the approval.
+fn deliver_decisions(
+    state: &AppState,
+    entry: PendingEntry,
+    decisions: Vec<SegmentDecision>,
+) -> Result<(), String> {
     let expected = entry.request.segments.len();
     let actual = decisions.len();
     if actual == 0 || actual != expected {
         let _ = entry.sender.send(PendingApprovalOutcome::Decision(vec![
-            SegmentDecision::DenyOnce,
+            SegmentDecision::DenyOnce { reason: None },
         ]));
         return Err(format!(
             "Expected {expected} segment decisions, received {actual}"
         ));
     }
+    // Persist before delivery so an always-grant survives a crash. Missing
+    // identity leaves an always decision scoped to this approval only.
+    if let (Some(workspace_id), Some(agent_id)) = (
+        entry.workspace_id.as_deref(),
+        entry.request.agent_id.as_deref(),
+    ) {
+        persist_decisions_to_agent(state, workspace_id, agent_id, &decisions)?;
+    }
     let _ = entry
         .sender
         .send(PendingApprovalOutcome::Decision(decisions));
+    Ok(())
+}
+
+fn normalize_denial_reasons(decisions: &mut [SegmentDecision]) -> Result<(), String> {
+    for decision in decisions.iter_mut() {
+        let (SegmentDecision::DenyOnce { reason } | SegmentDecision::DenyAlways { reason, .. }) =
+            decision
+        else {
+            continue;
+        };
+        if let Some(value) = reason {
+            let trimmed = value.trim();
+            if trimmed.chars().count() > 500 {
+                return Err("Denial reason must be at most 500 characters".to_string());
+            }
+            *reason = (!trimmed.is_empty()).then(|| trimmed.to_string());
+        }
+    }
     Ok(())
 }
 
@@ -624,7 +649,7 @@ fn apply_decisions_to_shell_policy(
                     changed = true;
                 }
             }
-            SegmentDecision::AllowOnce | SegmentDecision::DenyOnce => {}
+            SegmentDecision::AllowOnce | SegmentDecision::DenyOnce { .. } => {}
         }
     }
 
@@ -672,6 +697,7 @@ mod tests {
         SegmentDecision::DenyAlways {
             scope: PermissionScope::Agent,
             prefix: prefix.to_string(),
+            reason: None,
         }
     }
 
@@ -724,6 +750,82 @@ mod tests {
     }
 
     #[test]
+    fn denial_reasons_are_trimmed_and_bounded() {
+        let mut decisions = vec![
+            SegmentDecision::DenyOnce {
+                reason: Some("  use offline data  ".into()),
+            },
+            SegmentDecision::DenyAlways {
+                scope: PermissionScope::Agent,
+                prefix: "curl".into(),
+                reason: Some("  ".into()),
+            },
+        ];
+        normalize_denial_reasons(&mut decisions).unwrap();
+        assert!(
+            matches!(&decisions[0], SegmentDecision::DenyOnce { reason: Some(reason) } if reason == "use offline data")
+        );
+        assert!(matches!(
+            &decisions[1],
+            SegmentDecision::DenyAlways { reason: None, .. }
+        ));
+        let mut too_long = vec![SegmentDecision::DenyOnce {
+            reason: Some("x".repeat(501)),
+        }];
+        assert!(normalize_denial_reasons(&mut too_long).is_err());
+    }
+
+    #[test]
+    fn denial_reasons_are_optional_in_existing_decisions() {
+        let once: SegmentDecision = serde_json::from_str(r#"{"kind":"denyOnce"}"#).unwrap();
+        assert!(matches!(once, SegmentDecision::DenyOnce { reason: None }));
+        let always: SegmentDecision =
+            serde_json::from_str(r#"{"kind":"denyAlways","scope":"agent","prefix":"curl"}"#)
+                .unwrap();
+        assert!(matches!(
+            always,
+            SegmentDecision::DenyAlways { reason: None, .. }
+        ));
+    }
+
+    #[test]
+    fn deny_always_with_reason_persists_only_the_prefix() {
+        // The reason belongs to the response that carries it, never to the
+        // agent config on disk. A denial with a reason and one without must
+        // leave the same bytes behind.
+        let reason = "Do not send data externally";
+        let mut with_reason = fake_agent();
+        assert!(apply_decisions_to_shell_policy(
+            &mut with_reason,
+            &[SegmentDecision::DenyAlways {
+                scope: PermissionScope::Agent,
+                prefix: "curl".to_string(),
+                reason: Some(reason.to_string()),
+            }]
+        ));
+        let mut without_reason = fake_agent();
+        assert!(apply_decisions_to_shell_policy(
+            &mut without_reason,
+            &[deny_always("curl")]
+        ));
+
+        assert!(with_reason
+            .execution
+            .shell
+            .blocked_command_prefixes
+            .contains(&"curl".to_string()));
+        let serialized = serde_json::to_string(&with_reason).unwrap();
+        assert!(
+            !serialized.contains(reason),
+            "reason leaked into config: {serialized}"
+        );
+        assert_eq!(
+            serde_json::to_value(&with_reason.execution.shell).unwrap(),
+            serde_json::to_value(&without_reason.execution.shell).unwrap()
+        );
+    }
+
+    #[test]
     fn apply_decisions_is_idempotent_and_reports_no_change() {
         let mut agent = fake_agent();
         assert!(apply_decisions_to_shell_policy(
@@ -757,7 +859,7 @@ mod tests {
             &mut agent,
             &[
                 SegmentDecision::AllowOnce,
-                SegmentDecision::DenyOnce,
+                SegmentDecision::DenyOnce { reason: None },
                 allow_always("   "),
                 deny_always(""),
             ],
@@ -805,6 +907,7 @@ mod tests {
 
     #[tokio::test]
     async fn mismatched_decision_count_denies_pending_command() {
+        let fixture = crate::commands::path_grants::approval_destination_tests::Fixture::new();
         for (segment_count, count) in [(2, 0), (2, 1), (2, 3), (0, 0)] {
             let pending = PendingApprovals::new();
             let mut request = fake_request(Some("ws-1"));
@@ -819,7 +922,7 @@ mod tests {
             let (rx, _) = pending.register(request, "run-1".to_string()).await;
             let (entry, _) = pending.take(&id).await.unwrap();
             let decisions = (0..count).map(|_| SegmentDecision::AllowOnce).collect();
-            assert!(deliver_decisions(entry, decisions).is_err());
+            assert!(deliver_decisions(&fixture.state, entry, decisions).is_err());
             assert!(
                 matches!(rx.await, Ok(PendingApprovalOutcome::Decision(d)) if d.iter().any(|d| !d.is_allow()))
             );
@@ -1136,5 +1239,79 @@ mod approval_routing_tests {
         .expect("persist");
 
         assert_eq!(fixture.definition().revision, 1);
+    }
+}
+
+#[cfg(test)]
+mod denial_reason_tests {
+    //! A denial reason reaches the model through the tool error, and is not
+    //! written to agent configuration on the way.
+
+    use super::*;
+    use crate::commands::path_grants::approval_destination_tests::*;
+
+    #[tokio::test]
+    async fn a_submitted_reason_reaches_the_tool_error_and_is_not_persisted() {
+        let fixture = Fixture::new();
+
+        let segments = vec![SegmentApproval {
+            text: "curl x".to_string(),
+            kind: SegmentKind::Simple,
+            suggested_prefix: "curl".to_string(),
+        }];
+        let request = PermissionRequest {
+            request_id: "req-1".to_string(),
+            workspace_id: Some(WORKSPACE_ID.to_string()),
+            agent_id: Some(MAIN_ID.to_string()),
+            agent_name: None,
+            command: "curl x".to_string(),
+            segments: segments.clone(),
+            persists_to_shared_agent: false,
+            also_affects_workspaces: Vec::new(),
+        };
+        // The bash tool registers the request and waits on the oneshot.
+        let (rx, _count) = fixture
+            .state
+            .pending_approvals
+            .register(request.clone(), "run-1".to_string())
+            .await;
+
+        // The user denies always and gives a reason.
+        let mut decisions = vec![SegmentDecision::DenyAlways {
+            scope: PermissionScope::Agent,
+            prefix: "curl".to_string(),
+            reason: Some("no network upload".to_string()),
+        }];
+        normalize_denial_reasons(&mut decisions).expect("normalize reasons");
+
+        // The submit command removes the request from the queue and hands the
+        // decision to the waiting tool.
+        let (entry, _remaining) = fixture
+            .state
+            .pending_approvals
+            .take(&request.request_id)
+            .await
+            .expect("pending approval");
+        deliver_decisions(&fixture.state, entry, decisions).expect("deliver");
+
+        // The tool turns the decision into the error the model reads.
+        let PendingApprovalOutcome::Decision(received) = rx.await.expect("decision") else {
+            panic!("expected a decision");
+        };
+        let error = crate::assistant::tools::local::denied_segments_message(&segments, &received);
+        assert!(error.contains("no network upload"), "{error}");
+
+        // The agent config keeps the blocked prefix, but not the reason.
+        let config = fixture.config();
+        assert!(config
+            .main_agent
+            .as_ref()
+            .expect("main")
+            .execution
+            .shell
+            .blocked_command_prefixes
+            .contains(&"curl".to_string()));
+        let serialized = serde_json::to_string(&config).expect("serialize config");
+        assert!(!serialized.contains("no network upload"), "{serialized}");
     }
 }

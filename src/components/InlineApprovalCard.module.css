@@ -6,6 +6,9 @@
 }
 
 .card {
+  /* The reason field's textarea has an intrinsic width, so without this the
+     card cannot shrink below it. */
+  min-width: 0;
   position: relative;
   background: var(--color-bg-elevated);
   border: 1px solid var(--color-border-light);
@@ -139,6 +142,74 @@
   outline: none;
   border-color: var(--color-border-focus);
   box-shadow: 0 0 0 3px var(--color-primary-alpha-15);
+}
+
+/* The denial: one reason for the whole request, and the confirm that
+   sends it. */
+.denialArea {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.reasonField {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  min-width: 0;
+  width: 100%;
+  color: var(--color-text-secondary);
+  font-size: 11px;
+}
+
+.reasonField textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 52px;
+  resize: vertical;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border-medium);
+  border-radius: var(--radius-xs);
+  background: var(--color-bg-elevated);
+  color: var(--color-text-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.reasonField textarea:focus-visible {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: 1px;
+}
+
+.reasonMeta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mutedHint {
+  color: var(--color-text-secondary);
+  font-size: 11px;
+}
+
+.denialActions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.btnConfirmDeny {
+  background: var(--color-critical-bg, rgba(220, 38, 38, 0.08));
+  border-color: var(--color-critical-border, rgba(220, 38, 38, 0.30));
+  color: var(--color-critical-dark, #B91C1C);
+}
+
+.btnConfirmDeny:hover:not(:disabled) {
+  border-color: var(--color-critical, #DC2626);
+  color: var(--color-critical, #DC2626);
 }
 
 .segmentButtons {

@@ -317,6 +317,70 @@ impl CommandDenial {
     }
 }
 
+/// Builds the tool error for a denied command. The denied parts are listed
+/// once; a reason is stated next to the parts it covers.
+pub(crate) fn denied_segments_message(
+    segments: &[crate::commands::permissions::SegmentApproval],
+    decisions: &[crate::commands::permissions::SegmentDecision],
+) -> String {
+    use crate::commands::permissions::SegmentDecision;
+
+    // (reason, denied parts) in the order each reason first appears.
+    let mut groups: Vec<(Option<&str>, Vec<&str>)> = Vec::new();
+    let mut denied_parts: Vec<&str> = Vec::new();
+    for (segment, decision) in segments.iter().zip(decisions) {
+        let reason = match decision {
+            SegmentDecision::DenyOnce { reason } | SegmentDecision::DenyAlways { reason, .. } => {
+                reason
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())
+            }
+            // An allowed part was not denied, so it is not part of the error.
+            _ => continue,
+        };
+        denied_parts.push(segment.text.as_str());
+        match groups
+            .iter()
+            .position(|(group_reason, _)| *group_reason == reason)
+        {
+            Some(index) => groups[index].1.push(segment.text.as_str()),
+            None => groups.push((reason, vec![segment.text.as_str()])),
+        }
+    }
+
+    let quote = |parts: &[&str]| {
+        parts
+            .iter()
+            .map(|part| format!("`{part}`"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    let mut message = "User denied one or more command segments".to_string();
+    if denied_parts.is_empty() {
+        message.push('.');
+        return message;
+    }
+    message.push_str(&format!(". Denied parts: {}", quote(&denied_parts)));
+
+    // One reason for the whole denial: state it plainly. Otherwise each
+    // reason names the parts it covers, so the model can tell them apart.
+    let reasons: Vec<(&str, &[&str])> = groups
+        .iter()
+        .filter_map(|(reason, parts)| reason.map(|reason| (reason, parts.as_slice())))
+        .collect();
+    if reasons.len() == 1 && reasons[0].1.len() == denied_parts.len() {
+        message.push_str(&format!(". Reason: {}", reasons[0].0));
+    } else {
+        for (reason, parts) in reasons {
+            message.push_str(&format!(". Reason: {reason} for {}", quote(parts)));
+        }
+    }
+    message.push('.');
+    message
+}
+
 /// Richer per-segment policy evaluation result. Distinguishes a hard
 /// block (any segment matched the blocklist) from "needs approval"
 /// (some segments aren't in the allowlist but aren't blocked either).
@@ -741,14 +805,13 @@ async fn await_user_permission(
             SegmentDecision::DenyAlways { prefix, .. } => {
                 context.add_session_blocked_command_prefix(prefix.clone());
             }
-            SegmentDecision::DenyOnce => {}
+            SegmentDecision::DenyOnce { .. } => {}
         }
     }
 
     if decisions.iter().any(|d| !d.is_allow()) {
-        let msg = "User denied one or more command segments";
         context.note_warning();
-        return Err(msg.to_string());
+        return Err(denied_segments_message(&segments, &decisions));
     }
 
     Ok(())
@@ -2786,6 +2849,125 @@ mod tests {
     // Run-scoped blocklist — populated by DenyAlways so a fresh deny
     // takes effect mid-run instead of waiting for the next session.
     // -------------------------------------------------------------------
+
+    #[test]
+    fn denied_segment_message_groups_parts_by_reason() {
+        use crate::commands::permissions::{
+            PermissionScope, SegmentApproval, SegmentDecision, SegmentKind,
+        };
+        fn segment(text: &str) -> SegmentApproval {
+            SegmentApproval {
+                text: text.into(),
+                kind: SegmentKind::Simple,
+                suggested_prefix: text.into(),
+            }
+        }
+        fn deny_once(reason: Option<&str>) -> SegmentDecision {
+            SegmentDecision::DenyOnce {
+                reason: reason.map(str::to_string),
+            }
+        }
+
+        let segments = vec![
+            segment("git status"),
+            segment("./deploy --now"),
+            segment("curl x"),
+        ];
+
+        // One reason shared by three parts is stated once, with the parts it
+        // covers.
+        let message = denied_segments_message(
+            &segments,
+            &[
+                deny_once(Some("no network")),
+                deny_once(Some("no network")),
+                deny_once(Some("no network")),
+            ],
+        );
+        assert_eq!(
+            message,
+            "User denied one or more command segments. \
+             Denied parts: `git status`, `./deploy --now`, `curl x`. \
+             Reason: no network."
+        );
+        assert_eq!(message.matches("no network").count(), 1);
+        assert_eq!(message.matches("Denied parts:").count(), 1);
+
+        // Two reasons: each is stated once, with its own parts.
+        let message = denied_segments_message(
+            &segments,
+            &[
+                deny_once(Some("no network")),
+                deny_once(Some("file locked")),
+                deny_once(Some("file locked")),
+            ],
+        );
+        assert_eq!(
+            message,
+            "User denied one or more command segments. \
+             Denied parts: `git status`, `./deploy --now`, `curl x`. \
+             Reason: no network for `git status`. \
+             Reason: file locked for `./deploy --now`, `curl x`."
+        );
+        assert_eq!(message.matches("no network").count(), 1);
+        assert_eq!(message.matches("file locked").count(), 1);
+        assert_eq!(message.matches("Denied parts:").count(), 1);
+
+        // No reason: the denied parts are still listed, with no reason clause.
+        let message = denied_segments_message(
+            &segments,
+            &[deny_once(None), deny_once(None), deny_once(None)],
+        );
+        assert_eq!(
+            message,
+            "User denied one or more command segments. \
+             Denied parts: `git status`, `./deploy --now`, `curl x`."
+        );
+        assert!(!message.contains("Reason:"));
+
+        // A reason on one part and none on another: one list of denied parts,
+        // and the reason names the part it belongs to.
+        let message = denied_segments_message(
+            &segments[..2],
+            &[deny_once(Some("no network")), deny_once(None)],
+        );
+        assert_eq!(
+            message,
+            "User denied one or more command segments. \
+             Denied parts: `git status`, `./deploy --now`. \
+             Reason: no network for `git status`."
+        );
+        assert_eq!(message.matches("Denied parts:").count(), 1);
+        assert_eq!(message.matches("no network").count(), 1);
+
+        // An always-denial carries its reason the same way.
+        let always = SegmentDecision::DenyAlways {
+            scope: PermissionScope::Agent,
+            prefix: "curl".into(),
+            reason: Some("no network".into()),
+        };
+        let message = denied_segments_message(&segments[..1], &[always]);
+        assert_eq!(
+            message,
+            "User denied one or more command segments. \
+             Denied parts: `git status`. Reason: no network."
+        );
+
+        // An allowed part was not denied, so it stays out of the error.
+        let message = denied_segments_message(
+            &segments,
+            &[
+                SegmentDecision::AllowOnce,
+                deny_once(Some("no network")),
+                SegmentDecision::AllowOnce,
+            ],
+        );
+        assert_eq!(
+            message,
+            "User denied one or more command segments. \
+             Denied parts: `./deploy --now`. Reason: no network."
+        );
+    }
 
     #[test]
     fn policy_run_scoped_blocklist_blocks_simple_segment() {

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
+import React, { useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { listPendingPermissionRequests, submitPermissionDecision } from '../permissions/client';
 import type { PermissionRequest, SegmentApproval, SegmentDecision } from '../generated/bindings';
@@ -11,10 +11,15 @@ const PERMISSION_REQUEST_EVENT = 'permissions://request';
 // card. Payload: { requestId }.
 const PERMISSION_RESOLVED_EVENT = 'permissions://resolved';
 
+// The backend accepts at most 500 characters and rejects the whole
+// decision beyond that, so the field stops there.
+const MAX_REASON_LENGTH = 500;
+const limitReason = (value: string) => Array.from(value).slice(0, MAX_REASON_LENGTH).join('');
+
 const allowOnce = (): SegmentDecision => ({ kind: 'allowOnce' });
-const denyOnce = (): SegmentDecision => ({ kind: 'denyOnce' });
+const denyOnce = (reason?: string): SegmentDecision => ({ kind: 'denyOnce', ...(reason ? { reason } : {}) });
 const allowAlways = (prefix: string): SegmentDecision => ({ kind: 'allowAlways', scope: 'agent', prefix });
-const denyAlways = (prefix: string): SegmentDecision => ({ kind: 'denyAlways', scope: 'agent', prefix });
+const denyAlways = (prefix: string, reason?: string): SegmentDecision => ({ kind: 'denyAlways', scope: 'agent', prefix, ...(reason ? { reason } : {}) });
 
 /** A spoken chip names its prefix by its first words; its tooltip has it whole. */
 const CHIP_PREFIX_CHARS = 16;
@@ -28,6 +33,9 @@ const chipPrefix = (prefix: string): string => {
 // enum, not the full discriminated union (the scope/prefix only enter
 // at submit time).
 type DecisionKind = 'allowOnce' | 'denyOnce' | 'allowAlways' | 'denyAlways';
+
+const isDenial = (decision: DecisionKind | null): boolean =>
+  decision === 'denyOnce' || decision === 'denyAlways';
 
 interface SegmentCellState {
   prefix: string;
@@ -64,19 +72,34 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
     Object.fromEntries(req.segments.map((seg, idx) => [idx, { prefix: seg.suggestedPrefix || '', decision: null }]))
   );
   const [isSubmitting, setSubmitting] = useState(false);
+  // Latched once the decision is sent, so it cannot be sent twice.
+  const sent = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  // One reason for the whole request, sent with the denial response.
+  const [reason, setReason] = useState('');
+  const reasonId = useId();
+  const reasonHintId = `${reasonId}-hint`;
+  const reasonCountId = `${reasonId}-count`;
+  // The backend counts code points, so the count does too.
+  const reasonLength = Array.from(reason).length;
   // Collapse: squish the card to a one-line summary so a tall (or stacked)
   // request can't swallow the conversation. Default expanded.
   const [isCollapsed, setCollapsed] = useState(false);
   const spoken = Boolean(speaker);
 
   const sendDecisions = async (decisions: SegmentDecision[]) => {
+    // One decision per request: a click that lands after the send must not
+    // send the decision again.
+    if (sent.current) return;
+    sent.current = true;
     setSubmitting(true);
     setError(null);
     try {
       await submitPermissionDecision(req.requestId, decisions);
       onDecided?.(req.requestId);
     } catch (e) {
+      // A decision that failed can be sent again.
+      sent.current = false;
       setError(typeof e === 'string' ? e : e instanceof Error ? e.message : 'Failed to submit decision');
     } finally {
       setSubmitting(false);
@@ -86,48 +109,69 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
   const setSegmentPrefix = (idx: number, prefix: string) =>
     setCells((current) => ({ ...current, [idx]: { decision: current[idx]?.decision ?? null, prefix } }));
 
-  // The prefix a part is saved under: what the user typed in the field,
-  // else the backend's suggestion. Empty means the part is not saved as
-  // a rule at all. One place, so what the card promises and what it
-  // submits cannot drift apart.
-  const resolvedPrefix = (seg: SegmentApproval, idx: number): string =>
-    (cells[idx]?.prefix ?? seg.suggestedPrefix ?? '').trim();
+  const resolvedPrefix = (selected: CardState, seg: SegmentApproval, idx: number): string =>
+    (selected[idx]?.prefix ?? seg.suggestedPrefix ?? '').trim();
 
-  // What a row's chosen kind means right now. An "always allow" whose
-  // prefix was cleared has nothing to save, so it means an allow-once. A
-  // deny rule always has a prefix: with no stable one it blocks the
-  // command text itself.
   const effectiveDecision = (
     seg: SegmentApproval,
     idx: number,
     kind: DecisionKind | null
   ): DecisionKind | null => {
     if (kind === null) return null;
-    if (kind === 'allowAlways' && resolvedPrefix(seg, idx).length === 0) return 'allowOnce';
+    if (kind === 'allowAlways' && resolvedPrefix(cells, seg, idx).length === 0) return 'allowOnce';
     return kind;
   };
 
-  const decisionFor = (seg: SegmentApproval, idx: number, kind: DecisionKind): SegmentDecision => {
-    switch (effectiveDecision(seg, idx, kind)) {
+  const decisionFor = (selected: CardState, seg: SegmentApproval, idx: number, why?: string): SegmentDecision => {
+    const kind = selected[idx]!.decision!;
+    const prefix = resolvedPrefix(selected, seg, idx);
+    switch (kind) {
       case 'allowOnce':
         return allowOnce();
       case 'denyOnce':
-        return denyOnce();
+        return denyOnce(why);
       case 'allowAlways':
-        return allowAlways(resolvedPrefix(seg, idx));
-      default:
-        return denyAlways(resolvedPrefix(seg, idx) || seg.text);
+        return prefix ? allowAlways(prefix) : allowOnce();
+      case 'denyAlways':
+        return denyAlways(prefix || seg.text, why);
     }
+  };
+
+  const decisionsFrom = (selected: CardState, why: string): SegmentDecision[] => {
+    const trimmedReason = why.trim() || undefined;
+    return req.segments.map((seg, i) => decisionFor(selected, seg, i, trimmedReason));
   };
 
   const handleSegmentDecision = (idx: number, kind: DecisionKind) => {
     const next: CardState = { ...cells, [idx]: { prefix: cells[idx]?.prefix ?? '', decision: kind } };
     setCells(next);
     if (!req.segments.every((_, i) => next[i]?.decision)) return;
-    sendDecisions(req.segments.map((seg, i) => decisionFor(seg, i, next[i]!.decision!)));
+    // A denial waits for confirmation so the user can add a reason.
+    if (req.segments.some((_, i) => isDenial(next[i]?.decision ?? null))) return;
+    sendDecisions(decisionsFrom(next, reason));
   };
 
-  const denyAll = () => sendDecisions(req.segments.map(() => denyOnce()));
+  // Deny every part; the one reason field applies to all of them.
+  const denyAll = () =>
+    setCells((current) => {
+      const next: CardState = {};
+      req.segments.forEach((_, idx) => {
+        next[idx] = { prefix: current[idx]?.prefix ?? '', decision: 'denyOnce' };
+      });
+      return next;
+    });
+
+  const confirmDenial = () => sendDecisions(decisionsFrom(cells, reason));
+
+  const hasDenial = req.segments.some((_, i) => isDenial(cells[i]?.decision ?? null));
+  const allDecided = req.segments.every((_, i) => cells[i]?.decision);
+  // "Deny always" writes a block rule that lasts, so the confirm says so.
+  const blocksAlways = req.segments.some((_, i) => cells[i]?.decision === 'denyAlways');
+  const confirmLabel = (): string => {
+    if (isSubmitting) return 'Submitting…';
+    if (req.segments.length > 1) return 'Submit decisions';
+    return blocksAlways ? 'Deny and block always' : 'Deny command';
+  };
 
   // Batch "trust this whole command" shortcut. It decides the parts the
   // user has not decided yet: those with a prefix (either Simple or
@@ -136,15 +180,19 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
   // the run still proceeds. The parts the user already decided keep
   // their decision, so a deny is never turned into an allow rule by a
   // later click.
-  const allowAllAlways = () =>
-    sendDecisions(
-      req.segments.map((seg, idx) => {
-        const decided = cells[idx]?.decision;
-        if (decided) return decisionFor(seg, idx, decided);
-        const prefix = resolvedPrefix(seg, idx);
-        return prefix ? allowAlways(prefix) : allowOnce();
-      })
-    );
+  const allowAllAlways = () => {
+    const next: CardState = { ...cells };
+    req.segments.forEach((seg, idx) => {
+      if (next[idx]?.decision) return;
+      const prefix = resolvedPrefix(next, seg, idx);
+      next[idx] = { prefix: next[idx]?.prefix ?? '', decision: prefix ? 'allowAlways' : 'allowOnce' };
+    });
+    if (req.segments.some((_, i) => isDenial(next[i]?.decision ?? null))) {
+      setCells(next);
+      return;
+    }
+    sendDecisions(decisionsFrom(next, reason));
+  };
 
   // What the bulk click will do, part by part: it decides the parts the
   // user has not decided yet and leaves the decided ones alone. A part
@@ -156,7 +204,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
     return {
       idx,
       text: seg.text,
-      prefix: resolvedPrefix(seg, idx),
+      prefix: resolvedPrefix(cells, seg, idx),
       decided,
       effective: effectiveDecision(seg, idx, decided),
     };
@@ -332,8 +380,8 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
             {!spoken && (
               <p className={styles.segmentsLabel}>
                 {req.segments.length === 1
-                  ? 'Choose how to handle this command:'
-                  : `${req.segments.length} parts need a decision (submits as soon as every part is decided):`}
+                  ? 'Choose how to handle this command (a denial needs a confirm):'
+                  : `${req.segments.length} parts need a decision (confirm after choosing any denial):`}
               </p>
             )}
             {req.segments.map((seg, idx) => {
@@ -350,7 +398,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
               // The prefix this part would be saved under. Without one
               // the part cannot be saved as an allow rule, so the card
               // offers no "always allow" and says what allowing means.
-              const savePrefix = resolvedPrefix(seg, idx);
+              const savePrefix = resolvedPrefix(cells, seg, idx);
               const canSaveRule = savePrefix.length > 0;
               // A deny rule needs something to name: the prefix, or the
               // command text when there is no prefix. With neither, the
@@ -437,6 +485,41 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
               );
             })}
           </section>
+          {hasDenial && (
+            <div className={styles.denialArea}>
+              <div className={styles.reasonField}>
+                <label htmlFor={reasonId}>Reason for denying (optional)</label>
+                <textarea
+                  id={reasonId}
+                  value={reason}
+                  onChange={(e) => setReason(limitReason(e.target.value))}
+                  rows={2}
+                  disabled={isSubmitting}
+                  placeholder="Tell the agent why"
+                  aria-describedby={`${reasonHintId} ${reasonCountId}`}
+                />
+                <div className={styles.reasonMeta}>
+                  <span className={styles.mutedHint} id={reasonHintId}>
+                    Sent to the agent with this response.
+                  </span>
+                  <span className={styles.mutedHint} id={reasonCountId}>
+                    {reasonLength}/{MAX_REASON_LENGTH} characters
+                  </span>
+                </div>
+              </div>
+              <div className={styles.denialActions}>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnConfirmDeny}`}
+                  onClick={confirmDenial}
+                  disabled={isSubmitting || !allDecided}
+                >
+                  {confirmLabel()}
+                </button>
+                {!allDecided && <span className={styles.mutedHint}>Choose for every part to continue</span>}
+              </div>
+            </div>
+          )}
           {error && !isSubmitting && <div className={styles.error}>{error}</div>}
           {req.segments.length > 1 && (
             <footer className={styles.cardFooter}>
@@ -460,7 +543,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                 className={`${styles.btn} ${styles.btnDenyAll}`}
                 onClick={denyAll}
                 disabled={isSubmitting}
-                {...chipText(spoken, 'Deny entire command', 'Deny all', 'Deny every part of this pipeline in one click')}
+                {...chipText(spoken, 'Deny entire command', 'Deny all', 'Deny every part of this pipeline')}
               />
             </footer>
           )}

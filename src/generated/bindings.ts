@@ -493,7 +493,7 @@ timezone: string, };
 
 export type SegmentApproval = { text: string, kind: SegmentKind, suggestedPrefix: string, };
 
-export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways", scope: PermissionScope, prefix: string, } | { "kind": "denyOnce" } | { "kind": "denyAlways", scope: PermissionScope, prefix: string, };
+export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways", scope: PermissionScope, prefix: string, } | { "kind": "denyOnce", reason?: string, } | { "kind": "denyAlways", scope: PermissionScope, prefix: string, reason?: string, };
 
 export type SegmentKind = "simple" | "opaque";
 

@@ -892,6 +892,9 @@ describe('FleetPage', () => {
 
       fireEvent.click(within(row).getAllByRole('button', { name: 'Once' })[0]!);
       fireEvent.click(within(row).getAllByRole('button', { name: 'Deny' })[1]!);
+      // A denial is confirmed before it is sent, so nothing is submitted yet.
+      expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
+      fireEvent.click(within(row).getByRole('button', { name: 'Submit decisions' }));
       await waitFor(() =>
         expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
           requestId: 'r1',

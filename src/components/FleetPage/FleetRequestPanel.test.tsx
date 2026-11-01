@@ -89,7 +89,28 @@ describe('FleetRequestPanel', () => {
     expect(within(section).getByLabelText('Command').tagName).toBe('PRE');
     expect(within(section).getByLabelText('Command')).toHaveTextContent('cd /srv/app && cargo test');
     expect(within(section).queryByText('Permission requested')).not.toBeInTheDocument();
+    // The chip only opens the denial: the decision waits for the confirm.
     await userEvent.click(within(section).getByRole('button', { name: /Deny all/ }));
+    expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
+    // One reason field for the whole command.
+    expect(within(section).getAllByRole('textbox', { name: /reason for denying/i })).toHaveLength(1);
+    await userEvent.click(within(section).getByRole('button', { name: 'Submit decisions' }));
+    // No reason typed, so none is sent.
     expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', { requestId: 'perm-1', decisions: [{ kind: 'denyOnce' }, { kind: 'denyOnce' }] });
+  });
+
+  it('sends one reason for the whole command when the Fleet user types one', async () => {
+    const request = { kind: 'approval', request: { ...approval, agentName: 'Committer' }, agentName: 'Committer', text: approval.command } as unknown as FleetRequest;
+    const card = { ...emptyCard('ws-1'), agents: [{ name: 'Committer', seed: 'def-c' }], requests: { 'approval:perm-1': { ...request, at: 1 } } };
+    render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} })!} faces={castFor({}, null)} loud={false} now={10} />);
+    const section = screen.getByRole('region', { name: 'Committer needs you' });
+    await userEvent.click(within(section).getByRole('button', { name: /Deny all/ }));
+    await userEvent.type(within(section).getByRole('textbox', { name: /reason for denying/i }), 'Wrong target');
+    await userEvent.click(within(section).getByRole('button', { name: 'Submit decisions' }));
+
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'perm-1',
+      decisions: [{ kind: 'denyOnce', reason: 'Wrong target' }, { kind: 'denyOnce', reason: 'Wrong target' }],
+    });
   });
 });
