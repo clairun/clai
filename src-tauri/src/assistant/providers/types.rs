@@ -48,6 +48,13 @@ pub trait ProviderAdapter: Send + Sync {
     fn provider_id(&self) -> &'static str;
     fn protocol_family(&self) -> ProtocolFamily;
 
+    async fn validate_connection(
+        &self,
+        _connection: &ProviderConnection,
+    ) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
     async fn list_models(
         &self,
         _connection: &ProviderConnection,

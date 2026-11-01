@@ -339,7 +339,7 @@ async fn summarize_window(
     source_run_id: Option<&str>,
     messages: &[AssistantMessage],
 ) -> Result<String, String> {
-    let adapter = providers::resolve_adapter(&connection.protocol_id).map_err(|e| e.to_string())?;
+    let adapter = providers::resolve_connection_adapter(connection).map_err(|e| e.to_string())?;
     let transcript = transcript_for_summary(messages);
     let request = CompletionRequest {
         run_id: compaction_summary_run_id(session, source_run_id),

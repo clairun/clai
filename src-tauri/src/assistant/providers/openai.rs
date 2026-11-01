@@ -148,7 +148,7 @@ impl ProviderAdapter for OpenAiAdapter {
         Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>,
         ProviderError,
     > {
-        let api_key = get_api_key_opt(connection);
+        let api_key = get_api_key(connection)?;
         let url = completions_url(connection);
         let body = build_request_body(&request);
 
@@ -184,25 +184,50 @@ impl ProviderAdapter for OpenAiAdapter {
     }
 }
 
-/// Read the stored API key, if any. Returns `None` for keyless self-hosted
-/// providers (ollama / LM Studio / vLLM) that store no secret — the request is
-/// then sent without an `Authorization` header. A hosted provider with no key
-/// simply gets a 401 from the server, which surfaces as a normal error.
-/// Per-provider extra headers declared as data on the catalog entry (resolved
-/// via the connection's brand `provider_id`) — e.g. OpenRouter's attribution
-/// headers. Empty for connections with no catalog entry.
+/// Per-provider extra headers declared on the catalog entry.
 fn catalog_extra_headers(connection: &ProviderConnection) -> Vec<(String, String)> {
     catalog::get_entry(&connection.provider_id)
         .map(|e| e.extra_headers)
         .unwrap_or_default()
 }
 
+/// Model discovery may use public endpoints before a key is entered.
 fn get_api_key_opt(connection: &ProviderConnection) -> Option<String> {
     ProviderSecretStorage::get_secret(&connection.secret_ref)
         .ok()
         .flatten()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
+pub(super) fn get_api_key(
+    connection: &ProviderConnection,
+) -> Result<Option<String>, ProviderError> {
+    let key = match ProviderSecretStorage::get_secret(&connection.secret_ref) {
+        Ok(key) => key,
+        Err(_) if !requires_api_key(connection) => None,
+        Err(error) => {
+            return Err(ProviderError::RequestFailed(format!(
+                "Failed to read API key: {error}"
+            )))
+        }
+    };
+    validate_api_key(connection, key)
+}
+
+fn validate_api_key(
+    connection: &ProviderConnection,
+    key: Option<String>,
+) -> Result<Option<String>, ProviderError> {
+    let key = key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if key.is_none() && requires_api_key(connection) {
+        return Err(ProviderError::NotConfigured);
+    }
+    Ok(key)
+}
+
+fn requires_api_key(connection: &ProviderConnection) -> bool {
+    catalog::requires_api_key(&connection.provider_id)
 }
 
 fn completions_url(connection: &ProviderConnection) -> String {
@@ -823,6 +848,86 @@ mod tests {
             enabled: true,
             created_at: 0,
             updated_at: 0,
+        }
+    }
+
+    #[tokio::test]
+    async fn openrouter_model_probe_works_without_key_and_uses_stored_key() {
+        use axum::{http::HeaderMap, routing::get, Router};
+        use std::sync::{Arc, Mutex};
+
+        let seen_auth = Arc::new(Mutex::new(Vec::new()));
+        let captured_auth = seen_auth.clone();
+        let router = Router::new().route(
+            "/v1/models",
+            get(move |headers: HeaderMap| {
+                let seen_auth = captured_auth.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .map(|value| value.to_str().unwrap().to_string());
+                    seen_auth.lock().unwrap().push(auth);
+                    axum::Json(serde_json::json!({"data": [{"id": "openrouter/auto"}]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let mut connection = conn_with_brand("openrouter");
+        connection.base_url = Some(base_url);
+        connection.secret_ref = "provider-connection::model-probe-no-key".into();
+        let models = OpenAiAdapter.list_models(&connection).await.unwrap();
+        assert_eq!(models[0].id, "openrouter/auto");
+
+        connection.secret_ref = "provider-connection::model-probe-with-key".into();
+        ProviderSecretStorage::set_secret(&connection.secret_ref, "  valid-key  ").unwrap();
+        let models = OpenAiAdapter.list_models(&connection).await.unwrap();
+        assert_eq!(models[0].id, "openrouter/auto");
+        assert_eq!(
+            *seen_auth.lock().unwrap(),
+            vec![None, Some("Bearer valid-key".to_string())]
+        );
+    }
+
+    #[test]
+    fn hosted_provider_requires_stored_key() {
+        let connection = conn_with_brand("openrouter");
+        assert!(matches!(
+            validate_api_key(&connection, None),
+            Err(ProviderError::NotConfigured)
+        ));
+        assert!(matches!(
+            validate_api_key(&connection, Some("  ".into())),
+            Err(ProviderError::NotConfigured)
+        ));
+        assert_eq!(
+            validate_api_key(&connection, Some("  token  ".into())).unwrap(),
+            Some("token".into())
+        );
+    }
+
+    #[test]
+    fn keyless_provider_allows_missing_key() {
+        assert_eq!(
+            validate_api_key(&conn_with_brand("ollama"), None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_provider_requires_stored_key() {
+        for brand in ["groq", "unknown-custom"] {
+            let connection = conn_with_brand(brand);
+            assert!(matches!(
+                validate_api_key(&connection, None),
+                Err(ProviderError::NotConfigured)
+            ));
+            assert!(matches!(
+                validate_api_key(&connection, Some("  ".into())),
+                Err(ProviderError::NotConfigured)
+            ));
         }
     }
 

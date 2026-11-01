@@ -355,6 +355,13 @@ pub fn get_entry(provider_id: &str) -> Option<ProviderCatalogEntry> {
     catalog_entries().into_iter().find(|e| e.id == provider_id)
 }
 
+/// Unknown custom brands require a key; only explicit catalog entries can be keyless.
+pub fn requires_api_key(provider_id: &str) -> bool {
+    get_entry(provider_id)
+        .map(|entry| entry.requires_api_key)
+        .unwrap_or(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -489,6 +496,13 @@ mod tests {
             .as_ref()
             .is_some_and(|caps| !caps.supports_images));
         assert!(e.curated_models.iter().all(|m| !m.supports_images));
+    }
+
+    #[test]
+    fn unknown_brands_default_to_requiring_a_key() {
+        assert!(requires_api_key("groq"));
+        assert!(requires_api_key("definitely-not-a-provider"));
+        assert!(!requires_api_key("ollama"));
     }
 
     #[test]
