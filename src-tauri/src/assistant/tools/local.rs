@@ -446,8 +446,12 @@ pub(crate) fn evaluate_command_policy(
         // mid-run. A blocked name is also blocked when run by path or after
         // assignments (`FOO=1 /usr/bin/rm`); the allowlist is not widened.
         let blocked = |text: &str| {
-            find_matching_prefix(&execution.shell.blocked_command_prefixes, text)
-                .or_else(|| find_matching_prefix(extra_blocked_prefixes, text))
+            find_matching_prefix(
+                &execution.shell.blocked_command_prefixes,
+                text,
+                PolicySide::Deny,
+            )
+            .or_else(|| find_matching_prefix(extra_blocked_prefixes, text, PolicySide::Deny))
         };
         // The blocklist sees the command the segment runs, and the head it
         // runs it with: `timeout 60 rm -rf x` is blocked by `rm` and by
@@ -499,8 +503,8 @@ pub(crate) fn evaluate_command_policy(
         let allowed = if is_exact_only(kind, &suggested_prefix) {
             run_allowed.contains(&RunCommandGrant::Exact(text.to_string()))
         } else {
-            find_matching_prefix(&durable_allowed_prefixes, text).is_some()
-                || find_matching_prefix(&run_prefixes, text).is_some()
+            find_matching_prefix(&durable_allowed_prefixes, text, PolicySide::Allow).is_some()
+                || find_matching_prefix(&run_prefixes, text, PolicySide::Allow).is_some()
         };
         if !allowed {
             approvals.push(SegmentApproval {
@@ -1126,14 +1130,24 @@ fn command_preview(command: &str) -> String {
 ///   - prefix "kubectl get" matches command "kubectl get pods"
 ///   - prefix "kubectl" matches command "kubectl delete pods"
 ///   - prefix "kubectl get" does NOT match command "kubectl delete pods"
-fn find_matching_prefix(prefixes: &[String], command: &str) -> Option<String> {
+fn find_matching_prefix(prefixes: &[String], command: &str, side: PolicySide) -> Option<String> {
     prefixes
         .iter()
-        .find(|p| matches_prefix(p, command))
+        .find(|p| matches_prefix(p, command, side))
         .cloned()
 }
 
-fn matches_prefix(prefix: &str, command: &str) -> bool {
+/// Which policy list a prefix is matched against. The blocklist consults
+/// every canonical form — more forms can only block more. The allowlist
+/// consults only the form that keeps config-injecting options verbatim,
+/// so `git -c <cfg>=<cmd> diff` never rides a saved `git diff` grant.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PolicySide {
+    Allow,
+    Deny,
+}
+
+fn matches_prefix(prefix: &str, command: &str, side: PolicySide) -> bool {
     let p = prefix.trim();
     if p.is_empty() {
         return false;
@@ -1141,20 +1155,27 @@ fn matches_prefix(prefix: &str, command: &str) -> bool {
     if matches_prefix_literal(p, command) {
         return true;
     }
-    // Fall back to the command's canonical form so an allowlist entry the
+    // Fall back to the command's canonical forms so an allowlist entry the
     // suggester proposed still matches the raw command it came from. The
     // suggester strips leading env assignments and global flags between the
     // binary and its subcommand (`git --no-pager log` → `git log`); the
-    // literal match above does not, so without this an "Always allow git log"
-    // grant would never cover a `git --no-pager log` invocation. Applying it
-    // to the blocklist too only strengthens it (a blocked `rm` can't hide
-    // behind `FOO=bar rm`).
-    if let Some(canonical) =
-        crate::assistant::tools::prefix_detector::canonicalize_for_match(command)
-    {
-        return matches_prefix_literal(p, &canonical);
+    // literal match above does not, so without this an "Always allow git
+    // log" grant would never cover a `git --no-pager log` invocation. The
+    // blocklist additionally consults the fully-stripped form (a blocked
+    // `rm` can't hide behind `FOO=bar rm`, a blocked `git push` behind
+    // `git -C repo push`).
+    let matches_form =
+        |form: Option<String>| form.is_some_and(|canonical| matches_prefix_literal(p, &canonical));
+    let allow_form = crate::assistant::tools::prefix_detector::canonicalize_for_allow(command);
+    match side {
+        PolicySide::Allow => matches_form(allow_form),
+        PolicySide::Deny => {
+            matches_form(allow_form)
+                || matches_form(
+                    crate::assistant::tools::prefix_detector::canonicalize_for_deny(command),
+                )
+        }
     }
-    false
 }
 
 /// Literal word-boundary prefix test: `command` equals `p`, or starts with
@@ -2001,6 +2022,17 @@ mod tests {
         }
     }
 
+    fn full_execution_config(blocked: &[&str]) -> ExecutionCapabilityConfig {
+        ExecutionCapabilityConfig {
+            shell: ShellCapabilityConfig {
+                mode: ShellAccessMode::Full,
+                allowed_command_prefixes: vec![],
+                blocked_command_prefixes: blocked.iter().map(|s| s.to_string()).collect(),
+            },
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn policy_blocks_using_agent_blocklist() {
         let exec = restricted_execution_config(&[], &["rm"]);
@@ -2403,6 +2435,181 @@ mod tests {
                 ("sed -i 's/a/b/' f1".to_string(), "sed".to_string()),
                 ("sed -i '1d' /etc/hosts".to_string(), "sed".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn git_dash_c_forms_cannot_escape_a_broad_block() {
+        // `git -C <dir> status` is `git status` run elsewhere; a broad
+        // `git status` block must catch it even while `git` at large is
+        // allowed. Before option-aware normalization the matcher read the
+        // directory as the subcommand (`git repo status`) and the block
+        // never fired.
+        let exec = restricted_execution_config(&["git"], &["git status"]);
+        for cmd in [
+            "git -C repo status --short",
+            "git --git-dir=.git status --short",
+            "git --git-dir .git status --short",
+            "git --no-pager -C repo status",
+            "git status -C repo",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, cmd, &[], &[]),
+                    PolicyResult::Block { .. }
+                ),
+                "`{cmd}` must be blocked by `git status`"
+            );
+        }
+    }
+
+    #[test]
+    fn git_dash_c_block_applies_in_full_mode_and_behind_wrappers() {
+        // The blocklist is mode-independent, and neither a wrapper nor an
+        // env prefix may interpose itself between `git status` and its
+        // block.
+        let exec = full_execution_config(&["git status"]);
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git -C repo status --short", &[], &[]),
+            PolicyResult::Block { .. }
+        ));
+        let exec = restricted_execution_config(&[], &["git status"]);
+        for cmd in [
+            "timeout 600 git -C repo status --short",
+            "FOO=bar git -C repo status --short",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, cmd, &[], &[]),
+                    PolicyResult::Block { .. }
+                ),
+                "`{cmd}` must be blocked by `git status`"
+            );
+        }
+    }
+
+    #[test]
+    fn git_status_allowlist_covers_dash_c_forms_without_widening() {
+        let exec = restricted_execution_config(&["git status"], &[]);
+        // The saved prefix matches the commands it was suggested for…
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git -C repo status --short", &[], &[]),
+            PolicyResult::Allow
+        ));
+        // …and nothing more: another subcommand behind -C stays uncovered.
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git -C repo push", &[], &[]),
+            PolicyResult::NeedsApproval(_)
+        ));
+    }
+
+    #[test]
+    fn git_suggested_prefix_round_trips_through_saved_allow() {
+        let exec = restricted_execution_config(&[], &[]);
+        for (command, expected) in [
+            ("git -C repo status --short", "git status"),
+            ("git --git-dir=.git log --oneline", "git log"),
+            ("git --no-pager show HEAD", "git show"),
+        ] {
+            let rows = approval_texts(&exec, command);
+            assert_eq!(rows, vec![(command.to_string(), expected.to_string())]);
+            let saved = restricted_execution_config(&[&rows[0].1], &[]);
+            assert!(
+                matches!(
+                    evaluate_command_policy(&saved, command, &[], &[]),
+                    PolicyResult::Allow
+                ),
+                "saved suggestion must authorize its own command: `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn git_config_injection_has_no_persistent_subcommand_suggestion() {
+        let exec = restricted_execution_config(&["git show", "git status", "git log"], &[]);
+        for command in [
+            "git -c core.pager=less show HEAD",
+            "git --config-env core.fsmonitor=FSMON status",
+            "git --config-env=core.fsmonitor=FSMON status",
+            "git -C repo -c core.pager=less log --oneline",
+            "git --no-pager --config-env=core.fsmonitor=FSMON status",
+            "FOO=bar git -c core.pager=less show HEAD",
+            "timeout 600 git --config-env=core.fsmonitor=FSMON status",
+        ] {
+            assert_eq!(
+                approval_texts(&exec, command),
+                vec![(command.to_string(), String::new())],
+                "config-carrying command must require approval without offering a saved subcommand rule"
+            );
+        }
+    }
+
+    #[test]
+    fn git_config_injection_cannot_ride_a_saved_allow() {
+        // `-c` and `--config-env` inject configuration into the run, and
+        // configuration can name commands to execute (core.fsmonitor,
+        // diff.external). Normalization must not strip them for allow
+        // matching: `git -c diff.external=/bin/echo diff …` would
+        // otherwise run /bin/echo under a saved `git diff` — the same
+        // value-word skipping that fixed `-C` opened this gap, so
+        // config-carrying invocations stay outside every saved
+        // subcommand prefix and ask for approval on their own.
+        let exec = restricted_execution_config(&["git diff", "git status", "git log"], &[]);
+        for cmd in [
+            "git -c diff.external=/bin/echo diff HEAD~1 HEAD",
+            "git -c core.fsmonitor=/bin/evil status",
+            "git --config-env core.fsmonitor=FSMON status",
+            "git --config-env=core.fsmonitor=FSMON status",
+            "git -C repo -c core.pager=/bin/evil log --oneline",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, cmd, &[], &[]),
+                    PolicyResult::NeedsApproval(_)
+                ),
+                "`{cmd}` must need approval despite the saved allow"
+            );
+        }
+    }
+
+    #[test]
+    fn git_config_injection_still_meets_blocks() {
+        // Deny matching reads through every documented global option, so a
+        // block keeps catching the subcommand however the run is
+        // configured — and a deny aimed at the config form itself fires
+        // too, even behind an env prefix the literal match cannot see
+        // through.
+        let exec = restricted_execution_config(&["git"], &["git push", "git status"]);
+        for cmd in [
+            "git -c diff.external=/bin/echo push",
+            "git --config-env core.fsmonitor=FSMON status",
+            "git -C repo -c e=v push",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, cmd, &[], &[]),
+                    PolicyResult::Block { .. }
+                ),
+                "`{cmd}` must be blocked"
+            );
+        }
+        let exec = restricted_execution_config(&[], &["git -c"]);
+        assert!(matches!(
+            evaluate_command_policy(
+                &exec,
+                "FOO=bar git -c diff.external=/bin/echo diff",
+                &[],
+                &[]
+            ),
+            PolicyResult::Block { .. }
+        ));
+    }
+
+    #[test]
+    fn git_dash_c_suggestion_is_the_subcommand_not_the_value() {
+        assert_eq!(
+            crate::assistant::tools::prefix_detector::suggest_prefix("git -C repo status --short"),
+            "git status"
         );
     }
 
