@@ -145,13 +145,36 @@ pub(crate) async fn complete_run(
     run_id: &str,
     had_warnings: bool,
 ) -> Result<(), AssistantEngineError> {
-    let run =
-        repository::complete_run(&deps.pool, run_id, final_status(had_warnings), None).await?;
-    let _ = deps.emit(
-        session,
-        Some(run_id),
-        AssistantUiEvent::RunCompleted { run },
-    );
+    complete_run_with_sink(&deps.pool, run_id, had_warnings, |event| {
+        let _ = deps.emit(session, Some(run_id), event);
+    })
+    .await
+}
+
+async fn complete_run_with_sink(
+    pool: &DbPool,
+    run_id: &str,
+    had_warnings: bool,
+    mut emit: impl FnMut(AssistantUiEvent),
+) -> Result<(), AssistantEngineError> {
+    let orphaned_calls = repository::fail_running_tool_calls_for_run(
+        pool,
+        run_id,
+        "Run ended before tool call completed",
+    )
+    .await?;
+    let had_orphaned_calls = !orphaned_calls.is_empty();
+    for tool_call in orphaned_calls {
+        emit(AssistantUiEvent::ToolCallFailed { tool_call });
+    }
+    let run = repository::complete_run(
+        pool,
+        run_id,
+        final_status(had_warnings || had_orphaned_calls),
+        None,
+    )
+    .await?;
+    emit(AssistantUiEvent::RunCompleted { run });
     Ok(())
 }
 
@@ -337,6 +360,70 @@ pub(crate) async fn record_tool_call_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::types::{RunTrigger, SessionContext};
+    use crate::db::test_support::workspace_pool;
+
+    #[tokio::test]
+    async fn completed_run_closes_orphaned_ask_with_event() {
+        let (_tmp, pool) = workspace_pool().await;
+        let session = repository::create_session(&pool, SessionContext::default())
+            .await
+            .unwrap();
+        let run = repository::create_run(
+            &pool,
+            CreateRunParams {
+                session_id: session.id.clone(),
+                status: RunStatus::Running,
+                trigger: RunTrigger::UserMessage,
+                connection_id: "conn".into(),
+                protocol_id: "codex".into(),
+                model_id: "model".into(),
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+        repository::create_tool_call(
+            &pool,
+            CreateToolCallParams {
+                id: "ask-1".into(),
+                run_id: run.id.clone(),
+                session_id: session.id.clone(),
+                tool_name: "ask_user".into(),
+                params: serde_json::json!({"question": "Question?"}),
+                status: ToolCallStatus::Running,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut events = Vec::new();
+        complete_run_with_sink(&pool, &run.id, false, |event| events.push(event))
+            .await
+            .unwrap();
+
+        let call = repository::get_tool_call_for_session(&pool, &session.id, "ask-1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(call.status, ToolCallStatus::Failed));
+        assert_eq!(
+            call.error.as_deref(),
+            Some("Run ended before tool call completed")
+        );
+        assert!(matches!(events.as_slice(), [
+            AssistantUiEvent::ToolCallFailed { tool_call },
+            AssistantUiEvent::RunCompleted { run: completed_run },
+        ] if tool_call.id == "ask-1" && matches!(completed_run.status, RunStatus::CompletedWithWarnings)));
+        assert!(matches!(
+            repository::get_run(&pool, &run.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            RunStatus::CompletedWithWarnings
+        ));
+    }
     #[test]
     fn a_run_without_warnings_completes_cleanly() {
         assert!(matches!(final_status(false), RunStatus::Completed));
