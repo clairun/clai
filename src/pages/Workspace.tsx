@@ -18,6 +18,7 @@ import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
 import { restorePendingAsk } from '../assistant/pendingAsks';
 import { hydrateSession, useSessionChatActions } from '../assistant/sessionChat';
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
+import RunFailureBanner from '../components/RunFailureBanner/RunFailureBanner';
 import { WorkspaceFileContext, type WorkspaceFileLocation } from '../components/Chat/WorkspaceFileContext';
 import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
 import { runFailure, type RunFailure } from '../assistant/runErrors';
@@ -1512,6 +1513,10 @@ const ChatFirstLayout = ({
         <div className={styles.chatFirstLoading} aria-live="polite" aria-busy="true">
           <span className={styles.chatFirstLoadingDot} />
           <span className={styles.chatFirstLoadingText}>Loading conversation…</span>
+        </div>
+      ) : failure ? (
+        <div className={styles.chatFirstEmpty}>
+          <RunFailureBanner failure={failure} />
         </div>
       ) : (
         <div className={styles.chatFirstEmpty}>
