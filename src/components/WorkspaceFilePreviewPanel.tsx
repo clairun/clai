@@ -11,7 +11,7 @@ import { openExternal } from '../utils/openExternal';
 import type { WorkspaceFileContent, WorkspaceFileEntry } from '../generated/bindings';
 import styles from './WorkspaceFilePreviewPanel.module.css';
 
-// HTML and Vega-Lite files have a rendered preview and a raw-source view.
+// Markdown, HTML, and Vega-Lite files have a rendered preview and a raw-source view.
 type ViewMode = 'preview' | 'source';
 
 // The loaded-file shape this panel renders. `viewer`/`path` mirror the
@@ -347,7 +347,7 @@ const renderBody = (
   if (!file.content) {
     return <div className={styles.empty}>This file is empty.</div>;
   }
-  if (looksLikeMarkdown(file.viewer, file.path) && !line) {
+  if (looksLikeMarkdown(file.viewer, file.path) && viewMode === 'preview') {
     return (
       <div className={styles.markdownBody}>
         <WorkspaceFileContext.Provider value={fileLocation}>
@@ -438,7 +438,18 @@ export default function WorkspaceFilePreviewPanel({
   }, [armedDeletePath]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
-  const [viewMode, setViewMode] = useState<ViewMode>('preview');
+  const [viewSelection, setViewSelection] = useState({
+    workspaceId, path: entry?.path, line, navigationId, mode: line ? 'source' : 'preview' as ViewMode,
+  });
+  const viewMode = viewSelection.workspaceId === workspaceId
+    && viewSelection.path === entry?.path
+    && viewSelection.line === line
+    && viewSelection.navigationId === navigationId
+    ? viewSelection.mode
+    : line ? 'source' : 'preview';
+  const selectView = (mode: ViewMode) => {
+    setViewSelection({ workspaceId, path: entry?.path, line, navigationId, mode });
+  };
   // Self-contained HTML for the preview iframe: the raw markup with every
   // local resource inlined. Null until the bundler resolves for the current
   // file; `bundling` gates the iframe so it never mounts mid-inline.
@@ -513,8 +524,7 @@ export default function WorkspaceFilePreviewPanel({
   }, [workspaceId, entry?.path, entry?.viewer]);
 
   useEffect(() => {
-// eslint-disable-next-line react-hooks/set-state-in-effect -- Resets viewMode/justCopied/copiedField when the file target changes; 3-field prop→state mirror cannot be expressed as a useMemo without re-rendering on every copy click.
-    setViewMode(line ? 'source' : 'preview');
+// eslint-disable-next-line react-hooks/set-state-in-effect -- Reset copy feedback when navigating to another file or source line.
     setJustCopied(false);
     setCopiedField(null);
   }, [entry?.path, line, navigationId]);
@@ -654,7 +664,7 @@ export default function WorkspaceFilePreviewPanel({
   const kindLabel = kind === 'memory' ? 'Memory' : 'Artifact';
   const viewer = file?.viewer || entry.viewer;
   const path = file?.path || entry.path;
-  const hasPreview = looksLikeHtml(viewer, path) || looksLikeVegaLite(viewer, path);
+  const hasPreview = looksLikeMarkdown(viewer, path) || looksLikeHtml(viewer, path) || looksLikeVegaLite(viewer, path);
 
   return (
     <aside
@@ -811,14 +821,16 @@ export default function WorkspaceFilePreviewPanel({
                 <button
                   type="button"
                   className={`${styles.viewSwitchButton} ${viewMode === 'preview' ? styles.viewSwitchButtonActive : ''}`}
-                  onClick={() => setViewMode('preview')}
+                  onClick={() => selectView('preview')}
+                  aria-pressed={viewMode === 'preview'}
                 >
-                  Preview
+                  {looksLikeMarkdown(viewer, path) ? 'Rendered' : 'Preview'}
                 </button>
                 <button
                   type="button"
                   className={`${styles.viewSwitchButton} ${viewMode === 'source' ? styles.viewSwitchButtonActive : ''}`}
-                  onClick={() => setViewMode('source')}
+                  onClick={() => selectView('source')}
+                  aria-pressed={viewMode === 'source'}
                 >
                   Source
                 </button>
