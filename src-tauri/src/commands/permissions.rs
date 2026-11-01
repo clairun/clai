@@ -468,15 +468,33 @@ pub async fn submit_permission_decision(
     emit_permission_resolved(&app, &request_id);
     emit_attention(&app, entry.workspace_id.clone(), remaining);
 
-    // Persist always-decisions before delivering so the grant survives a
-    // crash between user click and command execution. If a request lacks
-    // workspace/agent identity, there is intentionally no legacy fallback:
-    // "always" decisions degrade to the current approval round only.
-    if let (Some(workspace_id), Some(agent_id)) = (
-        entry.workspace_id.as_deref(),
-        entry.request.agent_id.as_deref(),
-    ) {
-        persist_decisions_to_agent(state.inner(), workspace_id, agent_id, &decisions)?;
+    // An incomplete decision list must never authorize the whole command.
+    let valid_count = !decisions.is_empty() && decisions.len() == entry.request.segments.len();
+    if valid_count {
+        // Persist before delivery so an always-grant survives a crash.
+        if let (Some(workspace_id), Some(agent_id)) = (
+            entry.workspace_id.as_deref(),
+            entry.request.agent_id.as_deref(),
+        ) {
+            persist_decisions_to_agent(state.inner(), workspace_id, agent_id, &decisions)?;
+        }
+    }
+    let workspace_id = entry.workspace_id.clone();
+    let result = deliver_decisions(entry, decisions);
+    emit_attention(&app, workspace_id, remaining);
+    result
+}
+
+fn deliver_decisions(entry: PendingEntry, decisions: Vec<SegmentDecision>) -> Result<(), String> {
+    let expected = entry.request.segments.len();
+    let actual = decisions.len();
+    if actual == 0 || actual != expected {
+        let _ = entry.sender.send(PendingApprovalOutcome::Decision(vec![
+            SegmentDecision::DenyOnce,
+        ]));
+        return Err(format!(
+            "Expected {expected} segment decisions, received {actual}"
+        ));
     }
     let _ = entry
         .sender
@@ -782,6 +800,29 @@ mod tests {
             agent_name: None,
             command: "cmd".to_string(),
             segments: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_decision_count_denies_pending_command() {
+        for (segment_count, count) in [(2, 0), (2, 1), (2, 3), (0, 0)] {
+            let pending = PendingApprovals::new();
+            let mut request = fake_request(Some("ws-1"));
+            request.segments = (0..segment_count)
+                .map(|_| SegmentApproval {
+                    text: "echo ok".to_string(),
+                    kind: SegmentKind::Simple,
+                    suggested_prefix: "echo".to_string(),
+                })
+                .collect();
+            let id = request.request_id.clone();
+            let (rx, _) = pending.register(request, "run-1".to_string()).await;
+            let (entry, _) = pending.take(&id).await.unwrap();
+            let decisions = (0..count).map(|_| SegmentDecision::AllowOnce).collect();
+            assert!(deliver_decisions(entry, decisions).is_err());
+            assert!(
+                matches!(rx.await, Ok(PendingApprovalOutcome::Decision(d)) if d.iter().any(|d| !d.is_allow()))
+            );
         }
     }
 
