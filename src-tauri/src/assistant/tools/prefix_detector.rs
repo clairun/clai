@@ -8,8 +8,9 @@
 //!
 //! Algorithm:
 //!
-//! 1. Tokenize the segment (whitespace-split, quote-aware).
-//! 2. Skip leading `VAR=value` env-assignment tokens.
+//! 1. Take the command's words as tree-sitter-bash parses them
+//!    ([`command_words`]).
+//! 2. Leading `VAR=value` env assignments are not words, so they're skipped.
 //! 3. Take the next token as the **binary**. If it's path-shaped
 //!    (`./foo`, `/usr/bin/x`, `~/bin/y`), return it as-is.
 //! 4. Look up the binary in the per-binary depth table to pick a style:
@@ -27,6 +28,8 @@
 //! field so the user can narrow or broaden before confirming.
 
 #![allow(dead_code)] // wired into the approval flow in commit 7
+
+use crate::assistant::tools::command_splitter::{command_words, row_words};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Style {
@@ -209,22 +212,13 @@ const TWO_WORD_PERMISSIVE: &[&str] = &[
 /// The segment must not be Opaque (this function is only meaningful for
 /// segments that can be allowlisted).
 pub fn suggest_prefix(segment: &str) -> String {
-    let tokens = tokenize(segment);
-    if tokens.is_empty() {
-        return segment.trim().to_string();
-    }
-
-    // 1. Skip leading env assignments.
-    let mut idx = 0;
-    while idx < tokens.len() && is_env_assignment(&tokens[idx]) {
-        idx += 1;
-    }
-
-    // 2. Binary token, if any.
-    let Some(binary) = tokens.get(idx).map(String::as_str) else {
-        return segment.trim().to_string();
+    // 1–2. The command's words, without leading env assignments. Anything
+    // else (`> file`, `for f in …`) has no prefix to save.
+    let Some(tokens) = command_words(segment) else {
+        return String::new();
     };
-    idx += 1;
+    let binary = tokens[0];
+    let mut idx = 1;
 
     // 3. Path-shaped binaries are returned as-is (no subcommand layer).
     if is_path_shaped(binary) {
@@ -244,6 +238,11 @@ pub fn suggest_prefix(segment: &str) -> String {
     if !first.is_ascii_alphanumeric() && first != '_' {
         return String::new();
     }
+    // Nor does a reserved word like `for` or `case`: allowlisting `for i`
+    // would trust every loop over `i`, whatever its body runs.
+    if crate::assistant::tools::command_splitter::is_shell_syntax(binary) {
+        return String::new();
+    }
 
     let style = lookup_style(binary);
 
@@ -252,17 +251,17 @@ pub fn suggest_prefix(segment: &str) -> String {
     }
 
     // 4. Skip flags between binary and first subword.
-    while idx < tokens.len() && is_flag(&tokens[idx]) {
+    while idx < tokens.len() && is_flag(tokens[idx]) {
         idx += 1;
     }
-    let Some(first_sub) = tokens.get(idx).cloned() else {
+    let Some(&first_sub) = tokens.get(idx) else {
         return binary.to_string();
     };
     idx += 1;
 
     let include_first = match style {
         Style::OneWord | Style::TwoWord(_) => true,
-        Style::Unknown => is_subcommand_shaped(&first_sub),
+        Style::Unknown => is_subcommand_shaped(first_sub),
         Style::None => false,
     };
     if !include_first {
@@ -292,10 +291,10 @@ pub fn suggest_prefix(segment: &str) -> String {
 
 /// Normalizes a segment so the allowlist/blocklist matcher identifies a
 /// command the *same way* `suggest_prefix` does when it proposes the saved
-/// prefix. Mirrors steps 2–5 of the suggestion algorithm: it drops leading
-/// `VAR=value` env assignments and the global flags that sit between the
-/// binary and its first subcommand, while preserving every token from the
-/// first subcommand onward.
+/// prefix. Mirrors steps 2–5 of the suggestion algorithm: it keeps only the
+/// command's words, without leading `VAR=value` env assignments, redirects
+/// and the global flags that sit between the binary and its first
+/// subcommand, while preserving every word from the first subcommand onward.
 ///
 /// Without this, the two halves disagree: `suggest_prefix("git --no-pager
 /// log --oneline")` returns `git log`, but a literal prefix match of
@@ -303,56 +302,57 @@ pub fn suggest_prefix(segment: &str) -> String {
 /// git log" never matches the command it came from and the user is
 /// re-prompted forever.
 ///
-/// Returns `None` when nothing would be stripped (no env prefix, no
-/// inter-binary flags), so the caller can skip the redundant second match and
-/// keep using the raw text it already has.
+/// Returns `None` when `segment` is not one command.
 pub fn canonicalize_for_match(segment: &str) -> Option<String> {
-    let tokens = tokenize(segment);
-    if tokens.is_empty() {
-        return None;
-    }
-
-    // Step 2: skip leading env assignments.
-    let mut idx = 0;
-    while idx < tokens.len() && is_env_assignment(&tokens[idx]) {
-        idx += 1;
-    }
-    let env_skipped = idx > 0;
-
-    // Step 3: the binary.
-    let Some(binary) = tokens.get(idx).cloned() else {
-        // All-assignment segment (`FOO=bar`) — a benign construct, never
-        // routed through prefix matching. Nothing to canonicalize.
-        return None;
-    };
-    idx += 1;
-
-    // Step 5: skip global flags between the binary and its first subcommand,
-    // but only for binaries that actually have a subcommand layer. Path-shaped
-    // binaries (`~/bin/go`) and flat-argument commands (`ls`, Style::None) are
-    // returned head-only by `suggest_prefix` and skip no flags, so we mirror
-    // that and leave their flags in place.
-    let mut flags_skipped = false;
-    if !is_path_shaped(&binary) && !matches!(lookup_style(&binary), Style::None) {
-        while idx < tokens.len() && is_flag(&tokens[idx]) {
-            idx += 1;
-            flags_skipped = true;
+    let words = command_words(segment)?;
+    let binary = words[0];
+    let mut rest = &words[1..];
+    // Path-shaped binaries (`~/bin/go`) and flat-argument commands (`ls`,
+    // Style::None) are returned head-only by `suggest_prefix` and skip no
+    // flags, so we mirror that and leave their flags in place.
+    if !is_path_shaped(binary) && !matches!(lookup_style(binary), Style::None) {
+        while let [first, after @ ..] = rest {
+            if !is_flag(first) {
+                break;
+            }
+            rest = after;
         }
     }
+    Some(
+        std::iter::once(binary)
+            .chain(rest.iter().copied())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
 
-    // Nothing was removed → identical to the raw text; let the literal match
-    // handle it and avoid allocating a duplicate string.
-    if !env_skipped && !flags_skipped {
-        return None;
-    }
+/// The head of `segment` as the shell runs it, joined by single spaces, with
+/// the directory dropped from the command name: `FOO='a b' /usr/bin/rm\t-rf
+/// x` → `rm -rf x`. `None` when `segment` is not one command.
+pub fn by_head_name(segment: &str) -> Option<String> {
+    let words = row_words(segment)?;
+    let name = words[0].rsplit('/').next().unwrap_or(words[0]);
+    Some(
+        std::iter::once(name)
+            .chain(words[1..].iter().copied())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
 
-    let mut rebuilt = String::with_capacity(segment.len());
-    rebuilt.push_str(&binary);
-    for tok in &tokens[idx..] {
-        rebuilt.push(' ');
-        rebuilt.push_str(tok);
-    }
-    Some(rebuilt)
+/// The command `segment` runs, joined by single spaces, with the directory
+/// dropped from the command name: `timeout 60 rm -rf x` → `rm -rf x`. `None`
+/// when the command is not written out (`bash -c 'rm -rf /'`), so the
+/// blocklist cannot see into it.
+pub fn by_run_command(segment: &str) -> Option<String> {
+    let words = command_words(segment)?;
+    let name = words[0].rsplit('/').next().unwrap_or(words[0]);
+    Some(
+        std::iter::once(name)
+            .chain(words[1..].iter().copied())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
 }
 
 fn lookup_style(binary: &str) -> Style {
@@ -383,24 +383,6 @@ fn is_flag(token: &str) -> bool {
     !matches!(token, "-" | "--")
 }
 
-fn is_env_assignment(tok: &str) -> bool {
-    let Some(eq) = tok.find('=') else {
-        return false;
-    };
-    if eq == 0 {
-        return false;
-    }
-    let name = &tok[..eq];
-    let mut chars = name.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
 /// Looks like a subcommand name: lowercase ASCII, optional digits/hyphens/
 /// underscores, length 1-25, leading letter.
 fn is_subcommand_shaped(token: &str) -> bool {
@@ -413,68 +395,6 @@ fn is_subcommand_shaped(token: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_')
-}
-
-/// Shell-aware whitespace tokenizer. Honors single quotes, double quotes,
-/// and backslash escapes. Sufficient for breaking a Simple segment into
-/// argv-shaped tokens; the segment has already passed through the splitter
-/// so it has no top-level separators.
-fn tokenize(input: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut buf = String::new();
-    let mut in_single = false;
-    let mut in_double = false;
-    let mut escape = false;
-
-    for c in input.chars() {
-        if escape {
-            buf.push(c);
-            escape = false;
-            continue;
-        }
-        if in_single {
-            buf.push(c);
-            if c == '\'' {
-                in_single = false;
-            }
-            continue;
-        }
-        if in_double {
-            buf.push(c);
-            if c == '\\' {
-                escape = true;
-            } else if c == '"' {
-                in_double = false;
-            }
-            continue;
-        }
-        if c == '\\' {
-            buf.push(c);
-            escape = true;
-            continue;
-        }
-        if c == '\'' {
-            buf.push(c);
-            in_single = true;
-            continue;
-        }
-        if c == '"' {
-            buf.push(c);
-            in_double = true;
-            continue;
-        }
-        if c.is_whitespace() {
-            if !buf.is_empty() {
-                out.push(std::mem::take(&mut buf));
-            }
-            continue;
-        }
-        buf.push(c);
-    }
-    if !buf.is_empty() {
-        out.push(buf);
-    }
-    out
 }
 
 #[cfg(test)]
@@ -589,7 +509,7 @@ mod tests {
     #[test]
     fn gh_pr_create() {
         check(
-            r#"gh pr create --title "feat: x" --body "..."#,
+            r#"gh pr create --title "feat: x" --body "...""#,
             "gh pr create",
         );
     }
@@ -741,6 +661,14 @@ mod tests {
     }
 
     #[test]
+    fn reserved_word_head_has_no_prefix() {
+        // `for i` would trust every loop over `i`, whatever its body runs.
+        check("for f in $(ls)", "");
+        check("case $(uname) in", "");
+        check("function f", "");
+    }
+
+    #[test]
     fn colon_with_redirect_has_no_prefix() {
         // `: > file` — the over-collapsed shape from the real bug report.
         check(": > /tmp/out.jsonl", "");
@@ -762,9 +690,8 @@ mod tests {
 
     #[test]
     fn env_only_no_binary() {
-        // Pathological: just env assignments, no actual command.
-        // We fall back to the trimmed original.
-        check("FOO=bar", "FOO=bar");
+        // Just env assignments, no command: nothing to save as a prefix.
+        check("FOO=bar", "");
     }
 
     // -----------------------------------------------------------------
@@ -788,14 +715,6 @@ mod tests {
     // -----------------------------------------------------------------
     // Internal helpers
     // -----------------------------------------------------------------
-
-    #[test]
-    fn tokenize_handles_quotes_and_escapes() {
-        assert_eq!(tokenize("a b c"), vec!["a", "b", "c"]);
-        assert_eq!(tokenize(r#"a "b c" d"#), vec!["a", r#""b c""#, "d"]);
-        assert_eq!(tokenize(r"a\ b c"), vec![r"a\ b", "c"]);
-        assert_eq!(tokenize("a 'b c' d"), vec!["a", "'b c'", "d"]);
-    }
 
     #[test]
     fn is_subcommand_shaped_examples() {
@@ -879,10 +798,11 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_returns_none_when_nothing_to_strip() {
-        // Plain command with no env prefix and no inter-binary flags — the
-        // literal match already handles it, so we signal "no change".
-        assert_eq!(canonicalize_for_match("git log --oneline -5"), None);
+    fn canonicalize_keeps_a_plain_command() {
+        assert_eq!(
+            canonicalize_for_match("git log --oneline -5").as_deref(),
+            Some("git log --oneline -5")
+        );
     }
 
     #[test]
@@ -890,14 +810,20 @@ mod tests {
         // `ls` is Style::None — its leading flags are arguments, not a
         // pre-subcommand region, so suggest_prefix keeps them off the prefix
         // and we must not strip them here either.
-        assert_eq!(canonicalize_for_match("ls -la /tmp"), None);
+        assert_eq!(
+            canonicalize_for_match("ls -la /tmp").as_deref(),
+            Some("ls -la /tmp")
+        );
     }
 
     #[test]
     fn canonicalize_leaves_path_shaped_binary_flags_untouched() {
         // Path-shaped binaries have no subcommand layer; suggest_prefix
         // returns the binary head as-is, so no flag stripping.
-        assert_eq!(canonicalize_for_match("~/go/bin/go --foo build"), None);
+        assert_eq!(
+            canonicalize_for_match("~/go/bin/go --foo build").as_deref(),
+            Some("~/go/bin/go --foo build")
+        );
     }
 
     #[test]
@@ -911,5 +837,54 @@ mod tests {
     #[test]
     fn canonicalize_all_assignment_segment_returns_none() {
         assert_eq!(canonicalize_for_match("FOO=bar BAZ=1"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Wrappers that only change how a command runs
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn wrapper_suggests_the_command_it_runs() {
+        assert_eq!(suggest_prefix("timeout 600 cargo build"), "cargo build");
+        assert_eq!(suggest_prefix("time make build"), "make build");
+        assert_eq!(suggest_prefix("env FOO=1 cargo build"), "cargo build");
+    }
+
+    #[test]
+    fn wrapper_canonicalizes_to_the_command_it_runs() {
+        // The prefix the user saves must match the row it came from, or the
+        // grant never covers it and the user is asked again.
+        assert_eq!(
+            canonicalize_for_match("timeout 600 cargo build 2>&1").as_deref(),
+            Some("cargo build")
+        );
+        // The policy matches a row, not the whole command: the row of the
+        // wrapper is the command with its redirect.
+        assert_eq!(
+            canonicalize_for_match("timeout 600 cargo build 2>&1").as_deref(),
+            Some("cargo build")
+        );
+    }
+
+    #[test]
+    fn wrapper_of_code_has_no_command_to_name() {
+        assert_eq!(suggest_prefix("bash -c 'rm -rf /'"), "");
+        assert_eq!(by_run_command("bash -c 'rm -rf /'"), None);
+    }
+
+    #[test]
+    fn by_head_name_keeps_the_wrapper_and_by_run_command_the_command() {
+        assert_eq!(
+            by_head_name("/usr/bin/timeout 2 rm -rf x").as_deref(),
+            Some("timeout 2 rm -rf x")
+        );
+        assert_eq!(
+            by_run_command("timeout 60 rm -rf x").as_deref(),
+            Some("rm -rf x")
+        );
+        assert_eq!(
+            by_head_name("FOO=1 /usr/bin/rm -rf x").as_deref(),
+            Some("rm -rf x")
+        );
     }
 }

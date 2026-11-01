@@ -6,6 +6,7 @@ import { MemoryRouter, Outlet, Route, Routes, useNavigate } from 'react-router';
 
 import Workspace from './Workspace';
 import styles from './Workspace.module.css';
+import previewStyles from '../components/WorkspaceFilePreviewPanel.module.css';
 import useAssistantStore from '../assistant/sessionStore';
 import { useAssistantEvents } from '../assistant/useAssistantEvents';
 import { useTaskStore } from '../workspace/taskStore';
@@ -1175,6 +1176,98 @@ describe('Workspace file preview', () => {
 
     expect(await screen.findByRole('region', { name: 'Artifact: bisect.sh' })).toBeInTheDocument();
     expect(readWorkspaceFile.mock.calls.map((call) => call[1])).toContain('scratch/bisect.sh');
+  });
+
+  it('opens a Markdown link rendered and switches between rendered and source', async () => {
+    loadSessionMessagesPage.mockResolvedValue(messagePage([{
+      ...streamingAssistantMessage('sess-a', 'm1'),
+      content: [{ type: 'text', text: 'See [notes](/tmp/a/notes.md)' }],
+    }]));
+    readWorkspaceFile.mockResolvedValue({
+      path: 'notes.md',
+      viewer: 'markdown',
+      content: '# Notes\nA paragraph',
+    });
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('link', { name: 'notes' }));
+    const panel = await screen.findByRole('region', { name: 'Artifact: notes.md' });
+    expect(await within(panel).findByRole('heading', { name: 'Notes' })).toBeInTheDocument();
+    expect(within(panel).getByRole('button', { name: 'Rendered' })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(within(panel).getByRole('button', { name: 'Source' }));
+    expect(within(panel).queryByRole('heading', { name: 'Notes' })).toBeNull();
+    expect(within(panel).getByRole('button', { name: 'Source' })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(within(panel).getByRole('button', { name: 'Rendered' }));
+    expect(within(panel).getByRole('heading', { name: 'Notes' })).toBeInTheDocument();
+  });
+
+  it('opens a Markdown line link in source and restores that line after switching views', async () => {
+    loadSessionMessagesPage.mockResolvedValue(messagePage([{
+      ...streamingAssistantMessage('sess-a', 'm1'),
+      content: [{ type: 'text', text: 'See [source notes](/tmp/a/notes.md:2) or [rendered notes](/tmp/a/notes.md)' }],
+    }]));
+    readWorkspaceFile.mockResolvedValue({
+      path: 'notes.md',
+      viewer: 'markdown',
+      content: '# Notes\nSecond line',
+    });
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('link', { name: 'source notes' }));
+    const panel = await screen.findByRole('region', { name: 'Artifact: notes.md' });
+    expect(await within(panel).findByText('Second line')).toBeInTheDocument();
+    expect(panel.querySelector('[data-preview-line="2"]')).toHaveClass(previewStyles.targetLine!);
+    expect(within(panel).getByRole('button', { name: 'Source' })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(within(panel).getByRole('button', { name: 'Rendered' }));
+    expect(within(panel).getByRole('heading', { name: 'Notes' })).toBeInTheDocument();
+    expect(panel.querySelector('[data-preview-line="2"]')).toBeNull();
+
+    await userEvent.click(within(panel).getByRole('button', { name: 'Source' }));
+    expect(panel.querySelector('[data-preview-line="2"]')).toHaveClass(previewStyles.targetLine!);
+
+    await userEvent.click(screen.getByRole('link', { name: 'rendered notes' }));
+    expect(within(panel).getByRole('button', { name: 'Rendered' })).toHaveAttribute('aria-pressed', 'true');
+    expect(panel.querySelector('[data-preview-line="2"]')).toBeNull();
+
+    await userEvent.click(screen.getByRole('link', { name: 'source notes' }));
+    expect(within(panel).getByRole('button', { name: 'Source' })).toHaveAttribute('aria-pressed', 'true');
+    expect(panel.querySelector('[data-preview-line="2"]')).toHaveClass(previewStyles.targetLine!);
+  });
+
+  it('resets Markdown to Rendered when a memory is selected again from the list', async () => {
+    const otherMemory: WorkspaceFileEntry = {
+      ...MEMORY,
+      path: '.clai/memory/notes.md',
+      relativePath: '.clai/memory/notes.md',
+      name: 'notes.md',
+    };
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { memories: options.includeFiles ? [MEMORY, otherMemory] : [] })
+    );
+    readWorkspaceFile.mockImplementation(async (_workspaceId, path) => ({
+      path,
+      viewer: 'markdown',
+      content: path === MEMORY.path ? '# Knowledge' : '# Notes',
+    }));
+    renderWorkspace();
+
+    await userEvent.click(await screen.findByRole('button', { name: /2 memories/ }));
+    const drawer = await screen.findByRole('complementary', { name: 'memories drawer' });
+    await userEvent.click(within(drawer).getByRole('button', { name: /knowledge\.md/ }));
+    const panel = await screen.findByRole('region', { name: 'Memory: knowledge.md' });
+    await within(panel).findByRole('heading', { name: 'Knowledge' });
+    await userEvent.click(within(panel).getByRole('button', { name: 'Source' }));
+    expect(within(panel).getByRole('button', { name: 'Source' })).toHaveAttribute('aria-pressed', 'true');
+
+    await userEvent.click(within(drawer).getByRole('button', { name: /notes\.md/ }));
+    await within(panel).findByRole('heading', { name: 'Notes' });
+    await userEvent.click(within(drawer).getByRole('button', { name: /knowledge\.md/ }));
+
+    expect(within(panel).getByRole('button', { name: 'Rendered' })).toHaveAttribute('aria-pressed', 'true');
+    expect(await within(panel).findByRole('heading', { name: 'Knowledge' })).toBeInTheDocument();
   });
 
   it('returns to a source line when the same chat link is opened again', async () => {

@@ -67,6 +67,15 @@ pub fn strip_local_mcp_qualifier(name: &str) -> &str {
     name.strip_prefix(LOCAL_MCP_TOOL_PREFIX).unwrap_or(name)
 }
 
+/// A command that an approval earlier in the run allows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunCommandGrant {
+    /// The command and every command it prefixes.
+    Prefix(String),
+    /// This exact command text only.
+    Exact(String),
+}
+
 /// Context for tool execution within an assistant run.
 pub struct ToolExecutionContext {
     pub session_id: SessionId,
@@ -96,7 +105,8 @@ pub struct ToolExecutionContext {
     /// reflects neither the just-accepted `AllowOnce` nor the
     /// just-accepted `AllowAlways`, since persistence updates the DB but
     /// not the running execution snapshot) and re-prompted every time.
-    pub session_allowed_command_prefixes: Arc<Mutex<Vec<String>>>,
+    /// A row with no prefix to save is allowed as its exact text.
+    pub session_allowed_command_prefixes: Arc<Mutex<Vec<RunCommandGrant>>>,
     /// Run-scoped blocked command prefixes — symmetric counterpart of
     /// `session_allowed_command_prefixes` for `DenyAlways` decisions. A
     /// `DenyAlways` mid-run otherwise persists to the agent's durable
@@ -140,23 +150,23 @@ impl ToolExecutionContext {
             .unwrap_or_default()
     }
 
-    /// Append a run-scoped allowed command prefix. Idempotent on string
-    /// equality so re-approving the same command doesn't bloat the list.
-    pub fn add_session_allowed_command_prefix(&self, prefix: String) {
-        let trimmed = prefix.trim();
-        if trimmed.is_empty() {
+    /// Append a run-scoped allowed command. Idempotent so re-approving the
+    /// same command doesn't bloat the list.
+    pub fn add_session_allowed_command(&self, grant: RunCommandGrant) {
+        let (RunCommandGrant::Prefix(text) | RunCommandGrant::Exact(text)) = &grant;
+        if text.trim().is_empty() {
             return;
         }
-        if let Ok(mut prefixes) = self.session_allowed_command_prefixes.lock() {
-            if !prefixes.iter().any(|p| p == trimmed) {
-                prefixes.push(trimmed.to_string());
+        if let Ok(mut grants) = self.session_allowed_command_prefixes.lock() {
+            if !grants.contains(&grant) {
+                grants.push(grant);
             }
         }
     }
 
-    /// Snapshot of run-scoped allowed command prefixes for merging with
-    /// the durable allowlist in policy evaluation.
-    pub fn session_allowed_command_prefixes_snapshot(&self) -> Vec<String> {
+    /// Snapshot of run-scoped allowed commands for merging with the
+    /// durable allowlist in policy evaluation.
+    pub fn session_allowed_command_prefixes_snapshot(&self) -> Vec<RunCommandGrant> {
         self.session_allowed_command_prefixes
             .lock()
             .map(|p| p.clone())
@@ -164,7 +174,7 @@ impl ToolExecutionContext {
     }
 
     /// Append a run-scoped blocked command prefix. Idempotent on string
-    /// equality. Mirrors [`Self::add_session_allowed_command_prefix`].
+    /// equality. Mirrors [`Self::add_session_allowed_command`].
     pub fn add_session_blocked_command_prefix(&self, prefix: String) {
         let trimmed = prefix.trim();
         if trimmed.is_empty() {

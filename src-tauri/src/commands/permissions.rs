@@ -478,31 +478,34 @@ pub async fn submit_permission_decision(
     deliver_decisions(state.inner(), entry, decisions)
 }
 
-/// Persists the durable part of the decisions and hands them to the tool
-/// waiting on the approval. Split out of the Tauri command so the delivery
-/// path — the one that carries a denial reason to the model — can be tested
-/// without a Tauri app handle.
+/// Validate the complete decision list before persisting any rule, then
+/// deliver it to the tool waiting on the approval.
 fn deliver_decisions(
     state: &AppState,
     entry: PendingEntry,
     decisions: Vec<SegmentDecision>,
 ) -> Result<(), String> {
-    let PendingEntry {
-        sender,
-        workspace_id,
-        request,
-        ..
-    } = entry;
-    // Persist always-decisions before delivering so the grant survives a
-    // crash between user click and command execution. If a request lacks
-    // workspace/agent identity, there is intentionally no legacy fallback:
-    // "always" decisions degrade to the current approval round only.
-    if let (Some(workspace_id), Some(agent_id)) =
-        (workspace_id.as_deref(), request.agent_id.as_deref())
-    {
+    let expected = entry.request.segments.len();
+    let actual = decisions.len();
+    if actual == 0 || actual != expected {
+        let _ = entry.sender.send(PendingApprovalOutcome::Decision(vec![
+            SegmentDecision::DenyOnce { reason: None },
+        ]));
+        return Err(format!(
+            "Expected {expected} segment decisions, received {actual}"
+        ));
+    }
+    // Persist before delivery so an always-grant survives a crash. Missing
+    // identity leaves an always decision scoped to this approval only.
+    if let (Some(workspace_id), Some(agent_id)) = (
+        entry.workspace_id.as_deref(),
+        entry.request.agent_id.as_deref(),
+    ) {
         persist_decisions_to_agent(state, workspace_id, agent_id, &decisions)?;
     }
-    let _ = sender.send(PendingApprovalOutcome::Decision(decisions));
+    let _ = entry
+        .sender
+        .send(PendingApprovalOutcome::Decision(decisions));
     Ok(())
 }
 
@@ -518,8 +521,7 @@ fn normalize_denial_reasons(decisions: &mut [SegmentDecision]) -> Result<(), Str
             if trimmed.chars().count() > 500 {
                 return Err("Denial reason must be at most 500 characters".to_string());
             }
-            let normalized = (!trimmed.is_empty()).then(|| trimmed.to_string());
-            *reason = normalized;
+            *reason = (!trimmed.is_empty()).then(|| trimmed.to_string());
         }
     }
     Ok(())
@@ -900,6 +902,30 @@ mod tests {
             agent_name: None,
             command: "cmd".to_string(),
             segments: vec![],
+        }
+    }
+
+    #[tokio::test]
+    async fn mismatched_decision_count_denies_pending_command() {
+        let fixture = crate::commands::path_grants::approval_destination_tests::Fixture::new();
+        for (segment_count, count) in [(2, 0), (2, 1), (2, 3), (0, 0)] {
+            let pending = PendingApprovals::new();
+            let mut request = fake_request(Some("ws-1"));
+            request.segments = (0..segment_count)
+                .map(|_| SegmentApproval {
+                    text: "echo ok".to_string(),
+                    kind: SegmentKind::Simple,
+                    suggested_prefix: "echo".to_string(),
+                })
+                .collect();
+            let id = request.request_id.clone();
+            let (rx, _) = pending.register(request, "run-1".to_string()).await;
+            let (entry, _) = pending.take(&id).await.unwrap();
+            let decisions = (0..count).map(|_| SegmentDecision::AllowOnce).collect();
+            assert!(deliver_decisions(&fixture.state, entry, decisions).is_err());
+            assert!(
+                matches!(rx.await, Ok(PendingApprovalOutcome::Decision(d)) if d.iter().any(|d| !d.is_allow()))
+            );
         }
     }
 

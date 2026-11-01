@@ -1,7 +1,7 @@
 import React, { useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { listPendingPermissionRequests, submitPermissionDecision } from '../permissions/client';
-import type { PermissionRequest, SegmentDecision } from '../generated/bindings';
+import type { PermissionRequest, SegmentApproval, SegmentDecision } from '../generated/bindings';
 import { chipText } from './requestChips';
 import styles from './InlineApprovalCard.module.css';
 
@@ -43,6 +43,14 @@ interface SegmentCellState {
 }
 
 type CardState = Record<number, SegmentCellState>;
+
+// How a row's chosen decision reads in the bulk note.
+const DECISION_LABEL: Record<DecisionKind, string> = {
+  allowOnce: 'Allow once',
+  denyOnce: 'Deny once',
+  allowAlways: 'Always allow',
+  denyAlways: 'Always deny',
+};
 
 interface ApprovalCardProps {
   req: PermissionRequest;
@@ -101,32 +109,44 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
   const setSegmentPrefix = (idx: number, prefix: string) =>
     setCells((current) => ({ ...current, [idx]: { decision: current[idx]?.decision ?? null, prefix } }));
 
-  // The reason rides along with the denial it belongs to; an allow never
-  // carries one.
+  const resolvedPrefix = (selected: CardState, seg: SegmentApproval, idx: number): string =>
+    (selected[idx]?.prefix ?? seg.suggestedPrefix ?? '').trim();
+
+  const effectiveDecision = (
+    seg: SegmentApproval,
+    idx: number,
+    kind: DecisionKind | null
+  ): DecisionKind | null => {
+    if (kind === null) return null;
+    if (kind === 'allowAlways' && resolvedPrefix(cells, seg, idx).length === 0) return 'allowOnce';
+    return kind;
+  };
+
+  const decisionFor = (selected: CardState, seg: SegmentApproval, idx: number, why?: string): SegmentDecision => {
+    const kind = selected[idx]!.decision!;
+    const prefix = resolvedPrefix(selected, seg, idx);
+    switch (kind) {
+      case 'allowOnce':
+        return allowOnce();
+      case 'denyOnce':
+        return denyOnce(why);
+      case 'allowAlways':
+        return prefix ? allowAlways(prefix) : allowOnce();
+      case 'denyAlways':
+        return denyAlways(prefix || seg.text, why);
+    }
+  };
+
   const decisionsFrom = (selected: CardState, why: string): SegmentDecision[] => {
     const trimmedReason = why.trim() || undefined;
-    return req.segments.map((seg, i) => {
-      const cell = selected[i]!; // every segment is decided
-      const prefix = (cell.prefix || '').trim() || seg.text;
-      switch (cell.decision) {
-        case 'allowOnce':
-          return allowOnce();
-        case 'allowAlways':
-          return allowAlways(prefix);
-        case 'denyAlways':
-          return denyAlways(prefix, trimmedReason);
-        default:
-          return denyOnce(trimmedReason);
-      }
-    });
+    return req.segments.map((seg, i) => decisionFor(selected, seg, i, trimmedReason));
   };
 
   const handleSegmentDecision = (idx: number, kind: DecisionKind) => {
     const next: CardState = { ...cells, [idx]: { prefix: cells[idx]?.prefix ?? '', decision: kind } };
     setCells(next);
     if (!req.segments.every((_, i) => next[i]?.decision)) return;
-    // A denial waits for the confirm button below: the reason is typed
-    // there, and only the denial carries it.
+    // A denial waits for confirmation so the user can add a reason.
     if (req.segments.some((_, i) => isDenial(next[i]?.decision ?? null))) return;
     sendDecisions(decisionsFrom(next, reason));
   };
@@ -153,20 +173,129 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
     return blocksAlways ? 'Deny and block always' : 'Deny command';
   };
 
-  // Batch "trust this whole command" shortcut. For each segment that
-  // has a suggestedPrefix (either Simple or Opaque whose head is
-  // recognized), submits AllowAlways with the user's edited prefix or
-  // the suggestion; segments without a stable prefix fall back to
-  // AllowOnce so the run still proceeds. Mirrors the per-row
-  // "Always allow" buttons collapsed into a single click for multi-
-  // segment commands like `cd && go run foo` or `which … || find …`.
-  const allowAllAlways = () =>
-    sendDecisions(
-      req.segments.map((seg, idx) => {
-        const prefix = (cells[idx]?.prefix ?? seg.suggestedPrefix ?? '').trim();
-        return prefix ? allowAlways(prefix) : allowOnce();
-      })
-    );
+  // Batch "trust this whole command" shortcut. It decides the parts the
+  // user has not decided yet: those with a prefix (either Simple or
+  // Opaque whose head is recognized) get AllowAlways with the user's
+  // edited prefix or the suggestion, the rest fall back to AllowOnce so
+  // the run still proceeds. The parts the user already decided keep
+  // their decision, so a deny is never turned into an allow rule by a
+  // later click.
+  const allowAllAlways = () => {
+    const next: CardState = { ...cells };
+    req.segments.forEach((seg, idx) => {
+      if (next[idx]?.decision) return;
+      const prefix = resolvedPrefix(next, seg, idx);
+      next[idx] = { prefix: next[idx]?.prefix ?? '', decision: prefix ? 'allowAlways' : 'allowOnce' };
+    });
+    if (req.segments.some((_, i) => isDenial(next[i]?.decision ?? null))) {
+      setCells(next);
+      return;
+    }
+    sendDecisions(decisionsFrom(next, reason));
+  };
+
+  // What the bulk click will do, part by part: it decides the parts the
+  // user has not decided yet and leaves the decided ones alone. A part
+  // with a prefix is saved as an allow rule, a part without one is
+  // allowed for this run only. The note under the button says exactly
+  // that, so the click never decides more than it says.
+  const bulkPlan = req.segments.map((seg, idx) => {
+    const decided = cells[idx]?.decision ?? null;
+    return {
+      idx,
+      text: seg.text,
+      prefix: resolvedPrefix(cells, seg, idx),
+      decided,
+      effective: effectiveDecision(seg, idx, decided),
+    };
+  });
+  const pendingParts = bulkPlan.filter((part) => part.decided === null);
+  const keptParts = bulkPlan.filter((part) => part.decided !== null);
+  const savedParts = pendingParts.filter((part) => part.prefix.length > 0);
+  const onceOnlyParts = pendingParts.filter((part) => part.prefix.length === 0);
+  // One rule for both cards: the bulk action is offered only while it
+  // can save something. When no pending part has a prefix to save, the
+  // click would decide the rest for this run only, so the card offers
+  // one chip per remaining part instead. The Fleet card and the
+  // workspace card therefore always offer the same choices.
+  const showsBulkChip = pendingParts.length > 0 && savedParts.length > 0;
+  const hasBulkNote = onceOnlyParts.length > 0 || keptParts.length > 0;
+  const bulkNoteId = `approval-bulk-note-${req.requestId}`;
+  const bulkScope = keptParts.length > 0 ? 'the rest' : 'all';
+  const bulkLead = keptParts.length > 0 ? 'Rest' : 'All';
+  const bulkFullLabel =
+    onceOnlyParts.length === 0
+      ? `Allow ${bulkScope} (always)`
+      : `Allow ${bulkScope} (always where possible)`;
+  const bulkShortLabel =
+    onceOnlyParts.length === 0
+      ? `${bulkLead} always`
+      : `${bulkLead} · ${savedParts.length} of ${pendingParts.length} saved`;
+  const bulkWhy =
+    onceOnlyParts.length === 0
+      ? 'Saves the prefix of every part this click decides and runs the command.'
+      : `Saves the prefixes of ${savedParts.length} of the ${pendingParts.length} parts this click decides and runs the command; the remaining ${onceOnlyParts.length === 1 ? 'part is' : 'parts are'} allowed once only.`;
+  // Parts are named by their position in the command: two parts with the
+  // same text stay apart, and a part without text still gets a name.
+  const partName = (part: { text: string }) => part.text.trim() || '(empty)';
+  // What the click does with a part the user already decided: it keeps the
+  // decision, and an "always" decision is a rule, so this click saves it
+  // too. The note has to say so, or it under-reports what is persisted.
+  const keptTail = (part: (typeof bulkPlan)[number]) => {
+    if (part.effective === 'allowAlways')
+      return (
+        <>
+          saved as an allow rule for <code className={styles.bulkNotePart}>{part.prefix}</code>
+        </>
+      );
+    if (part.effective === 'denyAlways')
+      return (
+        <>
+          saved as a deny rule for{' '}
+          <code className={styles.bulkNotePart}>{part.prefix || partName(part)}</code>
+        </>
+      );
+    return <>for this run only</>;
+  };
+  const bulkNote = (
+    <>
+      <span>
+        This click saves:{' '}
+        {savedParts.map((part, i) => (
+          <span key={part.idx}>
+            {i > 0 ? ', ' : ''}
+            {part.idx + 1}) <code className={styles.bulkNotePart}>{part.prefix}</code>
+          </span>
+        ))}
+        .{' '}
+      </span>
+      {onceOnlyParts.length > 0 && (
+        <span>
+          Allowed once only:{' '}
+          {onceOnlyParts.map((part, i) => (
+            <span key={part.idx}>
+              {i > 0 ? ', ' : ''}
+              {part.idx + 1}) <code className={styles.bulkNotePart}>{partName(part)}</code>
+            </span>
+          ))}
+          .{' '}
+        </span>
+      )}
+      {keptParts.length > 0 && (
+        <span>
+          Keeps your decision on{' '}
+          {keptParts.map((part, i) => (
+            <span key={part.idx}>
+              {i > 0 ? ', ' : ''}
+              {part.idx + 1}) <code className={styles.bulkNotePart}>{partName(part)}</code>{' '}
+              ({DECISION_LABEL[part.effective!]}), {keptTail(part)}
+            </span>
+          ))}
+          .{' '}
+        </span>
+      )}
+    </>
+  );
 
   // A shared teammate keeps its command decisions on its library
   // definition, so "always" applies wherever that agent works — here,
@@ -188,7 +317,14 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
             </>
           ),
         }
-      : { title: savedOn, children: `Always ${verb} (${reach})` };
+      : {
+          title: `${savedOn}. ${
+            verb === 'allow'
+              ? `Saves the prefix \`${prefix}\`.`
+              : `Blocks commands starting with \`${prefix}\`.`
+          }`,
+          children: `Always ${verb} (${reach})`,
+        };
 
   return (
     <article
@@ -259,6 +395,21 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
               // segment whose head was recognized gets the same
               // "Always allow" workflow as Simple ones.
               const canPersist = Boolean(seg.suggestedPrefix);
+              // The prefix this part would be saved under. Without one
+              // the part cannot be saved as an allow rule, so the card
+              // offers no "always allow" and says what allowing means.
+              const savePrefix = resolvedPrefix(cells, seg, idx);
+              const canSaveRule = savePrefix.length > 0;
+              // A deny rule needs something to name: the prefix, or the
+              // command text when there is no prefix. With neither, the
+              // rule would be saved under an empty prefix, which the
+              // backend skips, so the card offers no "always deny" either.
+              const denyRuleName = savePrefix || seg.text;
+              const canSaveDenyRule = denyRuleName.trim().length > 0;
+              // The decision this row will submit: an "always allow" with
+              // an emptied prefix field saves nothing, so it is an
+              // allow-once.
+              const rowDecision = effectiveDecision(seg, idx, cell.decision);
               return (
                 <div key={idx} className={styles.segmentRow}>
                   {(req.segments.length > 1 || isOpaque) && (
@@ -290,37 +441,46 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                   <div className={styles.segmentButtons}>
                     <button
                       type="button"
-                      className={`${styles.btn} ${styles.btnAllowOnce} ${cell.decision === 'allowOnce' ? styles.btnSelected : ''}`}
+                      className={`${styles.btn} ${styles.btnAllowOnce} ${rowDecision === 'allowOnce' ? styles.btnSelected : ''}`}
                       onClick={() => handleSegmentDecision(idx, 'allowOnce')}
                       disabled={isSubmitting}
                       {...chipText(spoken, 'Allow once', 'Once')}
                     />
-                    {canPersist && (
+                    {canSaveRule && (
                       <button
                         type="button"
-                        className={`${styles.btn} ${styles.btnAllow} ${cell.decision === 'allowAlways' ? styles.btnSelected : ''}`}
+                        className={`${styles.btn} ${styles.btnAllow} ${rowDecision === 'allowAlways' ? styles.btnSelected : ''}`}
                         onClick={() => handleSegmentDecision(idx, 'allowAlways')}
                         disabled={isSubmitting}
-                        {...alwaysChip('allow', seg.suggestedPrefix)}
+                        {...alwaysChip('allow', savePrefix)}
                       />
                     )}
-                    {(canPersist || !spoken) && (
+                    {(canPersist || !spoken) && canSaveDenyRule && (
                       <button
                         type="button"
-                        className={`${styles.btn} ${styles.btnDeny} ${cell.decision === 'denyAlways' ? styles.btnSelected : ''}`}
+                        className={`${styles.btn} ${styles.btnDeny} ${rowDecision === 'denyAlways' ? styles.btnSelected : ''}`}
                         onClick={() => handleSegmentDecision(idx, 'denyAlways')}
                         disabled={isSubmitting}
-                        {...alwaysChip('deny', seg.suggestedPrefix)}
+                        {...alwaysChip('deny', denyRuleName)}
                       />
                     )}
                     <button
                       type="button"
-                      className={`${styles.btn} ${styles.btnDenyOnce} ${cell.decision === 'denyOnce' ? styles.btnSelected : ''}`}
+                      className={`${styles.btn} ${styles.btnDenyOnce} ${rowDecision === 'denyOnce' ? styles.btnSelected : ''}`}
                       onClick={() => handleSegmentDecision(idx, 'denyOnce')}
                       disabled={isSubmitting}
                       {...chipText(spoken, 'Deny once', 'Deny')}
                     />
                   </div>
+                  {!canSaveRule && (
+                    <p className={styles.segmentHint}>
+                      {spoken
+                        ? 'No prefix to save for this part, so allowing it applies to this run only.'
+                        : canSaveDenyRule
+                          ? 'No prefix to save for this part, so allowing it applies to this run only. Always deny still blocks commands starting with this text.'
+                          : 'No prefix to save for this part, so allowing it applies to this run only. There is no command text to name either, so no rule can be saved for this part.'}
+                    </p>
+                  )}
                 </div>
               );
             })}
@@ -363,18 +523,19 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
           {error && !isSubmitting && <div className={styles.error}>{error}</div>}
           {req.segments.length > 1 && (
             <footer className={styles.cardFooter}>
-              {(!spoken || req.segments.some((seg) => seg.suggestedPrefix)) && (
+              {showsBulkChip && hasBulkNote && (
+                <p className={styles.bulkNote} id={bulkNoteId}>
+                  {bulkNote}
+                </p>
+              )}
+              {showsBulkChip && (
                 <button
                   type="button"
                   className={`${styles.btn} ${styles.btnAllow}`}
                   onClick={allowAllAlways}
                   disabled={isSubmitting}
-                  {...chipText(
-                    spoken,
-                    'Allow all (always)',
-                    'All always',
-                    'Persist every persistable prefix and run. Segments without a stable prefix fall back to allow-once.'
-                  )}
+                  aria-describedby={hasBulkNote ? bulkNoteId : undefined}
+                  {...chipText(spoken, bulkFullLabel, bulkShortLabel, bulkWhy)}
                 />
               )}
               <button
