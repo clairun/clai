@@ -17,8 +17,9 @@
 //!    `None`, `OneWord`, `TwoWord`, or `Unknown` (heuristic).
 //! 5. Skip the global-option tokens between the binary and its first
 //!    subword (starting with `-`, but not the bare `-` or `--` markers).
-//!    For `git`, an option that takes a value (`-C <dir>`) consumes its
-//!    value word too, so the value is never mistaken for the subcommand.
+//!    For binaries with a [`GLOBAL_OPTION_SPECS`] entry, an option that
+//!    takes a value (`git -C <dir>`) consumes its value word too, so the
+//!    value is never mistaken for the subcommand.
 //! 6. For `OneWord`: take the first non-flag token as the subword.
 //!    For `TwoWord`: take that token *and* the immediately-following
 //!    non-flag token, but only if no flag intervenes.
@@ -293,31 +294,83 @@ pub fn suggest_prefix(segment: &str) -> String {
 /// [`suggest_prefix`] and [`canonicalize_for_match`] share this so the
 /// prefix one proposes is the exact form the other matches against.
 ///
-/// Only the option token is dropped for most binaries — their option
-/// tables are unknown, so a value word cannot be told from a subcommand.
-/// `git` is value-aware: its global options are documented and stable,
-/// and the ones the agent writes (`-C <dir>` above all) carry a value
-/// that must never be taken for the subcommand (`git -C repo status` is
-/// `git status`, never `git repo`).
+/// Value awareness is a lookup in [`GLOBAL_OPTION_SPECS`]: a listed
+/// binary's documented value options (`git -C <dir>` above all) consume
+/// their value word, which must never be taken for the subcommand
+/// (`git -C repo status` is `git status`, never `git repo`). Every other
+/// binary keeps the previous flag-token-only skipping — its option table
+/// is unknown, so a value word cannot be told from a subcommand.
 ///
-/// Dropping stops at the first non-option word: git's global options may
-/// only precede the subcommand (`git status -C .` is rejected by git),
-/// while options after it belong to the subcommand's own grammar (`git
-/// log -C 2` sets copy detection), so those stay verbatim. Path-shaped
-/// binaries and flat-argument commands (Style::None) keep every word:
-/// `suggest_prefix` returns their head alone, so no option region exists.
+/// Dropping stops at the first non-option word: the table only lists
+/// options documented to precede the subcommand (`git status -C .` is
+/// rejected by git), while options after it belong to the subcommand's
+/// own grammar (`git log -C 2` sets copy detection), so those stay
+/// verbatim. Path-shaped binaries and flat-argument commands (Style::None)
+/// keep every word: `suggest_prefix` returns their head alone, so no
+/// option region exists.
 fn after_global_options<'a>(binary: &str, rest: &'a [&'a str]) -> &'a [&'a str] {
     if is_path_shaped(binary) || matches!(lookup_style(binary), Style::None) {
         return rest;
     }
+    skip_global_options(value_options_for(binary), rest)
+}
+
+/// A binary's global options whose value is a separate word when not
+/// attached with `=`, as the binary's own synopsis documents them.
+struct GlobalOptionSpec {
+    /// The binary's name, as it is written at the head of a command.
+    binary: &'static str,
+    /// The value-taking global options, each spelled as it is written.
+    value_options: &'static [&'static str],
+}
+
+/// The per-binary option knowledge behind [`after_global_options`] — the
+/// only place a binary is named for option-value skipping. Supporting
+/// another CLI's documented, subcommand-preceding value options (kubectl
+/// `-n`, docker `--context` are candidates) is an entry here, not a
+/// parser change: the skipping semantics live once in
+/// [`skip_global_options`], which this table merely feeds.
+const GLOBAL_OPTION_SPECS: &[GlobalOptionSpec] = &[GlobalOptionSpec {
+    binary: "git",
+    // From git's synopsis (`git --bogus` usage). `-C` and `-c` accept
+    // no attached short form (git rejects `-Cdir`); the long options
+    // accept both spellings (`--git-dir=x`, `--git-dir x`).
+    value_options: &[
+        "-C",
+        "-c",
+        "--git-dir",
+        "--work-tree",
+        "--namespace",
+        "--config-env",
+        "--attr-source",
+    ],
+}];
+
+/// `binary`'s value-taking global options, or none when its option table
+/// is unknown: an unlisted binary must never have a word consumed.
+fn value_options_for(binary: &str) -> &'static [&'static str] {
+    GLOBAL_OPTION_SPECS
+        .iter()
+        .find(|spec| spec.binary == binary)
+        .map(|spec| spec.value_options)
+        .unwrap_or(&[])
+}
+
+/// Drops the global-option words from the head of `rest` and returns the
+/// words from the first non-option word onward. An option listed in
+/// `value_options` consumes its value word too, unless the value rides
+/// inside the token (`--git-dir=x`); every other option — boolean, or
+/// unknown to the table — is dropped alone, keeping the next word, the
+/// subcommand candidate, intact.
+fn skip_global_options<'a>(value_options: &[&str], rest: &'a [&'a str]) -> &'a [&'a str] {
     let mut rest = rest;
     while let [first, ..] = rest {
         if !is_flag(first) {
             break;
         }
-        // A git value option written without `=` takes its value as the
-        // next word; written with `=`, the value rides inside the token.
-        let skip = if binary == "git" && !first.contains('=') && git_takes_value_word(first) {
+        // A value option written without `=` takes its value as the next
+        // word; written with `=`, the value rides inside the token.
+        let skip = if !first.contains('=') && value_options.contains(&first) {
             2
         } else {
             1
@@ -325,24 +378,6 @@ fn after_global_options<'a>(binary: &str, rest: &'a [&'a str]) -> &'a [&'a str] 
         rest = rest.get(skip..).unwrap_or(&[]);
     }
     rest
-}
-
-/// Git global options whose value is a separate word when not attached
-/// with `=`. `-C` and `-c` accept no attached short form (git rejects
-/// `-Cdir`); the long options accept both spellings (`--git-dir=x`,
-/// `--git-dir x`). They precede the subcommand in git's CLI synopsis.
-const GIT_VALUE_OPTIONS: &[&str] = &[
-    "-C",
-    "-c",
-    "--git-dir",
-    "--work-tree",
-    "--namespace",
-    "--config-env",
-    "--attr-source",
-];
-
-fn git_takes_value_word(token: &str) -> bool {
-    GIT_VALUE_OPTIONS.contains(&token)
 }
 
 /// Normalizes a segment so the allowlist/blocklist matcher identifies a
@@ -963,6 +998,48 @@ mod tests {
         assert_eq!(
             canonicalize_for_match("timeout 600 git -C repo status --short").as_deref(),
             Some("git status --short")
+        );
+    }
+
+    #[test]
+    fn unlisted_binary_never_consumes_a_value_word() {
+        // A binary without a GLOBAL_OPTION_SPECS entry has an unknown
+        // option table: the word after an option could be its value or
+        // its subcommand, and guessing wrong would grant or block on a
+        // misread subcommand. Only the option token is dropped, so
+        // `tool -C repo status` suggests the (editable, inert) `tool
+        // repo` rather than risking a wrong `tool status`.
+        check("tool -C repo status", "tool repo");
+        check("tool --context prod ps", "tool prod");
+        assert_eq!(
+            canonicalize_for_match("tool -C repo status").as_deref(),
+            Some("tool repo status")
+        );
+    }
+
+    #[test]
+    fn a_table_entry_alone_makes_a_binary_value_aware() {
+        // Extensibility contract of GLOBAL_OPTION_SPECS: the next
+        // documented CLI needs data only. With docker's `--context <ctx>`
+        // and `-H <host>` as a hypothetical entry, the shared skipper
+        // must parse boolean globals, value globals, `=`-attached forms,
+        // and run out of words — with no parser change.
+        let docker: &[&str] = &["--context", "-H"];
+        assert_eq!(
+            skip_global_options(docker, &["--context", "prod", "ps", "-a"]),
+            &["ps", "-a"][..]
+        );
+        assert_eq!(
+            skip_global_options(docker, &["--debug", "--context=prod", "ps"]),
+            &["ps"][..]
+        );
+        assert_eq!(
+            skip_global_options(docker, &["-H", "tcp://d", "--context", "prod", "images"]),
+            &["images"][..]
+        );
+        assert_eq!(
+            skip_global_options(docker, &["--context", "prod"]),
+            &[] as &[&str]
         );
     }
 
