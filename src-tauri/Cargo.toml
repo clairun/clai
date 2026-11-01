@@ -205,3 +205,7 @@ libc = "0.2"
 tokio = { version = "1.53.1", features = ["test-util"] }
 # Temporary directories for testing
 tempfile = "3"
+# tauri::test::mock_app() lets unit tests call #[tauri::command] functions
+# through a real tauri::State without a running webview. Dev-only feature:
+# resolver 2 keeps it out of release builds.
+tauri = { version = "2.12.0", features = ["test"] }

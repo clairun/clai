@@ -48,7 +48,7 @@ impl ProviderAdapter for OpenAiAdapter {
         &self,
         connection: &ProviderConnection,
     ) -> Result<Vec<ModelInfo>, ProviderError> {
-        let api_key = get_api_key_opt(connection);
+        let api_key = get_api_key(connection)?;
         // Quirk-as-data: route model listing per the catalog entry's declared
         // style — curated list only, or a dedicated models URL apart from the
         // chat base (e.g. MiniMax).
@@ -148,7 +148,7 @@ impl ProviderAdapter for OpenAiAdapter {
         Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>,
         ProviderError,
     > {
-        let api_key = get_api_key_opt(connection);
+        let api_key = get_api_key(connection)?;
         let url = completions_url(connection);
         let body = build_request_body(&request);
 
@@ -184,25 +184,78 @@ impl ProviderAdapter for OpenAiAdapter {
     }
 }
 
-/// Read the stored API key, if any. Returns `None` for keyless self-hosted
-/// providers (ollama / LM Studio / vLLM) that store no secret — the request is
-/// then sent without an `Authorization` header. A hosted provider with no key
-/// simply gets a 401 from the server, which surfaces as a normal error.
-/// Per-provider extra headers declared as data on the catalog entry (resolved
-/// via the connection's brand `provider_id`) — e.g. OpenRouter's attribution
-/// headers. Empty for connections with no catalog entry.
+/// Per-provider extra headers declared on the catalog entry.
 fn catalog_extra_headers(connection: &ProviderConnection) -> Vec<(String, String)> {
     catalog::get_entry(&connection.provider_id)
         .map(|e| e.extra_headers)
         .unwrap_or_default()
 }
 
-fn get_api_key_opt(connection: &ProviderConnection) -> Option<String> {
-    ProviderSecretStorage::get_secret(&connection.secret_ref)
-        .ok()
-        .flatten()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+fn get_api_key(connection: &ProviderConnection) -> Result<Option<String>, ProviderError> {
+    let key = match ProviderSecretStorage::get_secret(&connection.secret_ref) {
+        Ok(key) => key,
+        Err(_) if !requires_api_key(connection) => None,
+        Err(error) => {
+            return Err(ProviderError::RequestFailed(format!(
+                "Failed to read API key: {error}"
+            )))
+        }
+    };
+    validate_api_key(connection, key)
+}
+
+fn validate_api_key(
+    connection: &ProviderConnection,
+    key: Option<String>,
+) -> Result<Option<String>, ProviderError> {
+    let key = key.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    if key.is_none() && requires_api_key(connection) {
+        return Err(ProviderError::NotConfigured);
+    }
+    Ok(key)
+}
+
+fn requires_api_key(connection: &ProviderConnection) -> bool {
+    catalog::requires_api_key(&connection.provider_id)
+}
+
+pub(crate) async fn validate_openrouter_key(
+    connection: &ProviderConnection,
+) -> Result<(), ProviderError> {
+    let key = get_api_key(connection)?.ok_or(ProviderError::NotConfigured)?;
+    validate_openrouter_key_at(&key_validation_url(connection), &key).await
+}
+
+/// OpenRouter's authenticated key endpoint, derived from the connection's
+/// base like every other URL in this adapter, so a custom base validates
+/// against itself instead of openrouter.ai proper.
+fn key_validation_url(connection: &ProviderConnection) -> String {
+    let base = connection
+        .base_url
+        .as_deref()
+        .unwrap_or("https://openrouter.ai/api/v1")
+        .trim_end_matches('/');
+    if base.ends_with("/v1") {
+        format!("{base}/key")
+    } else {
+        format!("{base}/v1/key")
+    }
+}
+
+async fn validate_openrouter_key_at(url: &str, key: &str) -> Result<(), ProviderError> {
+    let response = Client::new()
+        .get(url)
+        .bearer_auth(key)
+        .send()
+        .await
+        .map_err(|error| ProviderError::RequestFailed(error.to_string()))?;
+    if !response.status().is_success() {
+        return Err(ProviderError::RequestFailed(format!(
+            "OpenRouter API key validation failed: HTTP {}",
+            response.status()
+        )));
+    }
+    Ok(())
 }
 
 fn completions_url(connection: &ProviderConnection) -> String {
@@ -824,6 +877,84 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    #[test]
+    fn hosted_provider_requires_stored_key() {
+        let connection = conn_with_brand("openrouter");
+        assert!(matches!(
+            validate_api_key(&connection, None),
+            Err(ProviderError::NotConfigured)
+        ));
+        assert!(matches!(
+            validate_api_key(&connection, Some("  ".into())),
+            Err(ProviderError::NotConfigured)
+        ));
+        assert_eq!(
+            validate_api_key(&connection, Some("  token  ".into())).unwrap(),
+            Some("token".into())
+        );
+    }
+
+    #[test]
+    fn keyless_provider_allows_missing_key() {
+        assert_eq!(
+            validate_api_key(&conn_with_brand("ollama"), None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn unknown_provider_requires_stored_key() {
+        for brand in ["groq", "unknown-custom"] {
+            let connection = conn_with_brand(brand);
+            assert!(matches!(
+                validate_api_key(&connection, None),
+                Err(ProviderError::NotConfigured)
+            ));
+            assert!(matches!(
+                validate_api_key(&connection, Some("  ".into())),
+                Err(ProviderError::NotConfigured)
+            ));
+        }
+    }
+
+    #[test]
+    fn key_validation_url_follows_the_connection_base() {
+        let default_url = key_validation_url(&conn_with_brand("openrouter"));
+        assert_eq!(default_url, "https://openrouter.ai/api/v1/key");
+
+        let mut proxied = conn_with_brand("openrouter");
+        proxied.base_url = Some("https://proxy.example/openrouter/api/v1/".into());
+        assert_eq!(
+            key_validation_url(&proxied),
+            "https://proxy.example/openrouter/api/v1/key"
+        );
+
+        let mut bare = conn_with_brand("openrouter");
+        bare.base_url = Some("http://127.0.0.1:1".into());
+        assert_eq!(key_validation_url(&bare), "http://127.0.0.1:1/v1/key");
+    }
+
+    #[tokio::test]
+    async fn openrouter_key_validation_rejects_unauthorized_response() {
+        use axum::{http::HeaderMap, routing::get, Router};
+
+        let router = Router::new().route(
+            "/key",
+            get(|headers: HeaderMap| async move {
+                assert_eq!(headers["authorization"], "Bearer invalid-key");
+                axum::http::StatusCode::UNAUTHORIZED
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/key", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        assert!(matches!(
+            validate_openrouter_key_at(&url, "invalid-key").await,
+            Err(ProviderError::RequestFailed(message)) if message.contains("HTTP 401")
+        ));
     }
 
     #[test]

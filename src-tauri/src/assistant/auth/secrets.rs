@@ -78,30 +78,57 @@ fn create_default_collection() -> Result<(), keyring::Error> {
 pub struct ProviderSecretStorage;
 
 impl ProviderSecretStorage {
+    #[cfg_attr(test, allow(dead_code))]
     fn entry(secret_ref: &str) -> Result<Entry, keyring::Error> {
         entry_for(SERVICE_NAME, secret_ref)
     }
 
+    #[cfg_attr(test, allow(clippy::unnecessary_wraps))]
     pub fn set_secret(secret_ref: &str, secret: &str) -> Result<(), keyring::Error> {
-        let entry = Self::entry(secret_ref)?;
-        set_password_creating_default_collection(&entry, secret)
-    }
-
-    #[allow(dead_code)]
-    pub fn get_secret(secret_ref: &str) -> Result<Option<String>, keyring::Error> {
-        let entry = Self::entry(secret_ref)?;
-        match entry.get_password() {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error),
+        #[cfg(test)]
+        {
+            test_vault::set(SERVICE_NAME, secret_ref, secret);
+            Ok(())
+        }
+        #[cfg(not(test))]
+        {
+            let entry = Self::entry(secret_ref)?;
+            set_password_creating_default_collection(&entry, secret)
         }
     }
 
+    #[allow(dead_code)]
+    #[cfg_attr(test, allow(clippy::unnecessary_wraps))]
+    pub fn get_secret(secret_ref: &str) -> Result<Option<String>, keyring::Error> {
+        #[cfg(test)]
+        {
+            Ok(test_vault::get(SERVICE_NAME, secret_ref))
+        }
+        #[cfg(not(test))]
+        {
+            let entry = Self::entry(secret_ref)?;
+            match entry.get_password() {
+                Ok(secret) => Ok(Some(secret)),
+                Err(keyring::Error::NoEntry) => Ok(None),
+                Err(error) => Err(error),
+            }
+        }
+    }
+
+    #[cfg_attr(test, allow(clippy::unnecessary_wraps))]
     pub fn clear_secret(secret_ref: &str) -> Result<(), keyring::Error> {
-        let entry = Self::entry(secret_ref)?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error),
+        #[cfg(test)]
+        {
+            test_vault::clear(SERVICE_NAME, secret_ref);
+            Ok(())
+        }
+        #[cfg(not(test))]
+        {
+            let entry = Self::entry(secret_ref)?;
+            match entry.delete_credential() {
+                Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+                Err(error) => Err(error),
+            }
         }
     }
 }
@@ -147,4 +174,44 @@ pub fn secret_hint(value: &str) -> Option<String> {
     let mut last4: Vec<char> = value.chars().rev().take(4).collect();
     last4.reverse();
     Some(last4.into_iter().collect())
+}
+
+/// In-process stand-in for the OS keyring, consulted only by
+/// `ProviderSecretStorage` under `cfg(test)`. CI runners have no Secret
+/// Service, so key-dependent command flows can be tested without the keyring.
+#[cfg(test)]
+mod test_vault {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+
+    fn vault() -> &'static Mutex<HashMap<String, String>> {
+        static VAULT: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+        VAULT.get_or_init(|| Mutex::new(HashMap::new()))
+    }
+
+    fn key(service: &str, secret_ref: &str) -> String {
+        format!("{service}::{secret_ref}")
+    }
+
+    pub(crate) fn set(service: &str, secret_ref: &str, value: &str) {
+        vault()
+            .lock()
+            .expect("test vault lock")
+            .insert(key(service, secret_ref), value.to_string());
+    }
+
+    pub(crate) fn get(service: &str, secret_ref: &str) -> Option<String> {
+        vault()
+            .lock()
+            .expect("test vault lock")
+            .get(&key(service, secret_ref))
+            .cloned()
+    }
+
+    pub(crate) fn clear(service: &str, secret_ref: &str) {
+        vault()
+            .lock()
+            .expect("test vault lock")
+            .remove(&key(service, secret_ref));
+    }
 }

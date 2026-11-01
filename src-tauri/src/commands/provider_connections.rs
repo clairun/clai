@@ -247,9 +247,7 @@ pub async fn provider_connection_create(
         .unwrap_or_else(|| request.protocol_id.clone());
     // Keyless self-hosted catalog entries (ollama / LM Studio / vLLM) may be
     // created without an API key; store one only when provided.
-    let requires_key = catalog::get_entry(&brand_id)
-        .map(|e| e.requires_api_key)
-        .unwrap_or(true);
+    let requires_key = catalog::requires_api_key(&brand_id);
     if auth_mode == AuthMode::DeveloperApiKey {
         let api_key = request
             .api_key
@@ -524,6 +522,15 @@ pub async fn provider_connection_test(
         return test_cli_provider_connection(&connection).await;
     }
 
+    if connection.provider_id == "openrouter" {
+        if let Err(error) = providers::openai::validate_openrouter_key(&connection).await {
+            return Ok(TestResult {
+                success: false,
+                error: Some(error.to_string()),
+            });
+        }
+    }
+
     let adapter = providers::resolve_adapter(&connection.protocol_id).map_err(|e| {
         tracing::error!(
             protocol_id = %connection.protocol_id,
@@ -728,4 +735,165 @@ async fn test_cli_provider_connection(
         success: true,
         error: None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assistant::auth::ProviderSecretStorage;
+    use crate::config::AppConfig;
+    use crate::workspace_index::WorkspaceIndex;
+    use crate::ConfigManager;
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::get;
+    use axum::Router;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    use tauri::Manager;
+
+    const VALID_KEY: &str = "sk-or-valid-regression-key";
+
+    /// A local OpenRouter stand-in reproducing the endpoint behavior behind
+    /// issue #242: `GET /v1/models` answers 200 WITHOUT credentials, while
+    /// the key endpoint is authenticated. Testing the command against this
+    /// server proves a missing or wrong key can no longer produce a false
+    /// success from the model listing.
+    async fn fake_openrouter() -> (String, Arc<AtomicUsize>) {
+        let models_hits = Arc::new(AtomicUsize::new(0));
+        let hits = models_hits.clone();
+        let router = Router::new()
+            .route(
+                "/v1/key",
+                get(|headers: HeaderMap| async move {
+                    let authorized = headers
+                        .get("authorization")
+                        .and_then(|value| value.to_str().ok())
+                        .is_some_and(|value| value == format!("Bearer {VALID_KEY}"));
+                    if authorized {
+                        StatusCode::OK
+                    } else {
+                        StatusCode::UNAUTHORIZED
+                    }
+                }),
+            )
+            .route(
+                "/v1/models",
+                get(move || {
+                    let hits = hits.clone();
+                    async move {
+                        hits.fetch_add(1, Ordering::SeqCst);
+                        axum::Json(serde_json::json!({"data": [{"id": "openrouter/auto"}]}))
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        (format!("http://{addr}"), models_hits)
+    }
+
+    fn openrouter_connection(id: &str, base_url: String) -> ProviderConnection {
+        ProviderConnection {
+            id: id.to_string(),
+            name: "OpenRouter (regression)".into(),
+            protocol_id: "openai".into(),
+            provider_id: "openrouter".into(),
+            auth_mode: AuthMode::DeveloperApiKey,
+            base_url: Some(base_url),
+            secret_ref: format!("provider-connection::{id}"),
+            model_id: "openrouter/auto".into(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    /// Runs the real `provider_connection_test` command for `connection`
+    /// through a managed `tauri::State`, exactly as the frontend invokes it.
+    async fn run_connection_test(connection: ProviderConnection) -> TestResult {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let app_config = AppConfig {
+            provider_connections: vec![connection.clone()],
+            ..AppConfig::default()
+        };
+        let config_manager =
+            ConfigManager::new_for_tests(app_config, temp.path().join("config.json"));
+        let state =
+            AppState::new_for_tests(config_manager, WorkspaceIndex::default()).expect("app state");
+        let app = tauri::test::mock_app();
+        app.manage(state);
+        provider_connection_test(connection.id.clone(), app.state())
+            .await
+            .expect("command returns a TestResult, not an invocation error")
+    }
+
+    /// Regression test for #242: the OpenRouter key guard must reject a
+    /// stored-but-invalid key BEFORE the model listing runs. Without the
+    /// guard this test fails: the unauthenticated models endpoint answers
+    /// 200 and the command reports success.
+    #[tokio::test]
+    async fn openrouter_test_fails_on_an_invalid_key_without_listing_models() {
+        let (base_url, models_hits) = fake_openrouter().await;
+        let connection = openrouter_connection("test-openrouter-invalid-key", base_url);
+        ProviderSecretStorage::set_secret(&connection.secret_ref, "sk-or-invalid-key")
+            .expect("stage invalid key");
+
+        let result = run_connection_test(connection).await;
+
+        assert!(
+            !result.success,
+            "an invalid OpenRouter key must fail the connection test"
+        );
+        let error = result.error.expect("failure carries an error message");
+        assert!(
+            error.contains("OpenRouter API key validation failed"),
+            "unexpected error: {error}"
+        );
+        assert_eq!(
+            models_hits.load(Ordering::SeqCst),
+            0,
+            "the unauthenticated model listing must not be reached"
+        );
+    }
+
+    #[tokio::test]
+    async fn openrouter_test_fails_on_a_missing_key_without_listing_models() {
+        let (base_url, models_hits) = fake_openrouter().await;
+        let connection = openrouter_connection("test-openrouter-missing-key", base_url);
+        // No secret staged for this connection's secret_ref.
+
+        let result = run_connection_test(connection).await;
+
+        assert!(
+            !result.success,
+            "a missing OpenRouter key must fail the connection test"
+        );
+        assert_eq!(
+            models_hits.load(Ordering::SeqCst),
+            0,
+            "the unauthenticated model listing must not be reached"
+        );
+    }
+
+    #[tokio::test]
+    async fn openrouter_test_succeeds_with_a_valid_key_via_the_model_listing() {
+        let (base_url, models_hits) = fake_openrouter().await;
+        let connection = openrouter_connection("test-openrouter-valid-key", base_url);
+        ProviderSecretStorage::set_secret(&connection.secret_ref, VALID_KEY)
+            .expect("stage valid key");
+
+        let result = run_connection_test(connection).await;
+
+        assert!(
+            result.success,
+            "a valid OpenRouter key must pass: {:?}",
+            result.error
+        );
+        assert_eq!(
+            models_hits.load(Ordering::SeqCst),
+            1,
+            "a valid key passes through exactly one model listing"
+        );
+    }
 }
