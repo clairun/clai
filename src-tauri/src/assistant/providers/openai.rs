@@ -48,7 +48,7 @@ impl ProviderAdapter for OpenAiAdapter {
         &self,
         connection: &ProviderConnection,
     ) -> Result<Vec<ModelInfo>, ProviderError> {
-        let api_key = get_api_key(connection)?;
+        let api_key = get_api_key_opt(connection);
         // Quirk-as-data: route model listing per the catalog entry's declared
         // style — curated list only, or a dedicated models URL apart from the
         // chat base (e.g. MiniMax).
@@ -189,6 +189,15 @@ fn catalog_extra_headers(connection: &ProviderConnection) -> Vec<(String, String
     catalog::get_entry(&connection.provider_id)
         .map(|e| e.extra_headers)
         .unwrap_or_default()
+}
+
+/// Model discovery may use public endpoints before a key is entered.
+fn get_api_key_opt(connection: &ProviderConnection) -> Option<String> {
+    ProviderSecretStorage::get_secret(&connection.secret_ref)
+        .ok()
+        .flatten()
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
 }
 
 fn get_api_key(connection: &ProviderConnection) -> Result<Option<String>, ProviderError> {
@@ -877,6 +886,46 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         }
+    }
+
+    #[tokio::test]
+    async fn openrouter_model_probe_works_without_key_and_uses_stored_key() {
+        use axum::{http::HeaderMap, routing::get, Router};
+        use std::sync::{Arc, Mutex};
+
+        let seen_auth = Arc::new(Mutex::new(Vec::new()));
+        let captured_auth = seen_auth.clone();
+        let router = Router::new().route(
+            "/v1/models",
+            get(move |headers: HeaderMap| {
+                let seen_auth = captured_auth.clone();
+                async move {
+                    let auth = headers
+                        .get("authorization")
+                        .map(|value| value.to_str().unwrap().to_string());
+                    seen_auth.lock().unwrap().push(auth);
+                    axum::Json(serde_json::json!({"data": [{"id": "openrouter/auto"}]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let mut connection = conn_with_brand("openrouter");
+        connection.base_url = Some(base_url);
+        connection.secret_ref = "provider-connection::model-probe-no-key".into();
+        let models = OpenAiAdapter.list_models(&connection).await.unwrap();
+        assert_eq!(models[0].id, "openrouter/auto");
+
+        connection.secret_ref = "provider-connection::model-probe-with-key".into();
+        ProviderSecretStorage::set_secret(&connection.secret_ref, "  valid-key  ").unwrap();
+        let models = OpenAiAdapter.list_models(&connection).await.unwrap();
+        assert_eq!(models[0].id, "openrouter/auto");
+        assert_eq!(
+            *seen_auth.lock().unwrap(),
+            vec![None, Some("Bearer valid-key".to_string())]
+        );
     }
 
     #[test]
