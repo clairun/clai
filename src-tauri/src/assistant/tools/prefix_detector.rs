@@ -15,8 +15,10 @@
 //!    (`./foo`, `/usr/bin/x`, `~/bin/y`), return it as-is.
 //! 4. Look up the binary in the per-binary depth table to pick a style:
 //!    `None`, `OneWord`, `TwoWord`, or `Unknown` (heuristic).
-//! 5. Skip leading flag tokens (starting with `-`, but not the bare `-` or
-//!    `--` markers).
+//! 5. Skip the global-option tokens between the binary and its first
+//!    subword (starting with `-`, but not the bare `-` or `--` markers).
+//!    For `git`, an option that takes a value (`-C <dir>`) consumes its
+//!    value word too, so the value is never mistaken for the subcommand.
 //! 6. For `OneWord`: take the first non-flag token as the subword.
 //!    For `TwoWord`: take that token *and* the immediately-following
 //!    non-flag token, but only if no flag intervenes.
@@ -218,7 +220,6 @@ pub fn suggest_prefix(segment: &str) -> String {
         return String::new();
     };
     let binary = tokens[0];
-    let mut idx = 1;
 
     // 3. Path-shaped binaries are returned as-is (no subcommand layer).
     if is_path_shaped(binary) {
@@ -250,14 +251,12 @@ pub fn suggest_prefix(segment: &str) -> String {
         return binary.to_string();
     }
 
-    // 4. Skip flags between binary and first subword.
-    while idx < tokens.len() && is_flag(tokens[idx]) {
-        idx += 1;
-    }
-    let Some(&first_sub) = tokens.get(idx) else {
+    // 4. Skip the global options between binary and first subword; for
+    //    git, an option's value word is skipped with it.
+    let sub = after_global_options(binary, &tokens[1..]);
+    let Some(&first_sub) = sub.first() else {
         return binary.to_string();
     };
-    idx += 1;
 
     let include_first = match style {
         Style::OneWord | Style::TwoWord(_) => true,
@@ -272,7 +271,7 @@ pub fn suggest_prefix(segment: &str) -> String {
         // 5. Second subword only if the very next token is also a non-flag
         //    and looks like a subcommand. No flags allowed in between.
         //    Policy decides whether hyphenated tokens are accepted.
-        if let Some(second) = tokens.get(idx) {
+        if let Some(second) = sub.get(1) {
             if !is_flag(second) && is_subcommand_shaped(second) {
                 let hyphen_ok = match policy {
                     SecondTokenPolicy::Permissive => true,
@@ -287,6 +286,63 @@ pub fn suggest_prefix(segment: &str) -> String {
     }
 
     format!("{} {}", binary, first_sub)
+}
+
+/// The words after `binary`, from its first non-option word onward: the
+/// global options between the binary and its subcommand are dropped.
+/// [`suggest_prefix`] and [`canonicalize_for_match`] share this so the
+/// prefix one proposes is the exact form the other matches against.
+///
+/// Only the option token is dropped for most binaries — their option
+/// tables are unknown, so a value word cannot be told from a subcommand.
+/// `git` is value-aware: its global options are documented and stable,
+/// and the ones the agent writes (`-C <dir>` above all) carry a value
+/// that must never be taken for the subcommand (`git -C repo status` is
+/// `git status`, never `git repo`).
+///
+/// Dropping stops at the first non-option word: git's global options may
+/// only precede the subcommand (`git status -C .` is rejected by git),
+/// while options after it belong to the subcommand's own grammar (`git
+/// log -C 2` sets copy detection), so those stay verbatim. Path-shaped
+/// binaries and flat-argument commands (Style::None) keep every word:
+/// `suggest_prefix` returns their head alone, so no option region exists.
+fn after_global_options<'a>(binary: &str, rest: &'a [&'a str]) -> &'a [&'a str] {
+    if is_path_shaped(binary) || matches!(lookup_style(binary), Style::None) {
+        return rest;
+    }
+    let mut rest = rest;
+    while let [first, ..] = rest {
+        if !is_flag(first) {
+            break;
+        }
+        // A git value option written without `=` takes its value as the
+        // next word; written with `=`, the value rides inside the token.
+        let skip = if binary == "git" && !first.contains('=') && git_takes_value_word(first) {
+            2
+        } else {
+            1
+        };
+        rest = rest.get(skip..).unwrap_or(&[]);
+    }
+    rest
+}
+
+/// Git global options whose value is a separate word when not attached
+/// with `=`. `-C` and `-c` accept no attached short form (git rejects
+/// `-Cdir`); the long options accept both spellings (`--git-dir=x`,
+/// `--git-dir x`). They precede the subcommand in git's CLI synopsis.
+const GIT_VALUE_OPTIONS: &[&str] = &[
+    "-C",
+    "-c",
+    "--git-dir",
+    "--work-tree",
+    "--namespace",
+    "--config-env",
+    "--attr-source",
+];
+
+fn git_takes_value_word(token: &str) -> bool {
+    GIT_VALUE_OPTIONS.contains(&token)
 }
 
 /// Normalizes a segment so the allowlist/blocklist matcher identifies a
@@ -306,18 +362,7 @@ pub fn suggest_prefix(segment: &str) -> String {
 pub fn canonicalize_for_match(segment: &str) -> Option<String> {
     let words = command_words(segment)?;
     let binary = words[0];
-    let mut rest = &words[1..];
-    // Path-shaped binaries (`~/bin/go`) and flat-argument commands (`ls`,
-    // Style::None) are returned head-only by `suggest_prefix` and skip no
-    // flags, so we mirror that and leave their flags in place.
-    if !is_path_shaped(binary) && !matches!(lookup_style(binary), Style::None) {
-        while let [first, after @ ..] = rest {
-            if !is_flag(first) {
-                break;
-            }
-            rest = after;
-        }
-    }
+    let rest = after_global_options(binary, &words[1..]);
     Some(
         std::iter::once(binary)
             .chain(rest.iter().copied())
@@ -784,17 +829,17 @@ mod tests {
     }
 
     #[test]
-    fn canonicalize_agrees_with_suggestion_for_separate_token_flag_arg() {
-        // `git -c <val>` carries its argument as a separate token that looks
-        // like neither a flag nor an env assignment, so flag-skipping stops
-        // there — for *both* functions. They still agree (the suggested
-        // prefix is a literal prefix of the canonical form), so no re-prompt
-        // loop; this just documents the shared, pre-existing limitation.
+    fn git_dash_c_value_option_agrees_between_suggestion_and_match() {
+        // `git -c <val>` carries its value as a separate token that looks
+        // like neither a flag nor an env assignment. The value must be
+        // consumed with the option — it is not the subcommand — so the
+        // suggestion and the canonical form both land on `git show`.
         let cmd = "git -c core.pager=less show HEAD";
-        let suggested = suggest_prefix(cmd);
-        let canonical = canonicalize_for_match(cmd).unwrap();
-        assert_eq!(suggested, "git core.pager=less");
-        assert!(canonical.starts_with(&suggested));
+        assert_eq!(suggest_prefix(cmd), "git show");
+        assert_eq!(
+            canonicalize_for_match(cmd).as_deref(),
+            Some("git show HEAD")
+        );
     }
 
     #[test]
@@ -837,6 +882,88 @@ mod tests {
     #[test]
     fn canonicalize_all_assignment_segment_returns_none() {
         assert_eq!(canonicalize_for_match("FOO=bar BAZ=1"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Git global options that carry a value (-C, -c, --git-dir, …)
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn git_dash_c_value_is_not_the_subcommand() {
+        check("git -C repo status --short", "git status");
+        check("git -C ../wt-live-task-thinking status", "git status");
+        assert_eq!(
+            canonicalize_for_match("git -C repo status --short").as_deref(),
+            Some("git status --short")
+        );
+    }
+
+    #[test]
+    fn git_value_options_attached_forms() {
+        // git rejects `-Cdir` as an option spelling, but the normalizer
+        // still treats the whole token as one option — its tail is a
+        // value, not a subcommand. `--opt=value` is the real attached
+        // form and carries its value inside the token.
+        check("git -Crepo status", "git status");
+        check("git --git-dir=.git log", "git log");
+        assert_eq!(
+            canonicalize_for_match("git --git-dir=.git log --oneline").as_deref(),
+            Some("git log --oneline")
+        );
+    }
+
+    #[test]
+    fn git_long_value_options_separate_form() {
+        // `--git-dir x` and `--git-dir=x` are both valid git; the matcher
+        // must read them the same way.
+        check("git --git-dir .git log", "git log");
+        assert_eq!(
+            canonicalize_for_match("git --git-dir .git log --oneline").as_deref(),
+            Some("git log --oneline")
+        );
+    }
+
+    #[test]
+    fn git_global_options_reorder() {
+        check("git --no-pager -C repo status", "git status");
+        check("git -c core.pager=cat -C repo log --oneline", "git log");
+        assert_eq!(
+            canonicalize_for_match("git --no-pager -C repo status -s").as_deref(),
+            Some("git status -s")
+        );
+    }
+
+    #[test]
+    fn git_value_option_without_subcommand_falls_back_to_binary() {
+        // `git -C repo` names no subcommand; the honest prefix is `git`,
+        // matching `git --no-pager` (flag-only, no subcommand).
+        check("git -C repo", "git");
+    }
+
+    #[test]
+    fn git_options_after_subcommand_belong_to_it() {
+        // `-C` is global only before the subcommand (git rejects
+        // `git status -C .`); `git log -C 2` sets copy detection.
+        // Nothing after the subcommand is dropped.
+        check("git log -C 2 --oneline", "git log");
+        assert_eq!(
+            canonicalize_for_match("git status -C repo").as_deref(),
+            Some("git status -C repo")
+        );
+    }
+
+    #[test]
+    fn git_value_options_behind_env_and_wrapper() {
+        check("FOO=bar git -C repo status", "git status");
+        check("timeout 600 git -C repo status --short", "git status");
+        assert_eq!(
+            canonicalize_for_match("FOO=bar git -C repo status").as_deref(),
+            Some("git status")
+        );
+        assert_eq!(
+            canonicalize_for_match("timeout 600 git -C repo status --short").as_deref(),
+            Some("git status --short")
+        );
     }
 
     // -----------------------------------------------------------------

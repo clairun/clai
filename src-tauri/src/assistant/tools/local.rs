@@ -2001,6 +2001,17 @@ mod tests {
         }
     }
 
+    fn full_execution_config(blocked: &[&str]) -> ExecutionCapabilityConfig {
+        ExecutionCapabilityConfig {
+            shell: ShellCapabilityConfig {
+                mode: ShellAccessMode::Full,
+                allowed_command_prefixes: vec![],
+                blocked_command_prefixes: blocked.iter().map(|s| s.to_string()).collect(),
+            },
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn policy_blocks_using_agent_blocklist() {
         let exec = restricted_execution_config(&[], &["rm"]);
@@ -2403,6 +2414,79 @@ mod tests {
                 ("sed -i 's/a/b/' f1".to_string(), "sed".to_string()),
                 ("sed -i '1d' /etc/hosts".to_string(), "sed".to_string()),
             ]
+        );
+    }
+
+    #[test]
+    fn git_dash_c_forms_cannot_escape_a_broad_block() {
+        // `git -C <dir> status` is `git status` run elsewhere; a broad
+        // `git status` block must catch it even while `git` at large is
+        // allowed. Before option-aware normalization the matcher read the
+        // directory as the subcommand (`git repo status`) and the block
+        // never fired.
+        let exec = restricted_execution_config(&["git"], &["git status"]);
+        for cmd in [
+            "git -C repo status --short",
+            "git --git-dir=.git status --short",
+            "git --git-dir .git status --short",
+            "git --no-pager -C repo status",
+            "git status -C repo",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, cmd, &[], &[]),
+                    PolicyResult::Block { .. }
+                ),
+                "`{cmd}` must be blocked by `git status`"
+            );
+        }
+    }
+
+    #[test]
+    fn git_dash_c_block_applies_in_full_mode_and_behind_wrappers() {
+        // The blocklist is mode-independent, and neither a wrapper nor an
+        // env prefix may interpose itself between `git status` and its
+        // block.
+        let exec = full_execution_config(&["git status"]);
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git -C repo status --short", &[], &[]),
+            PolicyResult::Block { .. }
+        ));
+        let exec = restricted_execution_config(&[], &["git status"]);
+        for cmd in [
+            "timeout 600 git -C repo status --short",
+            "FOO=bar git -C repo status --short",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, cmd, &[], &[]),
+                    PolicyResult::Block { .. }
+                ),
+                "`{cmd}` must be blocked by `git status`"
+            );
+        }
+    }
+
+    #[test]
+    fn git_status_allowlist_covers_dash_c_forms_without_widening() {
+        let exec = restricted_execution_config(&["git status"], &[]);
+        // The saved prefix matches the commands it was suggested for…
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git -C repo status --short", &[], &[]),
+            PolicyResult::Allow
+        ));
+        // …and nothing more: another subcommand behind -C stays uncovered.
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git -C repo push", &[], &[]),
+            PolicyResult::NeedsApproval(_)
+        ));
+    }
+
+    #[test]
+    fn git_dash_c_suggestion_is_the_subcommand_not_the_value() {
+        assert_eq!(
+            crate::assistant::tools::prefix_detector::suggest_prefix("git -C repo status --short"),
+            "git status"
         );
     }
 
