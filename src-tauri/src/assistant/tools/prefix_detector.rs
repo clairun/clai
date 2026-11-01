@@ -252,11 +252,14 @@ pub fn suggest_prefix(segment: &str) -> String {
         return binary.to_string();
     }
 
-    // 4. Skip the global options between binary and first subword; for
-    //    git, an option's value word is skipped with it. The subcommand
-    //    sits behind every option, so suggestion reads through config
-    //    options too (`git -c x=y log` proposes `git log`).
+    // 4. A config-injecting global option changes what the command can run.
+    //    The allow matcher deliberately keeps it, so a subcommand-only
+    //    suggestion would not authorize the command it came from. Offer
+    //    allow-once instead of a persistent prefix that cannot round-trip.
     let sub = after_global_options(binary, &tokens[1..], OptionSkipping::All);
+    if after_global_options(binary, &tokens[1..], OptionSkipping::AllButConfig).len() != sub.len() {
+        return String::new();
+    }
     let Some(&first_sub) = sub.first() else {
         return binary.to_string();
     };
@@ -293,8 +296,8 @@ pub fn suggest_prefix(segment: &str) -> String {
 
 /// The words after `binary`, from its first non-option word onward: the
 /// global options between the binary and its subcommand are dropped.
-/// [`suggest_prefix`] and both canonical forms share this so a prefix is
-/// proposed and matched against the same view of the command.
+/// [`suggest_prefix`] and both canonical forms share this. Suggestion
+/// declines commands where the allow form keeps a config-injecting option.
 ///
 /// Value awareness is a lookup in [`GLOBAL_OPTION_SPECS`]: a listed
 /// binary's documented value options (`git -C <dir>` above all) consume
@@ -451,9 +454,9 @@ fn skip_global_options<'a>(
     rest
 }
 
-/// Normalizes a segment so the command-policy matcher identifies a
-/// command the *same way* `suggest_prefix` does when it proposes the
-/// saved prefix. Mirrors steps 2–5 of the suggestion algorithm: it keeps
+/// Normalizes a segment for command-policy matching. For commands with
+/// ordinary global options, this agrees with the saved prefix proposed
+/// by `suggest_prefix`. It keeps
 /// only the command's words, without leading `VAR=value` env assignments,
 /// redirects and the global flags that sit between the binary and its
 /// first subcommand, while preserving every word from the first
@@ -474,9 +477,9 @@ fn skip_global_options<'a>(
 ///   `git push` block still catches `git -c e=v push` and
 ///   `git -C repo push`.
 ///
-/// Suggestion runs on the same full view as the deny form: `git -C repo
-/// status` proposes `git status`, and the allow form of that command —
-/// `-C` relocates rather than configures — matches it.
+/// Suggestion reads through ordinary options like `git -C repo status`,
+/// which proposes `git status` and matches the allow form. It declines a
+/// config-injecting option because the allow form must keep it.
 fn canonicalize(segment: &str, skipping: OptionSkipping) -> Option<String> {
     let words = command_words(segment)?;
     let binary = words[0];
@@ -966,12 +969,11 @@ mod tests {
     fn config_value_option_splits_the_allow_form_from_the_deny_form() {
         // `git -c <val>` carries its value as a separate token that looks
         // like neither a flag nor an env assignment — it is not the
-        // subcommand. Suggestion and the deny form read through it, but
-        // the allow form keeps it: the value is configuration, and
-        // configuration can name commands to execute, so such a run must
-        // not silently match a prefix saved for the bare subcommand.
+        // subcommand. Deny matching reads through it, but allow matching
+        // keeps it: configuration can name commands to execute. A bare
+        // subcommand suggestion would not match the invocation.
         let cmd = "git -c core.pager=less show HEAD";
-        assert_eq!(suggest_prefix(cmd), "git show");
+        assert_eq!(suggest_prefix(cmd), "");
         assert_eq!(canonicalize_for_deny(cmd).as_deref(), Some("git show HEAD"));
         assert_eq!(
             canonicalize_for_allow(cmd).as_deref(),
@@ -1070,7 +1072,7 @@ mod tests {
     #[test]
     fn git_global_options_reorder() {
         check("git --no-pager -C repo status", "git status");
-        check("git -c core.pager=cat -C repo log --oneline", "git log");
+        check("git -c core.pager=cat -C repo log --oneline", "");
         assert_eq!(
             canonicalize_for_deny("git --no-pager -C repo status -s").as_deref(),
             Some("git status -s")

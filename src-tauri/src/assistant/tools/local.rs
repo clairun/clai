@@ -2504,6 +2504,47 @@ mod tests {
     }
 
     #[test]
+    fn git_suggested_prefix_round_trips_through_saved_allow() {
+        let exec = restricted_execution_config(&[], &[]);
+        for (command, expected) in [
+            ("git -C repo status --short", "git status"),
+            ("git --git-dir=.git log --oneline", "git log"),
+            ("git --no-pager show HEAD", "git show"),
+        ] {
+            let rows = approval_texts(&exec, command);
+            assert_eq!(rows, vec![(command.to_string(), expected.to_string())]);
+            let saved = restricted_execution_config(&[&rows[0].1], &[]);
+            assert!(
+                matches!(
+                    evaluate_command_policy(&saved, command, &[], &[]),
+                    PolicyResult::Allow
+                ),
+                "saved suggestion must authorize its own command: `{command}`"
+            );
+        }
+    }
+
+    #[test]
+    fn git_config_injection_has_no_persistent_subcommand_suggestion() {
+        let exec = restricted_execution_config(&["git show", "git status", "git log"], &[]);
+        for command in [
+            "git -c core.pager=less show HEAD",
+            "git --config-env core.fsmonitor=FSMON status",
+            "git --config-env=core.fsmonitor=FSMON status",
+            "git -C repo -c core.pager=less log --oneline",
+            "git --no-pager --config-env=core.fsmonitor=FSMON status",
+            "FOO=bar git -c core.pager=less show HEAD",
+            "timeout 600 git --config-env=core.fsmonitor=FSMON status",
+        ] {
+            assert_eq!(
+                approval_texts(&exec, command),
+                vec![(command.to_string(), String::new())],
+                "config-carrying command must require approval without offering a saved subcommand rule"
+            );
+        }
+    }
+
+    #[test]
     fn git_config_injection_cannot_ride_a_saved_allow() {
         // `-c` and `--config-env` inject configuration into the run, and
         // configuration can name commands to execute (core.fsmonitor,
