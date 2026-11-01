@@ -253,8 +253,10 @@ pub fn suggest_prefix(segment: &str) -> String {
     }
 
     // 4. Skip the global options between binary and first subword; for
-    //    git, an option's value word is skipped with it.
-    let sub = after_global_options(binary, &tokens[1..]);
+    //    git, an option's value word is skipped with it. The subcommand
+    //    sits behind every option, so suggestion reads through config
+    //    options too (`git -c x=y log` proposes `git log`).
+    let sub = after_global_options(binary, &tokens[1..], OptionSkipping::All);
     let Some(&first_sub) = sub.first() else {
         return binary.to_string();
     };
@@ -291,8 +293,8 @@ pub fn suggest_prefix(segment: &str) -> String {
 
 /// The words after `binary`, from its first non-option word onward: the
 /// global options between the binary and its subcommand are dropped.
-/// [`suggest_prefix`] and [`canonicalize_for_match`] share this so the
-/// prefix one proposes is the exact form the other matches against.
+/// [`suggest_prefix`] and both canonical forms share this so a prefix is
+/// proposed and matched against the same view of the command.
 ///
 /// Value awareness is a lookup in [`GLOBAL_OPTION_SPECS`]: a listed
 /// binary's documented value options (`git -C <dir>` above all) consume
@@ -301,6 +303,10 @@ pub fn suggest_prefix(segment: &str) -> String {
 /// binary keeps the previous flag-token-only skipping — its option table
 /// is unknown, so a value word cannot be told from a subcommand.
 ///
+/// `skipping` splits the consumers (see [`OptionSkipping`]): subcommand
+/// detection and deny matching drop every listed option with its value,
+/// while allow matching stops at an option that injects configuration.
+///
 /// Dropping stops at the first non-option word: the table only lists
 /// options documented to precede the subcommand (`git status -C .` is
 /// rejected by git), while options after it belong to the subcommand's
@@ -308,20 +314,73 @@ pub fn suggest_prefix(segment: &str) -> String {
 /// verbatim. Path-shaped binaries and flat-argument commands (Style::None)
 /// keep every word: `suggest_prefix` returns their head alone, so no
 /// option region exists.
-fn after_global_options<'a>(binary: &str, rest: &'a [&'a str]) -> &'a [&'a str] {
+fn after_global_options<'a>(
+    binary: &str,
+    rest: &'a [&'a str],
+    skipping: OptionSkipping,
+) -> &'a [&'a str] {
     if is_path_shaped(binary) || matches!(lookup_style(binary), Style::None) {
         return rest;
     }
-    skip_global_options(value_options_for(binary), rest)
+    skip_global_options(value_options_for(binary), rest, skipping)
 }
 
-/// A binary's global options whose value is a separate word when not
-/// attached with `=`, as the binary's own synopsis documents them.
+/// How much of the global-option region [`skip_global_options`] drops.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OptionSkipping {
+    /// Every listed value option leaves with its value. Subcommand
+    /// detection needs the subcommand wherever it sits, and deny
+    /// matching only grows stronger as the form gets shorter: both
+    /// `git -C repo push` and `git -c e=v push` must read as `git push`
+    /// to a `git push` block.
+    All,
+    /// Everything except an option whose value injects configuration:
+    /// skipping stops there, keeping that option and every word after
+    /// it. Allow matching runs on this form because configuration can
+    /// name commands to execute (`core.fsmonitor`, `diff.external`), so
+    /// a saved `git diff` must not silently cover
+    /// `git -c diff.external=/bin/echo diff`.
+    AllButConfig,
+}
+
+/// A binary's documented value-taking global option.
+struct GlobalValueOption {
+    /// The option as written between the binary and its subcommand
+    /// (`-C`, `--git-dir`, …), covering both spellings when the long
+    /// form also accepts `=`.
+    name: &'static str,
+    /// The option's value becomes configuration for this run (`git -c
+    /// <key>=<value>`, `git --config-env <key>=<envvar>`). Configuration
+    /// can name commands to execute, so such an invocation can do more
+    /// than the subcommand it ends in: it is kept out of allow matching
+    /// (see [`OptionSkipping::AllButConfig`]).
+    injects_config: bool,
+}
+
+impl GlobalValueOption {
+    /// Whether `token` is this option: the bare name (`--git-dir .git`)
+    /// or the attached form long options also accept (`--git-dir=.git`).
+    /// The `=` guard keeps `--git-dir2=x` a different, unknown option.
+    fn matches_token(&self, token: &str) -> bool {
+        token
+            .strip_prefix(self.name)
+            .is_some_and(|tail| tail.is_empty() || tail.starts_with('='))
+    }
+}
+
+const fn option(name: &'static str, injects_config: bool) -> GlobalValueOption {
+    GlobalValueOption {
+        name,
+        injects_config,
+    }
+}
+
+/// A binary's documented value-taking global options.
 struct GlobalOptionSpec {
     /// The binary's name, as it is written at the head of a command.
     binary: &'static str,
     /// The value-taking global options, each spelled as it is written.
-    value_options: &'static [&'static str],
+    options: &'static [GlobalValueOption],
 }
 
 /// The per-binary option knowledge behind [`after_global_options`] — the
@@ -334,76 +393,115 @@ const GLOBAL_OPTION_SPECS: &[GlobalOptionSpec] = &[GlobalOptionSpec {
     binary: "git",
     // From git's synopsis (`git --bogus` usage). `-C` and `-c` accept
     // no attached short form (git rejects `-Cdir`); the long options
-    // accept both spellings (`--git-dir=x`, `--git-dir x`).
-    value_options: &[
-        "-C",
-        "-c",
-        "--git-dir",
-        "--work-tree",
-        "--namespace",
-        "--config-env",
-        "--attr-source",
+    // accept both spellings (`--git-dir=x`, `--git-dir x`). `-c` and
+    // `--config-env` inject configuration, so they are marked as such;
+    // the rest only relocate (`-C`, `--git-dir`, `--work-tree`) or
+    // scope (`--namespace`, `--attr-source`) the run.
+    options: &[
+        option("-C", false),
+        option("-c", true),
+        option("--git-dir", false),
+        option("--work-tree", false),
+        option("--namespace", false),
+        option("--config-env", true),
+        option("--attr-source", false),
     ],
 }];
 
 /// `binary`'s value-taking global options, or none when its option table
 /// is unknown: an unlisted binary must never have a word consumed.
-fn value_options_for(binary: &str) -> &'static [&'static str] {
+fn value_options_for(binary: &str) -> &'static [GlobalValueOption] {
     GLOBAL_OPTION_SPECS
         .iter()
         .find(|spec| spec.binary == binary)
-        .map(|spec| spec.value_options)
+        .map(|spec| spec.options)
         .unwrap_or(&[])
 }
 
 /// Drops the global-option words from the head of `rest` and returns the
-/// words from the first non-option word onward. An option listed in
-/// `value_options` consumes its value word too, unless the value rides
-/// inside the token (`--git-dir=x`); every other option — boolean, or
-/// unknown to the table — is dropped alone, keeping the next word, the
-/// subcommand candidate, intact.
-fn skip_global_options<'a>(value_options: &[&str], rest: &'a [&'a str]) -> &'a [&'a str] {
+/// words from the first non-option word onward. A listed option consumes
+/// its value word too, unless the value rides inside the token
+/// (`--git-dir=x`); every other option — boolean, or unknown to the
+/// table — is dropped alone, keeping the next word, the subcommand
+/// candidate, intact. Under [`OptionSkipping::AllButConfig`] an option
+/// flagged `injects_config` is a wall: nothing is dropped from it on.
+fn skip_global_options<'a>(
+    value_options: &[GlobalValueOption],
+    rest: &'a [&'a str],
+    skipping: OptionSkipping,
+) -> &'a [&'a str] {
     let mut rest = rest;
     while let [first, ..] = rest {
         if !is_flag(first) {
             break;
         }
+        let Some(spec) = value_options.iter().find(|o| o.matches_token(first)) else {
+            // A boolean or unknown option: the token alone goes.
+            rest = rest.get(1..).unwrap_or(&[]);
+            continue;
+        };
+        if skipping == OptionSkipping::AllButConfig && spec.injects_config {
+            break;
+        }
         // A value option written without `=` takes its value as the next
         // word; written with `=`, the value rides inside the token.
-        let skip = if !first.contains('=') && value_options.contains(&first) {
-            2
-        } else {
-            1
-        };
+        let skip = if first.contains('=') { 1 } else { 2 };
         rest = rest.get(skip..).unwrap_or(&[]);
     }
     rest
 }
 
-/// Normalizes a segment so the allowlist/blocklist matcher identifies a
-/// command the *same way* `suggest_prefix` does when it proposes the saved
-/// prefix. Mirrors steps 2–5 of the suggestion algorithm: it keeps only the
-/// command's words, without leading `VAR=value` env assignments, redirects
-/// and the global flags that sit between the binary and its first
-/// subcommand, while preserving every word from the first subcommand onward.
+/// Normalizes a segment so the command-policy matcher identifies a
+/// command the *same way* `suggest_prefix` does when it proposes the
+/// saved prefix. Mirrors steps 2–5 of the suggestion algorithm: it keeps
+/// only the command's words, without leading `VAR=value` env assignments,
+/// redirects and the global flags that sit between the binary and its
+/// first subcommand, while preserving every word from the first
+/// subcommand onward. Returns `None` when `segment` is not one command.
 ///
-/// Without this, the two halves disagree: `suggest_prefix("git --no-pager
-/// log --oneline")` returns `git log`, but a literal prefix match of
-/// `git log` against the raw `git --no-pager log …` fails — so "Always allow
-/// git log" never matches the command it came from and the user is
-/// re-prompted forever.
+/// The two halves of the policy need different amounts of stripping, so
+/// there are two forms:
 ///
-/// Returns `None` when `segment` is not one command.
-pub fn canonicalize_for_match(segment: &str) -> Option<String> {
+/// - [`canonicalize_for_allow`] keeps an option whose value injects
+///   configuration. Stripping it would let `git -c
+///   diff.external=/bin/echo diff` match a saved `git diff` and execute
+///   `/bin/echo`: configuration can name commands (`core.fsmonitor`,
+///   `diff.external`), so such an invocation is not the command the user
+///   saved. Keeping the option leaves the command outside every saved
+///   subcommand prefix, so it asks for approval on its own.
+/// - [`canonicalize_for_deny`] drops every listed option with its
+///   value: the shorter form can only match more deny prefixes, so a
+///   `git push` block still catches `git -c e=v push` and
+///   `git -C repo push`.
+///
+/// Suggestion runs on the same full view as the deny form: `git -C repo
+/// status` proposes `git status`, and the allow form of that command —
+/// `-C` relocates rather than configures — matches it.
+fn canonicalize(segment: &str, skipping: OptionSkipping) -> Option<String> {
     let words = command_words(segment)?;
     let binary = words[0];
-    let rest = after_global_options(binary, &words[1..]);
+    let rest = after_global_options(binary, &words[1..], skipping);
     Some(
         std::iter::once(binary)
             .chain(rest.iter().copied())
             .collect::<Vec<_>>()
             .join(" "),
     )
+}
+
+/// The form a saved allow prefix matches against: global options
+/// stripped, except an option that injects configuration — and every
+/// word after it — which stays verbatim so it can never widen a grant
+/// silently. `None` when `segment` is not one command.
+pub fn canonicalize_for_allow(segment: &str) -> Option<String> {
+    canonicalize(segment, OptionSkipping::AllButConfig)
+}
+
+/// The form a deny prefix matches against: every documented value option
+/// stripped with its value, so a block cannot be dodged through the
+/// option region. `None` when `segment` is not one command.
+pub fn canonicalize_for_deny(segment: &str) -> Option<String> {
+    canonicalize(segment, OptionSkipping::All)
 }
 
 /// The head of `segment` as the shell runs it, joined by single spaces, with
@@ -832,8 +930,9 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // canonicalize_for_match — the matcher-side normalization that must
-    // agree with the suggestion it pairs with.
+    // canonicalize_for_allow / canonicalize_for_deny — the matcher-side
+    // normalization; the deny form agrees with the suggestion it pairs
+    // with, the allow form additionally keeps config options verbatim.
     // -----------------------------------------------------------------
 
     #[test]
@@ -842,7 +941,7 @@ mod tests {
         // canonical form must start with `git log` for the saved prefix to
         // match the command it came from.
         assert_eq!(
-            canonicalize_for_match("git --no-pager log --oneline -5").as_deref(),
+            canonicalize_for_deny("git --no-pager log --oneline -5").as_deref(),
             Some("git log --oneline -5")
         );
     }
@@ -850,7 +949,7 @@ mod tests {
     #[test]
     fn canonicalize_strips_leading_env_assignments() {
         assert_eq!(
-            canonicalize_for_match("FOO=bar BAZ=1 git log --oneline").as_deref(),
+            canonicalize_for_deny("FOO=bar BAZ=1 git log --oneline").as_deref(),
             Some("git log --oneline")
         );
     }
@@ -858,29 +957,32 @@ mod tests {
     #[test]
     fn canonicalize_strips_env_and_global_flag_together() {
         assert_eq!(
-            canonicalize_for_match("GIT_PAGER=cat git --no-pager show HEAD").as_deref(),
+            canonicalize_for_deny("GIT_PAGER=cat git --no-pager show HEAD").as_deref(),
             Some("git show HEAD")
         );
     }
 
     #[test]
-    fn git_dash_c_value_option_agrees_between_suggestion_and_match() {
+    fn config_value_option_splits_the_allow_form_from_the_deny_form() {
         // `git -c <val>` carries its value as a separate token that looks
-        // like neither a flag nor an env assignment. The value must be
-        // consumed with the option — it is not the subcommand — so the
-        // suggestion and the canonical form both land on `git show`.
+        // like neither a flag nor an env assignment — it is not the
+        // subcommand. Suggestion and the deny form read through it, but
+        // the allow form keeps it: the value is configuration, and
+        // configuration can name commands to execute, so such a run must
+        // not silently match a prefix saved for the bare subcommand.
         let cmd = "git -c core.pager=less show HEAD";
         assert_eq!(suggest_prefix(cmd), "git show");
+        assert_eq!(canonicalize_for_deny(cmd).as_deref(), Some("git show HEAD"));
         assert_eq!(
-            canonicalize_for_match(cmd).as_deref(),
-            Some("git show HEAD")
+            canonicalize_for_allow(cmd).as_deref(),
+            Some("git -c core.pager=less show HEAD")
         );
     }
 
     #[test]
     fn canonicalize_keeps_a_plain_command() {
         assert_eq!(
-            canonicalize_for_match("git log --oneline -5").as_deref(),
+            canonicalize_for_deny("git log --oneline -5").as_deref(),
             Some("git log --oneline -5")
         );
     }
@@ -891,7 +993,7 @@ mod tests {
         // pre-subcommand region, so suggest_prefix keeps them off the prefix
         // and we must not strip them here either.
         assert_eq!(
-            canonicalize_for_match("ls -la /tmp").as_deref(),
+            canonicalize_for_deny("ls -la /tmp").as_deref(),
             Some("ls -la /tmp")
         );
     }
@@ -901,7 +1003,7 @@ mod tests {
         // Path-shaped binaries have no subcommand layer; suggest_prefix
         // returns the binary head as-is, so no flag stripping.
         assert_eq!(
-            canonicalize_for_match("~/go/bin/go --foo build").as_deref(),
+            canonicalize_for_deny("~/go/bin/go --foo build").as_deref(),
             Some("~/go/bin/go --foo build")
         );
     }
@@ -909,14 +1011,15 @@ mod tests {
     #[test]
     fn canonicalize_path_shaped_binary_still_strips_env() {
         assert_eq!(
-            canonicalize_for_match("FOO=bar ~/go/bin/go build").as_deref(),
+            canonicalize_for_deny("FOO=bar ~/go/bin/go build").as_deref(),
             Some("~/go/bin/go build")
         );
     }
 
     #[test]
     fn canonicalize_all_assignment_segment_returns_none() {
-        assert_eq!(canonicalize_for_match("FOO=bar BAZ=1"), None);
+        assert_eq!(canonicalize_for_deny("FOO=bar BAZ=1"), None);
+        assert_eq!(canonicalize_for_allow("FOO=bar BAZ=1"), None);
     }
 
     // -----------------------------------------------------------------
@@ -928,7 +1031,13 @@ mod tests {
         check("git -C repo status --short", "git status");
         check("git -C ../wt-live-task-thinking status", "git status");
         assert_eq!(
-            canonicalize_for_match("git -C repo status --short").as_deref(),
+            canonicalize_for_deny("git -C repo status --short").as_deref(),
+            Some("git status --short")
+        );
+        // `-C` relocates the run; it configures nothing, so the allow
+        // form strips it too and a saved `git status` covers it.
+        assert_eq!(
+            canonicalize_for_allow("git -C repo status --short").as_deref(),
             Some("git status --short")
         );
     }
@@ -942,7 +1051,7 @@ mod tests {
         check("git -Crepo status", "git status");
         check("git --git-dir=.git log", "git log");
         assert_eq!(
-            canonicalize_for_match("git --git-dir=.git log --oneline").as_deref(),
+            canonicalize_for_deny("git --git-dir=.git log --oneline").as_deref(),
             Some("git log --oneline")
         );
     }
@@ -953,7 +1062,7 @@ mod tests {
         // must read them the same way.
         check("git --git-dir .git log", "git log");
         assert_eq!(
-            canonicalize_for_match("git --git-dir .git log --oneline").as_deref(),
+            canonicalize_for_deny("git --git-dir .git log --oneline").as_deref(),
             Some("git log --oneline")
         );
     }
@@ -963,7 +1072,11 @@ mod tests {
         check("git --no-pager -C repo status", "git status");
         check("git -c core.pager=cat -C repo log --oneline", "git log");
         assert_eq!(
-            canonicalize_for_match("git --no-pager -C repo status -s").as_deref(),
+            canonicalize_for_deny("git --no-pager -C repo status -s").as_deref(),
+            Some("git status -s")
+        );
+        assert_eq!(
+            canonicalize_for_allow("git --no-pager -C repo status -s").as_deref(),
             Some("git status -s")
         );
     }
@@ -982,7 +1095,7 @@ mod tests {
         // Nothing after the subcommand is dropped.
         check("git log -C 2 --oneline", "git log");
         assert_eq!(
-            canonicalize_for_match("git status -C repo").as_deref(),
+            canonicalize_for_deny("git status -C repo").as_deref(),
             Some("git status -C repo")
         );
     }
@@ -992,12 +1105,40 @@ mod tests {
         check("FOO=bar git -C repo status", "git status");
         check("timeout 600 git -C repo status --short", "git status");
         assert_eq!(
-            canonicalize_for_match("FOO=bar git -C repo status").as_deref(),
+            canonicalize_for_deny("FOO=bar git -C repo status").as_deref(),
             Some("git status")
         );
         assert_eq!(
-            canonicalize_for_match("timeout 600 git -C repo status --short").as_deref(),
+            canonicalize_for_deny("timeout 600 git -C repo status --short").as_deref(),
             Some("git status --short")
+        );
+    }
+
+    #[test]
+    fn config_injection_stops_the_allow_form_in_both_spellings() {
+        // `-c` and `--config-env` turn the run into something a saved
+        // subcommand prefix never described; whether the value rides in
+        // the next word or inside the token, the allow form keeps the
+        // whole command verbatim. The deny form still reads through to
+        // the subcommand.
+        for cmd in [
+            "git -c diff.external=/bin/echo diff HEAD~1 HEAD",
+            "git --config-env core.fsmonitor=FSMON status",
+            "git --config-env=core.fsmonitor=FSMON status",
+        ] {
+            assert_eq!(
+                canonicalize_for_allow(cmd).as_deref(),
+                Some(cmd),
+                "`{cmd}` must keep its config option for allow matching"
+            );
+        }
+        assert_eq!(
+            canonicalize_for_deny("git --config-env=core.fsmonitor=FSMON status").as_deref(),
+            Some("git status")
+        );
+        assert_eq!(
+            canonicalize_for_deny("git --config-env core.fsmonitor=FSMON status").as_deref(),
+            Some("git status")
         );
     }
 
@@ -1012,35 +1153,57 @@ mod tests {
         check("tool -C repo status", "tool repo");
         check("tool --context prod ps", "tool prod");
         assert_eq!(
-            canonicalize_for_match("tool -C repo status").as_deref(),
+            canonicalize_for_deny("tool -C repo status").as_deref(),
+            Some("tool repo status")
+        );
+        assert_eq!(
+            canonicalize_for_allow("tool -C repo status").as_deref(),
             Some("tool repo status")
         );
     }
 
     #[test]
-    fn a_table_entry_alone_makes_a_binary_value_aware() {
-        // Extensibility contract of GLOBAL_OPTION_SPECS: the next
-        // documented CLI needs data only. With docker's `--context <ctx>`
-        // and `-H <host>` as a hypothetical entry, the shared skipper
-        // must parse boolean globals, value globals, `=`-attached forms,
-        // and run out of words — with no parser change.
-        let docker: &[&str] = &["--context", "-H"];
+    fn spec_entries_alone_drive_both_skipping_scopes() {
+        // The extensibility contract of GLOBAL_OPTION_SPECS: the next
+        // documented CLI is an entry of the same shape, not a parser
+        // change. A hypothetical docker entry shows the whole contract —
+        // benign value options in both spellings, an option flagged
+        // config-injecting, and a binary with no entry at all.
+        let docker: &[GlobalValueOption] = &[
+            option("--context", false),
+            option("-H", false),
+            option("--log-config", true),
+        ];
+        let benign = ["--context", "prod", "ps", "-a"];
         assert_eq!(
-            skip_global_options(docker, &["--context", "prod", "ps", "-a"]),
+            skip_global_options(docker, &benign, OptionSkipping::All),
             &["ps", "-a"][..]
         );
         assert_eq!(
-            skip_global_options(docker, &["--debug", "--context=prod", "ps"]),
+            skip_global_options(docker, &benign, OptionSkipping::AllButConfig),
+            &["ps", "-a"][..]
+        );
+        let attached = ["--debug", "--context=prod", "ps"];
+        assert_eq!(
+            skip_global_options(docker, &attached, OptionSkipping::All),
+            &["ps"][..]
+        );
+        let config = ["--log-config", "/bin/evil", "ps"];
+        assert_eq!(
+            skip_global_options(docker, &config, OptionSkipping::All),
             &["ps"][..]
         );
         assert_eq!(
-            skip_global_options(docker, &["-H", "tcp://d", "--context", "prod", "images"]),
-            &["images"][..]
+            skip_global_options(docker, &config, OptionSkipping::AllButConfig),
+            &config[..]
         );
         assert_eq!(
-            skip_global_options(docker, &["--context", "prod"]),
+            skip_global_options(docker, &["--context", "prod"], OptionSkipping::All),
             &[] as &[&str]
         );
+        // A binary without an entry has an unknown option table: no word
+        // is ever consumed, under either scope.
+        assert!(value_options_for("no-such-tool").is_empty());
     }
 
     // -----------------------------------------------------------------
@@ -1059,13 +1222,13 @@ mod tests {
         // The prefix the user saves must match the row it came from, or the
         // grant never covers it and the user is asked again.
         assert_eq!(
-            canonicalize_for_match("timeout 600 cargo build 2>&1").as_deref(),
+            canonicalize_for_deny("timeout 600 cargo build 2>&1").as_deref(),
             Some("cargo build")
         );
         // The policy matches a row, not the whole command: the row of the
         // wrapper is the command with its redirect.
         assert_eq!(
-            canonicalize_for_match("timeout 600 cargo build 2>&1").as_deref(),
+            canonicalize_for_deny("timeout 600 cargo build 2>&1").as_deref(),
             Some("cargo build")
         );
     }
