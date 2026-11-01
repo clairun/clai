@@ -1,3 +1,4 @@
+import type { StreamedPart } from '../assistant/sessionStore';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useLocation, useNavigate, useOutletContext, useParams } from 'react-router';
@@ -115,7 +116,7 @@ type WorkspaceUiState = {
 const EMPTY_MESSAGES: AssistantMessage[] = [];
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_QUEUED_IDS: string[] = [];
-const EMPTY_STREAMING: Record<string, string> = {};
+const EMPTY_STREAMING: Record<string, StreamedPart[]> = {};
 const EMPTY_TASKS: readonly WorkspaceTaskResponse[] = [];
 
 const EMPTY_WORKSPACE_UI: WorkspaceUiState = {
@@ -1423,8 +1424,8 @@ const ChatFirstLayout = ({
   // Streaming deltas are the highest-frequency store updates (many per
   // second). Subscribing here — instead of in the Workspace page shell —
   // scopes each delta's re-render to the chat area only.
-  const streamingText = useAssistantStore((state) =>
-    (sessionId && state.streamingText[sessionId]) || EMPTY_STREAMING
+  const streamingParts = useAssistantStore((state) =>
+    (sessionId && state.streamingParts[sessionId]) || EMPTY_STREAMING
   );
   const cardRef = useRef<HTMLDivElement | null>(null);
   const owner = useMemo(() => resolveSessionOwner(taskRoster), [taskRoster]);
@@ -1489,7 +1490,7 @@ const ChatFirstLayout = ({
             workspaceId={workspaceId}
             messages={messages}
             toolCalls={toolCalls}
-            streamingText={streamingText}
+            streamingParts={streamingParts}
             isStreaming={isStreaming}
             runFailure={failure}
             runStartedAt={runStartedAt}

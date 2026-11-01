@@ -297,11 +297,11 @@ const renderWorkspace = () =>
   );
 
 beforeEach(() => {
-  // `streamingText` is reset alongside the sessions because the streaming
+  // `streamingParts` is reset alongside the sessions because the streaming
   // test below leaves deltas keyed by `sess-a`, and every other test here
   // hydrates that same session id — a leftover accumulator would render a
   // phantom assistant turn in an unrelated test.
-  useAssistantStore.setState({ sessions: {}, activeSessionByTab: {}, streamingText: {} });
+  useAssistantStore.setState({ sessions: {}, activeSessionByTab: {}, streamingParts: {} });
   useTaskStore.setState({ tasks: {}, seeded: {} });
   getWorkspaceDetails.mockImplementation(async (_workspaceId, options) => detailsFor(options));
   getOrCreateWorkspaceSession.mockResolvedValue({

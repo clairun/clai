@@ -12,6 +12,7 @@ import { WorkspaceFileContext, useDocumentLocation } from '../Chat/WorkspaceFile
 import VirtualizedList from '../common/VirtualizedList';
 import { isRunMarkerText } from '../../assistant/runMarker';
 import type { RunFailure } from '../../assistant/runErrors';
+import type { StreamedPart } from '../../assistant/sessionStore';
 import RunFailureBanner from '../RunFailureBanner/RunFailureBanner';
 import type {
   AssistantMessage,
@@ -91,7 +92,7 @@ type RenderItem =
       toolUses: ToolUsePart[];
     };
 
-const EMPTY_STREAMING: Record<string, string> = {};
+const EMPTY_STREAMING: Record<string, StreamedPart[]> = {};
 const EMPTY_TOOL_CALLS: ToolInvocation[] = [];
 const EMPTY_ROSTER: readonly WorkspaceAgentResponse[] = [];
 
@@ -101,23 +102,30 @@ const formatTimestamp = (timestamp: number | bigint | null | undefined): string 
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 };
 
-const getTextContent = (message: AssistantMessage): string => {
-  if (!message.content || !Array.isArray(message.content)) return '';
-  return message.content
+/**
+ * Content parts arrive from the backend, so a malformed entry (a null slot,
+ * a non-object) must not crash a reader that walks the array. Every content
+ * reader below normalizes through this predicate, so one bad part costs
+ * that part only — not the whole transcript.
+ */
+const isContentPart = (part: unknown): part is ContentPart =>
+  !!part && typeof part === 'object';
+
+/** The message's content parts, with malformed entries dropped. */
+const contentParts = (message: AssistantMessage): ContentPart[] =>
+  Array.isArray(message.content) ? message.content.filter(isContentPart) : [];
+
+const getTextContent = (message: AssistantMessage): string =>
+  contentParts(message)
     .filter((part): part is TextPart => part.type === 'text')
     .map((part) => part.text)
     .join('');
-};
 
-const getToolUses = (message: AssistantMessage): ToolUsePart[] => {
-  if (!message.content || !Array.isArray(message.content)) return [];
-  return message.content.filter((part): part is ToolUsePart => part.type === 'tool_use');
-};
+const getToolUses = (message: AssistantMessage): ToolUsePart[] =>
+  contentParts(message).filter((part): part is ToolUsePart => part.type === 'tool_use');
 
-const getImageContent = (message: AssistantMessage): ImagePart[] => {
-  if (!message.content || !Array.isArray(message.content)) return [];
-  return imageParts(message.content);
-};
+const getImageContent = (message: AssistantMessage): ImagePart[] =>
+  imageParts(contentParts(message));
 
 /**
  * Collapsible "thinking" block — renders the model's reasoning_content
@@ -177,7 +185,7 @@ const groupAssistantContent = (
   if (!Array.isArray(content)) return [];
   const segments: AssistantSegment[] = [];
   for (const part of content) {
-    if (!part || typeof part !== 'object') continue;
+    if (!isContentPart(part)) continue;
     if (part.type === 'text') {
       const text = part.text || '';
       if (!text) continue;
@@ -223,13 +231,18 @@ const groupAssistantContent = (
 };
 
 /**
- * Check if an assistant message contains only tool calls (no text).
+ * Check if an assistant message has tool calls without any visible prose or thinking.
  */
-const isToolOnlyMessage = (message: AssistantMessage): boolean => {
-  if (message.role !== 'assistant') return false;
-  const text = getTextContent(message);
-  const tools = getToolUses(message);
-  return !text.trim() && tools.length > 0;
+const isToolOnlyMessage = (
+  message: AssistantMessage,
+  streamingParts: Record<string, StreamedPart[]>
+): boolean => {
+  if (message.role !== 'assistant' || streamingParts[message.id]?.length) return false;
+  const hasTextOrThinking = contentParts(message).some((part) => {
+    if (part.type !== 'text' && part.type !== 'thinking') return false;
+    return typeof part.text === 'string' && part.text.trim().length > 0;
+  });
+  return !hasTextOrThinking && getToolUses(message).length > 0;
 };
 
 /**
@@ -239,12 +252,10 @@ const isToolOnlyMessage = (message: AssistantMessage): boolean => {
  * zero-height item, and VirtualizedList can't cache a 0px measurement, so
  * the item holds its ~48px size estimate. That phantom slot is the gap that
  * flashes under the last tool row while the model composes its next tool
- * call. Callers hide such messages until content (or streaming text) lands.
+ * call. Callers hide such messages until content (or a live part) lands.
  */
 const hasRenderableContent = (message: AssistantMessage): boolean =>
-  Array.isArray(message.content) &&
-  message.content.some((part) => {
-    if (!part || typeof part !== 'object') return false;
+  contentParts(message).some((part) => {
     if (part.type === 'text' || part.type === 'thinking') return !!part.text;
     return true;
   });
@@ -267,7 +278,10 @@ const isHiddenMessage = (message: AssistantMessage | undefined): boolean => {
  * - { type: 'message', message } for normal messages
  * - { type: 'tool-group', messages: [...], toolUses: [...] } for merged tool-only turns
  */
-const groupMessages = (messages: AssistantMessage[]): RenderItem[] => {
+const groupMessages = (
+  messages: AssistantMessage[],
+  streamingParts: Record<string, StreamedPart[]>
+): RenderItem[] => {
   const result: RenderItem[] = [];
   let i = 0;
 
@@ -279,7 +293,7 @@ const groupMessages = (messages: AssistantMessage[]): RenderItem[] => {
       continue;
     }
 
-    if (isToolOnlyMessage(msg)) {
+    if (isToolOnlyMessage(msg, streamingParts)) {
       // Collect consecutive tool-only assistant messages
       const group = [msg];
       let j = i + 1;
@@ -290,7 +304,7 @@ const groupMessages = (messages: AssistantMessage[]): RenderItem[] => {
           j++;
           continue;
         }
-        if (isToolOnlyMessage(candidate)) {
+        if (isToolOnlyMessage(candidate, streamingParts)) {
           group.push(candidate);
           j++;
         } else {
@@ -481,7 +495,7 @@ interface ChatMessageListProps {
   // Workspace that owns the session: backs image thumbnails, workspace-relative
   // markdown links, and lazy tool-call detail loads.
   workspaceId: string;
-  streamingText?: Record<string, string>;
+  streamingParts?: Record<string, StreamedPart[]>;
   isStreaming?: boolean;
   toolCalls?: ToolInvocation[];
   // Failure of the most recent run, shown inline at the end of the
@@ -524,7 +538,7 @@ interface ChatMessageListProps {
 const ChatMessageList = ({
   messages,
   workspaceId,
-  streamingText = EMPTY_STREAMING,
+  streamingParts = EMPTY_STREAMING,
   isStreaming = false,
   toolCalls = EMPTY_TOOL_CALLS,
   runFailure = null,
@@ -569,23 +583,22 @@ const ChatMessageList = ({
   useEffect(() => onScrollChatToBottom(() => setScrollNudge((n) => n + 1)), []);
 
   // Drop assistant messages that have nothing to render yet — the empty
-  // placeholder each turn is seeded with stays hidden until its first
-  // content part or streaming delta arrives (see hasRenderableContent).
+  // placeholder each turn stays hidden until content or a live part arrives.
   const visibleMessages = useMemo(
     () =>
       messages.filter(
-        (msg) => msg.role !== 'assistant' || hasRenderableContent(msg) || !!streamingText[msg.id]
+        (msg) => msg.role !== 'assistant' || hasRenderableContent(msg) || !!streamingParts[msg.id]?.length
       ),
-    [messages, streamingText]
+    [messages, streamingParts]
   );
 
   const grouped = useMemo(() => {
-    const items = groupMessages(visibleMessages);
+    const items = groupMessages(visibleMessages, streamingParts);
     if (hasOlderMessages && onLoadOlderMessages) {
       return [{ type: 'load-earlier' } as RenderItem, ...items];
     }
     return items;
-  }, [visibleMessages, hasOlderMessages, onLoadOlderMessages]);
+  }, [visibleMessages, streamingParts, hasOlderMessages, onLoadOlderMessages]);
 
   // Id of the last visible message iff it's a user message. Writing a message
   // is an explicit "show me the latest" — when a new user message lands at the
@@ -640,10 +653,10 @@ const ChatMessageList = ({
 
   const throttledMeasureKeys = useMemo(() => {
     if (!isStreaming) return undefined;
-    const streamingMessageIds = Object.keys(streamingText).filter((id) => streamingText[id]);
+    const streamingMessageIds = Object.keys(streamingParts).filter((id) => streamingParts[id]?.length);
     if (streamingMessageIds.length === 0) return undefined;
     return new Set(streamingMessageIds.map((id) => `message:${id}`));
-  }, [isStreaming, streamingText]);
+  }, [isStreaming, streamingParts]);
 
   // Set lookup for the queued chip; stable reference while the id list
   // doesn't change so memoized MessageBlocks don't re-render.
@@ -673,7 +686,7 @@ const ChatMessageList = ({
       ) : (
         <MessageBlock
           message={item.message}
-          streamingText={streamingText[item.message.id]}
+          streamingParts={streamingParts[item.message.id]}
           toolCallsById={toolCallsById}
           sender={senders.get(item.message.id)}
           workspaceId={workspaceId}
@@ -687,7 +700,7 @@ const ChatMessageList = ({
     [
       continuationFlags,
       ownerAgent,
-      streamingText,
+      streamingParts,
       toolCallsById,
       senders,
       workspaceId,
@@ -758,7 +771,7 @@ const ChatMessageList = ({
 
 interface MessageBlockProps {
   message: AssistantMessage;
-  streamingText?: string;
+  streamingParts?: StreamedPart[];
   toolCallsById: Map<string, ToolInvocation>;
   sender?: MessageSender;
   workspaceId: string;
@@ -905,7 +918,7 @@ const UserMessageBlock = ({
 
 const AssistantMessageBlock = ({
   message,
-  streamingText,
+  streamingParts,
   toolCallsById,
   workspaceId,
   isContinuation = false,
@@ -915,19 +928,38 @@ const AssistantMessageBlock = ({
   // parts into segments. This preserves the interleaving (text → tool
   // → text → tool …) the assistant actually produced, rather than
   // collapsing all text to the top and all tools to the bottom.
-  // streamingText is appended as a trailing segment because by
-  // definition it represents the *current* in-flight text block,
-  // which sits after everything already persisted. Memoized so
+  // Live parts follow persisted content and keep their text/thinking order.
+  // Memoized so
   // ToolCallGroup's prop reference is stable across re-renders when
   // nothing actually changed — its memo only helps if its toolUses
   // array reference doesn't churn.
   const segments = useMemo(() => {
     const base = groupAssistantContent(message.content, toolCallsById);
-    if (streamingText) {
-      base.push({ kind: 'text', text: streamingText, streaming: true });
+    for (const part of streamingParts ?? []) {
+      // A live part continues the block the persisted content ends with
+      // when both are the same kind. The persisted view merges consecutive
+      // same-kind parts into one block (groupAssistantContent), so merging
+      // here keeps the live view identical to what the message renders once
+      // the part is persisted. Unmerged, the same content shows as two
+      // "Thinking" blocks and then collapses into one when it is persisted.
+      const last = base[base.length - 1];
+      if (part.type === 'text' && last?.kind === 'text') {
+        last.text += part.text;
+        last.streaming = true;
+        continue;
+      }
+      if (part.type === 'thinking' && last?.kind === 'thinking') {
+        last.text += part.text;
+        continue;
+      }
+      base.push({
+        kind: part.type,
+        text: part.text,
+        ...(part.type === 'text' && { streaming: true }),
+      });
     }
     return base;
-  }, [message.content, toolCallsById, streamingText]);
+  }, [message.content, toolCallsById, streamingParts]);
 
   return (
     <div className={isContinuation ? styles.assistantContinuation : styles.assistantMessage}>

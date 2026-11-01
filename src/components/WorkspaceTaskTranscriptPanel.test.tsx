@@ -108,7 +108,7 @@ describe('WorkspaceTaskTranscriptPanel', () => {
     mockInvoke.mockReset();
     useAssistantStore.setState({
       sessions: {},
-      streamingText: {},
+      streamingParts: {},
       deliveredQueuedMessageIds: {},
     } as never);
     useTaskStore.setState({ tasks: {}, seeded: {} });
@@ -130,6 +130,47 @@ describe('WorkspaceTaskTranscriptPanel', () => {
       expect(screen.queryByText(/^\d+:\d\d$/)).toBeNull();
       unmount();
     }
+  });
+
+  it('shows live thinking in the task log and clears it when persisted', () => {
+    seedSession(true);
+    const { container } = render(
+      <WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />
+    );
+    act(() => useAssistantStore.getState().appendThinkingDelta(SESSION_ID, 'm1', 'checking the reducer'));
+    expect(screen.getByRole('button', { name: /Thinking.*checking the reducer/ })).toBeInTheDocument();
+    act(() => useAssistantStore.getState().completeMessage(SESSION_ID, {
+      ...message,
+      content: [...message.content, { type: 'thinking', text: 'checking the reducer' }],
+    }));
+    expect(container.querySelectorAll('button[class*="thinkingHeader"]')).toHaveLength(1);
+    expect(useAssistantStore.getState().streamingParts[SESSION_ID]?.m1).toBeUndefined();
+  });
+
+  it('shows only the selected task session while switching logs', () => {
+    seedSession(true);
+    const otherSession = 'sess-task-2';
+    useAssistantStore.setState((state) => ({
+      sessions: {
+        ...state.sessions,
+        [otherSession]: {
+          ...state.sessions[SESSION_ID]!,
+          messages: [{ ...message, id: 'm2', sessionId: otherSession }],
+        },
+      },
+    }));
+    act(() => {
+      useAssistantStore.getState().appendThinkingDelta(SESSION_ID, 'm1', 'first task thought');
+      useAssistantStore.getState().appendThinkingDelta(otherSession, 'm2', 'second task thought');
+    });
+    const { rerender } = render(
+      <WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task()} onClose={() => {}} />
+    );
+    expect(screen.getByRole('button', { name: /Thinking.*first task thought/ })).toBeInTheDocument();
+    expect(screen.queryByText('second task thought')).toBeNull();
+    rerender(<WorkspaceTaskTranscriptPanel workspaceId="ws-1" task={task({ sessionId: otherSession })} onClose={() => {}} />);
+    expect(screen.getByRole('button', { name: /Thinking.*second task thought/ })).toBeInTheDocument();
+    expect(screen.queryByText('first task thought')).toBeNull();
   });
 
   it('puts the task state on the header face instead', () => {

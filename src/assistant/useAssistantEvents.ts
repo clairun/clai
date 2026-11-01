@@ -76,8 +76,7 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
       break;
 
     case 'assistant_thinking_delta':
-      // Thinking deltas are intentionally not surfaced in the chat
-      // store today; they exist on the BE for provider compatibility.
+      store.appendThinkingDelta(sessionId, event.payload.message_id, event.payload.text);
       break;
 
     case 'assistant_message_completed':
