@@ -458,14 +458,12 @@ fn spawn_progress_keepalive(
             let peer = peer.clone();
             let token = token.clone();
             async move {
-                peer.notify_progress(ProgressNotificationParam {
-                    progress_token: token,
+                peer.notify_progress(ProgressNotificationParam::new(
+                    token,
                     // Monotonically increasing, as the MCP spec requires
                     // even when the total is unknown.
-                    progress: tick as f64,
-                    total: None,
-                    message: None,
-                })
+                    tick as f64,
+                ))
                 .await
                 .is_ok()
             }

@@ -6,7 +6,7 @@ use futures::StreamExt;
 use rmcp::{
     handler::client::progress::ProgressDispatcher,
     model::{
-        CallToolRequestParams, CallToolResult, ClientRequest, Content as McpContent,
+        CallToolRequestParams, CallToolResult, ClientRequest, ContentBlock,
         ProgressNotificationParam, Request, ResourceContents, ServerResult, Tool as RmcpTool,
     },
     service::{NotificationContext, PeerRequestOptions, RoleClient, RunningService, ServiceExt},
@@ -702,7 +702,7 @@ fn normalize_call_tool_result(
     })
 }
 
-fn extract_text_from_contents(contents: &[McpContent]) -> String {
+fn extract_text_from_contents(contents: &[ContentBlock]) -> String {
     contents
         .iter()
         .filter_map(|content| {
@@ -838,12 +838,11 @@ mod tests {
             self.release_progress.notified().await;
             context
                 .peer
-                .notify_progress(ProgressNotificationParam {
-                    progress_token,
-                    progress: 1.0,
-                    total: Some(2.0),
-                    message: Some("halfway".into()),
-                })
+                .notify_progress(
+                    ProgressNotificationParam::new(progress_token, 1.0)
+                        .with_total(2.0)
+                        .with_message("halfway"),
+                )
                 .await
                 .map_err(|error| {
                     rmcp::ErrorData::internal_error(
