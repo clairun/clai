@@ -1644,9 +1644,19 @@ const Workspace = () => {
 
   const openPreviewEntry = useCallback(
     (next: PreviewEntry) => {
-      patchWorkspaceUi({ previewEntry: next, viewingTask: null });
+      setUiByWorkspace((prev) => {
+        const current = prev[workspaceId] ?? EMPTY_WORKSPACE_UI;
+        return {
+          ...prev,
+          [workspaceId]: {
+            ...current,
+            previewEntry: { ...next, navigationId: (current.previewEntry?.navigationId ?? 0) + 1 },
+            viewingTask: null,
+          },
+        };
+      });
     },
-    [patchWorkspaceUi]
+    [workspaceId]
   );
 
   const openTaskTranscript = useCallback(
