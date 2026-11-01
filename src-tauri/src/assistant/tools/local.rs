@@ -343,7 +343,7 @@ pub(crate) fn evaluate_command_policy(
     extra_blocked_prefixes: &[String],
 ) -> PolicyResult {
     use crate::assistant::tools::command_splitter::{split_command, Segment};
-    use crate::assistant::tools::prefix_detector::suggest_prefix;
+    use crate::assistant::tools::prefix_detector::{by_head_name, by_run_command, suggest_prefix};
     use crate::commands::permissions::SegmentApproval;
 
     if command.trim().is_empty() {
@@ -356,7 +356,8 @@ pub(crate) fn evaluate_command_policy(
     let segments = split_command(command);
 
     let mut approvals: Vec<SegmentApproval> = Vec::new();
-    let durable_allowed_prefixes = if matches!(execution.shell.mode, ShellAccessMode::Restricted) {
+    let restricted = matches!(execution.shell.mode, ShellAccessMode::Restricted);
+    let durable_allowed_prefixes = if restricted {
         execution.shell.effective_allowed_command_prefixes()
     } else {
         Vec::new()
@@ -369,34 +370,38 @@ pub(crate) fn evaluate_command_policy(
         })
         .collect();
 
+    let blocklist_active =
+        !execution.shell.blocked_command_prefixes.is_empty() || !extra_blocked_prefixes.is_empty();
     for segment in &segments {
         let text = segment.text();
         let unparsed = matches!(segment, Segment::Unparsed(_));
 
-        // Blocklist applies to every segment, Simple or Opaque. Durable
-        // blocklist is checked first; run-scoped blocklist (this run's
-        // accepted `DenyAlways` decisions) is checked next so a fresh
-        // deny-always takes effect mid-run.
-        let blocked = if unparsed {
-            let mut active = execution
-                .shell
-                .blocked_command_prefixes
-                .iter()
-                .chain(extra_blocked_prefixes);
-            active.next().map(|_| UNPARSED_BLOCK.to_string())
-        } else {
+        // Blocklist applies to every segment. Durable blocklist is checked
+        // first; run-scoped blocklist (this run's accepted `DenyAlways`
+        // decisions) is checked next so a fresh deny-always takes effect
+        // mid-run. A blocked name is also blocked when run by path or after
+        // assignments (`FOO=1 /usr/bin/rm`); the allowlist is not widened.
+        let blocked = |text: &str| {
             find_matching_prefix(&execution.shell.blocked_command_prefixes, text)
                 .or_else(|| find_matching_prefix(extra_blocked_prefixes, text))
         };
-        if let Some(matched) = blocked {
+        // The blocklist sees the command the segment runs, and the head it
+        // runs it with: `timeout 60 rm -rf x` is blocked by `rm` and by
+        // `timeout`.
+        if let Some(matched) = blocked(text)
+            .or_else(|| by_head_name(text).and_then(|head| blocked(&head)))
+            .or_else(|| by_run_command(text).and_then(|cmd| blocked(&cmd)))
+        {
             return PolicyResult::Block {
                 segment_text: text.to_string(),
                 matched_prefix: matched,
             };
         }
 
-        // Allowlist check only matters in Restricted mode.
-        if !matches!(execution.shell.mode, ShellAccessMode::Restricted) {
+        // Approval only matters in Restricted mode, or for Unparsed input
+        // the blocklist cannot see into; see `is_exact_only`.
+        let needs_approval = restricted || (unparsed && blocklist_active);
+        if !needs_approval {
             continue;
         }
 
@@ -449,16 +454,12 @@ pub(crate) fn evaluate_command_policy(
     }
 }
 
-/// What a [`PolicyResult::Block`] names as matched when it denies input the
-/// splitter could not parse; see [`is_exact_only`].
-const UNPARSED_BLOCK: &str = "<unparsed shell syntax while a blocklist is active>";
-
-/// The conservative rule for a row whose commands the splitter could not
-/// all identify: input it could not parse (`Segment::Unparsed`), or an
-/// Opaque segment with no prefix to save. Such a row is decided as its exact
+/// The rule for a row whose commands the splitter could not all identify:
+/// input it could not parse (`Segment::Unparsed`, which has no prefix), or
+/// an Opaque segment with no prefix to save. Such a row is asked as its exact
 /// text: "Allow once" covers that text alone and no "Always" is offered.
-/// Unparsed input is also denied outright while any durable or run-scoped
-/// blocklist entry is active, in every shell mode.
+/// Unparsed input needs that approval in Restricted mode, and in every mode
+/// while any durable or run-scoped blocklist entry is active.
 fn is_exact_only(kind: SegmentKind, suggested_prefix: &str) -> bool {
     kind == SegmentKind::Opaque && suggested_prefix.is_empty()
 }
@@ -1094,10 +1095,12 @@ fn matches_prefix(prefix: &str, command: &str) -> bool {
 }
 
 /// Literal word-boundary prefix test: `command` equals `p`, or starts with
-/// `p` followed by a space (so `git log` matches `git log --oneline` but not
-/// `git logs`).
+/// `p` followed by whitespace (so `git log` matches `git log --oneline` but
+/// not `git logs`).
 fn matches_prefix_literal(p: &str, command: &str) -> bool {
-    command == p || (command.starts_with(p) && command.as_bytes().get(p.len()) == Some(&b' '))
+    command
+        .strip_prefix(p)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(|c: char| c.is_ascii_whitespace()))
 }
 
 // =============================================================================
@@ -2022,14 +2025,20 @@ mod tests {
     }
 
     #[test]
-    fn policy_opaque_segment_in_restricted_passes_when_head_allowlisted() {
-        // `bash -c "..."` is Opaque, but its binary head matches the
-        // allowlist via `matches_prefix`. The user explicitly opting
-        // into a broad prefix like `bash` is treated as consent — the
-        // modal had to show "Always allow bash" for this entry to land
-        // on the durable list. Same flow as Simple segments.
-        let exec = restricted_execution_config(&["bash"], &[]);
-        assert!(enforce_command_policy(&exec, None, r#"bash -c "echo hi""#).is_ok());
+    fn policy_allowlist_never_covers_unparsed_input() {
+        // `bash -c` runs its argument, so the splitter leaves it Unparsed.
+        // No prefix rule covers it, however broad.
+        let exec = restricted_execution_config(&["bash", "bash -c"], &[]);
+        let command = r#"bash -c "echo hi""#;
+        assert_eq!(
+            approval_texts(&exec, command),
+            vec![(command.to_string(), String::new())]
+        );
+        let run_allowed = vec![RunCommandGrant::Prefix(command.to_string())];
+        assert!(matches!(
+            evaluate_command_policy(&exec, command, &run_allowed, &[]),
+            PolicyResult::NeedsApproval(_)
+        ));
     }
 
     #[test]
@@ -2059,12 +2068,10 @@ mod tests {
 
     #[test]
     fn policy_mixed_pipeline_with_opaque_passes_when_all_heads_allowlisted() {
-        // `find . | xargs rm` — `xargs` head triggers Opaque (executor),
-        // `find .` is Simple. With both heads on the allowlist the
-        // pipeline passes. Caller still has the blocklist as the final
-        // safety net for catastrophic verbs like `rm`.
-        let exec = restricted_execution_config(&["find", "xargs"], &[]);
-        assert!(enforce_command_policy(&exec, None, "find . | xargs rm").is_ok());
+        // `find . 2>/dev/null` is Opaque (redirect), `wc -l` is Simple.
+        // With both heads on the allowlist the pipeline passes.
+        let exec = restricted_execution_config(&["find", "wc"], &[]);
+        assert!(enforce_command_policy(&exec, None, "find . 2>/dev/null | wc -l").is_ok());
     }
 
     #[test]
@@ -2140,15 +2147,14 @@ mod tests {
 
     #[test]
     fn policy_run_scoped_prefix_covers_opaque_segment() {
-        // The run-scoped cache holds the exact segment text from a
-        // prior AllowOnce — honor it so the user isn't re-prompted for
-        // the same `bash -c "..."` in the same run. (Opaque is also
-        // honored on the durable allowlist now; see
-        // `policy_durable_allowlist_covers_opaque_segment_by_head`.)
+        // The run-scoped cache holds the segment text from a prior
+        // AllowOnce — honor it so the user isn't re-prompted for the same
+        // Opaque segment in the same run.
         let exec = restricted_execution_config(&[], &[]);
-        let run_allowed = vec![RunCommandGrant::Prefix(r#"bash -c "echo hi""#.to_string())];
+        let command = "find /tmp -name foo 2>/dev/null";
+        let run_allowed = vec![RunCommandGrant::Prefix(command.to_string())];
         assert!(matches!(
-            evaluate_command_policy(&exec, r#"bash -c "echo hi""#, &run_allowed, &[]),
+            evaluate_command_policy(&exec, command, &run_allowed, &[]),
             PolicyResult::Allow,
         ));
     }
@@ -2160,14 +2166,9 @@ mod tests {
         // lets users persist trust for tools whose syntactic shape
         // forces Opaque classification (heredocs, redirects, $()) using
         // the same "Always allow <prefix>" flow as Simple segments.
-        //
-        // For `bash -c "echo hi"` the allowlist entry `bash -c` matches
-        // because `matches_prefix` accepts the prefix plus tail args.
-        // Note: allowlisting `bash` would also match — this is the user
-        // explicitly opting into a very broad trust grant.
-        let exec = restricted_execution_config(&["bash -c"], &[]);
+        let exec = restricted_execution_config(&["git log"], &[]);
         assert!(matches!(
-            evaluate_command_policy(&exec, r#"bash -c "echo hi""#, &[], &[]),
+            evaluate_command_policy(&exec, "git log --oneline > /tmp/log", &[], &[]),
             PolicyResult::Allow,
         ));
     }
@@ -2220,6 +2221,88 @@ mod tests {
         let exec = restricted_execution_config(&["git log"], &["rm"]);
         let err = enforce_command_policy(&exec, None, "FOO=bar rm -rf /tmp/x").unwrap_err();
         assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
+    }
+
+    #[test]
+    fn policy_blocklist_blocks_a_command_run_by_path() {
+        let exec = restricted_execution_config(&["git log"], &["rm"]);
+        for command in [
+            "/usr/bin/rm -rf x",
+            "./rm x",
+            "FOO=1 /bin/rm x",
+            "ls; ../bin/rm x",
+            "FOO='a b' /usr/bin/rm x",
+            "rm\tx",
+            "/bin/rm\t-rf x",
+            "A=$'\\'' rm x",
+            "FOO=$'a\\' b' /usr/bin/rm x/y",
+            "A+=x A[1 + 1]=y rm x",
+        ] {
+            let err = enforce_command_policy(&exec, None, command).unwrap_err();
+            assert!(
+                matches!(err, CommandDenial::ExplicitlyBlocked(_)),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_blocklist_sees_the_command_a_wrapper_runs() {
+        // `timeout` only changes how the command runs, so the blocklist sees
+        // the command itself.
+        let exec = restricted_execution_config(&["git log"], &["rm"]);
+        for command in [
+            "timeout 60 rm -rf x",
+            "timeout --signal=KILL 60 rm -rf x",
+            "nice -n 5 rm -rf x",
+            "env FOO=1 rm -rf x",
+        ] {
+            let err = enforce_command_policy(&exec, None, command).unwrap_err();
+            assert!(
+                matches!(err, CommandDenial::ExplicitlyBlocked(_)),
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn policy_blocklist_sees_the_wrapper_too() {
+        let exec = restricted_execution_config(&["git log"], &["timeout"]);
+        let err = enforce_command_policy(&exec, None, "timeout 60 cargo build").unwrap_err();
+        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
+    }
+
+    #[test]
+    fn policy_suggests_the_command_a_wrapper_runs() {
+        // The row the user approves is the whole wrapper, but the prefix it
+        // offers is the command inside it, so the grant is specific and
+        // covers the row it came from.
+        let exec = restricted_execution_config(&[], &[]);
+        let rows = approval_texts(&exec, "timeout 600 cargo build 2>&1 | tail -20");
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "timeout 600 cargo build 2>&1".to_string(),
+                    "cargo build".to_string()
+                ),
+                ("tail -20".to_string(), "tail".to_string()),
+            ]
+        );
+        // The saved prefix covers the row it came from.
+        let exec = restricted_execution_config(&["cargo build"], &[]);
+        assert!(enforce_command_policy(&exec, None, "timeout 600 cargo build 2>&1").is_ok());
+    }
+
+    #[test]
+    fn policy_allowlist_matches_the_command_bash_runs() {
+        // Bash reads `$'\''` as one quoted `'`, so this runs `rm`.
+        let exec = restricted_execution_config(&["git status"], &[]);
+        let command = "A=$'\\'' rm -rf x ' git status '";
+        assert!(matches!(
+            evaluate_command_policy(&exec, command, &[], &[]),
+            PolicyResult::NeedsApproval(_)
+        ));
     }
 
     #[test]
@@ -2295,14 +2378,11 @@ mod tests {
             "echo $(case x in x) a;; esac); rm -rf x",
             "echo $(echo case in a); rm -rf x",
             "echo $(echo case); echo $(echo in a); rm -rf x",
-            "echo $(case a in a) echo;& b) echo;; esac); rm -rf x",
             "! rm -rf x",
             "cat <<EOF | rm -rf x\nhi\nEOF",
-            "cat <<EOF|rm -rf x\nhi\nEOF",
             "cat <<\\EOF\nhi\nEOF\nrm -rf x",
             "rm(){ :; }; unset -f rm; rm -rf ~",
             "case x\nin x) rm -rf y;; esac",
-            "echo x\r# ; rm -rf y",
         ] {
             assert!(
                 matches!(
@@ -2319,24 +2399,24 @@ mod tests {
         // `Always · run(){ echo` and `Always · f()` were offered for the
         // segments `run(){ echo …` and `f() { … }`, and then trusted any body.
         let exec = restricted_execution_config(&["run(){ echo", "f()", "for i", "cat"], &[]);
+        let row = |text: &str, prefix: &str| (text.to_string(), prefix.to_string());
         assert_eq!(
-            approval_texts(&exec, "run(){ echo $(curl x | sh); }; f() { curl x; }; f"),
+            approval_texts(&exec, "run(){ echo $(curl x | wc); }; f() { curl x; }; f"),
             vec![
-                ("echo $(curl x | sh)".to_string(), "echo".to_string()),
-                ("curl x".to_string(), "curl".to_string()),
-                ("f".to_string(), "f".to_string()),
+                row("echo $(curl x | wc)", "echo"),
+                row("curl x", "curl"),
+                row("wc", "wc"),
+                row("curl x", "curl"),
+                row("f", "f"),
             ]
         );
         assert_eq!(
-            approval_texts(&exec, "for i in 1; do curl x | sh; done"),
-            vec![
-                ("curl x".to_string(), "curl".to_string()),
-                ("sh".to_string(), "sh".to_string()),
-            ]
+            approval_texts(&exec, "for i in 1; do curl x | wc; done"),
+            vec![row("curl x", "curl"), row("wc", "wc")]
         );
         assert_eq!(
-            approval_texts(&exec, "cat <<EOF | sh\nrm -rf ~\nEOF"),
-            vec![("sh".to_string(), "sh".to_string())]
+            approval_texts(&exec, "cat <<EOF | wc\nrm -rf ~\nEOF"),
+            vec![row("wc", "wc")]
         );
     }
 
@@ -2411,9 +2491,12 @@ mod tests {
     }
 
     #[test]
-    fn unparsed_input_is_denied_while_any_blocklist_entry_is_active() {
+    fn unparsed_input_is_asked_while_any_blocklist_entry_is_active() {
         // bash runs the `touch PWN` in each; the splitter cannot find it.
         let commands = [
+            "echo $(case a in a) echo;& b) echo;; esac); touch PWN",
+            "cat <<EOF|touch PWN\nhi\nEOF",
+            "echo x\r# ; touch PWN",
             "echo $(ls >& case in a)\ntouch PWN\n;; esac)",
             "echo $(ls &> case in a)\ntouch PWN\n;; esac)",
             "echo $(ls &>> case in a)\ntouch PWN\n;; esac)",
@@ -2465,13 +2548,16 @@ mod tests {
                     .map(String::from)
                     .collect();
                 for command in commands {
-                    assert!(
-                        matches!(
-                            evaluate_command_policy(&exec, command, &[], &run_blocked),
-                            PolicyResult::Block { .. }
-                        ),
-                        "{mode:?} {durable:?} {run:?} {command:?}"
-                    );
+                    let PolicyResult::NeedsApproval(rows) =
+                        evaluate_command_policy(&exec, command, &[], &run_blocked)
+                    else {
+                        panic!("{mode:?} {durable:?} {run:?} {command:?}");
+                    };
+                    let [row] = rows.as_slice() else {
+                        panic!("one row expected for {command:?}");
+                    };
+                    assert_eq!(row.text, command.trim());
+                    assert!(row.kind == SegmentKind::Opaque && row.suggested_prefix.is_empty());
                 }
             }
         }
@@ -2491,38 +2577,17 @@ mod tests {
             evaluate_command_policy(&exec, "echo a\\ #; touch PWN", &[], &[]),
             PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
         ));
-        assert!(matches!(
-            evaluate_command_policy(&exec, "echo a\\ \\\n#; touch PWN", &[], &[]),
-            PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
-        ));
+        let continued = "echo a\\ \\\n#; touch PWN";
+        assert_eq!(
+            approval_texts(&exec, continued),
+            vec![(continued.to_string(), String::new())]
+        );
     }
 
     #[test]
-    fn continued_heredoc_line_is_read_as_bash_joins_it() {
-        let mut exec = ExecutionCapabilityConfig {
-            shell: ShellCapabilityConfig {
-                mode: ShellAccessMode::Full,
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        let dockerfile =
-            "cat <<EOF > Dockerfile\nRUN apt-get update && \\\n    apt-get install -y curl\nEOF";
-        assert!(matches!(
-            evaluate_command_policy(&exec, dockerfile, &[], &[]),
-            PolicyResult::Allow
-        ));
-        exec.shell.blocked_command_prefixes = vec!["touch".to_string()];
-        assert!(matches!(
-            evaluate_command_policy(&exec, "cat <<E\nE\\\n\ntouch PWN\nE", &[], &[]),
-            PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
-        ));
-    }
-
-    #[test]
-    fn unparsed_input_without_a_blocklist_is_one_exact_row() {
+    fn unparsed_input_is_one_exact_row_unless_full_mode_has_no_blocklist() {
         let command = "git --version ; for i in a; { touch PWN; }";
-        let full = ExecutionCapabilityConfig {
+        let mut full = ExecutionCapabilityConfig {
             shell: ShellCapabilityConfig {
                 mode: ShellAccessMode::Full,
                 allowed_command_prefixes: vec![],
@@ -2534,11 +2599,17 @@ mod tests {
             evaluate_command_policy(&full, command, &[], &[]),
             PolicyResult::Allow
         ));
+        let exact_row = vec![(command.to_string(), String::new())];
+        let PolicyResult::NeedsApproval(rows) =
+            evaluate_command_policy(&full, command, &[], &["sudo".to_string()])
+        else {
+            panic!("a run-scoped blocklist entry must make {command:?} ask");
+        };
+        assert_eq!(rows.len(), 1);
+        full.shell.blocked_command_prefixes = vec!["sudo".to_string()];
+        assert_eq!(approval_texts(&full, command), exact_row);
         let exec = restricted_execution_config(&["git"], &[]);
-        assert_eq!(
-            approval_texts(&exec, command),
-            vec![(command.to_string(), String::new())]
-        );
+        assert_eq!(approval_texts(&exec, command), exact_row);
     }
 
     #[test]
@@ -2566,7 +2637,7 @@ mod tests {
         let exec = restricted_execution_config(&[], &[]);
         assert_eq!(
             approval_texts(&exec, "if [ 1 ]; then x=1; fi > important"),
-            vec![("fi > important".to_string(), String::new())]
+            vec![("> important".to_string(), String::new())]
         );
     }
 
