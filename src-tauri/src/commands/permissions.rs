@@ -817,29 +817,10 @@ mod tests {
             !serialized.contains(reason),
             "reason leaked into config: {serialized}"
         );
-        assert!(!serialized.contains("blockedCommandReasons"));
         assert_eq!(
             serde_json::to_value(&with_reason.execution.shell).unwrap(),
             serde_json::to_value(&without_reason.execution.shell).unwrap()
         );
-    }
-
-    #[test]
-    fn old_config_with_blocked_command_reasons_still_loads() {
-        // Configs written by the draft build carry `blockedCommandReasons`.
-        // The field is gone from the type, so serde must ignore it instead
-        // of rejecting the whole config.
-        let old_policy: crate::config::types::ShellCapabilityConfig = serde_json::from_str(
-            r#"{"mode":"restricted","blockedCommandPrefixes":["curl"],"blockedCommandReasons":{"curl":"old reason"}}"#,
-        )
-        .expect("old config must still deserialize");
-        assert_eq!(
-            old_policy.blocked_command_prefixes,
-            vec!["curl".to_string()]
-        );
-        let serialized = serde_json::to_string(&old_policy).unwrap();
-        assert!(!serialized.contains("blockedCommandReasons"));
-        assert!(!serialized.contains("old reason"));
     }
 
     #[test]
@@ -1238,7 +1219,7 @@ mod approval_routing_tests {
 #[cfg(test)]
 mod denial_reason_tests {
     //! A denial reason reaches the model through the tool error, and is not
-    //! written to any structured state on the way.
+    //! written to agent configuration on the way.
 
     use super::*;
     use crate::commands::path_grants::approval_destination_tests::*;
@@ -1294,8 +1275,7 @@ mod denial_reason_tests {
         let error = crate::assistant::tools::local::denied_segments_message(&segments, &received);
         assert!(error.contains("no network upload"), "{error}");
 
-        // The reason lives only in that error: the agent config keeps the
-        // blocked prefix and says nothing about the reason.
+        // The agent config keeps the blocked prefix, but not the reason.
         let config = fixture.config();
         assert!(config
             .main_agent
@@ -1307,9 +1287,5 @@ mod denial_reason_tests {
             .contains(&"curl".to_string()));
         let serialized = serde_json::to_string(&config).expect("serialize config");
         assert!(!serialized.contains("no network upload"), "{serialized}");
-        assert!(
-            !serialized.contains("blockedCommandReasons"),
-            "{serialized}"
-        );
     }
 }

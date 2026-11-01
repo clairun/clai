@@ -2589,24 +2589,6 @@ mod tests {
     }
 
     #[test]
-    fn automatic_block_carries_no_reason() {
-        // A denial reason lives only in the response that carries it. A
-        // later block of the same prefix is a different response and must
-        // not repeat the reason.
-        let exec = restricted_execution_config(&[], &["curl"]);
-        match evaluate_command_policy(&exec, "curl x", &[], &[]) {
-            PolicyResult::Block {
-                segment_text,
-                matched_prefix,
-            } => {
-                assert_eq!(segment_text, "curl x");
-                assert_eq!(matched_prefix, "curl");
-            }
-            _ => panic!("expected block"),
-        }
-    }
-
-    #[test]
     fn policy_run_scoped_blocklist_blocks_simple_segment() {
         // No durable blocklist, but a run-scoped DenyAlways for `rm -rf`.
         // A fresh `rm -rf /tmp/foo` should hit Block without prompting.

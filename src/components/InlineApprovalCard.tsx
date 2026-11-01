@@ -67,8 +67,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
   // Latched once the decision is sent, so it cannot be sent twice.
   const sent = useRef(false);
   const [error, setError] = useState<string | null>(null);
-  // One reason for the whole request: it travels with this response and
-  // nowhere else, so it is not kept anywhere after the decision.
+  // One reason for the whole request, sent with the denial response.
   const [reason, setReason] = useState('');
   const reasonId = useId();
   const reasonHintId = `${reasonId}-hint`;
