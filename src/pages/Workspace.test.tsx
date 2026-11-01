@@ -397,6 +397,39 @@ describe('Workspace session hydration', () => {
     expect(screen.getByRole('button', { name: 'Remove queued message' })).toBeInTheDocument();
   });
 
+  it('shows a first-turn failure after the unanswered message is retracted', async () => {
+    loadSessionMessagesPage.mockResolvedValue(
+      messagePage([userMessage('sess-a', 'm-1', 'first question')])
+    );
+    renderWorkspace();
+    expect(await screen.findByText('first question')).toBeInTheDocument();
+
+    act(() => {
+      useAssistantStore.getState().setRunStatus('sess-a', {
+        ...runFor('sess-a', 'failed'),
+        error: 'provider request failed: HTTP 401 Unauthorized',
+      });
+      useAssistantStore.getState().removeMessage('sess-a', 'm-1');
+    });
+
+    expect(screen.queryByText('first question')).toBeNull();
+    expect(screen.getByRole('alert')).toHaveTextContent('HTTP 401 Unauthorized');
+    expect(screen.queryByText('Start a conversation')).toBeNull();
+  });
+
+  it('shows a persisted first-turn failure when history has no messages', async () => {
+    listRuns.mockResolvedValue([
+      {
+        ...runFor('sess-a', 'failed'),
+        error: 'provider request failed: HTTP 401 Unauthorized',
+      },
+    ]);
+    renderWorkspace();
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('HTTP 401 Unauthorized');
+    expect(screen.queryByText('Start a conversation')).toBeNull();
+  });
+
   it('invites a workspace with no conversation to start one', async () => {
     getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
       detailsFor(options, { session: null })
