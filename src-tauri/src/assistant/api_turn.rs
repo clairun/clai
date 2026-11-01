@@ -321,7 +321,7 @@ async fn start_api_turn(
         return Ok(None);
     }
 
-    let adapter = providers::resolve_adapter(&connection.protocol_id)?;
+    let adapter = providers::resolve_connection_adapter(connection)?;
 
     // Get available tools for this session's context
     let external_tools = {

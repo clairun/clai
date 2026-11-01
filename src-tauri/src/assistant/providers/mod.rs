@@ -2,13 +2,14 @@ pub mod anthropic;
 pub mod catalog;
 pub mod cli;
 pub mod openai;
+pub mod openrouter;
 pub mod registry;
 pub mod types;
 
 use crate::assistant::types::{ModelInfo, ProviderConnection};
 
 pub use registry::{
-    get_provider_descriptor, is_cli_provider, resolve_adapter, supported_providers,
+    get_provider_descriptor, is_cli_provider, resolve_connection_adapter, supported_providers,
 };
 
 /// Whether a connection's active model can accept image input.

@@ -200,7 +200,7 @@ pub async fn provider_catalog_probe_models(
             .unwrap_or(0),
     };
 
-    let adapter = providers::resolve_adapter(&request.protocol_id).map_err(|e| e.to_string());
+    let adapter = providers::resolve_connection_adapter(&connection).map_err(|e| e.to_string());
     let result = match adapter {
         Ok(adapter) => adapter
             .list_models(&connection)
@@ -489,14 +489,6 @@ pub async fn provider_descriptor_models(provider_id: String) -> Result<Vec<Model
 }
 
 #[tauri::command]
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "lint debt: cognitive complexity 64 against a budget of 25"
-)]
-#[expect(
-    clippy::too_many_lines,
-    reason = "lint debt: 148 lines against a 100-line budget; split it, do not raise the budget"
-)]
 pub async fn provider_connection_test(
     id: String,
     state: State<'_, AppState>,
@@ -508,6 +500,20 @@ pub async fn provider_connection_test(
         .get_provider_connection(&id)
         .ok_or_else(|| format!("Provider connection not found: {}", id))?;
 
+    test_api_provider_connection(&connection).await
+}
+
+#[allow(
+    clippy::cognitive_complexity,
+    reason = "lint debt: cognitive complexity 65 against a budget of 25"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "lint debt: 148 lines against a 100-line budget; split it, do not raise the budget"
+)]
+async fn test_api_provider_connection(
+    connection: &ProviderConnection,
+) -> Result<TestResult, String> {
     tracing::info!(
         connection_id = %connection.id,
         connection_name = %connection.name,
@@ -519,19 +525,10 @@ pub async fn provider_connection_test(
     );
 
     if providers::is_cli_provider(&connection.protocol_id) {
-        return test_cli_provider_connection(&connection).await;
+        return test_cli_provider_connection(connection).await;
     }
 
-    if connection.provider_id == "openrouter" {
-        if let Err(error) = providers::openai::validate_openrouter_key(&connection).await {
-            return Ok(TestResult {
-                success: false,
-                error: Some(error.to_string()),
-            });
-        }
-    }
-
-    let adapter = providers::resolve_adapter(&connection.protocol_id).map_err(|e| {
+    let adapter = providers::resolve_connection_adapter(connection).map_err(|e| {
         tracing::error!(
             protocol_id = %connection.protocol_id,
             error = %e,
@@ -539,6 +536,13 @@ pub async fn provider_connection_test(
         );
         e.to_string()
     })?;
+
+    if let Err(error) = adapter.validate_connection(connection).await {
+        return Ok(TestResult {
+            success: false,
+            error: Some(error.to_string()),
+        });
+    }
 
     // Try a live model-list call first; if that fails (some providers don't
     // implement it), fall back to a minimal completion request to verify auth
@@ -553,7 +557,7 @@ pub async fn provider_connection_test(
         })
         .unwrap_or(true);
     if has_live_models_endpoint {
-        match adapter.list_models(&connection).await {
+        match adapter.list_models(connection).await {
             Ok(models) => {
                 tracing::info!(
                     connection_id = %connection.id,
@@ -603,7 +607,7 @@ pub async fn provider_connection_test(
         images: Default::default(),
     };
 
-    match adapter.stream_completion(&connection, request).await {
+    match adapter.stream_completion(connection, request).await {
         Ok(mut stream) => {
             let mut got_response = false;
             while let Some(event) = stream.next().await {
@@ -741,15 +745,11 @@ async fn test_cli_provider_connection(
 mod tests {
     use super::*;
     use crate::assistant::auth::ProviderSecretStorage;
-    use crate::config::AppConfig;
-    use crate::workspace_index::WorkspaceIndex;
-    use crate::ConfigManager;
     use axum::http::{HeaderMap, StatusCode};
     use axum::routing::get;
     use axum::Router;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
-    use tauri::Manager;
 
     const VALID_KEY: &str = "sk-or-valid-regression-key";
 
@@ -809,23 +809,10 @@ mod tests {
         }
     }
 
-    /// Runs the real `provider_connection_test` command for `connection`
-    /// through a managed `tauri::State`, exactly as the frontend invokes it.
     async fn run_connection_test(connection: ProviderConnection) -> TestResult {
-        let temp = tempfile::tempdir().expect("temp dir");
-        let app_config = AppConfig {
-            provider_connections: vec![connection.clone()],
-            ..AppConfig::default()
-        };
-        let config_manager =
-            ConfigManager::new_for_tests(app_config, temp.path().join("config.json"));
-        let state =
-            AppState::new_for_tests(config_manager, WorkspaceIndex::default()).expect("app state");
-        let app = tauri::test::mock_app();
-        app.manage(state);
-        provider_connection_test(connection.id.clone(), app.state())
+        test_api_provider_connection(&connection)
             .await
-            .expect("command returns a TestResult, not an invocation error")
+            .expect("connection test returns a result")
     }
 
     /// Regression test for #242: the OpenRouter key guard must reject a
