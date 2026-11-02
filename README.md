@@ -157,6 +157,27 @@ xattr -cr /Applications/clai.app
 Each agent chooses its own provider, so you can mix — for example a Claude
 Code main agent with an OpenAI-compatible reviewer.
 
+### Troubleshooting provider traffic
+
+Set `CLAI_PROVIDER_WIRE_LOG` before starting the app to record every direct
+provider HTTP exchange (request body, response status/body, and each raw
+stream chunk) to an append-only JSONL file:
+
+```bash
+CLAI_PROVIDER_WIRE_LOG=1 clai        # <temp dir>/clai-provider-wire-<pid>.log
+CLAI_PROVIDER_WIRE_LOG=/path/wire.log clai   # explicit file, appended to
+```
+
+The pid-named file is created fresh with owner-only permissions (0600 on
+Unix); if the name is already taken (PID reuse) a `-2`, `-3`, … suffix is
+used, and a pre-existing symlink at that name is never followed. Setting the
+variable to `0`, `false`, or `off` disables the log. API keys and
+other credential header values are redacted to `[REDACTED]`, but request and
+response bodies are logged verbatim — they contain full prompts, so delete the
+file when done. Logging is off unless the variable is set. Only CLAI's own
+HTTP providers are captured; traffic of CLI agents (Claude Code, Codex,
+OpenCode) happens inside their own processes and is not visible to CLAI.
+
 ## Development
 
 ```bash
