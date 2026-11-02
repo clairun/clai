@@ -609,7 +609,9 @@ fn parse_sse_frame(
 
                 let choice = json.get("choices").and_then(|c| c.get(0));
 
-                // Check finish_reason for tool_calls
+                // Check finish_reason: flush accumulated tool calls, and
+                // surface the terminal reason (`length` = output budget
+                // exhausted) so consumers can reject truncated output.
                 if let Some(reason) = choice
                     .and_then(|c| c.get("finish_reason"))
                     .and_then(|r| r.as_str())
@@ -617,6 +619,9 @@ fn parse_sse_frame(
                     if reason == "tool_calls" {
                         flush_tool_calls(tool_calls_buf, &mut events);
                     }
+                    events.push(Ok(ProviderEvent::StopReason {
+                        reason: reason.to_string(),
+                    }));
                 }
 
                 let delta = choice.and_then(|c| c.get("delta"));
@@ -988,10 +993,14 @@ mod tests {
         let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
         assert!(matches!(
             events.as_slice(),
-            [Ok(ProviderEvent::ToolCallReady { tool_call })] if
+            [
+                Ok(ProviderEvent::ToolCallReady { tool_call }),
+                Ok(ProviderEvent::StopReason { reason }),
+            ] if
                 tool_call.tool_call_id == call_id &&
                 tool_call.tool_name == "bash_exec" &&
-                tool_call.params == serde_json::json!({"cmd": "sed -n '35,75p' .github/workflows/ci.yml"})
+                tool_call.params == serde_json::json!({"cmd": "sed -n '35,75p' .github/workflows/ci.yml"}) &&
+                reason == "tool_calls"
         ));
     }
 }

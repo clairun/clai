@@ -741,6 +741,12 @@ async fn consume_api_stream_with_sink(
                 ProviderEvent::ToolCallDelta { .. } => {
                     // Could emit live UI updates here in the future
                 }
+                ProviderEvent::StopReason { .. } => {
+                    // A budget-capped finish (max_tokens / length) is legal
+                    // on a normal turn: the partial reply is stored as-is,
+                    // as before. Compaction is the consumer that must
+                    // reject truncated output.
+                }
                 ProviderEvent::MessageComplete => {
                     // Finalization happens once after the stream loop exits
                     // so we also capture in-memory state (text + tool_calls)

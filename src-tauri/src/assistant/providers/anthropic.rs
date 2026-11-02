@@ -646,6 +646,20 @@ fn parse_sse_frame(
                 }));
             }
         }
+        "message_delta" => {
+            // The terminal frame carries the stop reason (`max_tokens` =
+            // output budget exhausted). Capture it, or truncated output is
+            // indistinguishable from complete output downstream.
+            if let Some(reason) = json
+                .get("delta")
+                .and_then(|d| d.get("stop_reason"))
+                .and_then(|r| r.as_str())
+            {
+                events.push(Ok(ProviderEvent::StopReason {
+                    reason: reason.to_string(),
+                }));
+            }
+        }
         "message_stop" => {
             events.push(Ok(ProviderEvent::MessageComplete));
         }
@@ -1005,5 +1019,22 @@ mod tests {
         // Unsigned thinking can't be re-signed → dropped; only text remains.
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["type"], "text");
+    }
+
+    #[test]
+    fn message_delta_stop_reason_is_surfaced() {
+        let mut emitted_start = true;
+        let mut tool_calls = Vec::new();
+        let frame = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":4096}}\n\n";
+        let events = parse_sse_frame(frame, &mut emitted_start, &mut tool_calls);
+        assert!(matches!(
+            events.as_slice(),
+            [Ok(ProviderEvent::StopReason { reason })] if reason == "max_tokens"
+        ));
+
+        // A null stop_reason (Anthropic sends one in early message_delta
+        // frames) must not emit a bogus empty event.
+        let frame = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":null}}\n\n";
+        assert!(parse_sse_frame(frame, &mut emitted_start, &mut tool_calls).is_empty());
     }
 }

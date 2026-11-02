@@ -24,6 +24,12 @@ const ESTIMATED_INPUT_BUDGET_TOKENS: usize = 96_000;
 /// Cap on the newest history a compaction keeps verbatim; see
 /// [`verbatim_tail_tokens`]. The newest group is kept regardless.
 pub(crate) const VERBATIM_TAIL_MAX_TOKENS: usize = 20_000;
+/// Visible-text budget the summarizer asks for. Providers whose endpoint
+/// bills reasoning ("thinking") tokens against the same `max_tokens`
+/// (MiniMax) get a catalog `thinking_token_allowance` added on top in
+/// [`summarize_window`]; the transcript arithmetic below reserves room for
+/// the *summary text* only, and the thinking allowance fits the 16k reply
+/// headroom `ESTIMATED_INPUT_BUDGET_TOKENS` already documents.
 const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 4096;
 /// Transcript the summarizer request may carry: the input budget less the
 /// summary it is asked to write. Same unit as the trigger, so a compaction
@@ -359,7 +365,7 @@ async fn summarize_window(
         ],
         tools: Vec::new(),
         temperature: None,
-        max_output_tokens: Some(SUMMARY_MAX_OUTPUT_TOKENS),
+        max_output_tokens: Some(summary_output_tokens(connection)),
         images: Default::default(),
     };
 
@@ -368,9 +374,11 @@ async fn summarize_window(
         .await
         .map_err(provider_error_message)?;
     let mut summary = String::new();
+    let mut stop_reason: Option<String> = None;
     while let Some(event) = stream.next().await {
         match event.map_err(provider_error_message)? {
             ProviderEvent::TextDelta { text } => summary.push_str(&text),
+            ProviderEvent::StopReason { reason } => stop_reason = Some(reason),
             ProviderEvent::ProviderError { message } => return Err(message),
             ProviderEvent::MessageStart
             | ProviderEvent::ThinkingDelta { .. }
@@ -381,7 +389,39 @@ async fn summarize_window(
         }
     }
 
-    let summary = summary.trim().to_string();
+    finish_summary(summary, stop_reason.as_deref())
+}
+
+/// The summarizer's `max_tokens` ask: the summary-text budget plus the
+/// catalog's thinking allowance for providers whose endpoint bills thinking
+/// tokens against the same `max_tokens` (MiniMax). Everyone else gets the
+/// text budget alone, unchanged.
+fn summary_output_tokens(connection: &ProviderConnection) -> u32 {
+    SUMMARY_MAX_OUTPUT_TOKENS
+        + providers::catalog::get_entry(&connection.provider_id)
+            .map_or(0, |entry| entry.thinking_token_allowance)
+}
+
+/// Stop reasons that mean the provider cut generation at its output-token
+/// budget — Anthropic `max_tokens`, OpenAI `length`. Anything else is a
+/// natural finish and the text is complete as written.
+fn is_budget_truncation(reason: &str) -> bool {
+    matches!(reason, "max_tokens" | "length")
+}
+
+/// Decide whether a finished summarizer stream produced a storable summary.
+/// A summary cut at the output-token budget is not a summary: storing it
+/// would replace the transcript with silently truncated prose. On
+/// thinking-billing providers the usual cause is thinking consuming the
+/// budget (`max_tokens` stop reason, often with little or no text).
+fn finish_summary(text: String, stop_reason: Option<&str>) -> Result<String, String> {
+    if let Some(reason) = stop_reason.filter(|r| is_budget_truncation(r)) {
+        return Err(format!(
+            "Compaction summary was truncated at the output-token limit (stop reason \
+             `{reason}`) and was discarded instead of stored"
+        ));
+    }
+    let summary = text.trim().to_string();
     if summary.is_empty() {
         return Err("Compaction summary was empty".to_string());
     }
@@ -630,6 +670,79 @@ mod tests {
     use crate::assistant::token_estimate::message_tokens;
     use crate::assistant::types::{ContentPart, MessageRole};
     use crate::db::DbPool;
+
+    fn conn_for_brand(brand: &str) -> ProviderConnection {
+        ProviderConnection {
+            id: "t".to_string(),
+            name: "t".to_string(),
+            protocol_id: "anthropic".to_string(),
+            provider_id: brand.to_string(),
+            auth_mode: crate::assistant::types::AuthMode::DeveloperApiKey,
+            base_url: None,
+            secret_ref: "provider-connection::t".to_string(),
+            model_id: String::new(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn truncated_summary_is_rejected_instead_of_stored() {
+        // Partial text cut at the budget: discarded, with the provider's
+        // reason in the error.
+        let err = finish_summary("partial summary".to_string(), Some("max_tokens")).unwrap_err();
+        assert!(err.contains("max_tokens"), "{err}");
+        assert!(err.contains("discarded"), "{err}");
+
+        // The observed MiniMax starvation shape: thinking consumed the whole
+        // budget, no text at all. The truncation cause wins over "empty".
+        let err = finish_summary(String::new(), Some("max_tokens")).unwrap_err();
+        assert!(err.contains("max_tokens"), "{err}");
+
+        // OpenAI's spelling of the same cutoff.
+        assert!(finish_summary("partial".to_string(), Some("length")).is_err());
+    }
+
+    #[test]
+    fn complete_summary_is_stored_and_trimmed() {
+        // Natural stop: stored, trimmed, verbatim.
+        assert_eq!(
+            finish_summary(" summary text \n".to_string(), Some("end_turn")).unwrap(),
+            "summary text"
+        );
+        // Providers that never report a stop reason (CLI adapters) still store.
+        assert_eq!(
+            finish_summary("summary text".to_string(), None).unwrap(),
+            "summary text"
+        );
+        // No stop reason + no text stays the empty-summary failure.
+        assert_eq!(
+            finish_summary(String::new(), None).unwrap_err(),
+            "Compaction summary was empty"
+        );
+    }
+
+    #[test]
+    fn minimax_summarizer_ask_includes_thinking_allowance() {
+        // MiniMax bills thinking tokens against max_tokens, so the ask must
+        // cover thinking + summary text.
+        assert_eq!(
+            summary_output_tokens(&conn_for_brand("minimax")),
+            SUMMARY_MAX_OUTPUT_TOKENS + 12_288
+        );
+        // Providers that do not bill thinking against max_tokens are
+        // unchanged, including ones not in the catalog at all.
+        assert_eq!(
+            summary_output_tokens(&conn_for_brand("anthropic")),
+            SUMMARY_MAX_OUTPUT_TOKENS
+        );
+        assert_eq!(
+            summary_output_tokens(&conn_for_brand("custom-anthropic")),
+            SUMMARY_MAX_OUTPUT_TOKENS
+        );
+    }
 
     fn msg(id: &str, role: MessageRole, parts: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
