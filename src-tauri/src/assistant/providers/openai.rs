@@ -617,7 +617,7 @@ fn parse_sse_frame(
                     .and_then(|r| r.as_str())
                 {
                     if reason == "tool_calls" {
-                        flush_tool_calls(tool_calls_buf, &mut events);
+                        flush_announced_tool_calls(tool_calls_buf, &mut events);
                     }
                     events.push(Ok(ProviderEvent::StopReason {
                         reason: reason.to_string(),
@@ -709,6 +709,24 @@ fn parse_sse_frame(
     }
 
     events
+}
+
+/// Flush on the terminal `finish_reason:"tool_calls"` frame. When the
+/// provider announced tool calls but none survived parsing, fail the
+/// turn: completing silently ends the run green with neither visible
+/// text nor tool calls.
+fn flush_announced_tool_calls(
+    tool_calls_buf: &mut Vec<PartialToolCall>,
+    events: &mut Vec<Result<ProviderEvent, ProviderError>>,
+) {
+    let before = events.len();
+    flush_tool_calls(tool_calls_buf, events);
+    if events.len() == before {
+        events.push(Err(ProviderError::RequestFailed(
+            "provider announced finish_reason=tool_calls but no tool call could be parsed"
+                .to_string(),
+        )));
+    }
 }
 
 /// Flush accumulated tool calls as ToolCallReady events.
@@ -1001,6 +1019,28 @@ mod tests {
                 tool_call.tool_name == "bash_exec" &&
                 tool_call.params == serde_json::json!({"cmd": "sed -n '35,75p' .github/workflows/ci.yml"}) &&
                 reason == "tool_calls"
+        ));
+    }
+
+    /// A terminal `finish_reason:"tool_calls"` that flushes zero calls
+    /// must fail the turn, not complete it silently: the run would end
+    /// green with neither visible text nor tool calls.
+    #[test]
+    fn announced_tool_calls_with_none_parsed_fails_the_turn() {
+        let mut is_first = false;
+        let mut tool_calls = Vec::new();
+        // Fragments that never carried an id: nothing to flush.
+        let fragment = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"bash_exec\",\"arguments\":\"{}\"}}]}}]}\n\n";
+        assert!(parse_sse_frame(fragment, &mut is_first, &mut tool_calls).is_empty());
+
+        let terminal = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                Err(ProviderError::RequestFailed(message)),
+                Ok(ProviderEvent::StopReason { reason }),
+            ] if message.contains("no tool call could be parsed") && reason == "tool_calls"
         ));
     }
 }
