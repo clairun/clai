@@ -609,21 +609,6 @@ fn parse_sse_frame(
 
                 let choice = json.get("choices").and_then(|c| c.get(0));
 
-                // Check finish_reason: flush accumulated tool calls, and
-                // surface the terminal reason (`length` = output budget
-                // exhausted) so consumers can reject truncated output.
-                if let Some(reason) = choice
-                    .and_then(|c| c.get("finish_reason"))
-                    .and_then(|r| r.as_str())
-                {
-                    if reason == "tool_calls" {
-                        flush_announced_tool_calls(tool_calls_buf, &mut events);
-                    }
-                    events.push(Ok(ProviderEvent::StopReason {
-                        reason: reason.to_string(),
-                    }));
-                }
-
                 let delta = choice.and_then(|c| c.get("delta"));
 
                 // Extract text delta
@@ -700,6 +685,23 @@ fn parse_sse_frame(
                             tool_calls_buf[index].arguments.push_str(args);
                         }
                     }
+                }
+
+                // The terminal chunk may carry its tool-call fragment in
+                // the same delta as the finish reason, so apply the delta
+                // first; then flush accumulated tool calls and surface the
+                // terminal reason (`length` = output budget exhausted) so
+                // consumers can reject truncated output.
+                if let Some(reason) = choice
+                    .and_then(|c| c.get("finish_reason"))
+                    .and_then(|r| r.as_str())
+                {
+                    if reason == "tool_calls" {
+                        flush_announced_tool_calls(tool_calls_buf, &mut events);
+                    }
+                    events.push(Ok(ProviderEvent::StopReason {
+                        reason: reason.to_string(),
+                    }));
                 }
             }
             Err(e) => {
@@ -1041,6 +1043,52 @@ mod tests {
                 Err(ProviderError::RequestFailed(message)),
                 Ok(ProviderEvent::StopReason { reason }),
             ] if message.contains("no tool call could be parsed") && reason == "tool_calls"
+        ));
+    }
+
+    /// A terminal chunk may carry its first (or only) tool-call fragment
+    /// in the same delta that announces `finish_reason:"tool_calls"`: the
+    /// delta must be applied before the flush, or the call is lost and
+    /// the turn trips the zero-flush guard.
+    #[test]
+    fn terminal_chunk_with_first_tool_call_fragment_is_flushed() {
+        let mut is_first = false;
+        let mut tool_calls = Vec::new();
+        let terminal = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash_exec","arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                Ok(ProviderEvent::ToolCallReady { tool_call }),
+                Ok(ProviderEvent::StopReason { reason }),
+            ] if
+                tool_call.tool_call_id == "call_1" &&
+                tool_call.tool_name == "bash_exec" &&
+                tool_call.params == serde_json::json!({"cmd": "ls"}) &&
+                reason == "tool_calls"
+        ));
+    }
+
+    /// The terminal chunk may also carry the final arguments fragment:
+    /// flushing before applying that delta would truncate the call.
+    #[test]
+    fn terminal_chunk_final_argument_fragment_is_not_lost() {
+        let mut is_first = false;
+        let mut tool_calls = Vec::new();
+        let head = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_2","function":{"name":"bash_exec","arguments":"{\"cmd\":"}}]}}]}"#;
+        assert!(parse_sse_frame(head, &mut is_first, &mut tool_calls).is_empty());
+
+        let terminal = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                Ok(ProviderEvent::ToolCallReady { tool_call }),
+                Ok(ProviderEvent::StopReason { reason }),
+            ] if
+                tool_call.tool_call_id == "call_2" &&
+                tool_call.params == serde_json::json!({"cmd": "ls"}) &&
+                reason == "tool_calls"
         ));
     }
 }
