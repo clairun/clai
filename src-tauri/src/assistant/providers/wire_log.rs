@@ -4,12 +4,15 @@
 //! in that launch.
 //!
 //! Enabled only when `CLAI_PROVIDER_WIRE_LOG` is set at app start: `1`/`true`
-//! logs to `<host temp dir>/clai-provider-wire-<pid>.log` (0600, unique per
-//! launch so concurrent instances never interleave), any other non-empty
-//! value is taken as an explicit file path. Unset = feature off,
-//! zero cost beyond one mutex peek per request. Provider HTTP runs solely in
-//! the host app process — never inside a sandboxed child — so the host
-//! process temp dir is the real host `/tmp`, not a sandbox view.
+//! logs to a fresh `<host temp dir>/clai-provider-wire-<pid>.log` (0600,
+//! created exclusively so concurrent instances never interleave and neither
+//! a planted symlink nor a stale file left by a PID-reusing launch is
+//! followed or extended); any other non-empty value is an explicit file
+//! path, opened for append across launches. `0`/`false`/`off`, blank, and
+//! unset disable the feature: zero cost beyond one mutex peek per request.
+//! Provider HTTP runs solely in the host app process — never inside a
+//! sandboxed child — so the host process temp dir is the real host `/tmp`,
+//! not a sandbox view.
 //!
 //! Every line is one JSON event. A `request` line carries the verbatim body
 //! plus a process-unique request id; later `response`, `body`, `chunk`,
@@ -76,43 +79,66 @@ pub(crate) static TEST_LOCK: Mutex<()> = Mutex::new(());
 /// Resolve the env var and open the log file. Called once at app startup;
 /// failures disable the feature with a warning, never abort startup.
 pub(crate) fn init() {
-    let Some(path) = resolve_from_env() else {
+    let Some(target) = resolve_from_env() else {
         return;
     };
-    match Logger::open(&path) {
+    match Logger::open(&target) {
         Ok(logger) => {
             let logger = Arc::new(logger);
             let mut guard = LOGGER.lock().expect("wire log logger poisoned");
             *guard = Some(logger.clone());
             drop(guard);
             logger.emit_startup();
-            tracing::info!(path = %path.display(), "Provider wire log enabled");
+            tracing::info!(path = %logger.path.display(), "Provider wire log enabled");
         }
         Err(error) => tracing::warn!(
-            path = %path.display(),
+            path = %target.display(),
             error = %error,
             "CLAI_PROVIDER_WIRE_LOG is set but the wire log file could not be opened; continuing without provider wire logging"
         ),
     }
 }
 
-fn resolve_from_env() -> Option<PathBuf> {
+#[derive(Debug, PartialEq)]
+enum Target {
+    /// A fresh file per launch under the host temp dir, created exclusively:
+    /// a planted symlink or a stale file left by a PID-reusing launch can
+    /// neither capture nor extend this launch's log.
+    Auto { dir: PathBuf, stem: String },
+    /// A user-named file, opened for append: consecutive launches extend it.
+    Explicit(PathBuf),
+}
+
+impl Target {
+    fn display(&self) -> String {
+        match self {
+            Self::Auto { dir, stem } => dir.join(format!("{stem}.log")).display().to_string(),
+            Self::Explicit(path) => path.display().to_string(),
+        }
+    }
+}
+
+fn resolve_from_env() -> Option<Target> {
     let raw = std::env::var(ENV_WIRE_LOG).ok()?;
     let raw = raw.trim();
-    if raw.is_empty() {
+    if raw.is_empty()
+        || raw == "0"
+        || raw.eq_ignore_ascii_case("false")
+        || raw.eq_ignore_ascii_case("off")
+    {
         return None;
     }
     if raw == "1" || raw.eq_ignore_ascii_case("true") || raw.eq_ignore_ascii_case("on") {
-        // Pid-suffixed so each launch gets its own file: concurrent app
-        // instances never interleave, and a fresh launch cannot silently
-        // grow a previous session's log.
-        Some(std::env::temp_dir().join(format!(
-            "{}-{}.log",
-            DEFAULT_FILE_PREFIX,
-            std::process::id()
-        )))
+        // Pid-suffixed and created exclusively (see `Target::Auto`): each
+        // launch gets its own file, concurrent app instances never
+        // interleave, and a fresh launch cannot silently grow a previous
+        // session's log.
+        Some(Target::Auto {
+            dir: std::env::temp_dir(),
+            stem: format!("{DEFAULT_FILE_PREFIX}-{}", std::process::id()),
+        })
     } else {
-        Some(PathBuf::from(raw))
+        Some(Target::Explicit(PathBuf::from(raw)))
     }
 }
 
@@ -120,13 +146,56 @@ fn current_logger() -> Option<Arc<Logger>> {
     LOGGER.lock().expect("wire log logger poisoned").clone()
 }
 
+#[derive(Debug)]
 struct Logger {
     path: PathBuf,
     file: Mutex<std::fs::File>,
 }
 
 impl Logger {
-    fn open(path: &Path) -> std::io::Result<Self> {
+    /// How many `<stem>[-N].log` candidates `open_unique` tries before
+    /// giving up.
+    const MAX_NAME_ATTEMPTS: u32 = 64;
+
+    fn open(target: &Target) -> std::io::Result<Self> {
+        match target {
+            Target::Auto { dir, stem } => Self::open_unique(dir, stem),
+            Target::Explicit(path) => Self::open_explicit(path),
+        }
+    }
+
+    /// Open a file nobody could have prepared: `create_new` (O_EXCL) fails
+    /// when the name exists — including as a symlink — so a link planted in
+    /// the shared temp dir cannot divert this launch's log to another file,
+    /// and a stale file left by a launch that once had this PID stays
+    /// untouched (the next `-N` suffix is used instead).
+    fn open_unique(dir: &Path, stem: &str) -> std::io::Result<Self> {
+        std::fs::create_dir_all(dir)?;
+        for attempt in 1..=Self::MAX_NAME_ATTEMPTS {
+            let path = match attempt {
+                1 => dir.join(format!("{stem}.log")),
+                n => dir.join(format!("{stem}-{n}.log")),
+            };
+            match open_exclusive(&path) {
+                Ok(file) => {
+                    return Ok(Self {
+                        path,
+                        file: Mutex::new(file),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => return Err(error),
+            }
+        }
+        Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "every candidate wire log file name is already taken",
+        ))
+    }
+
+    /// The user named this file: keep plain append semantics so consecutive
+    /// launches extend the same log.
+    fn open_explicit(path: &Path) -> std::io::Result<Self> {
         if let Some(parent) = path.parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
@@ -189,6 +258,25 @@ impl Logger {
             tracing::warn!(error = %error, "failed to write provider wire log event");
         }
     }
+}
+
+/// Create-fresh append handle: O_EXCL also refuses a symlink at `path`.
+#[cfg(unix)]
+fn open_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .append(true)
+        .mode(0o600)
+        .open(path)
+}
+
+#[cfg(not(unix))]
+fn open_exclusive(path: &Path) -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new()
+        .create_new(true)
+        .append(true)
+        .open(path)
 }
 
 fn now_iso() -> String {
@@ -446,7 +534,9 @@ pub(crate) mod testing {
     /// Point the global logger at `path` for the duration of one test.
     /// Hold [`TEST_LOCK`] around the whole test: the logger is process-global.
     pub(crate) fn install(path: &Path) {
-        let logger = Arc::new(Logger::open(path).expect("open wire log for test"));
+        let logger = Arc::new(
+            Logger::open(&Target::Explicit(path.to_path_buf())).expect("open wire log for test"),
+        );
         *LOGGER.lock().expect("wire log logger poisoned") = Some(logger);
     }
 
@@ -713,17 +803,31 @@ mod tests {
         assert_eq!(resolve_from_env(), None);
         std::env::set_var(key, "  ");
         assert_eq!(resolve_from_env(), None, "blank disables");
+        std::env::set_var(key, "0");
+        assert_eq!(
+            resolve_from_env(),
+            None,
+            "zero disables, not a file named 0"
+        );
+        std::env::set_var(key, "FALSE");
+        assert_eq!(resolve_from_env(), None, "false disables");
+        std::env::set_var(key, "Off");
+        assert_eq!(resolve_from_env(), None, "off disables");
         std::env::set_var(key, "1");
         assert_eq!(
             resolve_from_env(),
-            Some(
-                std::env::temp_dir().join(format!("clai-provider-wire-{}.log", std::process::id()))
-            )
+            Some(Target::Auto {
+                dir: std::env::temp_dir(),
+                stem: format!("clai-provider-wire-{}", std::process::id()),
+            })
         );
         std::env::set_var(key, "TRUE");
-        assert!(resolve_from_env().is_some());
+        assert!(matches!(resolve_from_env(), Some(Target::Auto { .. })));
         std::env::set_var(key, "/tmp/my-wire.log");
-        assert_eq!(resolve_from_env(), Some(PathBuf::from("/tmp/my-wire.log")));
+        assert_eq!(
+            resolve_from_env(),
+            Some(Target::Explicit(PathBuf::from("/tmp/my-wire.log")))
+        );
         match previous {
             Some(value) => std::env::set_var(key, value),
             None => std::env::remove_var(key),
@@ -746,5 +850,102 @@ mod tests {
             .permissions()
             .mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auto_path_never_opens_a_planted_symlink() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let victim = dir.path().join("victim.log");
+        std::fs::write(&victim, "victim content").expect("write victim");
+        let stem = format!("{DEFAULT_FILE_PREFIX}-{}", std::process::id());
+        let planted = dir.path().join(format!("{stem}.log"));
+        std::os::unix::fs::symlink(&victim, &planted).expect("plant symlink");
+
+        let logger = Logger::open(&Target::Auto {
+            dir: dir.path().to_path_buf(),
+            stem: stem.clone(),
+        })
+        .expect("open moves past the planted name");
+        logger.emit_startup();
+
+        // The planted link diverted nothing and was not consumed.
+        assert_eq!(
+            std::fs::read_to_string(&victim).expect("victim readable"),
+            "victim content"
+        );
+        assert!(std::fs::symlink_metadata(&planted)
+            .expect("planted link still there")
+            .file_type()
+            .is_symlink());
+        let used = dir.path().join(format!("{stem}-2.log"));
+        let events = read_events(&used);
+        let startup = events_of(&events, "startup")[0];
+        assert_eq!(startup["path"], used.display().to_string());
+        let mode = std::fs::metadata(&used)
+            .expect("used file exists")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[test]
+    fn auto_path_does_not_extend_a_stale_file_from_a_reused_pid() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stem = format!("{DEFAULT_FILE_PREFIX}-{}", std::process::id());
+        let stale = dir.path().join(format!("{stem}.log"));
+        std::fs::write(&stale, "previous session").expect("write stale");
+
+        let logger = Logger::open(&Target::Auto {
+            dir: dir.path().to_path_buf(),
+            stem: stem.clone(),
+        })
+        .expect("open moves past the stale name");
+        logger.emit_startup();
+
+        // A launch reusing the PID logs to its own file instead of growing
+        // another session's log; the stale file is preserved as-is.
+        assert_eq!(
+            std::fs::read_to_string(&stale).expect("stale readable"),
+            "previous session"
+        );
+        let used = dir.path().join(format!("{stem}-2.log"));
+        let events = read_events(&used);
+        assert_eq!(events_of(&events, "startup").len(), 1);
+    }
+
+    #[test]
+    fn explicit_path_appends_across_launches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("wire-explicit.log");
+        let first = Logger::open(&Target::Explicit(path.clone())).expect("first open");
+        first.emit(json!({ "event": "startup", "n": 1 }));
+        drop(first);
+        let second = Logger::open(&Target::Explicit(path.clone())).expect("second open");
+        second.emit(json!({ "event": "startup", "n": 2 }));
+        drop(second);
+
+        let events = read_events(&path);
+        assert_eq!(events.len(), 2, "consecutive launches extend one file");
+    }
+
+    #[test]
+    fn auto_path_fails_when_all_candidate_names_are_taken() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let stem = format!("{DEFAULT_FILE_PREFIX}-{}", std::process::id());
+        for attempt in 1..=Logger::MAX_NAME_ATTEMPTS {
+            let name = match attempt {
+                1 => format!("{stem}.log"),
+                n => format!("{stem}-{n}.log"),
+            };
+            std::fs::write(dir.path().join(name), "x").expect("fill candidate names");
+        }
+        let error = Logger::open(&Target::Auto {
+            dir: dir.path().to_path_buf(),
+            stem,
+        })
+        .expect_err("all names taken");
+        assert_eq!(error.kind(), std::io::ErrorKind::AlreadyExists);
     }
 }

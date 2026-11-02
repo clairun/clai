@@ -165,10 +165,13 @@ stream chunk) to an append-only JSONL file:
 
 ```bash
 CLAI_PROVIDER_WIRE_LOG=1 clai        # <temp dir>/clai-provider-wire-<pid>.log
-CLAI_PROVIDER_WIRE_LOG=/path/wire.log clai   # explicit file
+CLAI_PROVIDER_WIRE_LOG=/path/wire.log clai   # explicit file, appended to
 ```
 
-The file is created with owner-only permissions (0600 on Unix). API keys and
+The pid-named file is created fresh with owner-only permissions (0600 on
+Unix); if the name is already taken (PID reuse) a `-2`, `-3`, … suffix is
+used, and a pre-existing symlink at that name is never followed. Setting the
+variable to `0`, `false`, or `off` disables the log. API keys and
 other credential header values are redacted to `[REDACTED]`, but request and
 response bodies are logged verbatim — they contain full prompts, so delete the
 file when done. Logging is off unless the variable is set. Only CLAI's own
