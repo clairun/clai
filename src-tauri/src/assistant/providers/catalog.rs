@@ -271,14 +271,21 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
     });
 
     // --- Self-hosted / open source (base_url editable, key optional) ---
-    entries.push(self_hosted(
+    let mut litellm = self_hosted(
         "litellm",
         "LiteLLM",
         "Self-hosted proxy exposing many providers via one OpenAI-compatible endpoint.",
         "http://localhost:4000",
         true, // LiteLLM commonly uses a master key
         "https://docs.litellm.ai/docs/simple_proxy",
-    ));
+    );
+    // Reasoning models behind the proxy bill thinking against the same
+    // max token cap (observed wire logs: qwen3.8 compaction asks capped at
+    // 4096 ended `length` after 14-19k chars of thinking with no summary
+    // text). Compaction asks get thinking headroom; non-reasoning models
+    // behind the proxy just see a higher cap and stop naturally.
+    litellm.thinking_token_allowance = 12_288;
+    entries.push(litellm);
     entries.push(self_hosted(
         "ollama",
         "Ollama",
@@ -527,7 +534,11 @@ mod tests {
     #[test]
     fn only_thinking_billing_providers_reserve_thinking_output() {
         for e in catalog_entries() {
-            let expected = if e.id == "minimax" { 12_288 } else { 0 };
+            let expected = if matches!(e.id.as_str(), "minimax" | "litellm") {
+                12_288
+            } else {
+                0
+            };
             assert_eq!(e.thinking_token_allowance, expected, "{}", e.id);
         }
     }

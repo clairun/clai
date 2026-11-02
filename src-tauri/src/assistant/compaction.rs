@@ -725,11 +725,17 @@ mod tests {
     }
 
     #[test]
-    fn minimax_summarizer_ask_includes_thinking_allowance() {
+    fn summarizer_ask_includes_thinking_allowance() {
         // MiniMax bills thinking tokens against max_tokens, so the ask must
         // cover thinking + summary text.
         assert_eq!(
             summary_output_tokens(&conn_for_brand("minimax")),
+            SUMMARY_MAX_OUTPUT_TOKENS + 12_288
+        );
+        // LiteLLM fronts reasoning models (qwen3.8 observed) that bill
+        // thinking against the same cap.
+        assert_eq!(
+            summary_output_tokens(&conn_for_brand("litellm")),
             SUMMARY_MAX_OUTPUT_TOKENS + 12_288
         );
         // Providers that do not bill thinking against max_tokens are
