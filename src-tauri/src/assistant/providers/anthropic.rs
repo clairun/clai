@@ -60,6 +60,7 @@ impl ProviderAdapter for AnthropicAdapter {
                 return super::fetch_models_openai_compatible(
                     &catalog::error_code_brand(connection),
                     &url,
+                    &connection.provider_id,
                     Some(api_key.as_str()),
                     capabilities.as_ref(),
                 )
@@ -75,27 +76,57 @@ impl ProviderAdapter for AnthropicAdapter {
             "Fetching models from Anthropic-compatible provider"
         );
 
+        let headers: Vec<(String, String)> = vec![
+            ("x-api-key".to_string(), api_key.clone()),
+            (
+                "anthropic-version".to_string(),
+                ANTHROPIC_API_VERSION.to_string(),
+            ),
+        ];
+
+        let wire = super::wire_log::Scope::begin(&super::wire_log::Request {
+            kind: "models",
+            provider_id: &connection.provider_id,
+            protocol_id: &connection.protocol_id,
+            model_id: None,
+            run_id: None,
+            session_id: None,
+            method: "GET",
+            url: &url,
+            headers: &headers,
+            body: &serde_json::Value::Null,
+        });
+
         let client = Client::new();
-        let resp = client
-            .get(&url)
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", ANTHROPIC_API_VERSION)
-            .send()
-            .await
-            .map_err(|e| {
+        let mut builder = client.get(&url);
+        for (name, value) in &headers {
+            builder = builder.header(name, value);
+        }
+        let resp = match builder.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
                 tracing::error!(url = %url, error = %e, "HTTP request failed");
-                ProviderError::RequestFailed(e.to_string())
-            })?;
+                wire.transport_error(&e.to_string());
+                return Err(ProviderError::RequestFailed(e.to_string()));
+            }
+        };
+
+        wire.response(resp.status().as_u16(), resp.headers());
 
         if !resp.status().is_success() {
             let brand = catalog::error_code_brand(connection);
-            return Err(ProviderError::Failed(read_failure(&brand, resp).await));
+            return Err(ProviderError::Failed(
+                read_failure(&brand, resp, &wire).await,
+            ));
         }
 
-        let body: serde_json::Value = resp
-            .json()
+        let text = resp
+            .text()
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        wire.body(&text);
+        let body: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
         let models = body["data"]
             .as_array()
@@ -130,23 +161,53 @@ impl ProviderAdapter for AnthropicAdapter {
         let url = endpoint_url(connection, "messages");
         let body = build_request_body(&request);
 
+        let headers: Vec<(String, String)> = vec![
+            ("x-api-key".to_string(), api_key.clone()),
+            (
+                "anthropic-version".to_string(),
+                ANTHROPIC_API_VERSION.to_string(),
+            ),
+            ("Content-Type".to_string(), "application/json".to_string()),
+        ];
+
+        let wire = super::wire_log::Scope::begin(&super::wire_log::Request {
+            kind: "completion",
+            provider_id: &connection.provider_id,
+            protocol_id: &connection.protocol_id,
+            model_id: Some(&request.model_id),
+            // `stream_sessionless_completion` (compaction summaries) falls
+            // through to this send, so the wire log covers both purposes.
+            run_id: Some(&request.run_id),
+            session_id: Some(&request.session_id),
+            method: "POST",
+            url: &url,
+            headers: &headers,
+            body: &body,
+        });
+
         let client = Client::new();
-        let resp = client
-            .post(&url)
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", ANTHROPIC_API_VERSION)
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let mut builder = client.post(&url).json(&body);
+        for (name, value) in &headers {
+            builder = builder.header(name, value);
+        }
+        let resp = match builder.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                wire.transport_error(&e.to_string());
+                return Err(ProviderError::RequestFailed(e.to_string()));
+            }
+        };
+
+        wire.response(resp.status().as_u16(), resp.headers());
 
         if !resp.status().is_success() {
             let brand = catalog::error_code_brand(connection);
-            return Err(ProviderError::Failed(read_failure(&brand, resp).await));
+            return Err(ProviderError::Failed(
+                read_failure(&brand, resp, &wire).await,
+            ));
         }
 
-        let byte_stream = resp.bytes_stream();
+        let byte_stream = wire.wrap_stream(resp.bytes_stream());
         let event_stream =
             sse_to_provider_events(byte_stream, catalog::error_code_brand(connection));
 
