@@ -16,6 +16,7 @@ use serde_json::Value;
 use ts_rs::TS;
 
 use super::types::is_context_limit_error;
+use super::wire_log;
 
 /// What a failed provider request asks for: one kind per action.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -114,12 +115,17 @@ impl fmt::Display for ProviderFailure {
 }
 
 /// Reads a non-success `response` into a failure, classified with `brand`'s
-/// error codes (`catalog::error_code_brand`).
-pub async fn read_failure(brand: &str, response: reqwest::Response) -> ProviderFailure {
+/// error codes (`catalog::error_code_brand`). The body goes to `wire`.
+pub async fn read_failure(
+    brand: &str,
+    response: reqwest::Response,
+    wire: &wire_log::Scope,
+) -> ProviderFailure {
     let url = response.url().to_string();
     let status = response.status().as_u16();
     let retry_after = retry_after(response.headers());
     let body = response.text().await.unwrap_or_default();
+    wire.body(&body);
     let failure = classify_http(brand, status, retry_after, &body);
     tracing::warn!(%url, brand, ?failure, "Provider returned an error");
     failure
