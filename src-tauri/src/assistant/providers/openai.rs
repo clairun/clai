@@ -664,16 +664,24 @@ fn parse_sse_frame(
                             tool_calls_buf.push(PartialToolCall::default());
                         }
 
-                        // Accumulate id
-                        if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                        // Only a non-empty id/name (re)binds: some
+                        // OpenAI-compatible streams repeat `id` (and
+                        // `name`) as an empty string on argument
+                        // fragments, which must not erase the value the
+                        // first fragment set.
+                        if let Some(id) = tc
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .filter(|id| !id.is_empty())
+                        {
                             tool_calls_buf[index].id = id.to_string();
                         }
 
-                        // Accumulate function name
                         if let Some(name) = tc
                             .get("function")
                             .and_then(|f| f.get("name"))
                             .and_then(|n| n.as_str())
+                            .filter(|name| !name.is_empty())
                         {
                             tool_calls_buf[index].name = name.to_string();
                         }
@@ -940,5 +948,50 @@ mod tests {
         // A brand with no extra headers (or no catalog entry) yields none.
         assert!(catalog_extra_headers(&conn_with_brand("openai")).is_empty());
         assert!(catalog_extra_headers(&conn_with_brand("not-a-brand")).is_empty());
+    }
+
+    /// Regression (qwen3.8 via LiteLLM, captured wire log): the first
+    /// tool_call delta carries the id, the 27 argument fragments that
+    /// follow repeat `id` as an empty string. The empty strings must not
+    /// erase the id, or `flush_tool_calls` drops the call and the turn
+    /// ends with no visible text and no tool calls.
+    #[test]
+    fn empty_id_fragments_do_not_erase_tool_call_id() {
+        let mut is_first = false;
+        let mut tool_calls = Vec::new();
+        let call_id = "call_c8d731cf5ccd4d88b4c36489";
+        let args = format!("{{\"cmd\":\"sed -n '35,75p' .github/workflows/ci.yml\"}}");
+
+        let first = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{call_id}\",\"type\":\"function\",\"function\":{{\"name\":\"bash_exec\",\"arguments\":\"\"}}}}]}}}}]}}\n\n"
+        );
+        let events = parse_sse_frame(&first, &mut is_first, &mut tool_calls);
+        assert!(events.is_empty());
+
+        // 27 fragments with a present-but-empty id, each carrying a slice
+        // of the arguments JSON, exactly like the captured stream.
+        for slice in [
+            &args[..12],
+            &args[12..24],
+            &args[24..36],
+            &args[36..args.len()],
+        ] {
+            let frame = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"\",\"function\":{{\"arguments\":\"{}\"}}}}]}}}}]}}\n\n",
+                slice.replace('"', r#"\""#)
+            );
+            let events = parse_sse_frame(&frame, &mut is_first, &mut tool_calls);
+            assert!(events.is_empty(), "fragments carry no terminal reason");
+        }
+
+        let terminal = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        assert!(matches!(
+            events.as_slice(),
+            [Ok(ProviderEvent::ToolCallReady { tool_call })] if
+                tool_call.tool_call_id == call_id &&
+                tool_call.tool_name == "bash_exec" &&
+                tool_call.params == serde_json::json!({"cmd": "sed -n '35,75p' .github/workflows/ci.yml"})
+        ));
     }
 }
