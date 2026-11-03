@@ -410,16 +410,7 @@ extraHeaders: Array<[string, string]>, modelsEndpointStyle: ModelsEndpointStyle,
 /**
  * Capability defaults when the models endpoint is thin/absent.
  */
-capabilities: ProviderCaps | null, 
-/**
- * Output tokens a request must reserve for reasoning ("thinking") on
- * top of its visible-text ask, for providers whose endpoint bills
- * thinking tokens against the same `max_tokens` as text (MiniMax's
- * Anthropic-compatible API: "Thinking tokens count toward it too", and
- * thinking cannot be disabled there). Compaction adds this to its
- * `max_tokens` so thinking + summary fit. 0 for everyone else.
- */
-thinkingTokenAllowance: number, };
+capabilities: ProviderCaps | null, };
 
 /**
  * Where a catalog entry sits in the picker (also drives form defaults).

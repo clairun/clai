@@ -96,14 +96,6 @@ pub struct ProviderCatalogEntry {
     pub models_endpoint_style: ModelsEndpointStyle,
     /// Capability defaults when the models endpoint is thin/absent.
     pub capabilities: Option<ProviderCaps>,
-    /// Output tokens a request must reserve for reasoning ("thinking") on
-    /// top of its visible-text ask, for providers whose endpoint bills
-    /// thinking tokens against the same `max_tokens` as text (MiniMax's
-    /// Anthropic-compatible API: "Thinking tokens count toward it too", and
-    /// thinking cannot be disabled there). Compaction adds this to its
-    /// `max_tokens` so thinking + summary fit. 0 for everyone else.
-    #[serde(default)]
-    pub thinking_token_allowance: u32,
 }
 
 fn model(id: &str) -> ModelInfo {
@@ -145,7 +137,6 @@ fn hosted_openai(
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
         capabilities: None,
-        thinking_token_allowance: 0,
     }
 }
 
@@ -238,7 +229,6 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
         capabilities: None,
-        thinking_token_allowance: 0,
     });
     // MiniMax — Anthropic-compatible endpoint (user preference; international, not the CN variant).
     entries.push(ProviderCatalogEntry {
@@ -261,31 +251,17 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
             supports_tools: true,
             supports_images: false,
         }),
-        // The endpoint bills thinking tokens against max_tokens and cannot
-        // disable thinking ("thinking tokens count toward it too"; observed
-        // wire logs: 3181..4096 thinking tokens on a ~48k-token compaction
-        // transcript, starving the 4096-token summary ask). 12_288 + the
-        // 4096 text ask = the 16k reply the compaction input budget's
-        // 96k/128k arithmetic already reserves room for.
-        thinking_token_allowance: 12_288,
     });
 
     // --- Self-hosted / open source (base_url editable, key optional) ---
-    let mut litellm = self_hosted(
+    entries.push(self_hosted(
         "litellm",
         "LiteLLM",
         "Self-hosted proxy exposing many providers via one OpenAI-compatible endpoint.",
         "http://localhost:4000",
         true, // LiteLLM commonly uses a master key
         "https://docs.litellm.ai/docs/simple_proxy",
-    );
-    // Reasoning models behind the proxy bill thinking against the same
-    // max token cap (observed wire logs: qwen3.8 compaction asks capped at
-    // 4096 ended `length` after 14-19k chars of thinking with no summary
-    // text). Compaction asks get thinking headroom; non-reasoning models
-    // behind the proxy just see a higher cap and stop naturally.
-    litellm.thinking_token_allowance = 12_288;
-    entries.push(litellm);
+    ));
     entries.push(self_hosted(
         "ollama",
         "Ollama",
@@ -327,7 +303,6 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
         capabilities: None,
-        thinking_token_allowance: 0,
     });
     entries.push(ProviderCatalogEntry {
         id: "custom-anthropic".to_string(),
@@ -344,7 +319,6 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
         capabilities: None,
-        thinking_token_allowance: 0,
     });
 
     entries
@@ -373,7 +347,6 @@ fn self_hosted(
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
         capabilities: None,
-        thinking_token_allowance: 0,
     }
 }
 
@@ -523,24 +496,6 @@ mod tests {
             .as_ref()
             .is_some_and(|caps| !caps.supports_images));
         assert!(e.curated_models.iter().all(|m| !m.supports_images));
-    }
-
-    #[test]
-    fn minimax_reserves_output_room_for_thinking() {
-        let e = get_entry("minimax").expect("minimax present");
-        assert_eq!(e.thinking_token_allowance, 12_288);
-    }
-
-    #[test]
-    fn only_thinking_billing_providers_reserve_thinking_output() {
-        for e in catalog_entries() {
-            let expected = if matches!(e.id.as_str(), "minimax" | "litellm") {
-                12_288
-            } else {
-                0
-            };
-            assert_eq!(e.thinking_token_allowance, expected, "{}", e.id);
-        }
     }
 
     #[test]
