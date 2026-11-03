@@ -785,12 +785,27 @@ describe('ApprovalCard — what the bulk "allow all" click actually saves', () =
     });
   });
 
-  it('tells apart two parts with the same text', () => {
+  // Two parts with the same text and no prefix are one row now, so the note
+  // names that row once and the row itself says how many parts it covers.
+  it('merges parts that repeat without a prefix and counts them on the row', async () => {
     render(<ApprovalCard req={SAME_TEXT_TWICE} />);
 
     const bulk = screen.getByRole('button', { name: 'Allow all (always where possible)' });
     const note = noteOf(bulk);
-    expect(note).toHaveTextContent('Allowed once only: 2) git status, 3) git status');
+    expect(note).toHaveTextContent('Allowed once only: 2) git status.');
+    expect(screen.getByText('\u00d72')).toBeInTheDocument();
+    // The note never points at a row the card does not show.
+    expect(note).not.toHaveTextContent('3) git status');
+    // One click still answers the backend for both parts.
+    await userEvent.click(bulk);
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
+      requestId: 'perm-same',
+      decisions: [
+        { kind: 'allowAlways', scope: 'agent', prefix: 'cd' },
+        { kind: 'allowOnce' },
+        { kind: 'allowOnce' },
+      ],
+    });
   });
 
   it('never shows an empty part in the note', () => {
@@ -977,5 +992,221 @@ describe('InlineApprovalCard — each card its own submit', () => {
     expect(await first!.findByText('Approval channel closed')).toBeInTheDocument();
     expect(second!.queryByText('Approval channel closed')).not.toBeInTheDocument();
     expect(second!.getByRole('button', { name: /allow once/i })).toBeEnabled();
+  });
+});
+
+// The complaint the card has to answer: one command whose parts share a
+// prefix, which used to ask the user to allow the same prefix twice.
+const SHARED_PREFIX = {
+  requestId: 'perm-shared-prefix',
+  workspaceId: 'ws-1',
+  agentId: null,
+  agentName: null,
+  persistsToSharedAgent: false,
+  alsoAffectsWorkspaces: [],
+  command: 'ls target && ls src && grep a f | head -30',
+  segments: [
+    { text: 'ls target', kind: 'simple', suggestedPrefix: 'ls' },
+    { text: 'ls src', kind: 'simple', suggestedPrefix: 'ls' },
+    { text: 'grep a f | head -30', kind: 'opaque', suggestedPrefix: 'grep' },
+  ],
+} as unknown as PermissionRequest;
+
+// Two rows that each stand for two parts, plus a part on its own: the card
+// still answers the backend with one decision per part, in request order.
+const TWIN_ROWS = {
+  ...SHARED_PREFIX,
+  requestId: 'perm-twins',
+  command: 'cd /x && cd /y && ls a && ls b && cargo test',
+  segments: [
+    { text: 'cd /x', kind: 'simple', suggestedPrefix: 'cd' },
+    { text: 'cd /y', kind: 'simple', suggestedPrefix: 'cd' },
+    { text: 'ls a', kind: 'simple', suggestedPrefix: 'ls' },
+    { text: 'ls b', kind: 'simple', suggestedPrefix: 'ls' },
+    { text: 'cargo test', kind: 'simple', suggestedPrefix: 'cargo test' },
+  ],
+} as unknown as PermissionRequest;
+
+// Parts that repeat without a prefix are exact-match-only, so they merge only
+// with a part whose text is the same string.
+const REPEATED_BARE = {
+  ...SHARED_PREFIX,
+  requestId: 'perm-bare-dup',
+  command: 'git status && git status && ./deploy --now',
+  segments: [
+    { text: 'git status', kind: 'simple', suggestedPrefix: '' },
+    { text: 'git status', kind: 'simple', suggestedPrefix: '' },
+    { text: './deploy --now', kind: 'opaque', suggestedPrefix: '' },
+  ],
+} as unknown as PermissionRequest;
+
+const ALMOST_THE_SAME = {
+  ...REPEATED_BARE,
+  requestId: 'perm-near-dup',
+  command: 'git status && git status --short',
+  segments: [
+    { text: 'git status', kind: 'simple', suggestedPrefix: '' },
+    { text: 'git status --short', kind: 'simple', suggestedPrefix: '' },
+  ],
+} as unknown as PermissionRequest;
+
+// Only one of the two parts sharing a prefix is opaque: the row is the one to
+// read carefully.
+const HALF_OPAQUE = {
+  ...SHARED_PREFIX,
+  requestId: 'perm-half-opaque',
+  command: 'cat notes && cat < notes',
+  segments: [
+    { text: 'cat notes', kind: 'simple', suggestedPrefix: 'cat' },
+    { text: 'cat < notes', kind: 'opaque', suggestedPrefix: 'cat' },
+  ],
+} as unknown as PermissionRequest;
+
+const submitted = (): unknown[] => {
+  const call = mockInvoke.mock.calls.find(([cmd]) => cmd === 'submit_permission_decision');
+  if (!call) throw new Error('no decision was submitted');
+  return (call[1] as { decisions: unknown[] }).decisions;
+};
+
+const alwaysAllow = (n: number) => screen.getAllByRole('button', { name: 'Always allow (this agent)' })[n]!;
+const allowOnce = (n: number) => screen.getAllByRole('button', { name: 'Allow once' })[n]!;
+const denyOnce = (n: number) => screen.getAllByRole('button', { name: 'Deny once' })[n]!;
+
+describe('ApprovalCard — one row per prefix', () => {
+  it('asks once per prefix and lists every command the row approves', () => {
+    render(<ApprovalCard req={SHARED_PREFIX} />);
+    const card = within(screen.getByRole('article', { name: 'Permission requested' }));
+
+    // Three parts, two prefixes: the duplicate is one row, not two.
+    expect(card.getAllByLabelText('Save as prefix:')).toHaveLength(2);
+    expect(card.getAllByRole('button', { name: 'Always allow (this agent)' })).toHaveLength(2);
+    // Nothing the click approves is hidden behind its twin.
+    expect(card.getByText('ls target')).toBeInTheDocument();
+    expect(card.getByText('ls src')).toBeInTheDocument();
+    expect(card.getByText('grep a f | head -30')).toBeInTheDocument();
+    expect(card.getByText('2 parts need a decision (confirm after choosing any denial):')).toBeInTheDocument();
+  });
+
+  it('collapses the duplicate chips in the spoken card too', () => {
+    render(<ApprovalCard req={SHARED_PREFIX} speaker={speaker} />);
+    expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual([
+      'Once', 'Always · ls', 'Never · ls', 'Deny',
+      'Once', 'Always · grep', 'Never · grep', 'Deny',
+      'All always', 'Deny all',
+    ]);
+  });
+
+  it('saves every part that shares the prefix with one click', async () => {
+    render(<ApprovalCard req={TWIN_ROWS} />);
+
+    await userEvent.click(alwaysAllow(0));
+    await userEvent.click(alwaysAllow(1));
+    await userEvent.click(alwaysAllow(2));
+
+    // One row per prefix, but the backend still gets a decision per part.
+    expect(submitted()).toEqual([
+      { kind: 'allowAlways', scope: 'agent', prefix: 'cd' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'cd' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'ls' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'ls' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'cargo test' },
+    ]);
+  });
+
+  it('fans an allow-once out to every part of the row', async () => {
+    render(<ApprovalCard req={TWIN_ROWS} />);
+
+    await userEvent.click(allowOnce(0));
+    expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
+    await userEvent.click(alwaysAllow(1));
+    await userEvent.click(alwaysAllow(2));
+
+    expect(submitted()).toEqual([
+      { kind: 'allowOnce' },
+      { kind: 'allowOnce' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'ls' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'ls' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'cargo test' },
+    ]);
+  });
+
+  it('fans a denial out and confirms the whole row at once', async () => {
+    render(<ApprovalCard req={TWIN_ROWS} />);
+
+    await userEvent.click(denyOnce(0));
+    await userEvent.click(alwaysAllow(1));
+    await userEvent.click(alwaysAllow(2));
+    // A denial waits for the confirm, and one row means one confirm.
+    expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
+    await userEvent.click(screen.getByRole('button', { name: 'Submit decisions' }));
+
+    expect(submitted()).toEqual([
+      { kind: 'denyOnce' },
+      { kind: 'denyOnce' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'ls' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'ls' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'cargo test' },
+    ]);
+  });
+
+  it('saves every part of the row under the prefix the user typed', async () => {
+    render(<ApprovalCard req={TWIN_ROWS} />);
+
+    // One field for the two parts that share the prefix.
+    const field = screen.getByDisplayValue('cd');
+    await userEvent.clear(field);
+    await userEvent.type(field, 'cd /x');
+    await userEvent.click(alwaysAllow(0));
+    await userEvent.click(alwaysAllow(1));
+    await userEvent.click(alwaysAllow(2));
+
+    expect(submitted()).toEqual([
+      { kind: 'allowAlways', scope: 'agent', prefix: 'cd /x' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'cd /x' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'ls' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'ls' },
+      { kind: 'allowAlways', scope: 'agent', prefix: 'cargo test' },
+    ]);
+  });
+
+  it('merges a repeated part without a prefix and answers both with one click', async () => {
+    render(<ApprovalCard req={REPEATED_BARE} />);
+    const card = within(screen.getByRole('article', { name: 'Permission requested' }));
+
+    // The two `git status` parts are one row, which says it covers two.
+    expect(card.getAllByText(/No prefix to save for this part/)).toHaveLength(2);
+    expect(card.getByText('\u00d72')).toBeInTheDocument();
+    expect(card.getByText('2 parts need a decision (confirm after choosing any denial):')).toBeInTheDocument();
+
+    await userEvent.click(denyOnce(0));
+    await userEvent.click(allowOnce(1));
+    await userEvent.click(screen.getByRole('button', { name: 'Submit decisions' }));
+
+    expect(submitted()).toEqual([
+      { kind: 'denyOnce' },
+      { kind: 'denyOnce' },
+      { kind: 'allowOnce' },
+    ]);
+  });
+
+  it('keeps two parts without a prefix apart when their texts differ', () => {
+    render(<ApprovalCard req={ALMOST_THE_SAME} />);
+
+    expect(screen.getByText('git status')).toBeInTheDocument();
+    expect(screen.getByText('git status --short')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Allow once' })).toHaveLength(2);
+    expect(screen.queryByText('\u00d72')).not.toBeInTheDocument();
+  });
+
+  it('flags the row as complex when only one of its parts is', () => {
+    render(<ApprovalCard req={HALF_OPAQUE} />);
+
+    // One prefix, so one row: and a row that stands alone reads as one command.
+    expect(screen.getAllByLabelText('Save as prefix:')).toHaveLength(1);
+    expect(screen.getByText('Choose how to handle this command (a denial needs a confirm):')).toBeInTheDocument();
+    // The opaque member still marks the whole row.
+    expect(screen.getByText('complex')).toBeInTheDocument();
+    expect(screen.getByText('cat notes')).toBeInTheDocument();
+    expect(screen.getByText('cat < notes')).toBeInTheDocument();
   });
 });

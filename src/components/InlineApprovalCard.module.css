@@ -108,6 +108,29 @@
   color: var(--color-text-primary);
 }
 
+/* One row stands for every part that shares its prefix: the commands stack
+   so nothing the decision approves is hidden behind its twin. */
+.segmentTexts {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  min-width: 0;
+}
+
+.segmentMember {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+/* How many parts of the command this line covers. */
+.memberCount {
+  font-size: 11px;
+  color: var(--color-text-secondary);
+}
+
 .opaqueTag {
   font-size: 10px;
   background: var(--color-warning-lighter, #FFFBEB);
@@ -397,6 +420,10 @@
 }
 
 .spoken .segments {
+  gap: 2px;
+}
+
+.spoken .segmentTexts {
   gap: 2px;
 }
 
