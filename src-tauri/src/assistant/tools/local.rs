@@ -407,7 +407,9 @@ pub(crate) fn evaluate_command_policy(
     extra_blocked_prefixes: &[String],
 ) -> PolicyResult {
     use crate::assistant::tools::command_splitter::{split_command, Segment};
-    use crate::assistant::tools::prefix_detector::{by_head_name, by_run_command, suggest_prefix};
+    use crate::assistant::tools::prefix_detector::{
+        by_argument_command, by_head_name, by_run_command, suggest_prefix,
+    };
     use crate::commands::permissions::SegmentApproval;
 
     if command.trim().is_empty() {
@@ -453,10 +455,11 @@ pub(crate) fn evaluate_command_policy(
         };
         // The blocklist sees the command the segment runs, and the head it
         // runs it with: `timeout 60 rm -rf x` is blocked by `rm` and by
-        // `timeout`.
+        // `timeout`, `xargs rm` by `rm` and by `xargs`.
         if let Some(matched) = blocked(text)
             .or_else(|| by_head_name(text).and_then(|head| blocked(&head)))
             .or_else(|| by_run_command(text).and_then(|cmd| blocked(&cmd)))
+            .or_else(|| by_argument_command(text).and_then(|cmd| blocked(&cmd)))
         {
             return PolicyResult::Block {
                 segment_text: text.to_string(),
@@ -465,9 +468,8 @@ pub(crate) fn evaluate_command_policy(
         }
 
         // Approval only exists in Restricted mode: Full mode never
-        // prompts, so the blocklist stays best-effort for Unparsed input
-        // it cannot see into (blocked and hidden code are different
-        // concepts). See `is_exact_only`.
+        // prompts, so the blocklist is best-effort for Unparsed input it
+        // cannot see into. See `is_exact_only`.
         let needs_approval = restricted;
         if !needs_approval {
             continue;
@@ -3014,8 +3016,8 @@ mod tests {
     }
 
     #[test]
-    fn restricted_mode_names_former_hidden_code_commands() {
-        // Former code-wrapper heads are named by their written words, so
+    fn restricted_mode_names_commands_whose_argument_is_code() {
+        // Commands whose argument is code are named by their written words, so
         // every approval row carries a prefix the user can save. The
         // heredoc forms keep one row for the script and name the command
         // an unquoted body substitutes.
@@ -3456,5 +3458,144 @@ mod tests {
         let out = augment_timeout_error(err, MAX_BASH_TIMEOUT_MS, true);
         assert!(out.contains("maximum `timeoutMs`"));
         assert!(out.contains("narrow the command"));
+    }
+
+    // ------------------------------------------------------------------
+    // Commands that run their arguments, heredoc bodies, lookups
+    // ------------------------------------------------------------------
+
+    fn is_block(exec: &ExecutionCapabilityConfig, command: &str) -> bool {
+        matches!(
+            evaluate_command_policy(exec, command, &[], &[]),
+            PolicyResult::Block { .. }
+        )
+    }
+
+    #[test]
+    fn blocklist_sees_the_command_an_argument_runner_runs() {
+        for exec in [
+            full_execution_config(&["rm"]),
+            restricted_execution_config(&[], &["rm"]),
+        ] {
+            for command in [
+                "find . | xargs rm -f",
+                "find . | xargs -0 -I {} -n 1 rm -f {}",
+                "exec rm -rf x",
+                "exec -a name rm x",
+                "eval rm -rf x",
+                "eval -- timeout 5 rm x",
+                "watch rm x",
+                "watch -d -n 2 rm x",
+                "nohup xargs -P 4 rm",
+                "xargs eval rm",
+            ] {
+                assert!(is_block(&exec, command), "{command} must be blocked");
+            }
+        }
+    }
+
+    #[test]
+    fn argument_runners_without_a_blocked_command_stay_named() {
+        let exec = full_execution_config(&["rm"]);
+        for command in ["exec >log 2>&1", "xargs grep foo", "watch -n 2 ls"] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::Allow
+                ),
+                "{command}"
+            );
+        }
+        let exec = restricted_execution_config(&[], &["rm"]);
+        for command in ["exec >log 2>&1", "xargs grep foo", "watch -n 2 ls"] {
+            let rows = approval_texts(&exec, command);
+            assert!(
+                matches!(rows.as_slice(), [(text, prefix)] if text == command && !prefix.is_empty()),
+                "{command}: {rows:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocklist_sees_commands_an_unquoted_heredoc_body_runs() {
+        for exec in [
+            full_execution_config(&["rm"]),
+            restricted_execution_config(&[], &["rm"]),
+        ] {
+            for command in [
+                "cat <<EOF\n${x:-$(rm -rf ~)}\nEOF",
+                "cat <<EOF\n`rm -rf ~`\nEOF",
+                "cat <<EOF\nx\n`rm b` $(echo c)\nEOF",
+                "cat <<EOF\n$(echo `rm a`)\nEOF",
+                "cat <<EOF\n`echo \\`rm a\\``\nEOF",
+            ] {
+                assert!(is_block(&exec, command), "{command:?} must be blocked");
+            }
+        }
+    }
+
+    #[test]
+    fn quoted_heredoc_body_runs_nothing_the_blocklist_sees() {
+        let command = "cat <<'EOF'\n`rm x` $(rm y)\nEOF";
+        assert!(!is_block(&full_execution_config(&["rm"]), command));
+        let exec = restricted_execution_config(&[], &["rm"]);
+        assert_eq!(
+            approval_texts(&exec, command),
+            vec![(command.to_string(), "cat".to_string())]
+        );
+    }
+
+    #[test]
+    fn command_lookup_is_not_the_command_it_names() {
+        for exec in [
+            full_execution_config(&["rm"]),
+            restricted_execution_config(&[], &["rm"]),
+        ] {
+            for command in ["command -v rm", "command -V rm", "command -pv rm"] {
+                assert!(!is_block(&exec, command), "{command} only looks rm up");
+            }
+            for command in ["command rm x", "command -p rm x"] {
+                assert!(is_block(&exec, command), "{command} runs rm");
+            }
+        }
+    }
+
+    #[test]
+    fn every_suggested_prefix_covers_the_row_it_came_from() {
+        // Saving the suggested prefix must allow the command it was
+        // suggested for, or the user is asked again for the same row.
+        for command in [
+            "bash -lc 'echo hi'",
+            "bash -ec 'echo hi'",
+            "perl -ne 'print'",
+            "python3 -W ignore x.py",
+            "python3 -X dev x.py",
+            "bash -o pipefail s.sh",
+            "python3 -W ignore -m pytest -q",
+            "python3 -m pytest -q",
+            "bash tools/check-links.sh",
+            ". ./setup.sh",
+            "source ./setup.sh",
+            "command -v rm",
+            "xargs grep foo",
+            "watch -n 2 ls",
+            "exec >log 2>&1",
+            "cat <<EOF > notes.md\nuse `ls` here\nEOF",
+        ] {
+            let rows = approval_texts(&restricted_execution_config(&[], &[]), command);
+            let prefixes: Vec<&str> = rows.iter().map(|(_, p)| p.as_str()).collect();
+            assert!(
+                prefixes.iter().all(|p| !p.is_empty()),
+                "{command:?}: {rows:?}"
+            );
+            let exec = restricted_execution_config(&prefixes, &[]);
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::Allow
+                ),
+                "{command:?} is asked again after saving {prefixes:?}"
+            );
+        }
     }
 }

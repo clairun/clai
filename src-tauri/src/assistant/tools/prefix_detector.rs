@@ -27,18 +27,19 @@
 //!    subcommand-shaped (`^[a-z][a-z0-9_-]{0,24}$`).
 //!    For `None`: ignore subwords entirely.
 //!
-//! Interpreters (`bash`, `python3`, …) are their own case: the prefix
-//! is the binary plus the word that names what it runs — the script
-//! (`bash tools/check-links.sh`) or a module flag with its value
-//! (`python3 -m pytest`). Inline code (`bash -c`) and stdin (`python3 -`)
-//! suggest the binary alone.
+//! Interpreters and the sourcing builtins (`bash`, `python3`, `.`, …) are
+//! their own case: the prefix is the binary plus the word that names what
+//! it runs ([`interpreter_prefix`]). A lookup (`command -v rm`) suggests
+//! the lookup (`command -v`), never the command it names.
 //!
 //! The output is always a default; the modal pre-fills it into an editable
 //! field so the user can narrow or broaden before confirming.
 
 #![allow(dead_code)] // wired into the approval flow in commit 7
 
-use crate::assistant::tools::command_splitter::{command_words, row_words};
+use crate::assistant::tools::command_splitter::{
+    argument_command_words, command_words, lookup_option, row_words,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Style {
@@ -226,6 +227,14 @@ pub fn suggest_prefix(segment: &str) -> String {
     };
     let binary = tokens[0];
 
+    // A lookup names the lookup: `command rm` would also allow running `rm`.
+    if let Some(option) = lookup_option(&tokens) {
+        return format!("{binary} {option}");
+    }
+    if INTERPRETERS.contains(&binary) {
+        return interpreter_prefix(binary, &tokens[1..]);
+    }
+
     // 3. Path-shaped binaries are returned as-is (no subcommand layer).
     if is_path_shaped(binary) {
         return binary.to_string();
@@ -248,10 +257,6 @@ pub fn suggest_prefix(segment: &str) -> String {
     // would trust every loop over `i`, whatever its body runs.
     if crate::assistant::tools::command_splitter::is_shell_syntax(binary) {
         return String::new();
-    }
-
-    if INTERPRETERS.contains(&binary) {
-        return interpreter_prefix(binary, &tokens[1..]);
     }
 
     let style = lookup_style(binary);
@@ -394,6 +399,12 @@ struct GlobalOptionSpec {
     options: &'static [GlobalValueOption],
 }
 
+/// Python's value options before the script. `-m` names the module to run,
+/// so the allow form keeps it next to its value: `python3 -m pytest -q`
+/// matches a saved `python3 -m pytest`. `-W` and `-X` only set options.
+const PYTHON_OPTIONS: &[GlobalValueOption] =
+    &[option("-m", true), option("-W", false), option("-X", false)];
+
 /// The per-binary option knowledge behind [`after_global_options`] — the
 /// only place a binary is named for option-value skipping. Supporting
 /// another CLI's documented, subcommand-preceding value options (kubectl
@@ -420,18 +431,37 @@ const GLOBAL_OPTION_SPECS: &[GlobalOptionSpec] = &[
         ],
     },
     GlobalOptionSpec {
-        // "-m" names the module to run, changing what the
-        // invocation executes, so the allow form keeps it next to its value:
-        // python3 -m pytest -q matches a saved python3 -m pytest.
         binary: "python",
-        options: &[option("-m", true)],
+        options: PYTHON_OPTIONS,
     },
     GlobalOptionSpec {
-        // "-m" names the module to run, changing what the
-        // invocation executes, so the allow form keeps it next to its value:
-        // python3 -m pytest -q matches a saved python3 -m pytest.
         binary: "python3",
-        options: &[option("-m", true)],
+        options: PYTHON_OPTIONS,
+    },
+    GlobalOptionSpec {
+        binary: "bash",
+        options: &[
+            option("-o", false),
+            option("-O", false),
+            option("--rcfile", false),
+            option("--init-file", false),
+        ],
+    },
+    GlobalOptionSpec {
+        binary: "sh",
+        options: &[option("-o", false)],
+    },
+    GlobalOptionSpec {
+        binary: "dash",
+        options: &[option("-o", false)],
+    },
+    GlobalOptionSpec {
+        binary: "ksh",
+        options: &[option("-o", false)],
+    },
+    GlobalOptionSpec {
+        binary: "zsh",
+        options: &[option("-o", false)],
     },
 ];
 
@@ -535,14 +565,7 @@ pub fn canonicalize_for_deny(segment: &str) -> Option<String> {
 /// the directory dropped from the command name: `FOO='a b' /usr/bin/rm\t-rf
 /// x` → `rm -rf x`. `None` when `segment` is not one command.
 pub fn by_head_name(segment: &str) -> Option<String> {
-    let words = row_words(segment)?;
-    let name = words[0].rsplit('/').next().unwrap_or(words[0]);
-    Some(
-        std::iter::once(name)
-            .chain(words[1..].iter().copied())
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    Some(by_name(&row_words(segment)?))
 }
 
 /// The command `segment` runs, joined by single spaces, with the directory
@@ -550,65 +573,94 @@ pub fn by_head_name(segment: &str) -> Option<String> {
 /// when a modifier wrapper is run by path or its own arguments cannot be
 /// told from the command.
 pub fn by_run_command(segment: &str) -> Option<String> {
-    let words = command_words(segment)?;
-    let name = words[0].rsplit('/').next().unwrap_or(words[0]);
-    Some(
-        std::iter::once(name)
-            .chain(words[1..].iter().copied())
-            .collect::<Vec<_>>()
-            .join(" "),
-    )
+    Some(by_name(&command_words(segment)?))
 }
 
-/// Interpreters whose first non-option word is the script they run.
-/// A saved prefix keeps that word, so a grant names the script
-/// (`bash tools/check-links.sh` saves as itself); code passed inline is
-/// not written out, and neither is the stdin form, so those suggest the
-/// binary alone.
+/// The command `segment` runs from the arguments of `xargs`, `exec`, `eval`
+/// or `watch`, joined like [`by_run_command`]: `xargs -0 rm -f` → `rm -f`.
+/// Deny matching only: the row itself stays named by its head.
+pub fn by_argument_command(segment: &str) -> Option<String> {
+    Some(by_name(&argument_command_words(segment)?))
+}
+
+/// `words` joined by single spaces, with the directory dropped from the
+/// command name.
+fn by_name(words: &[&str]) -> String {
+    let name = words[0].rsplit('/').next().unwrap_or(words[0]);
+    std::iter::once(name)
+        .chain(words[1..].iter().copied())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Interpreters whose first non-option word is the script they run, and
+/// the builtins that source a script. A saved prefix keeps that word, so a
+/// grant names the script (`bash tools/check-links.sh`, `. ./setup.sh`
+/// save as themselves); code passed inline is not written out, and neither
+/// is the stdin form, so those suggest the binary alone.
 const INTERPRETERS: &[&str] = &[
     "bash", "sh", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "deno", "bun", "ruby",
-    "perl", "php",
+    "perl", "php", "source", ".",
 ];
 
-/// The options whose value is a program run by the interpreter: the
-/// prefix stops at the binary, since the code is not a name anything
-/// else would share.
-fn takes_code(binary: &str, flag: &str) -> bool {
+/// True if `flag` makes `binary` run code passed inline: the code flag
+/// alone or ending a cluster of short options (`bash -lc`, `perl -ne`). A
+/// token led by a value option holds that option's value (`-Wdefault`).
+fn runs_inline_code(binary: &str, flag: &str) -> bool {
+    let Some(cluster) = flag.strip_prefix('-') else {
+        return false;
+    };
+    let Some(last) = cluster.chars().last() else {
+        return false;
+    };
+    if !cluster.bytes().all(|b| b.is_ascii_alphabetic())
+        || value_options_for(binary)
+            .iter()
+            .any(|o| o.name.len() == 2 && cluster.starts_with(&o.name[1..]))
+    {
+        return false;
+    }
     matches!(
-        (binary, flag),
-        ("bash" | "sh" | "zsh" | "dash" | "ksh" | "fish", "-c")
-            | ("python" | "python3", "-c")
-            | ("node" | "ruby" | "perl", "-e")
-            | ("php", "-r"),
+        (binary, last),
+        ("bash" | "sh" | "zsh" | "dash" | "ksh" | "fish", 'c')
+            | ("python" | "python3", 'c')
+            | ("node" | "ruby" | "perl", 'e')
+            | ("php", 'r')
     )
 }
 
 /// `binary` plus the first word that names what it runs: the script
-/// word, or a module flag with its value. Options the table does not
-/// name are skipped, like the global options of any other binary.
+/// word, or a module option with its value. The binary's value options
+/// ([`GLOBAL_OPTION_SPECS`]) skip their value; other options are skipped
+/// alone, as the allow form skips them, so the prefix matches the command
+/// it came from.
 fn interpreter_prefix(binary: &str, rest: &[&str]) -> String {
-    let mut words = vec![binary];
-    for (i, &token) in rest.iter().enumerate() {
-        if token == "-" || token == "--" {
-            break; // reads the program from stdin
+    let options = value_options_for(binary);
+    let mut at = 0;
+    while let Some(&token) = rest.get(at) {
+        if !is_flag(token) {
+            break;
         }
-        if is_flag(token) {
-            if matches!(binary, "python" | "python3") && token == "-m" {
-                if let Some(module) = rest.get(i + 1) {
-                    words.push(token);
-                    words.push(module);
-                }
-                break;
-            }
-            if takes_code(binary, token) {
-                break;
-            }
-            continue;
+        if runs_inline_code(binary, token) {
+            return binary.to_string();
         }
-        words.push(token); // the script
-        break;
+        match options.iter().find(|o| o.matches_token(token)) {
+            // The option names the program (`python3 -m pytest`).
+            Some(o) if o.injects_config => {
+                return match rest.get(at + 1) {
+                    Some(module) if !token.contains('=') => format!("{binary} {token} {module}"),
+                    _ => binary.to_string(),
+                };
+            }
+            Some(_) if !token.contains('=') => at += 2,
+            _ => at += 1,
+        }
     }
-    words.join(" ")
+    match rest.get(at) {
+        // `-` and `--` read the program from stdin.
+        Some(&script) if !matches!(script, "-" | "--") => format!("{binary} {script}"),
+        _ => binary.to_string(),
+    }
 }
 
 fn lookup_style(binary: &str) -> Style {
@@ -1397,5 +1449,37 @@ mod tests {
             by_head_name("FOO=1 /usr/bin/rm -rf x").as_deref(),
             Some("rm -rf x")
         );
+    }
+
+    #[test]
+    fn interpreter_flag_cluster_ending_in_the_code_flag_is_inline_code() {
+        check("bash -lc 'echo hi'", "bash");
+        check("bash -ec 'echo hi'", "bash");
+        check("perl -ne 'print'", "perl");
+        check("perl -lne 'print'", "perl");
+        check("ruby -ne 'puts'", "ruby");
+        check("python3 -Bc 'print(1)'", "python3");
+    }
+
+    #[test]
+    fn interpreter_value_options_consume_their_value() {
+        check("python3 -W ignore x.py", "python3 x.py");
+        check("python3 -X dev x.py", "python3 x.py");
+        check("bash -o pipefail s.sh", "bash s.sh");
+        check("bash -O extglob s.sh", "bash s.sh");
+        check("python3 -W ignore -m pytest -q", "python3 -m pytest");
+    }
+
+    #[test]
+    fn sourcing_names_the_script() {
+        check(". ./setup.sh", ". ./setup.sh");
+        check("source ./setup.sh", "source ./setup.sh");
+    }
+
+    #[test]
+    fn command_lookup_suggests_the_lookup() {
+        // Not `command rm`, which would also allow running `rm`.
+        check("command -v rm", "command -v");
+        check("command -V git", "command -V");
     }
 }

@@ -4,7 +4,7 @@
 //! 5.3 ran for it with an empty `PATH`, logged by `command_not_found_handle`.
 //! Builtins and functions are not logged.
 
-use crate::assistant::tools::command_splitter::split_command;
+use crate::assistant::tools::command_splitter::{split_command, Segment};
 use crate::assistant::tools::local::{evaluate_command_policy, PolicyResult};
 use crate::config::types::ShellCapabilityConfig;
 use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
@@ -21,8 +21,8 @@ fn cases() -> Vec<Case> {
 
 /// Every command bash runs that the splitter writes out is blocked by a
 /// blocklist entry naming it. The rest is invisible by design: the command
-/// sits inside a quoted code string, an alias, or text kept as heredoc
-/// body, which the policy does not look into. Full mode must still never
+/// sits inside a quoted code string or an alias, which the policy does not
+/// look into, or the input does not parse. Full mode must still never
 /// produce an approval row.
 #[test]
 fn blocklist_sees_every_command_bash_runs() {
@@ -30,10 +30,12 @@ fn blocklist_sees_every_command_bash_runs() {
         // Code inside a quoted string the policy does not read.
         (r#"trap 'touch PWN' EXIT"#, "touch"),
         (r#"trap 'touch PWN' DEBUG; :"#, "touch"),
+        (r#"mapfile -C 'touch PWN'"#, "touch"),
+        (r#"readarray -C 'touch PWN'"#, "touch"),
+        (r#"compgen -C 'touch PWN'"#, "touch"),
+        (r#"let 'x=a[$(touch PWN)]'"#, "touch"),
         // An alias: `touch` is what `x` expands to at run time.
         (r"shopt -s expand_aliases", "touch"),
-        // A substitution inside heredoc body text kept literal.
-        (r"x=1; cat <<EOF", "touch"),
     ];
     let mut missed = Vec::new();
     for case in cases() {
@@ -53,8 +55,7 @@ fn blocklist_sees_every_command_bash_runs() {
                         // Allowed because the splitter could not parse the
                         // input at all; Full mode runs such input, asking
                         // only for its exact text in Restricted mode.
-                        || matches!(split_command(&case.input).as_slice(), [row]
-                            if row.text() == case.input.trim())
+                        || matches!(split_command(&case.input).as_slice(), [Segment::Unparsed(_)])
                 }
                 PolicyResult::NeedsApproval(_) => false,
             };

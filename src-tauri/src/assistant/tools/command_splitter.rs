@@ -20,15 +20,19 @@
 //! as code (`PS4`), or a command whose name is not a plain word (`\rm`,
 //! `"$cmd"`).
 //!
-//! A command whose argument is code (`bash -c`, `xargs`, `eval`, `trap`, …)
-//! is named by the words it is written with; the code inside its argument
-//! is not looked into, like a script file named by `source`. An unquoted
-//! heredoc body names only the commands its `$(…)`, `<(…)` substitutions
-//! run; the rest of the body stays text with the row.
+//! A command whose argument is code (`bash -c`, `eval`, `trap`, …) is named
+//! by the words it is written with; code inside a quoted argument or a
+//! script file (`source x.sh`) is not looked into. A wrapper that only
+//! changes how a command runs still names the command it runs (`timeout 600
+//! cargo build` runs `cargo build`), so its row keeps that command: the
+//! policy can allowlist it, and the blocklist sees it. The blocklist also
+//! reads the command written in the arguments of `xargs`, `exec`, `eval` and
+//! `watch` ([`argument_command_words`]); their rows stay named by their head.
 //!
-//! A wrapper that only changes how a command runs still names the command it
-//! runs (`timeout 600 cargo build` runs `cargo build`), so its row keeps that
-//! command: the policy can allowlist it, and the blocklist sees it.
+//! A quoted heredoc body is text. Bash expands an unquoted one: the commands
+//! its `$(…)`, backticks and `${…}` run become rows of their own, each
+//! `$(…)` and `${…}` read as it is outside a heredoc, and the rest stays
+//! text with the row.
 //!
 //! - [`Segment::Simple`] — a plain command.
 //! - [`Segment::Opaque`] — a command with a redirect, heredoc, here-string,
@@ -138,9 +142,8 @@ fn command_node_words<'src>(src: &'src str, node: Node) -> Option<Vec<&'src str>
     Some(words.iter().map(|n| &src[n.byte_range()]).collect())
 }
 
-/// A wrapper that only changes how a command runs: the command it runs is
-/// written out after it, so the policy can still name it.
-struct ModifierWrapper {
+/// A command that runs the command written after it.
+struct Wrapper {
     /// The wrapper's name, as it is written.
     name: &'static str,
     /// The options whose value is the next argument.
@@ -150,63 +153,66 @@ struct ModifierWrapper {
     plain_args: usize,
 }
 
-const MODIFIER_WRAPPERS: &[ModifierWrapper] = &[
-    ModifierWrapper {
+/// Wrappers that only change how a command runs: the row names the command
+/// they run (`timeout 600 cargo build` runs `cargo build`), so the policy can
+/// allowlist it and the blocklist sees it.
+const MODIFIER_WRAPPERS: &[Wrapper] = &[
+    Wrapper {
         name: "timeout",
         value_options: &["-s", "--signal", "-k", "--kill-after"],
         plain_args: 1,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "time",
         value_options: &[],
         plain_args: 0,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "nice",
         value_options: &["-n", "--adjustment"],
         plain_args: 0,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "nohup",
         value_options: &[],
         plain_args: 0,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "taskset",
         value_options: &["-c", "--cpu-list", "-p", "--pid"],
         plain_args: 0,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "stdbuf",
         value_options: &["-i", "--input", "-o", "--output", "-e", "--error"],
         plain_args: 0,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "ionice",
         value_options: &["-c", "--class", "-n", "--classdata"],
         plain_args: 0,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "chrt",
         value_options: &["--rr"],
         plain_args: 0,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "setsid",
         value_options: &[],
         plain_args: 0,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "command",
         value_options: &[],
         plain_args: 0,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "builtin",
         value_options: &[],
         plain_args: 0,
     },
-    ModifierWrapper {
+    Wrapper {
         name: "env",
         value_options: &["-u", "--unset", "-C", "--chdir"],
         plain_args: 0,
@@ -214,9 +220,9 @@ const MODIFIER_WRAPPERS: &[ModifierWrapper] = &[
 ];
 
 /// The command the words name, looking through the wrappers that only change
-/// how it runs: `timeout 600 cargo build` names `cargo build`. `None` when a
-/// wrapper is run by path or its own arguments cannot be told from the
-/// command.
+/// how it runs: `timeout 600 cargo build` names `cargo build`. A lookup
+/// (`command -v rm`) names itself. `None` when a wrapper is run by path or
+/// its own arguments cannot be told from the command.
 fn effective_words<'a>(words: &[&'a str]) -> Option<Vec<&'a str>> {
     let (name, rest) = words.split_first()?;
     let base = name.rsplit('/').next().unwrap_or(name);
@@ -228,7 +234,16 @@ fn effective_words<'a>(words: &[&'a str]) -> Option<Vec<&'a str>> {
         // table describes, so the command it runs is not ours to name.
         return None;
     }
-    // The wrapper's own options come first.
+    if lookup_option(words).is_some() {
+        return Some(words.to_vec());
+    }
+    effective_words(rest.get(wrapped_start(wrapper, rest)?..)?)
+}
+
+/// Where the command `wrapper` runs starts in `rest`, the words after it:
+/// past the wrapper's own options, the plain arguments it takes before the
+/// command, and the assignments `env` takes.
+fn wrapped_start(wrapper: &Wrapper, rest: &[&str]) -> Option<usize> {
     let mut at = 0;
     while let Some(arg) = rest.get(at) {
         if *arg == "--" {
@@ -246,7 +261,6 @@ fn effective_words<'a>(words: &[&'a str]) -> Option<Vec<&'a str>> {
             at += 1;
         }
     }
-    // Then the arguments the wrapper takes before the command.
     for _ in 0..wrapper.plain_args {
         let arg = *rest.get(at)?;
         if arg.starts_with('-') && arg != "-" {
@@ -254,11 +268,87 @@ fn effective_words<'a>(words: &[&'a str]) -> Option<Vec<&'a str>> {
         }
         at += 1;
     }
-    // `env` takes assignments before the command.
     while rest.get(at).is_some_and(|arg| is_assignment(arg)) {
         at += 1;
     }
-    effective_words(rest.get(at..)?)
+    Some(at)
+}
+
+/// The short-option letters that make a wrapper look a command up instead
+/// of running it: `command -v rm` prints where `rm` is.
+const LOOKUP_OPTIONS: &[(&str, &[char])] = &[("command", &['v', 'V'])];
+
+/// The option that makes `words` a lookup of the command they name rather
+/// than a run of it: `-v` in `command -v rm`.
+pub fn lookup_option<'a>(words: &[&'a str]) -> Option<&'a str> {
+    let (name, rest) = words.split_first()?;
+    let (_, letters) = LOOKUP_OPTIONS.iter().find(|(n, _)| n == name)?;
+    rest.iter()
+        .take_while(|arg| arg.starts_with('-') && !matches!(**arg, "-" | "--"))
+        .find(|arg| !arg.starts_with("--") && arg.contains(*letters))
+        .copied()
+}
+
+/// Commands that run the command written in their arguments (`xargs rm`,
+/// `exec rm`, `eval rm`, `watch rm`) but whose row names them: they also run
+/// without a command (`exec >log 2>&1`, bare `xargs`), and `eval` and `watch`
+/// read their arguments as code. Only the blocklist looks through them, in
+/// [`argument_command_words`].
+const ARGUMENT_RUNNERS: &[Wrapper] = &[
+    Wrapper {
+        name: "exec",
+        value_options: &["-a"],
+        plain_args: 0,
+    },
+    Wrapper {
+        name: "eval",
+        value_options: &[],
+        plain_args: 0,
+    },
+    Wrapper {
+        name: "xargs",
+        value_options: &[
+            "-a",
+            "--arg-file",
+            "-d",
+            "--delimiter",
+            "-E",
+            "-I",
+            "-L",
+            "-n",
+            "--max-args",
+            "-P",
+            "--max-procs",
+            "-s",
+            "--max-chars",
+            "--process-slot-var",
+        ],
+        plain_args: 0,
+    },
+    Wrapper {
+        name: "watch",
+        value_options: &["-n", "--interval", "-q", "--equexit", "-s", "--shotsdir"],
+        plain_args: 0,
+    },
+];
+
+/// The command an [`ARGUMENT_RUNNERS`] head runs from its arguments, looking
+/// through further runners and modifier wrappers: `xargs -0 timeout 5 rm`
+/// → `rm`. `None` when `row` is not headed by one, or its arguments name no
+/// command (`exec >log 2>&1`).
+pub fn argument_command_words(row: &str) -> Option<Vec<&str>> {
+    let mut words = command_words(row)?;
+    let mut ran = false;
+    loop {
+        let base = words[0].rsplit('/').next().unwrap_or(words[0]);
+        let Some(runner) = ARGUMENT_RUNNERS.iter().find(|r| r.name == base) else {
+            break;
+        };
+        let rest = &words[1..];
+        words = effective_words(rest.get(wrapped_start(runner, rest)?..)?)?;
+        ran = true;
+    }
+    ran.then_some(words)
 }
 
 /// A `NAME=value` token, as `env` takes before the command it runs.
@@ -709,22 +799,57 @@ impl<'src> Walker<'src> {
         Some(())
     }
 
-    /// An unquoted heredoc body. Tree-sitter parses the `$(...)` and `<()`
-    /// commands bash expands into nodes, which become rows of their own;
-    /// the remaining text it did not parse (plain `$var`, `${var}`,
-    /// `$((…))`, backticks) is kept as body text: the row stays named, and
-    /// the policy does not look inside it, as it does not look inside
-    /// `bash -c` strings.
-    fn heredoc_body_walk(&mut self, node: Node) -> Option<()> {
-        for child in Self::children(node) {
-            match child.kind() {
-                // Bash reads `$((` as arithmetic, not a command to run.
-                "command_substitution" if self.text(child).starts_with("$((") => {}
-                "command_substitution" | "process_substitution" => self.word(child)?,
-                "heredoc_body" => self.heredoc_body_walk(child)?,
-                _ => {}
+    /// An unquoted heredoc body. Bash expands its `$(…)`, backtick and `${…}`
+    /// text, so each command those run becomes a row of its own; the rest of
+    /// the body is text kept with the row.
+    fn heredoc_body_walk(&mut self, body: Node) -> Option<()> {
+        let mut expansions = Vec::new();
+        Self::expansions(body, &mut expansions);
+        let mut expansions = expansions.into_iter().peekable();
+        let bytes = self.src.as_bytes();
+        let mut at = body.start_byte();
+        while at < body.end_byte() {
+            // Tree-sitter does not parse backticks or escapes in a heredoc
+            // body, so an expansion it found inside either is text.
+            while expansions.next_if(|e| e.start_byte() < at).is_some() {}
+            if let Some(expansion) = expansions.next_if(|e| e.start_byte() == at) {
+                self.heredoc_expansion(expansion)?;
+                at = expansion.end_byte();
+                continue;
+            }
+            match bytes[at] {
+                b'\\' => at += 2,
+                b'`' => {
+                    let (code, len) = backtick_code(&self.src[at + 1..body.end_byte()])?;
+                    self.out.extend(split(&code)?);
+                    at += len + 2;
+                }
+                _ => at += 1,
             }
         }
+        Some(())
+    }
+
+    /// The `$(…)` and `${…}` nodes tree-sitter parsed in `node`, outermost
+    /// first.
+    fn expansions<'tree>(node: Node<'tree>, out: &mut Vec<Node<'tree>>) {
+        for child in Self::children(node) {
+            if matches!(child.kind(), "command_substitution" | "expansion") {
+                out.push(child);
+            } else {
+                Self::expansions(child, out);
+            }
+        }
+    }
+
+    /// A `$(…)` or `${…}` in a heredoc body, read as it is outside one.
+    /// Tree-sitter parses less inside a heredoc body: it reads every `$((`
+    /// there as a subshell, where bash reads arithmetic first, and leaves
+    /// backticks and some `${…}` operands unparsed.
+    fn heredoc_expansion(&mut self, node: Node) -> Option<()> {
+        let segments = split(&format!(": {}", self.text(node)))?;
+        // The first row is the `:` that holds the expansion.
+        self.out.extend(segments.into_iter().skip(1));
         Some(())
     }
 
@@ -783,6 +908,29 @@ impl<'src> Walker<'src> {
             Some(_) => false,
         }
     }
+}
+
+/// The command in a backtick substitution, from `rest`, the text after its
+/// opening backtick: with the backslashes bash removes inside it (before
+/// `` ` ``, `$` and `\`), and the length of `rest` up to the closing
+/// backtick. `None` when it is not closed.
+fn backtick_code(rest: &str) -> Option<(String, usize)> {
+    let mut code = String::new();
+    let mut chars = rest.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '`' => return Some((code, i)),
+            '\\' => {
+                let (_, escaped) = chars.next()?;
+                if !matches!(escaped, '`' | '$' | '\\') {
+                    code.push(c);
+                }
+                code.push(escaped);
+            }
+            _ => code.push(c),
+        }
+    }
+    None
 }
 
 /// False for bytes tree-sitter-bash reads as blanks or line continuations
@@ -2077,5 +2225,86 @@ mod tests {
             split(r#"echo "a ; b" && ls"#),
             vec![simple(r#"echo "a ; b""#), simple("ls")]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // Unquoted heredoc bodies name every command bash expands
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn unquoted_heredoc_body_names_nested_substitutions() {
+        let input = "cat <<EOF\n${x:-$(rm -rf ~)}\nEOF";
+        assert_eq!(split(input), vec![opaque(input), simple("rm -rf ~")]);
+    }
+
+    #[test]
+    fn unquoted_heredoc_body_names_backtick_commands() {
+        let input = "cat <<EOF > notes.md\nuse `ls` here\nEOF";
+        assert_eq!(split(input), vec![opaque(input), simple("ls")]);
+        let input = "cat <<EOF\n${x:-$(rm a)} `pwd`\nEOF";
+        assert_eq!(
+            split(input),
+            vec![opaque(input), simple("rm a"), simple("pwd")]
+        );
+        // A `${…}` is read as it is outside a heredoc.
+        for input in ["cat <<EOF\n${x:-`rm a`}\nEOF", "echo ${x:-`rm a`}"] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
+        // Inside backticks, an escaped backtick nests another substitution.
+        let input = "cat <<EOF\n`echo \\`ls\\``\nEOF";
+        assert_eq!(
+            split(input),
+            vec![opaque(input), opaque("echo `ls`"), simple("ls")]
+        );
+        // An escaped backtick or `$` is text.
+        for input in ["cat <<EOF\na \\`b\\` c\nEOF", "cat <<EOF\na \\$(rm x)\nEOF"] {
+            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn quoted_heredoc_body_names_nothing() {
+        let input = "cat <<'EOF'\n`rm x` $(rm y)\nEOF";
+        assert_eq!(split(input), vec![opaque(input)]);
+    }
+
+    #[test]
+    fn heredoc_arithmetic_is_read_as_it_is_outside_a_heredoc() {
+        // Tree-sitter reads every `$((` in a heredoc body as a subshell;
+        // bash reads arithmetic first, as the splitter does elsewhere.
+        let input = "cat <<EOF\n$((1+2))\nEOF";
+        assert_eq!(split(input), vec![opaque(input)]);
+        for input in [
+            "cat <<EOF\n$((i))\nEOF",
+            "cat <<EOF\n$((rm x) )\nEOF",
+            "echo $((i))",
+            "echo $((rm x) )",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn argument_runners_stay_named_rows() {
+        for input in ["exec >log 2>&1", "xargs grep foo", "watch -n 2 ls"] {
+            assert!(
+                !matches!(split(input).as_slice(), [Segment::Unparsed(_)]),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            argument_command_words("find_x | xargs -I {} -n 1 rm -f {}"),
+            None
+        );
+        assert_eq!(
+            argument_command_words("xargs -0 -I {} -n 1 rm -f {}"),
+            Some(vec!["rm", "-f", "{}"])
+        );
+        assert_eq!(
+            argument_command_words("watch -d -n 2 timeout 5 rm x"),
+            Some(vec!["rm", "x"])
+        );
+        assert_eq!(argument_command_words("exec >log 2>&1"), None);
+        assert_eq!(argument_command_words("ls -la"), None);
     }
 }
