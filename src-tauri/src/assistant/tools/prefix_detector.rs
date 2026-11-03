@@ -32,13 +32,17 @@
 //! it runs ([`interpreter_prefix`]). A lookup (`command -v rm`) suggests
 //! the lookup (`command -v`), never the command it names.
 //!
+//! `xargs` and `exec` run the command in their arguments, so their prefix is
+//! the runner plus that command's prefix (`xargs -n 1 grep foo` → `xargs
+//! grep`), and the allow form reads them the same way. `eval` and `watch`
+//! re-read their arguments as shell code, so, like `bash -c …` → `bash`, no
+//! prefix narrower than the runner names what they run.
+//!
 //! The output is always a default; the modal pre-fills it into an editable
 //! field so the user can narrow or broaden before confirming.
 
-#![allow(dead_code)] // wired into the approval flow in commit 7
-
 use crate::assistant::tools::command_splitter::{
-    argument_command_words, command_words, lookup_option, row_words,
+    argument_command_words, argument_run, command_words, effective_words, lookup_option, row_words,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,13 +226,32 @@ const TWO_WORD_PERMISSIVE: &[&str] = &[
 pub fn suggest_prefix(segment: &str) -> String {
     // 1–2. The command's words, without leading env assignments. Anything
     // else (`> file`, `for f in …`) has no prefix to save.
-    let Some(tokens) = command_words(segment) else {
-        return String::new();
-    };
+    match command_words(segment) {
+        Some(tokens) => prefix_for_words(&tokens),
+        None => String::new(),
+    }
+}
+
+/// [`suggest_prefix`] for a command's words.
+fn prefix_for_words(tokens: &[&str]) -> String {
     let binary = tokens[0];
 
+    if let Some(run) = argument_run(tokens) {
+        if run.reads_code || run.command.is_empty() {
+            return binary.to_string();
+        }
+        // The runner's own options are dropped, as the allow form drops them.
+        let inner = effective_words(run.command)
+            .map(|words| prefix_for_words(&words))
+            .unwrap_or_default();
+        if inner.is_empty() {
+            return String::new();
+        }
+        return format!("{binary} {inner}");
+    }
+
     // A lookup names the lookup: `command rm` would also allow running `rm`.
-    if let Some(option) = lookup_option(&tokens) {
+    if let Some(option) = lookup_option(tokens) {
         return format!("{binary} {option}");
     }
     if INTERPRETERS.contains(&binary) {
@@ -330,11 +353,11 @@ pub fn suggest_prefix(segment: &str) -> String {
 /// verbatim. Path-shaped binaries and flat-argument commands (Style::None)
 /// keep every word: `suggest_prefix` returns their head alone, so no
 /// option region exists.
-fn after_global_options<'a>(
+fn after_global_options<'w, 'a>(
     binary: &str,
-    rest: &'a [&'a str],
+    rest: &'w [&'a str],
     skipping: OptionSkipping,
-) -> &'a [&'a str] {
+) -> &'w [&'a str] {
     if is_path_shaped(binary) || matches!(lookup_style(binary), Style::None) {
         return rest;
     }
@@ -482,11 +505,11 @@ fn value_options_for(binary: &str) -> &'static [GlobalValueOption] {
 /// table — is dropped alone, keeping the next word, the subcommand
 /// candidate, intact. Under [`OptionSkipping::AllButConfig`] an option
 /// flagged `injects_config` is a wall: nothing is dropped from it on.
-fn skip_global_options<'a>(
+fn skip_global_options<'w, 'a>(
     value_options: &[GlobalValueOption],
-    rest: &'a [&'a str],
+    rest: &'w [&'a str],
     skipping: OptionSkipping,
-) -> &'a [&'a str] {
+) -> &'w [&'a str] {
     let mut rest = rest;
     while let [first, ..] = rest {
         if !is_flag(first) {
@@ -534,15 +557,34 @@ fn skip_global_options<'a>(
 /// Suggestion reads through ordinary options like `git -C repo status`,
 /// which proposes `git status` and matches the allow form. It declines a
 /// config-injecting option because the allow form must keep it.
+///
+/// The allow form reads an `xargs` or `exec` row as the runner plus the
+/// allow form of the command it runs, as [`suggest_prefix`] names it: a
+/// saved `xargs grep` covers `xargs -n 1 grep foo` but not `xargs cat`. The
+/// deny form keeps reading the row by its head and flags, so a block never
+/// matches less than it did.
 fn canonicalize(segment: &str, skipping: OptionSkipping) -> Option<String> {
-    let words = command_words(segment)?;
+    Some(canonical_words(&command_words(segment)?, skipping)?.join(" "))
+}
+
+/// [`canonicalize`] for a command's words. `None` when an `xargs` or `exec`
+/// runs a command that cannot be told from its wrapper's arguments.
+fn canonical_words<'a>(words: &[&'a str], skipping: OptionSkipping) -> Option<Vec<&'a str>> {
     let binary = words[0];
+    if skipping == OptionSkipping::AllButConfig {
+        if let Some(run) = argument_run(words).filter(|run| !run.reads_code) {
+            let mut form = vec![binary];
+            if !run.command.is_empty() {
+                form.extend(canonical_words(&effective_words(run.command)?, skipping)?);
+            }
+            return Some(form);
+        }
+    }
     let rest = after_global_options(binary, &words[1..], skipping);
     Some(
         std::iter::once(binary)
             .chain(rest.iter().copied())
-            .collect::<Vec<_>>()
-            .join(" "),
+            .collect(),
     )
 }
 

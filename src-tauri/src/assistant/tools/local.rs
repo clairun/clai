@@ -3488,6 +3488,8 @@ mod tests {
                 "watch -d -n 2 rm x",
                 "nohup xargs -P 4 rm",
                 "xargs eval rm",
+                "xargs rm",
+                "timeout 5 rm x",
             ] {
                 assert!(is_block(&exec, command), "{command} must be blocked");
             }
@@ -3578,8 +3580,12 @@ mod tests {
             "source ./setup.sh",
             "command -v rm",
             "xargs grep foo",
+            "xargs -n 1 grep foo",
+            "xargs -I {} grep foo {}",
+            "xargs git -C x push",
             "watch -n 2 ls",
             "exec >log 2>&1",
+            "exec cargo test",
             "cat <<EOF > notes.md\nuse `ls` here\nEOF",
         ] {
             let rows = approval_texts(&restricted_execution_config(&[], &[]), command);
@@ -3595,6 +3601,53 @@ mod tests {
                     PolicyResult::Allow
                 ),
                 "{command:?} is asked again after saving {prefixes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn argument_runner_rows_suggest_the_runner_and_the_command_it_runs() {
+        // `xargs` and `exec` name the command they run, without their own
+        // options; `eval` and `watch` run code, so only the runner is named.
+        for (command, expected) in [
+            ("xargs -n 1 grep foo", "xargs grep"),
+            ("xargs -I {} grep foo {}", "xargs grep"),
+            ("xargs grep foo", "xargs grep"),
+            ("xargs git push", "xargs git push"),
+            ("xargs git -C x push", "xargs git push"),
+            ("xargs", "xargs"),
+            ("exec cargo test", "exec cargo test"),
+            ("exec >log 2>&1", "exec"),
+            ("watch -n 2 ls", "watch"),
+            ("eval ls", "eval"),
+        ] {
+            assert_eq!(
+                approval_texts(&restricted_execution_config(&[], &[]), command),
+                vec![(command.to_string(), expected.to_string())],
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn saved_argument_runner_prefix_covers_only_the_command_it_names() {
+        let exec = restricted_execution_config(&["xargs grep"], &[]);
+        for command in ["xargs -n 1 grep foo", "xargs -I {} grep foo {}"] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::Allow
+                ),
+                "{command} runs grep"
+            );
+        }
+        for command in ["xargs sh -c 'x'", "xargs cat", "xargs -n 1 cat"] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::NeedsApproval(_)
+                ),
+                "{command} does not run grep"
             );
         }
     }

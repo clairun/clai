@@ -223,7 +223,7 @@ const MODIFIER_WRAPPERS: &[Wrapper] = &[
 /// how it runs: `timeout 600 cargo build` names `cargo build`. A lookup
 /// (`command -v rm`) names itself. `None` when a wrapper is run by path or
 /// its own arguments cannot be told from the command.
-fn effective_words<'a>(words: &[&'a str]) -> Option<Vec<&'a str>> {
+pub fn effective_words<'a>(words: &[&'a str]) -> Option<Vec<&'a str>> {
     let (name, rest) = words.split_first()?;
     let base = name.rsplit('/').next().unwrap_or(name);
     let Some(wrapper) = MODIFIER_WRAPPERS.iter().find(|w| w.name == base) else {
@@ -292,8 +292,9 @@ pub fn lookup_option<'a>(words: &[&'a str]) -> Option<&'a str> {
 /// Commands that run the command written in their arguments (`xargs rm`,
 /// `exec rm`, `eval rm`, `watch rm`) but whose row names them: they also run
 /// without a command (`exec >log 2>&1`, bare `xargs`), and `eval` and `watch`
-/// read their arguments as code. Only the blocklist looks through them, in
-/// [`argument_command_words`].
+/// read their arguments as code. The blocklist looks through all of them, in
+/// [`argument_command_words`]; allow prefixes only through the ones that run
+/// the command directly ([`argument_run`]).
 const ARGUMENT_RUNNERS: &[Wrapper] = &[
     Wrapper {
         name: "exec",
@@ -332,6 +333,29 @@ const ARGUMENT_RUNNERS: &[Wrapper] = &[
     },
 ];
 
+/// What the [`ARGUMENT_RUNNERS`] head of some words runs.
+pub struct ArgumentRun<'w, 'a> {
+    /// The runner reads its arguments as shell code (`eval`, and `watch`,
+    /// which passes them to `sh -c`), so they name no single command.
+    pub reads_code: bool,
+    /// The words after the runner's own options, as written: `grep foo` in
+    /// `xargs -n 1 grep foo`. Empty when they name no command (`exec >log
+    /// 2>&1`, bare `xargs`).
+    pub command: &'w [&'a str],
+}
+
+/// The [`ArgumentRun`] of `words`, or `None` when they are not headed by an
+/// [`ARGUMENT_RUNNERS`] entry.
+pub fn argument_run<'w, 'a>(words: &'w [&'a str]) -> Option<ArgumentRun<'w, 'a>> {
+    let (name, rest) = words.split_first()?;
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let runner = ARGUMENT_RUNNERS.iter().find(|r| r.name == base)?;
+    Some(ArgumentRun {
+        reads_code: matches!(runner.name, "eval" | "watch"),
+        command: rest.get(wrapped_start(runner, rest)?..).unwrap_or(&[]),
+    })
+}
+
 /// The command an [`ARGUMENT_RUNNERS`] head runs from its arguments, looking
 /// through further runners and modifier wrappers: `xargs -0 timeout 5 rm`
 /// → `rm`. `None` when `row` is not headed by one, or its arguments name no
@@ -339,13 +363,8 @@ const ARGUMENT_RUNNERS: &[Wrapper] = &[
 pub fn argument_command_words(row: &str) -> Option<Vec<&str>> {
     let mut words = command_words(row)?;
     let mut ran = false;
-    loop {
-        let base = words[0].rsplit('/').next().unwrap_or(words[0]);
-        let Some(runner) = ARGUMENT_RUNNERS.iter().find(|r| r.name == base) else {
-            break;
-        };
-        let rest = &words[1..];
-        words = effective_words(rest.get(wrapped_start(runner, rest)?..)?)?;
+    while let Some(run) = argument_run(&words) {
+        words = effective_words(run.command)?;
         ran = true;
     }
     ran.then_some(words)
