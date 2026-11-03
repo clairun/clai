@@ -985,7 +985,7 @@ mod tests {
         let mut is_first = false;
         let mut tool_calls = Vec::new();
         let call_id = "call_c8d731cf5ccd4d88b4c36489";
-        let args = format!("{{\"cmd\":\"sed -n '35,75p' .github/workflows/ci.yml\"}}");
+        let args = r#"{"cmd":"sed -n '35,75p' .github/workflows/ci.yml"}"#.to_string();
 
         let first = format!(
             "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{call_id}\",\"type\":\"function\",\"function\":{{\"name\":\"bash_exec\",\"arguments\":\"\"}}}}]}}}}]}}\n\n"
