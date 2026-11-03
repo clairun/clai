@@ -609,16 +609,6 @@ fn parse_sse_frame(
 
                 let choice = json.get("choices").and_then(|c| c.get(0));
 
-                // Check finish_reason for tool_calls
-                if let Some(reason) = choice
-                    .and_then(|c| c.get("finish_reason"))
-                    .and_then(|r| r.as_str())
-                {
-                    if reason == "tool_calls" {
-                        flush_tool_calls(tool_calls_buf, &mut events);
-                    }
-                }
-
                 let delta = choice.and_then(|c| c.get("delta"));
 
                 // Extract text delta
@@ -664,16 +654,24 @@ fn parse_sse_frame(
                             tool_calls_buf.push(PartialToolCall::default());
                         }
 
-                        // Accumulate id
-                        if let Some(id) = tc.get("id").and_then(|i| i.as_str()) {
+                        // Only a non-empty id/name (re)binds: some
+                        // OpenAI-compatible streams repeat `id` (and
+                        // `name`) as an empty string on argument
+                        // fragments, which must not erase the value the
+                        // first fragment set.
+                        if let Some(id) = tc
+                            .get("id")
+                            .and_then(|i| i.as_str())
+                            .filter(|id| !id.is_empty())
+                        {
                             tool_calls_buf[index].id = id.to_string();
                         }
 
-                        // Accumulate function name
                         if let Some(name) = tc
                             .get("function")
                             .and_then(|f| f.get("name"))
                             .and_then(|n| n.as_str())
+                            .filter(|name| !name.is_empty())
                         {
                             tool_calls_buf[index].name = name.to_string();
                         }
@@ -688,6 +686,23 @@ fn parse_sse_frame(
                         }
                     }
                 }
+
+                // The terminal chunk may carry its tool-call fragment in
+                // the same delta as the finish reason, so apply the delta
+                // first; then flush accumulated tool calls and surface the
+                // terminal reason (`length` = output budget exhausted) so
+                // consumers can reject truncated output.
+                if let Some(reason) = choice
+                    .and_then(|c| c.get("finish_reason"))
+                    .and_then(|r| r.as_str())
+                {
+                    if reason == "tool_calls" {
+                        flush_announced_tool_calls(tool_calls_buf, &mut events);
+                    }
+                    events.push(Ok(ProviderEvent::StopReason {
+                        reason: reason.to_string(),
+                    }));
+                }
             }
             Err(e) => {
                 tracing::warn!("Failed to parse SSE JSON: {} (data: {})", e, data);
@@ -696,6 +711,24 @@ fn parse_sse_frame(
     }
 
     events
+}
+
+/// Flush on the terminal `finish_reason:"tool_calls"` frame. When the
+/// provider announced tool calls but none survived parsing, fail the
+/// turn: completing silently ends the run green with neither visible
+/// text nor tool calls.
+fn flush_announced_tool_calls(
+    tool_calls_buf: &mut Vec<PartialToolCall>,
+    events: &mut Vec<Result<ProviderEvent, ProviderError>>,
+) {
+    let before = events.len();
+    flush_tool_calls(tool_calls_buf, events);
+    if events.len() == before {
+        events.push(Err(ProviderError::RequestFailed(
+            "provider announced finish_reason=tool_calls but no tool call could be parsed"
+                .to_string(),
+        )));
+    }
 }
 
 /// Flush accumulated tool calls as ToolCallReady events.
@@ -940,5 +973,122 @@ mod tests {
         // A brand with no extra headers (or no catalog entry) yields none.
         assert!(catalog_extra_headers(&conn_with_brand("openai")).is_empty());
         assert!(catalog_extra_headers(&conn_with_brand("not-a-brand")).is_empty());
+    }
+
+    /// Regression (qwen3.8 via LiteLLM, captured wire log): the first
+    /// tool_call delta carries the id, the 27 argument fragments that
+    /// follow repeat `id` as an empty string. The empty strings must not
+    /// erase the id, or `flush_tool_calls` drops the call and the turn
+    /// ends with no visible text and no tool calls.
+    #[test]
+    fn empty_id_fragments_do_not_erase_tool_call_id() {
+        let mut is_first = false;
+        let mut tool_calls = Vec::new();
+        let call_id = "call_c8d731cf5ccd4d88b4c36489";
+        let args = r#"{"cmd":"sed -n '35,75p' .github/workflows/ci.yml"}"#.to_string();
+
+        let first = format!(
+            "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{call_id}\",\"type\":\"function\",\"function\":{{\"name\":\"bash_exec\",\"arguments\":\"\"}}}}]}}}}]}}\n\n"
+        );
+        let events = parse_sse_frame(&first, &mut is_first, &mut tool_calls);
+        assert!(events.is_empty());
+
+        // 27 fragments with a present-but-empty id, each carrying a slice
+        // of the arguments JSON, exactly like the captured stream.
+        for slice in [
+            &args[..12],
+            &args[12..24],
+            &args[24..36],
+            &args[36..args.len()],
+        ] {
+            let frame = format!(
+                "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"\",\"function\":{{\"arguments\":\"{}\"}}}}]}}}}]}}\n\n",
+                slice.replace('"', r#"\""#)
+            );
+            let events = parse_sse_frame(&frame, &mut is_first, &mut tool_calls);
+            assert!(events.is_empty(), "fragments carry no terminal reason");
+        }
+
+        let terminal = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                Ok(ProviderEvent::ToolCallReady { tool_call }),
+                Ok(ProviderEvent::StopReason { reason }),
+            ] if
+                tool_call.tool_call_id == call_id &&
+                tool_call.tool_name == "bash_exec" &&
+                tool_call.params == serde_json::json!({"cmd": "sed -n '35,75p' .github/workflows/ci.yml"}) &&
+                reason == "tool_calls"
+        ));
+    }
+
+    /// A terminal `finish_reason:"tool_calls"` that flushes zero calls
+    /// must fail the turn, not complete it silently: the run would end
+    /// green with neither visible text nor tool calls.
+    #[test]
+    fn announced_tool_calls_with_none_parsed_fails_the_turn() {
+        let mut is_first = false;
+        let mut tool_calls = Vec::new();
+        // Fragments that never carried an id: nothing to flush.
+        let fragment = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"bash_exec\",\"arguments\":\"{}\"}}]}}]}\n\n";
+        assert!(parse_sse_frame(fragment, &mut is_first, &mut tool_calls).is_empty());
+
+        let terminal = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
+        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                Err(ProviderError::RequestFailed(message)),
+                Ok(ProviderEvent::StopReason { reason }),
+            ] if message.contains("no tool call could be parsed") && reason == "tool_calls"
+        ));
+    }
+
+    /// A terminal chunk may carry its first (or only) tool-call fragment
+    /// in the same delta that announces `finish_reason:"tool_calls"`: the
+    /// delta must be applied before the flush, or the call is lost and
+    /// the turn trips the zero-flush guard.
+    #[test]
+    fn terminal_chunk_with_first_tool_call_fragment_is_flushed() {
+        let mut is_first = false;
+        let mut tool_calls = Vec::new();
+        let terminal = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash_exec","arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                Ok(ProviderEvent::ToolCallReady { tool_call }),
+                Ok(ProviderEvent::StopReason { reason }),
+            ] if
+                tool_call.tool_call_id == "call_1" &&
+                tool_call.tool_name == "bash_exec" &&
+                tool_call.params == serde_json::json!({"cmd": "ls"}) &&
+                reason == "tool_calls"
+        ));
+    }
+
+    /// The terminal chunk may also carry the final arguments fragment:
+    /// flushing before applying that delta would truncate the call.
+    #[test]
+    fn terminal_chunk_final_argument_fragment_is_not_lost() {
+        let mut is_first = false;
+        let mut tool_calls = Vec::new();
+        let head = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_2","function":{"name":"bash_exec","arguments":"{\"cmd\":"}}]}}]}"#;
+        assert!(parse_sse_frame(head, &mut is_first, &mut tool_calls).is_empty());
+
+        let terminal = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]},"finish_reason":"tool_calls"}]}"#;
+        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        assert!(matches!(
+            events.as_slice(),
+            [
+                Ok(ProviderEvent::ToolCallReady { tool_call }),
+                Ok(ProviderEvent::StopReason { reason }),
+            ] if
+                tool_call.tool_call_id == "call_2" &&
+                tool_call.params == serde_json::json!({"cmd": "ls"}) &&
+                reason == "tool_calls"
+        ));
     }
 }

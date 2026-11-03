@@ -546,6 +546,14 @@ pub enum ProviderEvent {
     ToolCallReady {
         tool_call: ToolInvocationDraft,
     },
+    /// Why the provider stopped generating, when it reports one, verbatim:
+    /// Anthropic `message_delta.delta.stop_reason`, OpenAI
+    /// `choices[0].finish_reason`. `max_tokens` / `length` mean the output
+    /// was cut at its token budget; consumers that must not persist partial
+    /// output (compaction) treat those values as truncation.
+    StopReason {
+        reason: String,
+    },
     MessageComplete,
     ProviderError {
         message: String,

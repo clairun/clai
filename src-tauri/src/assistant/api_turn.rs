@@ -1,5 +1,6 @@
 use crate::assistant::{
-    conversation::content_text, conversation::RunConversation,
+    conversation::content_text,
+    conversation::{is_compaction_summary_message, RunConversation},
     providers::types::is_context_limit_error,
 };
 use futures::StreamExt;
@@ -741,6 +742,12 @@ async fn consume_api_stream_with_sink(
                 ProviderEvent::ToolCallDelta { .. } => {
                     // Could emit live UI updates here in the future
                 }
+                ProviderEvent::StopReason { .. } => {
+                    // A budget-capped finish (max_tokens / length) is legal
+                    // on a normal turn: the partial reply is stored as-is,
+                    // as before. Compaction is the consumer that must
+                    // reject truncated output.
+                }
                 ProviderEvent::MessageComplete => {
                     // Finalization happens once after the stream loop exits
                     // so we also capture in-memory state (text + tool_calls)
@@ -1142,6 +1149,70 @@ mod tests {
             created_at: 0,
             provider_metadata: None,
         }
+    }
+
+    /// Regression (GLM/Z.ai 400 "messages parameter is illegal"): when a
+    /// compaction cut falls after the session's last user message, the
+    /// post-compaction tail is all assistant/tool messages and the summary
+    /// is the only candidate to lead with. The provider-bound copy of the
+    /// persisted System-role summary must be a user message, or providers
+    /// that require a user message reject the whole request.
+    #[test]
+    fn normalize_sends_compaction_summary_as_user_message() {
+        let mut summary = system_message("Summary of the earlier conversation.");
+        summary.provider_metadata = Some(serde_json::json!({
+            "source": crate::assistant::conversation::COMPACTION_METADATA_SOURCE,
+        }));
+        let messages = vec![
+            summary,
+            assistant_message_with_content(vec![ContentPart::ToolUse {
+                tool_call_id: "call_b".into(),
+                tool_name: "bash_exec".into(),
+                arguments: serde_json::json!({}),
+            }]),
+            tool_message("call_b"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        assert_eq!(
+            normalized
+                .iter()
+                .map(|m| m.role.clone())
+                .collect::<Vec<_>>(),
+            vec![MessageRole::User, MessageRole::Assistant, MessageRole::Tool],
+            "post-compaction history must be user-led: [user(summary), assistant, tool]"
+        );
+        // The persisted row keeps role System; only the provider copy flips.
+        assert_eq!(messages[0].role, MessageRole::System);
+    }
+
+    /// A tail that still contains user messages keeps them; the summary is
+    /// still user there, never a second system message after the system
+    /// prompt.
+    #[test]
+    fn normalize_compacted_history_with_user_tail_stays_user_led() {
+        let mut summary = system_message("Summary of the earlier conversation.");
+        summary.provider_metadata = Some(serde_json::json!({
+            "source": crate::assistant::conversation::COMPACTION_METADATA_SOURCE,
+        }));
+        let messages = vec![
+            summary,
+            user_message("follow-up"),
+            assistant_message_with_text("answer"),
+        ];
+
+        let normalized = normalize_history_for_provider(&messages);
+
+        // The consecutive user messages merge per the standing rule; the
+        // result stays user-led with no system role anywhere.
+        assert!(normalized.iter().all(|m| m.role != MessageRole::System));
+        assert_eq!(normalized.len(), 2);
+        assert_eq!(normalized[0].role, MessageRole::User);
+        assert_eq!(normalized[1].role, MessageRole::Assistant);
+        let merged = content_text(&normalized[0].content);
+        assert!(merged.contains("Summary of the earlier conversation."));
+        assert!(merged.contains("follow-up"));
     }
 
     #[test]
@@ -2149,8 +2220,21 @@ pub(crate) fn normalize_history_for_provider(
                 });
             }
             MessageRole::System => {
+                // The compaction summary is the only System message history
+                // carries. It goes to the provider as a user message: with
+                // the cut after the session's last user message, the tail
+                // is all assistant/tool messages, and OpenAI-compatible
+                // providers that require a user message (observed: Z.ai
+                // GLM 400 "messages parameter is illegal") reject the
+                // user-less request. The persisted row keeps role System;
+                // only this provider-bound copy flips.
+                let role = if is_compaction_summary_message(msg) {
+                    MessageRole::User
+                } else {
+                    MessageRole::System
+                };
                 out.push(ProviderInputMessage {
-                    role: MessageRole::System,
+                    role,
                     content: msg.content.clone(),
                 });
             }

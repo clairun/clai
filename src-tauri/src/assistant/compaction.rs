@@ -16,40 +16,50 @@ use crate::assistant::types::{
 /// Estimated input tokens a request may hold before automatic compaction
 /// runs. CLAI knows no per-model context capacity, so this is one engineering
 /// default rather than a model limit: it is the whole input allowance, and
-/// leaves a 128k-token context room for a 16k-token reply and for the
-/// estimator's error against the provider's own tokenizer. Models with
+/// leaves a 128k-token context room for the 16k compaction reply cap and for
+/// the estimator's error against the provider's own tokenizer. Models with
 /// smaller windows fall back to forced context-limit recovery, which uses
 /// the same compactor.
 const ESTIMATED_INPUT_BUDGET_TOKENS: usize = 96_000;
 /// Cap on the newest history a compaction keeps verbatim; see
 /// [`verbatim_tail_tokens`]. The newest group is kept regardless.
 pub(crate) const VERBATIM_TAIL_MAX_TOKENS: usize = 20_000;
-const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 4096;
+/// The one `max_tokens` cap every compaction summary request carries, for
+/// every provider: thinking and text share it, because some endpoints
+/// (MiniMax's Anthropic-compatible API, reasoning models behind LiteLLM)
+/// bill reasoning tokens against the same `max_tokens` as text. Providers
+/// that stop naturally just see a generous ceiling. The 16k value is exactly
+/// the reply headroom `ESTIMATED_INPUT_BUDGET_TOKENS` documents against a
+/// 128k context.
+const SUMMARY_MAX_OUTPUT_TOKENS: u32 = 16_384;
 /// Transcript the summarizer request may carry: the input budget less the
-/// summary it is asked to write. Same unit as the trigger, so a compaction
+/// whole output cap, so a reply that spends the entire cap still keeps the
+/// request inside the budget. Same unit as the trigger, so a compaction
 /// that fires can be summarized without dropping most of its own input.
 const SUMMARY_TRANSCRIPT_MAX_TOKENS: usize =
     ESTIMATED_INPUT_BUDGET_TOKENS - SUMMARY_MAX_OUTPUT_TOKENS as usize;
 const SUMMARY_TOOL_CALL_MAX_CHARS: usize = 4_000;
 const SUMMARY_TOOL_RESULT_MAX_CHARS: usize = 8_000;
-/// Hard budget for the summary body we store back into the conversation.
-/// `SUMMARY_MAX_OUTPUT_TOKENS` is only a *request*: on the CLI path it is
-/// advisory prose in the prompt (`providers/cli.rs`), so nothing enforces it.
-/// An oversized summary is not self-limiting -- it is replayed on every
-/// following turn and re-injected into every fresh CLI session until the next
-/// compaction folds it away -- so it is clamped here, at the single point where
-/// a summary becomes durable.
+/// Hard budget for the summary body we store back into the conversation:
+/// the invariant that stored summaries stay *compact*, distinct from the
+/// wire cap. `SUMMARY_MAX_OUTPUT_TOKENS` is headroom for providers that
+/// bill thinking against `max_tokens`, not license for a longer summary --
+/// and it is only a *request* (on the CLI path it is advisory prose in the
+/// prompt, `providers/cli.rs`), so nothing enforces it. A summary that
+/// spends the headroom is clamped here by design, at the single point where
+/// a summary becomes durable: an oversized summary is not self-limiting --
+/// it is replayed on every following turn and re-injected into every fresh
+/// CLI session until the next compaction folds it away.
 ///
 /// The number is pinned by two neighbours, not by taste:
-/// * it must stay above a *conforming* summary (~4 chars per token against a
-///   4096-token ask, ~16_400 chars) so a well-behaved model is never clamped;
 /// * with the preamble it must stay under a third of
 ///   `SUMMARY_TRANSCRIPT_MAX_TOKENS`, the head slice of
 ///   `transcript_for_summary`, even at one token per character, or the *next*
-///   compaction pass drops this summary's own tail into its omitted middle.
-///
-/// It is also well under `CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES` (64_000), so the
-/// CLI fresh-session clamp never has to re-cut a summary we produced.
+///   compaction pass drops this summary's own tail into its omitted middle —
+///   this is what keeps a longer model output from making compaction
+///   self-defeating;
+/// * it stays well under `CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES` (64_000), so
+///   the CLI fresh-session clamp never has to re-cut a summary we produced.
 const SUMMARY_MESSAGE_MAX_CHARS: usize = 24_000;
 
 /// What automatic compaction achieved during a run.
@@ -368,9 +378,11 @@ async fn summarize_window(
         .await
         .map_err(provider_error_message)?;
     let mut summary = String::new();
+    let mut stop_reason: Option<String> = None;
     while let Some(event) = stream.next().await {
         match event.map_err(provider_error_message)? {
             ProviderEvent::TextDelta { text } => summary.push_str(&text),
+            ProviderEvent::StopReason { reason } => stop_reason = Some(reason),
             ProviderEvent::ProviderError { message } => return Err(message),
             ProviderEvent::MessageStart
             | ProviderEvent::ThinkingDelta { .. }
@@ -381,7 +393,30 @@ async fn summarize_window(
         }
     }
 
-    let summary = summary.trim().to_string();
+    finish_summary(summary, stop_reason.as_deref())
+}
+
+/// Stop reasons that mean the provider cut generation at its output-token
+/// budget — Anthropic `max_tokens`, OpenAI `length`. Anything else is a
+/// natural finish and the text is complete as written.
+fn is_budget_truncation(reason: &str) -> bool {
+    matches!(reason, "max_tokens" | "length")
+}
+
+/// Decide whether a finished summarizer stream produced a storable summary.
+/// A summary cut at the output-token budget is not a summary: storing it
+/// would replace the transcript with silently truncated prose. A reasoning
+/// model can still spend the whole shared cap on thinking (`max_tokens` stop
+/// reason, often with little or no text), which is what the observed
+/// MiniMax/LiteLLM failures looked like before the cap covered thinking.
+fn finish_summary(text: String, stop_reason: Option<&str>) -> Result<String, String> {
+    if let Some(reason) = stop_reason.filter(|r| is_budget_truncation(r)) {
+        return Err(format!(
+            "Compaction summary was truncated at the output-token limit (stop reason \
+             `{reason}`) and was discarded instead of stored"
+        ));
+    }
+    let summary = text.trim().to_string();
     if summary.is_empty() {
         return Err("Compaction summary was empty".to_string());
     }
@@ -630,6 +665,64 @@ mod tests {
     use crate::assistant::token_estimate::message_tokens;
     use crate::assistant::types::{ContentPart, MessageRole};
     use crate::db::DbPool;
+
+    #[test]
+    fn truncated_summary_is_rejected_instead_of_stored() {
+        // Partial text cut at the budget: discarded, with the provider's
+        // reason in the error.
+        let err = finish_summary("partial summary".to_string(), Some("max_tokens")).unwrap_err();
+        assert!(err.contains("max_tokens"), "{err}");
+        assert!(err.contains("discarded"), "{err}");
+
+        // The observed MiniMax starvation shape: thinking consumed the whole
+        // budget, no text at all. The truncation cause wins over "empty".
+        let err = finish_summary(String::new(), Some("max_tokens")).unwrap_err();
+        assert!(err.contains("max_tokens"), "{err}");
+
+        // OpenAI's spelling of the same cutoff.
+        assert!(finish_summary("partial".to_string(), Some("length")).is_err());
+    }
+
+    #[test]
+    fn complete_summary_is_stored_and_trimmed() {
+        // Natural stop: stored, trimmed, verbatim.
+        assert_eq!(
+            finish_summary(" summary text \n".to_string(), Some("end_turn")).unwrap(),
+            "summary text"
+        );
+        // Providers that never report a stop reason (CLI adapters) still store.
+        assert_eq!(
+            finish_summary("summary text".to_string(), None).unwrap(),
+            "summary text"
+        );
+        // No stop reason + no text stays the empty-summary failure.
+        assert_eq!(
+            finish_summary(String::new(), None).unwrap_err(),
+            "Compaction summary was empty"
+        );
+    }
+
+    #[test]
+    fn compaction_output_caps_stay_reconciled() {
+        // One wire cap for every provider — thinking and text share it, so
+        // there is no per-provider thinking allowance to consult anymore
+        // (the catalog field is gone; differentiation cannot reappear
+        // without reintroducing it).
+        assert_eq!(SUMMARY_MAX_OUTPUT_TOKENS, 16_384);
+        // A reply that spends the entire cap still fits the input budget.
+        assert!(
+            SUMMARY_TRANSCRIPT_MAX_TOKENS + SUMMARY_MAX_OUTPUT_TOKENS as usize
+                <= ESTIMATED_INPUT_BUDGET_TOKENS
+        );
+        // The stored-summary invariant keeps the next pass from being
+        // self-defeating: a standing summary (clamp + preamble, worst case
+        // one token per character) fits inside the head slice the next
+        // transcript cut keeps.
+        assert!(
+            SUMMARY_MESSAGE_MAX_CHARS + SUMMARY_MESSAGE_PREAMBLE.len() + 2
+                < SUMMARY_TRANSCRIPT_MAX_TOKENS / 3
+        );
+    }
 
     fn msg(id: &str, role: MessageRole, parts: Vec<ContentPart>) -> AssistantMessage {
         AssistantMessage {
