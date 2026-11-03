@@ -124,9 +124,9 @@ pub fn row_words(row: &str) -> Option<Vec<&str>> {
 /// The command `row` runs: the words of the command itself, looking through
 /// the wrappers that only change how it runs (`timeout 600 cargo build` →
 /// `cargo build`). `None` when a modifier wrapper is run by path or its own
-/// arguments cannot be told from the command.
-pub fn command_words(row: &str) -> Option<Vec<&str>> {
-    effective_words(&row_words(row)?)
+/// arguments cannot be told from the command, read as `reading` says.
+pub fn command_words(row: &str, reading: Reading) -> Option<Vec<&str>> {
+    Some(effective_words(&row_words(row)?, reading)?.to_vec())
 }
 
 /// The name and arguments of a command node, as written in `src`.
@@ -146,11 +146,33 @@ fn command_node_words<'src>(src: &'src str, node: Node) -> Option<Vec<&'src str>
 struct Wrapper {
     /// The wrapper's name, as it is written.
     name: &'static str,
-    /// The options whose value is the next argument.
-    value_options: &'static [&'static str],
+    /// The short options that take a value: the rest of their word, or the
+    /// next word when they end it (`-n` in `xargs -0n 1`).
+    value_letters: &'static str,
+    /// The short options whose value is optional, so it can only be the
+    /// rest of their word (GNU `xargs -i[R]`).
+    optional_value_letters: &'static str,
+    /// The long options whose value is the next word, unless written
+    /// `--name=value`.
+    value_long: &'static [&'static str],
+    /// The other long options: they never take the next word.
+    flag_long: &'static [&'static str],
     /// The plain arguments the wrapper takes before the command
     /// (`timeout`'s duration).
     plain_args: usize,
+}
+
+impl Wrapper {
+    const fn named(name: &'static str) -> Self {
+        Wrapper {
+            name,
+            value_letters: "",
+            optional_value_letters: "",
+            value_long: &[],
+            flag_long: &[],
+            plain_args: 0,
+        }
+    }
 }
 
 /// Wrappers that only change how a command runs: the row names the command
@@ -158,108 +180,142 @@ struct Wrapper {
 /// allowlist it and the blocklist sees it.
 const MODIFIER_WRAPPERS: &[Wrapper] = &[
     Wrapper {
-        name: "timeout",
-        value_options: &["-s", "--signal", "-k", "--kill-after"],
+        value_letters: "sk",
+        value_long: &["--signal", "--kill-after"],
+        flag_long: &["--foreground", "--preserve-status", "--verbose"],
         plain_args: 1,
+        ..Wrapper::named("timeout")
+    },
+    Wrapper::named("time"),
+    Wrapper {
+        value_letters: "n",
+        value_long: &["--adjustment"],
+        ..Wrapper::named("nice")
+    },
+    Wrapper::named("nohup"),
+    Wrapper {
+        value_letters: "cp",
+        value_long: &["--cpu-list", "--pid"],
+        flag_long: &["--all-tasks"],
+        ..Wrapper::named("taskset")
     },
     Wrapper {
-        name: "time",
-        value_options: &[],
-        plain_args: 0,
+        value_letters: "ioe",
+        value_long: &["--input", "--output", "--error"],
+        ..Wrapper::named("stdbuf")
     },
     Wrapper {
-        name: "nice",
-        value_options: &["-n", "--adjustment"],
-        plain_args: 0,
+        value_letters: "cnpPu",
+        value_long: &["--class", "--classdata", "--pid", "--pgid", "--uid"],
+        flag_long: &["--ignore"],
+        ..Wrapper::named("ionice")
     },
     Wrapper {
-        name: "nohup",
-        value_options: &[],
-        plain_args: 0,
+        value_letters: "TPD",
+        value_long: &[
+            "--rr",
+            "--sched-runtime",
+            "--sched-period",
+            "--sched-deadline",
+        ],
+        flag_long: &[
+            "--batch",
+            "--deadline",
+            "--ext",
+            "--fifo",
+            "--idle",
+            "--other",
+            "--reset-on-fork",
+            "--all-tasks",
+            "--max",
+            "--pid",
+            "--verbose",
+        ],
+        ..Wrapper::named("chrt")
     },
     Wrapper {
-        name: "taskset",
-        value_options: &["-c", "--cpu-list", "-p", "--pid"],
-        plain_args: 0,
+        flag_long: &["--ctty", "--fork", "--wait"],
+        ..Wrapper::named("setsid")
     },
+    Wrapper::named("command"),
+    Wrapper::named("builtin"),
     Wrapper {
-        name: "stdbuf",
-        value_options: &["-i", "--input", "-o", "--output", "-e", "--error"],
-        plain_args: 0,
-    },
-    Wrapper {
-        name: "ionice",
-        value_options: &["-c", "--class", "-n", "--classdata"],
-        plain_args: 0,
-    },
-    Wrapper {
-        name: "chrt",
-        value_options: &["--rr"],
-        plain_args: 0,
-    },
-    Wrapper {
-        name: "setsid",
-        value_options: &[],
-        plain_args: 0,
-    },
-    Wrapper {
-        name: "command",
-        value_options: &[],
-        plain_args: 0,
-    },
-    Wrapper {
-        name: "builtin",
-        value_options: &[],
-        plain_args: 0,
-    },
-    Wrapper {
-        name: "env",
-        value_options: &["-u", "--unset", "-C", "--chdir"],
-        plain_args: 0,
+        value_letters: "auC",
+        value_long: &["--argv0", "--unset", "--chdir", "--env0-from"],
+        flag_long: &[
+            "--ignore-environment",
+            "--null",
+            "--split-string",
+            "--block-signal",
+            "--default-signal",
+            "--ignore-signal",
+            "--list-signal-handling",
+            "--debug",
+        ],
+        ..Wrapper::named("env")
     },
 ];
+
+/// How [`wrapped_start`] reads a long option its table does not list as
+/// written: getopt takes any unambiguous abbreviation (`xargs --process`
+/// is `--process-slot-var`), and an implementation may have options the
+/// table lacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    /// The command cannot be told: allow matching reads words this way,
+    /// so a grant never covers a command found past a misread option.
+    Exact,
+    /// As getopt would with the table: an abbreviation of one listed
+    /// option is that option, anything else takes no value. The splitter
+    /// and the blocklist read words this way.
+    Getopt,
+}
 
 /// The command the words name, looking through the wrappers that only change
 /// how it runs: `timeout 600 cargo build` names `cargo build`. A lookup
 /// (`command -v rm`) names itself. `None` when a wrapper is run by path or
 /// its own arguments cannot be told from the command.
-pub fn effective_words<'a>(words: &[&'a str]) -> Option<Vec<&'a str>> {
-    let (name, rest) = words.split_first()?;
-    let base = name.rsplit('/').next().unwrap_or(name);
-    let Some(wrapper) = MODIFIER_WRAPPERS.iter().find(|w| w.name == base) else {
-        return Some(words.to_vec());
-    };
-    if name.contains('/') {
-        // A wrapper run by path: its own arguments are not the ones the
-        // table describes, so the command it runs is not ours to name.
-        return None;
+pub fn effective_words<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option<&'w [&'a str]> {
+    let mut words = words;
+    loop {
+        let (name, rest) = words.split_first()?;
+        let base = name.rsplit('/').next().unwrap_or(name);
+        let Some(wrapper) = MODIFIER_WRAPPERS.iter().find(|w| w.name == base) else {
+            return Some(words);
+        };
+        if name.contains('/') {
+            // A wrapper run by path: its own arguments are not the ones the
+            // table describes, so the command it runs is not ours to name.
+            return None;
+        }
+        if lookup_option(words).is_some() {
+            return Some(words);
+        }
+        words = rest.get(wrapped_start(wrapper, rest, reading)?..)?;
     }
-    if lookup_option(words).is_some() {
-        return Some(words.to_vec());
-    }
-    effective_words(rest.get(wrapped_start(wrapper, rest)?..)?)
 }
 
 /// Where the command `wrapper` runs starts in `rest`, the words after it:
-/// past the wrapper's own options, the plain arguments it takes before the
-/// command, and the assignments `env` takes.
-fn wrapped_start(wrapper: &Wrapper, rest: &[&str]) -> Option<usize> {
+/// past the wrapper's own options, read as getopt reads them, the plain
+/// arguments it takes before the command, and the assignments `env` takes.
+fn wrapped_start(wrapper: &Wrapper, rest: &[&str], reading: Reading) -> Option<usize> {
     let mut at = 0;
-    while let Some(arg) = rest.get(at) {
-        if *arg == "--" {
+    while let Some(&arg) = rest.get(at) {
+        if arg == "--" {
             at += 1;
             break;
         }
-        if !arg.starts_with('-') || *arg == "-" {
-            break;
-        }
-        if arg.contains('=') {
-            at += 1;
-        } else if wrapper.value_options.contains(arg) {
-            at += 2;
+        let takes_next_word = if arg.starts_with("--") {
+            !arg.contains('=') && long_option_takes_value(wrapper, arg, reading)?
+        } else if let Some(cluster) = arg.strip_prefix('-').filter(|c| !c.is_empty()) {
+            cluster_takes_next_word(wrapper, cluster)
+        } else if arg == "-" && wrapper.name == "env" {
+            // `env -` is `env -i`.
+            false
         } else {
-            at += 1;
-        }
+            break;
+        };
+        at += 1 + usize::from(takes_next_word);
     }
     for _ in 0..wrapper.plain_args {
         let arg = *rest.get(at)?;
@@ -272,6 +328,45 @@ fn wrapped_start(wrapper: &Wrapper, rest: &[&str]) -> Option<usize> {
         at += 1;
     }
     Some(at)
+}
+
+/// Whether a cluster of short options (`0n` in `-0n 1`) takes the next
+/// word: getopt reads its letters until one that takes a value, whose
+/// value is the rest of the cluster, or the next word when none is left.
+fn cluster_takes_next_word(wrapper: &Wrapper, cluster: &str) -> bool {
+    for (at, letter) in cluster.char_indices() {
+        if wrapper.optional_value_letters.contains(letter) {
+            return false;
+        }
+        if wrapper.value_letters.contains(letter) {
+            return at + letter.len_utf8() == cluster.len();
+        }
+    }
+    false
+}
+
+/// Whether the long option `arg`, written without `=`, takes the next word.
+/// `None` under [`Reading::Exact`] when the table does not list it as
+/// written.
+fn long_option_takes_value(wrapper: &Wrapper, arg: &str, reading: Reading) -> Option<bool> {
+    if wrapper.value_long.contains(&arg) {
+        return Some(true);
+    }
+    if wrapper.flag_long.contains(&arg) {
+        return Some(false);
+    }
+    if reading == Reading::Exact {
+        return None;
+    }
+    let value = wrapper.value_long.iter().map(|option| (option, true));
+    let flag = wrapper.flag_long.iter().map(|option| (option, false));
+    let mut abbreviated = value
+        .chain(flag)
+        .filter(|(option, _)| option.starts_with(arg));
+    match (abbreviated.next(), abbreviated.next()) {
+        (Some((_, takes_value)), None) => Some(takes_value),
+        _ => Some(false),
+    }
 }
 
 /// The short-option letters that make a wrapper look a command up instead
@@ -297,39 +392,55 @@ pub fn lookup_option<'a>(words: &[&'a str]) -> Option<&'a str> {
 /// the command directly ([`argument_run`]).
 const ARGUMENT_RUNNERS: &[Wrapper] = &[
     Wrapper {
-        name: "exec",
-        value_options: &["-a"],
-        plain_args: 0,
+        value_letters: "a",
+        ..Wrapper::named("exec")
     },
+    Wrapper::named("eval"),
     Wrapper {
-        name: "eval",
-        value_options: &[],
-        plain_args: 0,
-    },
-    Wrapper {
-        name: "xargs",
-        value_options: &[
-            "-a",
+        // GNU's options, and BSD's `-J`, `-R` and `-S`.
+        value_letters: "adEILnPsJRS",
+        optional_value_letters: "eil",
+        value_long: &[
             "--arg-file",
-            "-d",
             "--delimiter",
-            "-E",
-            "-I",
-            "-L",
-            "-n",
+            "--max-lines",
             "--max-args",
-            "-P",
             "--max-procs",
-            "-s",
             "--max-chars",
             "--process-slot-var",
         ],
-        plain_args: 0,
+        flag_long: &[
+            "--null",
+            "--eof",
+            "--replace",
+            "--open-tty",
+            "--interactive",
+            "--no-run-if-empty",
+            "--show-limits",
+            "--verbose",
+            "--exit",
+        ],
+        ..Wrapper::named("xargs")
     },
     Wrapper {
-        name: "watch",
-        value_options: &["-n", "--interval", "-q", "--equexit", "-s", "--shotsdir"],
-        plain_args: 0,
+        value_letters: "nqs",
+        optional_value_letters: "d",
+        value_long: &["--interval", "--equexit", "--shotsdir"],
+        flag_long: &[
+            "--beep",
+            "--color",
+            "--no-color",
+            "--differences",
+            "--errexit",
+            "--follow",
+            "--chgexit",
+            "--precise",
+            "--no-rerun",
+            "--no-title",
+            "--no-wrap",
+            "--exec",
+        ],
+        ..Wrapper::named("watch")
     },
 ];
 
@@ -340,19 +451,20 @@ pub struct ArgumentRun<'w, 'a> {
     pub reads_code: bool,
     /// The words after the runner's own options, as written: `grep foo` in
     /// `xargs -n 1 grep foo`. Empty when they name no command (`exec >log
-    /// 2>&1`, bare `xargs`).
-    pub command: &'w [&'a str],
+    /// 2>&1`, bare `xargs`); `None` when the runner's options, read as
+    /// [`argument_run`] was asked to, do not tell where they start.
+    pub command: Option<&'w [&'a str]>,
 }
 
 /// The [`ArgumentRun`] of `words`, or `None` when they are not headed by an
 /// [`ARGUMENT_RUNNERS`] entry.
-pub fn argument_run<'w, 'a>(words: &'w [&'a str]) -> Option<ArgumentRun<'w, 'a>> {
+pub fn argument_run<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option<ArgumentRun<'w, 'a>> {
     let (name, rest) = words.split_first()?;
     let base = name.rsplit('/').next().unwrap_or(name);
     let runner = ARGUMENT_RUNNERS.iter().find(|r| r.name == base)?;
     Some(ArgumentRun {
         reads_code: matches!(runner.name, "eval" | "watch"),
-        command: rest.get(wrapped_start(runner, rest)?..).unwrap_or(&[]),
+        command: wrapped_start(runner, rest, reading).map(|at| rest.get(at..).unwrap_or(&[])),
     })
 }
 
@@ -361,13 +473,14 @@ pub fn argument_run<'w, 'a>(words: &'w [&'a str]) -> Option<ArgumentRun<'w, 'a>>
 /// → `rm`. `None` when `row` is not headed by one, or its arguments name no
 /// command (`exec >log 2>&1`).
 pub fn argument_command_words(row: &str) -> Option<Vec<&str>> {
-    let mut words = command_words(row)?;
+    let row = row_words(row)?;
+    let mut words = effective_words(&row, Reading::Getopt)?;
     let mut ran = false;
-    while let Some(run) = argument_run(&words) {
-        words = effective_words(run.command)?;
+    while let Some(run) = argument_run(words, Reading::Getopt) {
+        words = effective_words(run.command?, Reading::Getopt)?;
         ran = true;
     }
-    ran.then_some(words)
+    ran.then(|| words.to_vec())
 }
 
 /// A `NAME=value` token, as `env` takes before the command it runs.
@@ -513,8 +626,9 @@ impl<'src> Walker<'src> {
         let text = self.row_text(row, node.start_byte());
         // Policy reads the command from the row text alone, so it must name
         // the same command.
-        let row_command = command_words(&text)?;
-        let node_command = effective_words(&command_node_words(self.src, node)?)?;
+        let row_command = command_words(&text, Reading::Getopt)?;
+        let node_words = command_node_words(self.src, node)?;
+        let node_command = effective_words(&node_words, Reading::Getopt)?;
         if row_command != node_command {
             return None;
         }
@@ -1611,7 +1725,7 @@ mod tests {
         ] {
             assert_eq!(split(input), vec![opaque(input)], "{input:?}");
             assert_eq!(
-                command_words(input).map(|words| words.join(" ")),
+                command_words(input, Reading::Getopt).map(|words| words.join(" ")),
                 Some(command.to_string()),
                 "{input:?}"
             );

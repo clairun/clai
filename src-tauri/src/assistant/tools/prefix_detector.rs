@@ -43,6 +43,7 @@
 
 use crate::assistant::tools::command_splitter::{
     argument_command_words, argument_run, command_words, effective_words, lookup_option, row_words,
+    Reading,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,29 +227,44 @@ const TWO_WORD_PERMISSIVE: &[&str] = &[
 pub fn suggest_prefix(segment: &str) -> String {
     // 1–2. The command's words, without leading env assignments. Anything
     // else (`> file`, `for f in …`) has no prefix to save.
-    match command_words(segment) {
+    match command_words(segment, Reading::Exact) {
         Some(tokens) => prefix_for_words(&tokens),
         None => String::new(),
     }
 }
 
-/// [`suggest_prefix`] for a command's words.
+/// [`suggest_prefix`] for a command's words: the argument runners heading
+/// them, without their own options (as the allow form drops them), then
+/// the prefix of the command they run.
 fn prefix_for_words(tokens: &[&str]) -> String {
-    let binary = tokens[0];
-
-    if let Some(run) = argument_run(tokens) {
-        if run.reads_code || run.command.is_empty() {
-            return binary.to_string();
+    let mut runners = Vec::new();
+    let mut tokens = tokens;
+    while let Some(run) = argument_run(tokens, Reading::Exact) {
+        runners.push(tokens[0]);
+        if run.reads_code {
+            return runners.join(" ");
         }
-        // The runner's own options are dropped, as the allow form drops them.
-        let inner = effective_words(run.command)
-            .map(|words| prefix_for_words(&words))
-            .unwrap_or_default();
-        if inner.is_empty() {
-            return String::new();
+        // A runner with no command written after it (`exec >log 2>&1`, bare
+        // `xargs`) has no prefix that names one: saving the runner alone
+        // would allow every command it can run.
+        match run
+            .command
+            .and_then(|command| effective_words(command, Reading::Exact))
+        {
+            Some(command) => tokens = command,
+            None => return String::new(),
         }
-        return format!("{binary} {inner}");
     }
+    let prefix = command_prefix(tokens);
+    if runners.is_empty() || prefix.is_empty() {
+        return prefix;
+    }
+    format!("{} {prefix}", runners.join(" "))
+}
+
+/// [`prefix_for_words`] for words not headed by an argument runner.
+fn command_prefix(tokens: &[&str]) -> String {
+    let binary = tokens[0];
 
     // A lookup names the lookup: `command rm` would also allow running `rm`.
     if let Some(option) = lookup_option(tokens) {
@@ -564,28 +580,38 @@ fn skip_global_options<'w, 'a>(
 /// deny form keeps reading the row by its head and flags, so a block never
 /// matches less than it did.
 fn canonicalize(segment: &str, skipping: OptionSkipping) -> Option<String> {
-    Some(canonical_words(&command_words(segment)?, skipping)?.join(" "))
+    let reading = match skipping {
+        OptionSkipping::AllButConfig => Reading::Exact,
+        OptionSkipping::All => Reading::Getopt,
+    };
+    Some(canonical_words(&command_words(segment, reading)?, skipping)?.join(" "))
 }
 
 /// [`canonicalize`] for a command's words. `None` when an `xargs` or `exec`
 /// runs a command that cannot be told from its wrapper's arguments.
 fn canonical_words<'a>(words: &[&'a str], skipping: OptionSkipping) -> Option<Vec<&'a str>> {
-    let binary = words[0];
+    let mut form = Vec::new();
+    let mut words = words;
     if skipping == OptionSkipping::AllButConfig {
-        if let Some(run) = argument_run(words).filter(|run| !run.reads_code) {
-            let mut form = vec![binary];
-            if !run.command.is_empty() {
-                form.extend(canonical_words(&effective_words(run.command)?, skipping)?);
+        while let Some(run) = argument_run(words, Reading::Exact).filter(|run| !run.reads_code) {
+            form.push(words[0]);
+            match run.command? {
+                [] => return Some(form),
+                command => words = effective_words(command, Reading::Exact)?,
             }
+        }
+        // A lookup keeps the option that makes it one, as its prefix does:
+        // `command -p -v rm` → `command -v rm`.
+        if let Some(option) = lookup_option(words) {
+            form.extend([words[0], option]);
+            form.extend(words[1..].iter().filter(|word| !is_flag(word)));
             return Some(form);
         }
     }
-    let rest = after_global_options(binary, &words[1..], skipping);
-    Some(
-        std::iter::once(binary)
-            .chain(rest.iter().copied())
-            .collect(),
-    )
+    let binary = words[0];
+    form.push(binary);
+    form.extend(after_global_options(binary, &words[1..], skipping));
+    Some(form)
 }
 
 /// The form a saved allow prefix matches against: global options
@@ -615,7 +641,7 @@ pub fn by_head_name(segment: &str) -> Option<String> {
 /// when a modifier wrapper is run by path or its own arguments cannot be
 /// told from the command.
 pub fn by_run_command(segment: &str) -> Option<String> {
-    Some(by_name(&command_words(segment)?))
+    Some(by_name(&command_words(segment, Reading::Getopt)?))
 }
 
 /// The command `segment` runs from the arguments of `xargs`, `exec`, `eval`

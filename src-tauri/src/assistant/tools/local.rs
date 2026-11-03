@@ -502,7 +502,7 @@ pub(crate) fn evaluate_command_policy(
         } else {
             suggest_prefix(text)
         };
-        let allowed = if is_exact_only(kind, &suggested_prefix) {
+        let allowed = if is_exact_only(&suggested_prefix) {
             run_allowed.contains(&RunCommandGrant::Exact(text.to_string()))
         } else {
             find_matching_prefix(&durable_allowed_prefixes, text, PolicySide::Allow).is_some()
@@ -524,19 +524,20 @@ pub(crate) fn evaluate_command_policy(
     }
 }
 
-/// The rule for a row whose commands the splitter could not all identify:
-/// input it could not parse (`Segment::Unparsed`, which has no prefix), or
-/// an Opaque segment with no prefix to save. Such a row is asked as its exact
-/// text: "Allow once" covers that text alone and no "Always" is offered.
-/// Unparsed input needs that approval in Restricted mode only: Full mode
-/// never prompts, even while a blocklist is active.
-fn is_exact_only(kind: SegmentKind, suggested_prefix: &str) -> bool {
-    kind == SegmentKind::Opaque && suggested_prefix.is_empty()
+/// The rule for a row with no prefix to save: input the splitter could not
+/// parse (`Segment::Unparsed`), an Opaque segment whose commands it could
+/// not all identify, or a command no prefix names safely (bare `xargs`,
+/// which a prefix `xargs` would extend to every command). Such a row is
+/// asked as its exact text: "Allow once" covers that text alone and no
+/// "Always" is offered. Unparsed input needs that approval in Restricted
+/// mode only: Full mode never prompts, even while a blocklist is active.
+fn is_exact_only(suggested_prefix: &str) -> bool {
+    suggested_prefix.is_empty()
 }
 
 /// What an "Allow once" on `row` allows for the rest of the run.
 fn once_grant(row: &crate::commands::permissions::SegmentApproval) -> RunCommandGrant {
-    if is_exact_only(row.kind, &row.suggested_prefix) {
+    if is_exact_only(&row.suggested_prefix) {
         RunCommandGrant::Exact(row.text.clone())
     } else {
         RunCommandGrant::Prefix(row.text.clone())
@@ -3509,11 +3510,15 @@ mod tests {
             );
         }
         let exec = restricted_execution_config(&[], &["rm"]);
-        for command in ["exec >log 2>&1", "xargs grep foo", "watch -n 2 ls"] {
-            let rows = approval_texts(&exec, command);
-            assert!(
-                matches!(rows.as_slice(), [(text, prefix)] if text == command && !prefix.is_empty()),
-                "{command}: {rows:?}"
+        for (command, prefix) in [
+            ("exec >log 2>&1", ""),
+            ("xargs grep foo", "xargs grep"),
+            ("watch -n 2 ls", "watch"),
+        ] {
+            assert_eq!(
+                approval_texts(&exec, command),
+                vec![(command.to_string(), prefix.to_string())],
+                "{command}"
             );
         }
     }
@@ -3584,8 +3589,17 @@ mod tests {
             "xargs -I {} grep foo {}",
             "xargs git -C x push",
             "watch -n 2 ls",
-            "exec >log 2>&1",
             "exec cargo test",
+            "FOO=1 command -v rm",
+            "timeout 5 command -v rm",
+            "env -i command -v rm",
+            "command -p -v rm",
+            "xargs -0 command -v",
+            "xargs -0I grep echo RAN",
+            "xargs -rI grep echo RAN",
+            "xargs -0n 1 grep foo",
+            "exec -la grep echo RAN",
+            "env -iu FOO cargo build",
             "cat <<EOF > notes.md\nuse `ls` here\nEOF",
         ] {
             let rows = approval_texts(&restricted_execution_config(&[], &[]), command);
@@ -3615,9 +3629,10 @@ mod tests {
             ("xargs grep foo", "xargs grep"),
             ("xargs git push", "xargs git push"),
             ("xargs git -C x push", "xargs git push"),
-            ("xargs", "xargs"),
+            ("xargs -0I grep echo RAN", "xargs echo"),
+            ("xargs -0n 1 grep foo", "xargs grep"),
+            ("exec -la grep echo RAN", "exec echo"),
             ("exec cargo test", "exec cargo test"),
-            ("exec >log 2>&1", "exec"),
             ("watch -n 2 ls", "watch"),
             ("eval ls", "eval"),
         ] {
@@ -3650,5 +3665,109 @@ mod tests {
                 "{command} does not run grep"
             );
         }
+    }
+    #[test]
+    fn runner_without_a_command_offers_only_its_exact_text() {
+        // A saved `xargs` or `exec` would allow every command after it.
+        let exec = restricted_execution_config(&[], &[]);
+        for command in [
+            "xargs",
+            "exec >log 2>&1",
+            "exec 3>&1",
+            "xargs -0",
+            "exec -a name",
+        ] {
+            let PolicyResult::NeedsApproval(rows) =
+                evaluate_command_policy(&exec, command, &[], &[])
+            else {
+                panic!("expected approval for {command:?}");
+            };
+            assert_eq!(rows.len(), 1, "{command:?}");
+            assert_eq!(rows[0].suggested_prefix, "", "{command:?}");
+            let once: Vec<RunCommandGrant> = rows.iter().map(once_grant).collect();
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &once, &[]),
+                    PolicyResult::Allow
+                ),
+                "{command:?}"
+            );
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, &format!("{command} rm -rf x"), &once, &[]),
+                    PolicyResult::NeedsApproval(_)
+                ),
+                "allowing {command:?} once must not allow running rm through it"
+            );
+        }
+    }
+
+    #[test]
+    fn runner_options_are_read_as_getopt_reads_them() {
+        // `xargs -0I grep echo RAN` runs `echo` with `grep` as the replace
+        // string, `exec -la grep echo RAN` runs `echo` named `grep`, and
+        // `xargs --process grep` abbreviates `--process-slot-var grep`.
+        for (grant, command) in [
+            ("xargs grep", "xargs -0I grep sh -c evil"),
+            ("xargs grep", "xargs -rI grep sh -c evil"),
+            ("xargs grep", "xargs --process grep sh -c evil"),
+            ("xargs grep", "xargs -J % sh -c evil"),
+            ("exec grep", "exec -la grep sh -c evil"),
+            ("FOO", "env -iu FOO sh -c evil"),
+        ] {
+            let exec = restricted_execution_config(&[grant], &[]);
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::NeedsApproval(_)
+                ),
+                "a saved {grant:?} must not allow {command:?}"
+            );
+        }
+        // An option the table does not list as written may take the next
+        // word, so no prefix names the command after it.
+        let exec = restricted_execution_config(&[], &[]);
+        assert_eq!(
+            approval_texts(&exec, "xargs --process grep echo RAN"),
+            vec![("xargs --process grep echo RAN".to_string(), String::new())]
+        );
+        for exec in [
+            full_execution_config(&["rm"]),
+            restricted_execution_config(&[], &["rm"]),
+        ] {
+            for command in [
+                "xargs -0n 1 rm -rf x",
+                "xargs -0I grep rm -rf x",
+                "xargs -rI grep rm -rf x",
+                "xargs -J % rm -rf x",
+                "xargs --process grep rm -rf x",
+                "xargs -in rm -rf x",
+                "exec -la grep rm -rf x",
+                "env -iu FOO rm -rf x",
+                "env - rm -rf x",
+                "timeout -sKILL 5 rm -rf x",
+                "timeout --pres 5 rm -rf x",
+            ] {
+                assert!(is_block(&exec, command), "{command} must be blocked");
+            }
+        }
+    }
+
+    #[test]
+    fn deeply_nested_runners_do_not_overflow_the_stack() {
+        use crate::assistant::tools::prefix_detector::{canonicalize_for_allow, suggest_prefix};
+        let handle = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(|| {
+                for runner in ["exec ", "nohup "] {
+                    let command = format!("{}grep x", runner.repeat(20_000));
+                    assert!(!suggest_prefix(&command).is_empty(), "{runner}");
+                    assert!(canonicalize_for_allow(&command).is_some(), "{runner}");
+                }
+                let command = format!("{}rm x", "exec ".repeat(20_000));
+                assert!(is_block(&full_execution_config(&["rm"]), &command));
+            })
+            .expect("spawn");
+        handle.join().expect("nested runners must not overflow");
     }
 }
