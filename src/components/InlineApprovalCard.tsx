@@ -305,6 +305,15 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
   const partCount = (rows: BulkPart[]) =>
     rows.reduce((total, row) => total + row.group.indices.length, 0);
   const onceOnlyCount = partCount(onceOnlyParts);
+  // A row answers every command that shares its prefix, so the two
+  // counts part company as soon as commands merge: five commands can need
+  // three decisions. A label calls them parts only while the counts agree,
+  // and names both when they do not.
+  const commandCount = partCount(bulkPlan);
+  const rowsMerged = groups.length < commandCount;
+  const needDecisionLabel = rowsMerged
+    ? `${commandCount} commands in ${groups.length} rows need a decision`
+    : `${groups.length} parts need a decision`;
   const bulkWhy =
     onceOnlyParts.length === 0
       ? 'Saves the prefix of every part this click decides and runs the command.'
@@ -482,7 +491,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
               <p className={styles.segmentsLabel}>
                 {groups.length === 1
                   ? 'Choose how to handle this command (a denial needs a confirm):'
-                  : `${groups.length} parts need a decision (confirm after choosing any denial):`}
+                  : `${needDecisionLabel} (confirm after choosing any denial):`}
               </p>
             )}
             {groups.map((group) => {
@@ -641,7 +650,11 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                 >
                   {confirmLabel()}
                 </button>
-                {!allDecided && <span className={styles.mutedHint}>Choose for every part to continue</span>}
+                {!allDecided && (
+                  <span className={styles.mutedHint}>
+                    Choose for every {rowsMerged ? 'row' : 'part'} to continue
+                  </span>
+                )}
               </div>
             </div>
           )}

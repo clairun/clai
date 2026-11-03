@@ -1062,6 +1062,19 @@ const HALF_OPAQUE = {
   ],
 } as unknown as PermissionRequest;
 
+// Two commands that share a prefix, and one with nothing to save: the
+// rows are two, the commands three, and only one row can be saved.
+const MIXED_SAVABILITY = {
+  ...SHARED_PREFIX,
+  requestId: 'perm-mixed-savable',
+  command: 'ls a && ls b && ./deploy --now',
+  segments: [
+    { text: 'ls a', kind: 'simple', suggestedPrefix: 'ls' },
+    { text: 'ls b', kind: 'simple', suggestedPrefix: 'ls' },
+    { text: './deploy --now', kind: 'opaque', suggestedPrefix: '' },
+  ],
+} as unknown as PermissionRequest;
+
 const submitted = (): unknown[] => {
   const call = mockInvoke.mock.calls.find(([cmd]) => cmd === 'submit_permission_decision');
   if (!call) throw new Error('no decision was submitted');
@@ -1084,7 +1097,9 @@ describe('ApprovalCard — one row per prefix', () => {
     expect(card.getByText('ls target')).toBeInTheDocument();
     expect(card.getByText('ls src')).toBeInTheDocument();
     expect(card.getByText('grep a f | head -30')).toBeInTheDocument();
-    expect(card.getByText('2 parts need a decision (confirm after choosing any denial):')).toBeInTheDocument();
+    // Two rows answer three commands, so the header names both counts:
+    // the card asks twice, but the click approves three things.
+    expect(card.getByText('3 commands in 2 rows need a decision (confirm after choosing any denial):')).toBeInTheDocument();
   });
 
   it('collapses the duplicate chips in the spoken card too', () => {
@@ -1176,7 +1191,9 @@ describe('ApprovalCard — one row per prefix', () => {
     // The two `git status` parts are one row, which says it covers two.
     expect(card.getAllByText(/No prefix to save for this part/)).toHaveLength(2);
     expect(card.getByText('\u00d72')).toBeInTheDocument();
-    expect(card.getByText('2 parts need a decision (confirm after choosing any denial):')).toBeInTheDocument();
+    // The row says it stands for two commands, and the header counts
+    // the three commands in the two rows it shows.
+    expect(card.getByText('3 commands in 2 rows need a decision (confirm after choosing any denial):')).toBeInTheDocument();
 
     await userEvent.click(denyOnce(0));
     await userEvent.click(allowOnce(1));
@@ -1208,5 +1225,33 @@ describe('ApprovalCard — one row per prefix', () => {
     expect(screen.getByText('complex')).toBeInTheDocument();
     expect(screen.getByText('cat notes')).toBeInTheDocument();
     expect(screen.getByText('cat < notes')).toBeInTheDocument();
+  });
+
+  it('counts the commands behind the rows in the bulk tooltip', () => {
+    render(<ApprovalCard req={MIXED_SAVABILITY} />);
+
+    // The two `ls` commands are one row, so a count of rows would claim
+    // the click saves the prefix of 1 of the 2 parts it decides. It decides
+    // three commands and saves the prefix of two of them.
+    const bulk = screen.getByRole('button', { name: 'Allow all (always where possible)' });
+    expect(bulk.getAttribute('title')).toBe(
+      'Saves the prefixes of 2 of the 3 parts this click decides and runs the command; the remaining part is allowed once only.'
+    );
+    expect(bulk.getAttribute('title')).not.toMatch(/1 of the 2/);
+    // The header counts the same three commands, and says they sit in two
+    // rows, so the two numbers on the card can be told apart.
+    expect(
+      screen.getByText('3 commands in 2 rows need a decision (confirm after choosing any denial):')
+    ).toBeInTheDocument();
+  });
+
+  it('asks for every row while a row stands for two commands', async () => {
+    render(<ApprovalCard req={MIXED_SAVABILITY} />);
+
+    // Denying one row leaves the other to answer, and what is left to
+    // answer is a row, not the two commands behind it.
+    await userEvent.click(denyOnce(0));
+    expect(screen.getByText('Choose for every row to continue')).toBeInTheDocument();
+    expect(screen.queryByText('Choose for every part to continue')).toBeNull();
   });
 });
