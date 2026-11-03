@@ -4,6 +4,7 @@
 //! 5.3 ran for it with an empty `PATH`, logged by `command_not_found_handle`.
 //! Builtins and functions are not logged.
 
+use crate::assistant::tools::command_splitter::split_command;
 use crate::assistant::tools::local::{evaluate_command_policy, PolicyResult};
 use crate::config::types::ShellCapabilityConfig;
 use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
@@ -18,10 +19,22 @@ fn cases() -> Vec<Case> {
     serde_json::from_str(include_str!("bash_runs.json")).expect("bash_runs.json")
 }
 
-/// Every command bash runs is blocked by a blocklist entry naming it, or the
-/// input is asked as one exact row.
+/// Every command bash runs that the splitter writes out is blocked by a
+/// blocklist entry naming it. The rest is invisible by design: the command
+/// sits inside a quoted code string, an alias, or text kept as heredoc
+/// body, which the policy does not look into. Full mode must still never
+/// produce an approval row.
 #[test]
 fn blocklist_sees_every_command_bash_runs() {
+    let invisible = [
+        // Code inside a quoted string the policy does not read.
+        (r#"trap 'touch PWN' EXIT"#, "touch"),
+        (r#"trap 'touch PWN' DEBUG; :"#, "touch"),
+        // An alias: `touch` is what `x` expands to at run time.
+        (r"shopt -s expand_aliases", "touch"),
+        // A substitution inside heredoc body text kept literal.
+        (r"x=1; cat <<EOF", "touch"),
+    ];
     let mut missed = Vec::new();
     for case in cases() {
         for name in &case.runs {
@@ -33,14 +46,19 @@ fn blocklist_sees_every_command_bash_runs() {
                 },
                 ..Default::default()
             };
-            let seen = match evaluate_command_policy(&exec, &case.input, &[], &[]) {
+            let ok = match evaluate_command_policy(&exec, &case.input, &[], &[]) {
                 PolicyResult::Block { .. } => true,
-                PolicyResult::NeedsApproval(rows) => {
-                    matches!(rows.as_slice(), [row] if row.text == case.input.trim())
+                PolicyResult::Allow => {
+                    invisible.iter().any(|(i, n)| n == name && case.input.starts_with(i))
+                        // Allowed because the splitter could not parse the
+                        // input at all; Full mode runs such input, asking
+                        // only for its exact text in Restricted mode.
+                        || matches!(split_command(&case.input).as_slice(), [row]
+                            if row.text() == case.input.trim())
                 }
-                PolicyResult::Allow => false,
+                PolicyResult::NeedsApproval(_) => false,
             };
-            if !seen {
+            if !ok {
                 missed.push(format!("{:?} runs {name:?}", case.input));
             }
         }

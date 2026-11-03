@@ -27,6 +27,12 @@
 //!    subcommand-shaped (`^[a-z][a-z0-9_-]{0,24}$`).
 //!    For `None`: ignore subwords entirely.
 //!
+//! Interpreters (`bash`, `python3`, …) are their own case: the prefix
+//! is the binary plus the word that names what it runs — the script
+//! (`bash tools/check-links.sh`) or a module flag with its value
+//! (`python3 -m pytest`). Inline code (`bash -c`) and stdin (`python3 -`)
+//! suggest the binary alone.
+//!
 //! The output is always a default; the modal pre-fills it into an editable
 //! field so the user can narrow or broaden before confirming.
 
@@ -190,8 +196,6 @@ const ONE_WORD: &[&str] = &[
     "journalctl",
     "brew",
     "rustup",
-    "deno",
-    "bun",
     "tsc",
     "ruff",
     "black",
@@ -244,6 +248,10 @@ pub fn suggest_prefix(segment: &str) -> String {
     // would trust every loop over `i`, whatever its body runs.
     if crate::assistant::tools::command_splitter::is_shell_syntax(binary) {
         return String::new();
+    }
+
+    if INTERPRETERS.contains(&binary) {
+        return interpreter_prefix(binary, &tokens[1..]);
     }
 
     let style = lookup_style(binary);
@@ -352,11 +360,11 @@ struct GlobalValueOption {
     /// (`-C`, `--git-dir`, …), covering both spellings when the long
     /// form also accepts `=`.
     name: &'static str,
-    /// The option's value becomes configuration for this run (`git -c
-    /// <key>=<value>`, `git --config-env <key>=<envvar>`). Configuration
-    /// can name commands to execute, so such an invocation can do more
-    /// than the subcommand it ends in: it is kept out of allow matching
-    /// (see [`OptionSkipping::AllButConfig`]).
+    /// The option's value changes what this run can execute: it names
+    /// configuration (`git -c <key>=<value>`) or the program to run
+    /// (`python -m <module>`). It is kept out of allow matching
+    /// (see [`OptionSkipping::AllButConfig`]): such an invocation can do more
+    /// than the subcommand it ends in.
     injects_config: bool,
 }
 
@@ -392,24 +400,40 @@ struct GlobalOptionSpec {
 /// `-n`, docker `--context` are candidates) is an entry here, not a
 /// parser change: the skipping semantics live once in
 /// [`skip_global_options`], which this table merely feeds.
-const GLOBAL_OPTION_SPECS: &[GlobalOptionSpec] = &[GlobalOptionSpec {
-    binary: "git",
-    // From git's synopsis (`git --bogus` usage). `-C` and `-c` accept
-    // no attached short form (git rejects `-Cdir`); the long options
-    // accept both spellings (`--git-dir=x`, `--git-dir x`). `-c` and
-    // `--config-env` inject configuration, so they are marked as such;
-    // the rest only relocate (`-C`, `--git-dir`, `--work-tree`) or
-    // scope (`--namespace`, `--attr-source`) the run.
-    options: &[
-        option("-C", false),
-        option("-c", true),
-        option("--git-dir", false),
-        option("--work-tree", false),
-        option("--namespace", false),
-        option("--config-env", true),
-        option("--attr-source", false),
-    ],
-}];
+const GLOBAL_OPTION_SPECS: &[GlobalOptionSpec] = &[
+    GlobalOptionSpec {
+        binary: "git",
+        // From git's synopsis (`git --bogus` usage). `-C` and `-c` accept
+        // no attached short form (git rejects `-Cdir`); the long options
+        // accept both spellings (`--git-dir=x`, `--git-dir x`). `-c` and
+        // `--config-env` inject configuration, so they are marked as such;
+        // the rest only relocate (`-C`, `--git-dir`, `--work-tree`) or
+        // scope (`--namespace`, `--attr-source`) the run.
+        options: &[
+            option("-C", false),
+            option("-c", true),
+            option("--git-dir", false),
+            option("--work-tree", false),
+            option("--namespace", false),
+            option("--config-env", true),
+            option("--attr-source", false),
+        ],
+    },
+    GlobalOptionSpec {
+        // "-m" names the module to run, changing what the
+        // invocation executes, so the allow form keeps it next to its value:
+        // python3 -m pytest -q matches a saved python3 -m pytest.
+        binary: "python",
+        options: &[option("-m", true)],
+    },
+    GlobalOptionSpec {
+        // "-m" names the module to run, changing what the
+        // invocation executes, so the allow form keeps it next to its value:
+        // python3 -m pytest -q matches a saved python3 -m pytest.
+        binary: "python3",
+        options: &[option("-m", true)],
+    },
+];
 
 /// `binary`'s value-taking global options, or none when its option table
 /// is unknown: an unlisted binary must never have a word consumed.
@@ -523,8 +547,8 @@ pub fn by_head_name(segment: &str) -> Option<String> {
 
 /// The command `segment` runs, joined by single spaces, with the directory
 /// dropped from the command name: `timeout 60 rm -rf x` → `rm -rf x`. `None`
-/// when the command is not written out (`bash -c 'rm -rf /'`), so the
-/// blocklist cannot see into it.
+/// when a modifier wrapper is run by path or its own arguments cannot be
+/// told from the command.
 pub fn by_run_command(segment: &str) -> Option<String> {
     let words = command_words(segment)?;
     let name = words[0].rsplit('/').next().unwrap_or(words[0]);
@@ -534,6 +558,57 @@ pub fn by_run_command(segment: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join(" "),
     )
+}
+
+/// Interpreters whose first non-option word is the script they run.
+/// A saved prefix keeps that word, so a grant names the script
+/// (`bash tools/check-links.sh` saves as itself); code passed inline is
+/// not written out, and neither is the stdin form, so those suggest the
+/// binary alone.
+const INTERPRETERS: &[&str] = &[
+    "bash", "sh", "zsh", "dash", "ksh", "fish", "python", "python3", "node", "deno", "bun", "ruby",
+    "perl", "php",
+];
+
+/// The options whose value is a program run by the interpreter: the
+/// prefix stops at the binary, since the code is not a name anything
+/// else would share.
+fn takes_code(binary: &str, flag: &str) -> bool {
+    matches!(
+        (binary, flag),
+        ("bash" | "sh" | "zsh" | "dash" | "ksh" | "fish", "-c")
+            | ("python" | "python3", "-c")
+            | ("node" | "ruby" | "perl", "-e")
+            | ("php", "-r"),
+    )
+}
+
+/// `binary` plus the first word that names what it runs: the script
+/// word, or a module flag with its value. Options the table does not
+/// name are skipped, like the global options of any other binary.
+fn interpreter_prefix(binary: &str, rest: &[&str]) -> String {
+    let mut words = vec![binary];
+    for (i, &token) in rest.iter().enumerate() {
+        if token == "-" || token == "--" {
+            break; // reads the program from stdin
+        }
+        if is_flag(token) {
+            if matches!(binary, "python" | "python3") && token == "-m" {
+                if let Some(module) = rest.get(i + 1) {
+                    words.push(token);
+                    words.push(module);
+                }
+                break;
+            }
+            if takes_code(binary, token) {
+                break;
+            }
+            continue;
+        }
+        words.push(token); // the script
+        break;
+    }
+    words.join(" ")
 }
 
 fn lookup_style(binary: &str) -> Style {
@@ -587,6 +662,68 @@ mod tests {
         assert_eq!(
             got, expected,
             "suggest_prefix({input:?}) → {got:?}, expected {expected:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Interpreters — the prefix names the script, not the code
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn interpreter_script_word_is_the_prefix() {
+        check("bash tools/check-links.sh", "bash tools/check-links.sh");
+        check("sh script.sh", "sh script.sh");
+        check("zsh run.zsh", "zsh run.zsh");
+        check("dash d.sh", "dash d.sh");
+        check("ksh k.ksh", "ksh k.ksh");
+        check("fish f.fish", "fish f.fish");
+        check("python main.py", "python main.py");
+        check("python3 run.py arg", "python3 run.py");
+        check("node server.js", "node server.js");
+        check("ruby app.rb", "ruby app.rb");
+        check("perl scan.pl", "perl scan.pl");
+        check("php unit.php", "php unit.php");
+        check("bun install.js", "bun install.js");
+        check("deno run mod.ts", "deno run");
+    }
+
+    #[test]
+    fn interpreter_inline_code_stops_at_the_binary() {
+        check("bash -c \"echo hi\"", "bash");
+        check("python3 -c \"print(1)\"", "python3");
+        check("node -e \"console.log(1)\"", "node");
+        check("ruby -e \"puts 1\"", "ruby");
+        check("perl -e \"print 1\"", "perl");
+        check("php -r \"echo 1;\"", "php");
+    }
+
+    #[test]
+    fn interpreter_stdin_forms_stop_at_the_binary() {
+        check("python3 -", "python3");
+        check("bash -", "bash");
+    }
+
+    #[test]
+    fn interpreter_env_assignment_is_skipped() {
+        check("FOO=1 bash tools/x.sh", "bash tools/x.sh");
+    }
+
+    #[test]
+    fn interpreter_options_are_skipped_before_the_script() {
+        check("python3 -q -u tools/x.py", "python3 tools/x.py");
+        check("bash -x tools/run.sh", "bash tools/run.sh");
+    }
+
+    #[test]
+    fn python_module_flag_stays_in_the_prefix_and_round_trips() {
+        check("python3 -m pytest -q", "python3 -m pytest");
+        check("python -m http.server", "python -m http.server");
+        check("python3 -m", "python3");
+        let prefix = suggest_prefix("python3 -m pytest -q");
+        let allow = canonicalize_for_allow("python3 -m pytest -q").unwrap();
+        assert!(
+            allow.starts_with(&prefix),
+            "allow form {allow:?} does not cover prefix {prefix:?}"
         );
     }
 
@@ -1236,9 +1373,14 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_of_code_has_no_command_to_name() {
-        assert_eq!(suggest_prefix("bash -c 'rm -rf /'"), "");
-        assert_eq!(by_run_command("bash -c 'rm -rf /'"), None);
+    fn code_argument_is_named_by_its_written_words() {
+        // The code inside the argument is not looked into, so the prefix
+        // names the binary alone and deny matching stays outside it.
+        assert_eq!(suggest_prefix("bash -c 'rm -rf /'"), "bash");
+        assert_eq!(
+            by_run_command("bash -c 'rm -rf /'").as_deref(),
+            Some("bash -c 'rm -rf /'")
+        );
     }
 
     #[test]

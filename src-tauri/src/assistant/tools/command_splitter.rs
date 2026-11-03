@@ -16,10 +16,15 @@
 //! did not parse (`Walker::leaf`). A parse error, anything else, or a
 //! construct whose effect depends on runtime values bash may evaluate as code
 //! (arithmetic on variables, indirect expansion) makes the whole input one
-//! [`Segment::Unparsed`]. So does a command whose argument is a command or a
-//! string of code that is not written out (`xargs`, `bash -c`, `trap`, …),
-//! input that names a variable bash expands as code (`PS4`), or a command
-//! whose name is not a plain word (`\rm`, `"$cmd"`).
+//! [`Segment::Unparsed`]. So does input that names a variable bash expands
+//! as code (`PS4`), or a command whose name is not a plain word (`\rm`,
+//! `"$cmd"`).
+//!
+//! A command whose argument is code (`bash -c`, `xargs`, `eval`, `trap`, …)
+//! is named by the words it is written with; the code inside its argument
+//! is not looked into, like a script file named by `source`. An unquoted
+//! heredoc body names only the commands its `$(…)`, `<(…)` substitutions
+//! run; the rest of the body stays text with the row.
 //!
 //! A wrapper that only changes how a command runs still names the command it
 //! runs (`timeout 600 cargo build` runs `cargo build`), so its row keeps that
@@ -114,9 +119,8 @@ pub fn row_words(row: &str) -> Option<Vec<&str>> {
 
 /// The command `row` runs: the words of the command itself, looking through
 /// the wrappers that only change how it runs (`timeout 600 cargo build` →
-/// `cargo build`). `None` when the command is not written out (`bash -c
-/// 'rm -rf /'`) or when the wrapper's own arguments cannot be told from the
-/// command.
+/// `cargo build`). `None` when a modifier wrapper is run by path or its own
+/// arguments cannot be told from the command.
 pub fn command_words(row: &str) -> Option<Vec<&str>> {
     effective_words(&row_words(row)?)
 }
@@ -133,37 +137,6 @@ fn command_node_words<'src>(src: &'src str, node: Node) -> Option<Vec<&'src str>
     };
     Some(words.iter().map(|n| &src[n.byte_range()]).collect())
 }
-
-/// Commands whose argument is a command or a string of code that is not
-/// written out, so the command they run cannot be named. Matched on the last
-/// part of the command's path.
-const CODE_WRAPPERS: &[&str] = &[
-    "bash",
-    "sh",
-    "zsh",
-    "dash",
-    "ksh",
-    "fish",
-    "xargs",
-    "eval",
-    "watch",
-    "exec",
-    "source",
-    ".",
-    "command",
-    "builtin",
-    "coproc",
-    "trap",
-    "alias",
-    "let",
-    "mapfile",
-    "readarray",
-    "compgen",
-    "complete",
-    "hash",
-    "enable",
-    "fc",
-];
 
 /// A wrapper that only changes how a command runs: the command it runs is
 /// written out after it, so the policy can still name it.
@@ -224,6 +197,16 @@ const MODIFIER_WRAPPERS: &[ModifierWrapper] = &[
         plain_args: 0,
     },
     ModifierWrapper {
+        name: "command",
+        value_options: &[],
+        plain_args: 0,
+    },
+    ModifierWrapper {
+        name: "builtin",
+        value_options: &[],
+        plain_args: 0,
+    },
+    ModifierWrapper {
         name: "env",
         value_options: &["-u", "--unset", "-C", "--chdir"],
         plain_args: 0,
@@ -231,15 +214,12 @@ const MODIFIER_WRAPPERS: &[ModifierWrapper] = &[
 ];
 
 /// The command the words name, looking through the wrappers that only change
-/// how it runs: `timeout 600 cargo build` names `cargo build`. `None` when
-/// the words name a command that is not written out (`bash -c 'rm -rf /'`),
-/// or when the wrapper's own arguments cannot be told from the command.
+/// how it runs: `timeout 600 cargo build` names `cargo build`. `None` when a
+/// wrapper is run by path or its own arguments cannot be told from the
+/// command.
 fn effective_words<'a>(words: &[&'a str]) -> Option<Vec<&'a str>> {
     let (name, rest) = words.split_first()?;
     let base = name.rsplit('/').next().unwrap_or(name);
-    if CODE_WRAPPERS.contains(&base) {
-        return None;
-    }
     let Some(wrapper) = MODIFIER_WRAPPERS.iter().find(|w| w.name == base) else {
         return Some(words.to_vec());
     };
@@ -401,7 +381,7 @@ impl<'src> Walker<'src> {
             let word = name.named_child(0)?;
             let text = self.text(word);
             let basename = text.rsplit('/').next().unwrap_or(text);
-            if word.kind() != "word" || !is_plain_name(text) || CODE_WRAPPERS.contains(&basename) {
+            if word.kind() != "word" || !is_plain_name(text) {
                 return None;
             }
             // A wrapper runs the command written after it: the row is opaque
@@ -692,14 +672,13 @@ impl<'src> Walker<'src> {
                         .src
                         .get(body_start?..child.start_byte())
                         .is_none_or(|skipped| skipped.bytes().any(|b| b != b'\n'));
-                    if moved && !text.is_empty()
-                        || !quoted && (text.contains("\\\n") || text.contains('`'))
-                    {
+                    if moved && !text.is_empty() || !quoted && text.contains("\\\n") {
                         return None;
                     }
-                    // A quoted delimiter keeps the body literal.
+                    // A quoted delimiter keeps the body literal; an
+                    // unquoted one is walked for the commands it expands.
                     if !quoted {
-                        self.word(child)?;
+                        self.heredoc_body_walk(child)?;
                     }
                 }
                 "heredoc_end" => {
@@ -725,6 +704,25 @@ impl<'src> Walker<'src> {
                 "file_redirect" | "herestring_redirect" => self.word(child)?,
                 "&&" | "||" | "|" | "|&" | ";" | "&" => {}
                 _ => return None,
+            }
+        }
+        Some(())
+    }
+
+    /// An unquoted heredoc body. Tree-sitter parses the `$(...)` and `<()`
+    /// commands bash expands into nodes, which become rows of their own;
+    /// the remaining text it did not parse (plain `$var`, `${var}`,
+    /// `$((…))`, backticks) is kept as body text: the row stays named, and
+    /// the policy does not look inside it, as it does not look inside
+    /// `bash -c` strings.
+    fn heredoc_body_walk(&mut self, node: Node) -> Option<()> {
+        for child in Self::children(node) {
+            match child.kind() {
+                // Bash reads `$((` as arithmetic, not a command to run.
+                "command_substitution" if self.text(child).starts_with("$((") => {}
+                "command_substitution" | "process_substitution" => self.word(child)?,
+                "heredoc_body" => self.heredoc_body_walk(child)?,
+                _ => {}
             }
         }
         Some(())
@@ -1048,11 +1046,12 @@ mod tests {
     }
 
     #[test]
-    fn wrappers_run_by_path_are_unparsed() {
+    fn modifier_wrappers_run_by_path_are_unparsed() {
+        // A modifier wrapper run by path cannot be told from the command
+        // it wraps, so the input is asked as its exact text. A command
+        // whose argument is code is named even when run by path.
         for input in [
             "/usr/bin/env touch PWN",
-            "/bin/sh -c 'touch PWN'",
-            "/usr/bin/xargs touch <<< PWN",
             "/usr/bin/timeout 2 touch PWN",
             "FOO=1 ./nice touch PWN",
         ] {
@@ -1385,26 +1384,44 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Executor commands at head → Opaque
+    // A command whose argument is code names the head it runs directly
     // -----------------------------------------------------------------
 
     #[test]
-    fn command_that_runs_its_arguments_is_unparsed() {
-        // The command these run is not written out, so the row cannot name
-        // it and is asked as its exact text.
+    fn commands_whose_argument_is_code_are_named() {
+        // The words name the command bash runs directly; the code inside
+        // the argument is not looked into.
         for input in [
-            r#"bash -c "rm -rf /""#,
-            r#"sh -c "echo hi""#,
-            "find . -name '*.tmp' | xargs rm",
-            r#"eval "$cmd""#,
+            "bash -c \"rm -rf /\"",
+            "sh -c \"echo hi\"",
+            "eval \"$cmd\"",
             "watch -n 1 'ls'",
-            "command touch PWN",
             "exec touch PWN",
             "source ./setup.sh",
             ". ./setup.sh",
-            "\\touch PWN",
-            "\"touch\" PWN",
+            "xargs rm",
+            "/bin/sh -c 'touch PWN'",
         ] {
+            assert_eq!(split(input), vec![simple(input)], "{input:?}");
+        }
+        assert_eq!(
+            split("find . -name '*.tmp' | xargs rm"),
+            vec![simple("find . -name '*.tmp'"), simple("xargs rm")]
+        );
+        assert_eq!(
+            split("/usr/bin/xargs touch <<< PWN"),
+            vec![opaque("/usr/bin/xargs touch <<< PWN")]
+        );
+        // `command` and `builtin` write the command they run out, so the
+        // row looks through them to it (an Opaque row, like the `timeout`
+        // rows).
+        assert_eq!(
+            split("command touch PWN"),
+            vec![opaque("command touch PWN")]
+        );
+        assert_eq!(split("builtin cd /x"), vec![opaque("builtin cd /x")]);
+        // A command whose name is not a plain word still cannot be named.
+        for input in ["\\touch PWN", "\"touch\" PWN"] {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
     }
@@ -1904,12 +1921,15 @@ mod tests {
             "E\n",
             "run \"M2 drop ctx check\"\n",
         );
-        // `source` runs a file nobody has seen.
-        assert_eq!(split(input), vec![unparsed(input.trim())]);
+        // `source` names the script it runs; the file's contents are not
+        // looked into. The function body splits at its `;` into real
+        // commands, the header and braces are not segments, and the
+        // heredoc body stays with `python3`.
         assert_eq!(
-            split(&input.replace("source ./.goenv.sh && ", "")),
+            split(input),
             vec![
                 simple("cd /w"),
+                simple("source ./.goenv.sh"),
                 simple("M=$PWD/.trash/rev/mut"),
                 simple("mkdir -p $M"),
                 simple("cd cloud-devstack"),
@@ -1919,19 +1939,14 @@ mod tests {
                 opaque("cp internal/docker/diagnose.go /tmp/d.go 2>/dev/null"),
                 simple("cp internal/docker/diagnose.go ../d.orig"),
                 simple("echo \"== $1\""),
-                opaque("go test ./internal/docker/ ./internal/ops/ -run 'Diagnose|FixFor' 2>&1"),
+                opaque("go test ./internal/docker/ ./internal/ops/ -run \'Diagnose|FixFor\' 2>&1"),
                 simple("grep -E \"^(ok|FAIL|---)\""),
                 simple("head -4"),
                 simple("cp ../d.orig internal/docker/diagnose.go"),
-                simple("sed -i 's/ || strings.Contains(lower, \"cannot connect\")//' internal/docker/diagnose.go"),
+                simple("sed -i \'s/ || strings.Contains(lower, \"cannot connect\")//\' internal/docker/diagnose.go"),
                 simple("run \"M1 drop\""),
-                simple("sed -i 's/x//' internal/docker/diagnose.go"),
-                opaque(concat!(
-                    "python3 - <<'E'\n",
-                    "p='internal/docker/diagnose.go'; s=open(p).read()\n",
-                    "s=s.replace('\\tif err != nil {\\n','\\tif err != nil {\\n',1); open(p,'w').write(s)\n",
-                    "E",
-                )),
+                simple("sed -i \'s/x//\' internal/docker/diagnose.go"),
+                opaque("python3 - <<\'E\'\np=\'internal/docker/diagnose.go\'; s=open(p).read()\ns=s.replace(\'\\tif err != nil {\\n\',\'\\tif err != nil {\\n\',1); open(p,\'w\').write(s)\nE"),
                 simple("run \"M2 drop ctx check\""),
             ]
         );

