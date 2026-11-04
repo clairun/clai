@@ -81,7 +81,7 @@ type View = { kind: 'overview' } | { kind: 'source'; key: string } | { kind: 'ac
 // ── Helpers ─────────────────────────────────────────────────────────
 
 // The backend's default ask-first list (config/types.rs), for an agent drafted
-// without the backend's defaults.
+// without the backend's defaults. A test there keeps the two lists equal.
 const DEFAULT_ASK_FIRST = [
   'git push', 'gh pr merge', 'gh release', 'gh repo delete', 'gh api -X DELETE',
   'npm publish', 'pnpm publish', 'yarn publish', 'yarn npm publish', 'cargo publish', 'twine upload',

@@ -767,6 +767,18 @@ mod tests {
     }
 
     #[test]
+    fn the_settings_form_drafts_the_same_default_list() {
+        let form = include_str!("../../../src/components/Settings/AgentBehaviorForm.tsx");
+        let start = form
+            .find("const DEFAULT_ASK_FIRST = [")
+            .expect("the form's default list");
+        let list = &form[start..];
+        let list = &list[..list.find("];").expect("the end of the list")];
+        let rules: Vec<&str> = list.split('\'').skip(1).step_by(2).collect();
+        assert_eq!(rules, default_ask_first_command_prefixes());
+    }
+
+    #[test]
     fn a_config_without_an_ask_first_list_builds_it_from_its_blocklist() {
         let shell = stored_shell(serde_json::json!({
             "mode": "restricted",
