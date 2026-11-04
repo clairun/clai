@@ -341,12 +341,14 @@ pub(crate) fn evaluate_command_policy(
         .any(|s| matches!(s, Segment::Exact(_) | Segment::Unparsed(_)));
     let rows: Vec<AskFirstRow> = segments
         .iter()
-        .filter_map(|segment| {
+        .flat_map(|segment| {
             let text = segment.text();
-            matching_rule(&rules, text, any_exact).map(|rule| AskFirstRow {
-                text: text.to_string(),
-                rule: rule.trim().to_string(),
-            })
+            matching_rules(&rules, text, any_exact)
+                .into_iter()
+                .map(|rule| AskFirstRow {
+                    text: text.to_string(),
+                    rule,
+                })
         })
         .collect();
 
@@ -357,40 +359,65 @@ pub(crate) fn evaluate_command_policy(
     }
 }
 
-/// The first of `rules` that names a command the row `text` runs.
+/// Every rule of `rules` that names a command the row `text` runs, trimmed,
+/// once each, in list order. "Always allow" removes all of them, so the row
+/// does not ask again through another rule.
 ///
 /// A rule matches the row as written, and also when the command is run by
 /// path or after assignments (`FOO=1 /usr/bin/rm`). The row is also read
 /// as the head it runs a command with and the command that head runs:
 /// `timeout 60 rm -rf x` matches `rm` and `timeout`, `xargs rm` matches
 /// `rm` and `xargs`. Every command a misread option could hide is read
-/// too: `xargs -0I rm echo` matches `rm`. When `any_exact` is set, some
-/// row of the input could not be named, so every run of words is read.
-fn matching_rule(rules: &[String], text: &str, any_exact: bool) -> Option<String> {
+/// too: `xargs -0I rm echo` matches `rm`, and so are the commands `find`
+/// runs for its matches and the method `gh api` requests. When `any_exact`
+/// is set, some row of the input could not be named, so every run of words
+/// is read.
+fn matching_rules(rules: &[String], text: &str, any_exact: bool) -> Vec<String> {
     use crate::assistant::tools::prefix_detector::{
         by_any_reading, by_argument_command, by_find_action, by_head_name, by_run_command,
-        gh_api_method_forms,
+        canonicalize_for_deny, gh_api_method_forms,
     };
 
-    let find = |text: &str| find_matching_prefix(rules, text);
-    find(text)
-        .or_else(|| by_head_name(text).and_then(|head| find(&head)))
-        .or_else(|| by_run_command(text).and_then(|cmd| find(&cmd)))
-        .or_else(|| by_argument_command(text).and_then(|cmd| find(&cmd)))
-        .or_else(|| by_any_reading(text).iter().find_map(|cmd| find(cmd)))
-        .or_else(|| by_find_action(text).iter().find_map(|cmd| find(cmd)))
-        .or_else(|| gh_api_method_forms(text).iter().find_map(|form| find(form)))
-        .or_else(|| any_exact.then(|| word_run_rule(rules, text)).flatten())
-}
+    let mut readings: Vec<String> = std::iter::once(text.to_string())
+        .chain(by_head_name(text))
+        .chain(by_run_command(text))
+        .chain(by_argument_command(text))
+        .collect();
+    // `by_any_reading` can give a reading per word of a long row, so only
+    // these are read for `find` actions and the `gh api` method.
+    let derived: Vec<String> = readings
+        .iter()
+        .flat_map(|reading| {
+            by_find_action(reading)
+                .into_iter()
+                .chain(gh_api_method_forms(reading))
+        })
+        .collect();
+    readings.extend(derived);
+    readings.extend(by_any_reading(text));
+    // A rule cannot hide behind leading assignments or global options either:
+    // `FOO=bar rm` reads as `rm`, `git -C repo push` as `git push`.
+    let canonical: Vec<String> = readings
+        .iter()
+        .filter_map(|reading| canonicalize_for_deny(reading))
+        .collect();
+    readings.extend(canonical);
+    if any_exact {
+        readings.extend(word_runs(text));
+    }
 
-/// The first of `rules` that starts one of the [`word_runs`] of `text`.
-fn word_run_rule(rules: &[String], text: &str) -> Option<String> {
-    word_runs(text).find_map(|run| {
-        rules
-            .iter()
-            .find(|p| !p.trim().is_empty() && matches_prefix_literal(p.trim(), &run))
-            .cloned()
-    })
+    let mut matched: Vec<String> = Vec::new();
+    for rule in rules.iter().map(|rule| rule.trim()) {
+        if !rule.is_empty()
+            && !matched.iter().any(|seen| seen == rule)
+            && readings
+                .iter()
+                .any(|reading| matches_prefix_literal(rule, reading))
+        {
+            matched.push(rule.to_string());
+        }
+    }
+    matched
 }
 
 /// Words a rule may span in [`word_runs`].
@@ -843,35 +870,6 @@ async fn await_path_grant_decision(
         }
         Err(_) => abandon_guard.expire_and_stop().await,
     }
-}
-
-/// Word-boundary prefix match for command-policy lists. Returns the first
-/// matching prefix on a hit.
-///
-/// Matching rules:
-///   - prefix "kubectl get" matches command "kubectl get pods"
-///   - prefix "kubectl" matches command "kubectl delete pods"
-///   - prefix "kubectl get" does NOT match command "kubectl delete pods"
-fn find_matching_prefix(prefixes: &[String], command: &str) -> Option<String> {
-    prefixes
-        .iter()
-        .find(|p| matches_prefix(p, command))
-        .cloned()
-}
-
-fn matches_prefix(prefix: &str, command: &str) -> bool {
-    let p = prefix.trim();
-    if p.is_empty() {
-        return false;
-    }
-    if matches_prefix_literal(p, command) {
-        return true;
-    }
-    // Fall back to the command's canonical forms, so a rule cannot hide
-    // behind leading assignments or global options: `FOO=bar rm` reads as
-    // `rm`, `git -C repo push` and `git --no-pager push` as `git push`.
-    crate::assistant::tools::prefix_detector::canonicalize_for_deny(command)
-        .is_some_and(|canonical| matches_prefix_literal(p, &canonical))
 }
 
 /// Literal word-boundary prefix test: `command` equals `p`, or starts with
@@ -1916,6 +1914,22 @@ mod tests {
         ] {
             assert!(!asks_first(&exec, command), "`{command}` must run");
         }
+    }
+
+    #[test]
+    fn a_row_lists_every_rule_it_matches() {
+        let exec = ask_first_config(&["git push", "rm", " git ", "git push"]);
+        let rules: Vec<String> = asked(&exec, "git push origin")
+            .into_iter()
+            .map(|row| row.rule)
+            .collect();
+        assert_eq!(rules, ["git push", "git"]);
+        // With every listed rule removed, the row runs: none is left to ask.
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git push origin", &rules),
+            PolicyResult::Allow
+        ));
+        assert!(asks_first(&exec, "git status"), "`git` still asks");
     }
 
     #[test]
