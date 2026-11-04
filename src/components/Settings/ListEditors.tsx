@@ -125,7 +125,8 @@ export const PrefixListEditor = ({
   const [draft, setDraft] = useState('');
 
   const add = () => {
-    const value = draft.trim();
+    // Rules match single-spaced command words, so `git  push` would never match.
+    const value = draft.trim().split(/\s+/).join(' ');
     if (value && !items.includes(value)) onChange([...items, value]);
     setDraft('');
   };
