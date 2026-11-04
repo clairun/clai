@@ -703,6 +703,7 @@ dependencies = [
  "tree-sitter",
  "tree-sitter-bash",
  "ts-rs",
+ "url",
  "uuid",
  "windows-sys 0.61.2",
 ]

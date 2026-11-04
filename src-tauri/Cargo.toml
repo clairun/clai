@@ -86,6 +86,7 @@ tree-sitter-bash = "=0.25.1"
 # Features: json (automatic JSON parsing), stream (for SSE), gzip (compression)
 reqwest = { version = "0.12", features = ["json", "stream", "gzip"] }
 http = "1"  # HeaderName/HeaderValue for MCP custom headers (shared 1.x in tree)
+url = "2"  # host normalisation (IDNA, IP literals) for the network allowlist
 
 # Async runtime - required by reqwest
 # The "full" feature enables all async utilities
