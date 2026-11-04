@@ -155,7 +155,7 @@ describe('AgentBehaviorForm', () => {
         onDirtyChange={onDirtyChange}
       />
     );
-    expect(await screen.findByText('Shell off')).toBeInTheDocument();
+    expect(await screen.findByText('Shell: Off')).toBeInTheDocument();
     expect(screen.getByText('1 path')).toBeInTheDocument();
 
     let verdict: { ok: boolean; error?: string } | undefined;
@@ -380,7 +380,7 @@ describe('AgentBehaviorForm', () => {
     it('summarizes on the overview and edits in its own view', async () => {
       const { ref, onDirtyChange } = renderForm({ agentId: 'agent-1' });
       await screen.findByDisplayValue('Reviewer');
-      expect(screen.getByText('Shell restricted')).toBeInTheDocument();
+      expect(screen.getByText('Shell: Ask first')).toBeInTheDocument();
       expect(screen.getByText('Web on')).toBeInTheDocument();
 
       await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
@@ -397,7 +397,7 @@ describe('AgentBehaviorForm', () => {
       await userEvent.type(screen.getByRole('textbox', { name: 'New path for path grants' }), '/srv/data');
       await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Access for the new path' }), 'read_write');
       await userEvent.click(screen.getAllByRole('button', { name: 'Add' })[0]!);
-      await userEvent.click(screen.getByRole('button', { name: 'Full' }));
+      await userEvent.click(screen.getByRole('button', { name: "Don't ask" }));
       // Full reads no list, so none is shown.
       expect(screen.queryByRole('list', { name: 'Ask-first command prefixes' })).toBeNull();
       await userEvent.click(screen.getByRole('switch', { name: 'Web access' }));
@@ -405,7 +405,7 @@ describe('AgentBehaviorForm', () => {
 
       await userEvent.click(screen.getByRole('button', { name: 'Back to Reviewer' }));
       expect(screen.getByRole('button', { name: 'Edit local access' })).toHaveFocus();
-      expect(screen.getByText('Shell full')).toBeInTheDocument();
+      expect(screen.getByText("Shell: Don't ask")).toBeInTheDocument();
 
       await submit(ref);
       const { execution } = sentUpdate();

@@ -26,13 +26,13 @@ const SHELL_MODES: { mode: ShellAccessMode; label: string; hint: string }[] = [
   },
   {
     mode: 'restricted',
-    label: 'Restricted',
-    hint: 'A command outside the allowed list stops for your approval. An allowed list with nothing that writes leaves the agent able to read but not save.',
+    label: 'Ask first',
+    hint: 'Asks before commands on the ask-first list; everything else runs. It catches common accidents, not a determined agent.',
   },
   {
     mode: 'full',
-    label: 'Full',
-    hint: 'Any command runs without asking, except the blocked ones.',
+    label: "Don't ask",
+    hint: 'Runs every command without asking.',
   },
 ];
 
@@ -53,7 +53,7 @@ export const grantOrigin = (grant: FilesystemPathGrant): { text: string; title?:
 
 /** The overview's one-line answer to "what can it touch?". */
 export const accessSummary = (draft: AccessDraft): string[] => [
-  `Shell ${SHELL_MODES.find((m) => m.mode === draft.shellMode)?.label.toLowerCase() ?? draft.shellMode}`,
+  `Shell: ${SHELL_MODES.find((m) => m.mode === draft.shellMode)?.label ?? draft.shellMode}`,
   draft.grants.length ? plural(draft.grants.length, 'path') : 'No paths',
   draft.web ? 'Web on' : 'Web off',
   draft.sessionBus ? 'Keyring on' : 'Keyring off',

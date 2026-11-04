@@ -435,10 +435,11 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
         )),
     }
 
+    // The label the user sees in agent settings, then the stored value.
     let shell_mode = match context.execution.shell.mode {
-        crate::config::ShellAccessMode::Off => "off",
-        crate::config::ShellAccessMode::Restricted => "restricted",
-        crate::config::ShellAccessMode::Full => "full",
+        crate::config::ShellAccessMode::Off => "Off (off)",
+        crate::config::ShellAccessMode::Restricted => "Ask first (restricted)",
+        crate::config::ShellAccessMode::Full => "Don't ask (full)",
     };
     prompt.push_str(&format!("- Shell mode: {}\n", shell_mode));
     let network_status = match context.execution.sandbox.network {
@@ -943,7 +944,7 @@ mod tests {
             other => panic!("expected text content, got {:?}", other),
         };
 
-        assert!(text.contains("- Shell mode: restricted"));
+        assert!(text.contains("- Shell mode: Ask first (restricted)\n"));
         assert!(text.contains(
             "- Ask first (the user approves each one; a denial comes back as an error \
              with the user's reason): git push, rm\n"
@@ -969,7 +970,7 @@ mod tests {
             other => panic!("expected text content, got {:?}", other),
         };
 
-        assert!(text.contains("- Shell mode: full"));
+        assert!(text.contains("- Shell mode: Don't ask (full)\n"));
         assert!(!text.contains("Ask first"));
         assert!(!text.contains("command prefixes"));
     }
