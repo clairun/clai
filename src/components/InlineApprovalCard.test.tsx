@@ -74,7 +74,20 @@ describe('ApprovalCard — the three actions', () => {
     const list = within(screen.getByRole('list', { name: 'Ask-first matches' }));
     const matches = list.getAllByRole('listitem');
     expect(matches.map((item) => item.textContent)).toEqual(['rm -f build.logrm', 'git pushgit push']);
-    expect(list.getByText('rm')).toHaveAttribute('title', 'Matches the ask-first rule `rm`');
+    expect(list.getByText('rm')).toHaveAttribute('title', 'Matches the ask-first rule “rm”');
+  });
+
+  it('says whether the whole command or only part of it is on the list', () => {
+    const { unmount } = render(<ApprovalCard req={{ ...PUSH, command: 'git push origin main' }} />);
+    expect(screen.getByText('This command is on the ask-first list:')).toBeInTheDocument();
+    unmount();
+
+    const { unmount: unmountPart } = render(<ApprovalCard req={PUSH} />);
+    expect(screen.getByText('Part of this command is on the ask-first list:')).toBeInTheDocument();
+    unmountPart();
+
+    render(<ApprovalCard req={TWO_RULES} />);
+    expect(screen.getByText('These parts of the command are on the ask-first list:')).toBeInTheDocument();
   });
 
   it('sends Allow once with no reason', async () => {

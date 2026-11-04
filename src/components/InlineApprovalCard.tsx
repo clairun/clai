@@ -114,6 +114,12 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
   const spoken = Boolean(speaker);
 
   const rules = [...new Set(req.rows.map((row) => row.rule))];
+  const matchesLabel =
+    req.rows.length > 1
+      ? 'These parts of the command are on the ask-first list:'
+      : req.rows[0]?.text.trim() === req.command.trim()
+        ? 'This command is on the ask-first list:'
+        : 'Part of this command is on the ask-first list:';
   const scope = alwaysScope(req);
   const reach = scope === 'run' ? 'this run' : scope === 'everywhere' ? 'every workspace' : (workspaceName ?? 'this workspace');
 
@@ -190,15 +196,13 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
             <pre className={styles.command}>{req.command}</pre>
           )}
           <section className={styles.segments}>
-            <p className={styles.segmentsLabel}>
-              {req.rows.length === 1 ? 'It is on the ask-first list:' : 'These parts are on the ask-first list:'}
-            </p>
+            <p className={styles.segmentsLabel}>{matchesLabel}</p>
             <ul className={styles.matchList} aria-label="Ask-first matches">
               {req.rows.map((row, idx) => (
                 <li key={idx} className={styles.segmentRow}>
                   <div className={styles.segmentText}>
                     <code title={spoken ? row.text : undefined}>{row.text}</code>
-                    <span className={styles.ruleChip} title={`Matches the ask-first rule \`${row.rule}\``}>
+                    <span className={styles.ruleChip} title={`Matches the ask-first rule “${row.rule}”`}>
                       {row.rule}
                     </span>
                   </div>
