@@ -13,21 +13,35 @@
 //!
 //! Only node kinds and tokens this module names are accepted, and a node
 //! accepted whole must hold nothing tree-sitter nested in it and no `$` it
-//! did not parse (`Walker::leaf`). A parse error, anything else, or a
-//! construct whose effect depends on runtime values bash may evaluate as code
-//! (arithmetic on variables, indirect expansion) makes the whole input one
-//! [`Segment::Unparsed`]. So does a command whose argument is a command or a
-//! string of code that is not written out (`xargs`, `bash -c`, `trap`, …),
-//! input that names a variable bash expands as code (`PS4`), or a command
-//! whose name is not a plain word (`\rm`, `"$cmd"`).
+//! did not parse (`Walker::leaf`). A parse error or anything else makes the
+//! whole input one [`Segment::Unparsed`], unless lines before it split: the
+//! rest is then one [`Segment::Exact`] row. A command the walker cannot name
+//! is an Exact row of its own: one on runtime values bash may evaluate as
+//! code (arithmetic on variables, a variable such as `PS4`), or one whose name
+//! is not a plain word (`\rm`, `"$cmd"`, a wrapper run by path). So is a
+//! block header holding such a value. Valid bash that tree-sitter-bash reads
+//! differently is rewritten, at the same offsets, before it is parsed.
 //!
-//! A wrapper that only changes how a command runs still names the command it
-//! runs (`timeout 600 cargo build` runs `cargo build`), so its row keeps that
-//! command: the policy can allowlist it, and the blocklist sees it.
+//! A command whose argument is code (`bash -c`, `eval`, `trap`, …) is named
+//! by the words it is written with; code inside a quoted argument or a
+//! script file (`source x.sh`) is not looked into. A wrapper that only
+//! changes how a command runs still names the command it runs (`timeout 600
+//! cargo build` runs `cargo build`), so its row keeps that command: the
+//! policy can allowlist it, and the blocklist sees it. The blocklist also
+//! reads the command written in the arguments of `xargs`, `exec`, `eval` and
+//! `watch` ([`argument_command_words`]), and every command a misread option
+//! could hide ([`possible_commands`]); their rows stay named by their head.
+//!
+//! A quoted heredoc body is text. Bash expands an unquoted one: the commands
+//! its `$(…)`, backticks and `${…}` run become rows of their own, each
+//! `$(…)` and `${…}` read as it is outside a heredoc, and the rest stays
+//! text with the row.
 //!
 //! - [`Segment::Simple`] — a plain command.
 //! - [`Segment::Opaque`] — a command with a redirect, heredoc, here-string,
 //!   command or process substitution, or a `[`/`[[` test.
+//! - [`Segment::Exact`] — a row the walker cannot name, asked by its exact
+//!   text.
 //! - [`Segment::Unparsed`] — the whole input when it cannot be split
 //!   reliably. The policy layer decides it as one row of exact text.
 
@@ -39,17 +53,22 @@ pub enum Segment {
     Opaque(String),
     /// The whole input when shell grammar could not be parsed reliably.
     Unparsed(String),
+    /// A row whose effect the splitter cannot name: arithmetic on a variable,
+    /// a wrapper run by path or with no command, a quoted or expanded command
+    /// name, a variable bash expands as code, or the rest of the input after
+    /// the last line that splits. The policy approves it by its exact text.
+    Exact(String),
 }
 
 impl Segment {
     pub fn text(&self) -> &str {
         match self {
-            Segment::Simple(s) | Segment::Opaque(s) | Segment::Unparsed(s) => s,
+            Segment::Simple(s) | Segment::Opaque(s) | Segment::Unparsed(s) | Segment::Exact(s) => s,
         }
     }
 
     pub fn is_opaque(&self) -> bool {
-        matches!(self, Segment::Opaque(_) | Segment::Unparsed(_))
+        !matches!(self, Segment::Simple(_))
     }
 }
 
@@ -70,30 +89,330 @@ pub fn has_substitution(text: &str) -> bool {
 
 /// Splits a shell command into [`Segment`]s, in source order.
 pub fn split_command(input: &str) -> Vec<Segment> {
-    split(input).unwrap_or_else(|| vec![Segment::Unparsed(input.trim().to_string())])
+    split(input)
+        .or_else(|| split_lines(input))
+        .unwrap_or_else(|| vec![Segment::Unparsed(input.trim().to_string())])
+}
+
+/// Lines [`split_lines`] reads one by one at most, since each try parses
+/// the lines before it again.
+const MAX_LINES: usize = 256;
+/// Bytes [`split_lines`] parses at most, over all its tries.
+const MAX_LINE_BYTES: usize = 256 * 1024;
+
+/// Splits `input` one complete command at a time, as bash reads it: each
+/// part ends at the first newline before which the walker accepts it whole.
+/// Tree-sitter-bash sometimes reads a pipeline on into the next line
+/// (`a && b 2>&1 | c | d⏎e >f`), where bash ends it at the newline. A part
+/// bash reads past its newline (an open quote or block, a trailing `&&`, a
+/// heredoc without its body) does not parse alone.
+///
+/// Bash runs each command before it reads the next, so what follows the
+/// last part the walker accepts cannot change the commands before it: that
+/// rest is one [`Segment::Exact`] row.
+fn split_lines(input: &str) -> Option<Vec<Segment>> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut parsed = 0;
+    for (end, _) in input.match_indices('\n').take(MAX_LINES) {
+        let part = &input[start..end];
+        let escapes = part.bytes().rev().take_while(|b| *b == b'\\').count();
+        if escapes % 2 == 1 {
+            continue;
+        }
+        parsed += part.len();
+        if parsed > MAX_LINE_BYTES {
+            break;
+        }
+        if let Some(segments) = split(part) {
+            out.extend(segments);
+            start = end + 1;
+        }
+    }
+    if start == 0 {
+        return None;
+    }
+    let rest = &input[start..];
+    match split(rest) {
+        Some(segments) => out.extend(segments),
+        None => out.push(Segment::Exact(rest.trim().to_string())),
+    }
+    Some(out)
 }
 
 fn split(input: &str) -> Option<Vec<Segment>> {
-    if !lexes_like_bash(input) || names_code_variable(input) {
-        return None;
-    }
     let tree = parse(input)?;
     let root = tree.root_node();
+    if !lexes_like_bash(input, &literal_ranges(input, root)) {
+        return None;
+    }
     let mut walker = Walker {
         src: input,
         out: Vec::new(),
+        unmodeled: false,
+        comments: Vec::new(),
+        quoted_bodies: Vec::new(),
+        backticks: false,
     };
     walker.node(root)?;
-    Some(walker.out)
+    // Arithmetic on a variable outside any row (`case x in $((n))) …`).
+    if walker.unmodeled {
+        return None;
+    }
+    let mut out = walker.out;
+    let mut code = input.to_string();
+    let blank = |code: &mut String, ranges: Vec<std::ops::Range<usize>>| {
+        for range in ranges {
+            code.replace_range(range.clone(), &" ".repeat(range.len()));
+        }
+    };
+    blank(&mut code, walker.comments);
+    let mut names = names_code_variable(&code);
+    // A quoted heredoc body is data, unless a shell may read it as code.
+    if names && !out.iter().any(|segment| runs_a_shell(segment.text())) {
+        blank(&mut code, walker.quoted_bodies);
+        names = names_code_variable(&code);
+    }
+    if names {
+        // The value acts on the commands after the one that sets it, which
+        // the policy cannot follow, so each row naming it is asked by its
+        // exact text.
+        let mut named = false;
+        for segment in &mut out {
+            if names_code_variable(segment.text()) {
+                *segment = Segment::Exact(segment.text().to_string());
+                named = true;
+            }
+        }
+        if !named {
+            return None;
+        }
+    }
+    Some(out)
 }
 
+/// Times [`parse`] rewrites the input at most, each before parsing it again.
+const MAX_REPAIRS: usize = 16;
+
+/// Parses `input`, first rewriting each place tree-sitter-bash reads
+/// differently from bash ([`repair`], [`rename_words`]). A rewrite only
+/// replaces ASCII bytes with ASCII bytes, so every node keeps its offsets
+/// and the walker reads its text from `input`.
 fn parse(input: &str) -> Option<tree_sitter::Tree> {
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_bash::LANGUAGE.into())
         .ok()?;
-    let tree = parser.parse(input, None)?;
-    (!tree.root_node().has_error()).then_some(tree)
+    let mut text = input.as_bytes().to_vec();
+    let mut renamed = false;
+    for _ in 0..MAX_REPAIRS {
+        let tree = parser.parse(&text, None)?;
+        if repair(tree.root_node(), &mut text) {
+            continue;
+        }
+        if !tree.root_node().has_error() {
+            return Some(tree);
+        }
+        if renamed || !rename_words(&mut text) {
+            return None;
+        }
+        renamed = true;
+    }
+    None
+}
+
+/// Rewrites in `text` the places where tree-sitter-bash, which parsed it as
+/// `root`, reads a heredoc or an expansion differently from bash, skipping
+/// those inside or overlapping one found before. Returns whether it rewrote
+/// any. A place found in text tree-sitter misread may end a heredoc where
+/// bash does not; [`Walker::heredoc`] rejects that heredoc.
+fn repair(root: Node, text: &mut [u8]) -> bool {
+    let mut rewrites = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        let rewrite = match node.kind() {
+            "heredoc_redirect" => early_heredoc_end(node, text)
+                .or_else(|| escaped_heredoc_body(node, text))
+                .or_else(|| redirects_before_pipe(node, text)),
+            // Tree-sitter-bash may leave a heredoc it misread unwrapped.
+            "ERROR" => dotted_expansion(node, text).or_else(|| escaped_heredoc_body(node, text)),
+            _ => None,
+        };
+        match rewrite {
+            Some(rewrite) => rewrites.push(rewrite),
+            None => stack.extend(Walker::children(node)),
+        }
+    }
+    rewrites.sort_by_key(|(at, _)| *at);
+    let mut free = 0;
+    for (at, bytes) in &rewrites {
+        if *at >= free {
+            text[*at..*at + bytes.len()].copy_from_slice(bytes);
+            free = at + bytes.len();
+        }
+    }
+    !rewrites.is_empty()
+}
+
+/// Whether a heredoc strips leading tabs (`<<-`), its delimiter, and
+/// whether that is quoted.
+fn heredoc_parts(redirect: Node, text: &[u8]) -> Option<(bool, String, bool)> {
+    let mut strip_tabs = false;
+    for child in Walker::children(redirect) {
+        match child.kind() {
+            "<<-" => strip_tabs = true,
+            "heredoc_start" => {
+                let (word, quoted) =
+                    heredoc_delimiter(std::str::from_utf8(&text[child.byte_range()]).ok()?)?;
+                return Some((strip_tabs, word, quoted));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Tree-sitter-bash ends a heredoc at a line that starts with its delimiter
+/// after blanks (`  EOF`), where bash ends it only at the delimiter alone,
+/// after tabs for `<<-`. The first letter of each such line up to the one
+/// bash ends it at is renamed, so the body goes on as in bash. A line with
+/// the delimiter at its start (after tabs for `<<-`) is left alone: inside
+/// `$(…)` bash ends the heredoc at `EOF)`.
+fn early_heredoc_end(redirect: Node, text: &[u8]) -> Option<(usize, Vec<u8>)> {
+    let (strip_tabs, word, _) = heredoc_parts(redirect, text)?;
+    let word = word.as_bytes();
+    let first = *word.first()?;
+    if !(first.is_ascii_alphanumeric() || first == b'_') {
+        return None;
+    }
+    let end = Walker::children(redirect)
+        .into_iter()
+        .find(|c| c.kind() == "heredoc_end" && !c.is_missing())?;
+    let from = text[..end.start_byte()].iter().rposition(|b| *b == b'\n')? + 1;
+    let mut renamed = Vec::new();
+    let mut line_start = from;
+    for line in text[from..].split(|b| *b == b'\n') {
+        let indent = line
+            .iter()
+            .take_while(|b| matches!(b, b' ' | b'\t'))
+            .count();
+        let tabs = line.iter().take_while(|b| **b == b'\t').count();
+        let column_zero = if strip_tabs {
+            tabs == indent
+        } else {
+            indent == 0
+        };
+        if line[indent..].starts_with(word) {
+            if column_zero {
+                break;
+            }
+            renamed.push(line_start + indent);
+        }
+        line_start += line.len() + 1;
+    }
+    let (&at, &last) = (renamed.first()?, renamed.last()?);
+    let mut bytes = text[at..=last].to_vec();
+    for i in renamed {
+        bytes[i - at] = if first == b'_' { b'x' } else { b'_' };
+    }
+    Some((at, bytes))
+}
+
+/// Tree-sitter-bash reads a heredoc body that starts with `\` as words of
+/// the redirect. That `\` is renamed, with the byte after it when bash reads
+/// the two as an escape (`\$`, `\\` or a backtick, in an unquoted body).
+fn escaped_heredoc_body(redirect: Node, text: &[u8]) -> Option<(usize, Vec<u8>)> {
+    let (_, _, quoted) = heredoc_parts(redirect, text)?;
+    let children = Walker::children(redirect);
+    let start = children.iter().find(|c| c.kind() == "heredoc_start")?;
+    let line_end = text[start.end_byte()..].iter().position(|b| *b == b'\n')?;
+    let at = start.end_byte() + line_end + 1;
+    let misread = children
+        .iter()
+        .any(|c| c.kind() != "heredoc_body" && c.byte_range().contains(&at));
+    if text.get(at) != Some(&b'\\') || !misread {
+        return None;
+    }
+    match text.get(at + 1) {
+        _ if quoted => Some((at, b"_".to_vec())),
+        Some(b'$' | b'`' | b'\\') => Some((at, b"__".to_vec())),
+        Some(b'\n') | None => None,
+        Some(_) => Some((at, b"_".to_vec())),
+    }
+}
+
+/// Tree-sitter-bash reads no pipe after the redirects that follow a heredoc
+/// (`cat <<E 2>&1 | tail`), though it reads one right after the heredoc.
+/// Redirects of plain words run nothing, so they are blanked.
+fn redirects_before_pipe(redirect: Node, text: &[u8]) -> Option<(usize, Vec<u8>)> {
+    let children = Walker::children(redirect);
+    let mut redirects = children.iter().filter(|c| c.kind() == "file_redirect");
+    let first = redirects.clone().next()?;
+    let pipe = redirects.find_map(|r| {
+        Walker::children(*r).into_iter().find(|c| {
+            c.kind() == "ERROR" && c.child(0).is_some_and(|p| matches!(p.kind(), "|" | "|&"))
+        })
+    })?;
+    let range = first.start_byte()..pipe.start_byte();
+    text[range.clone()]
+        .iter()
+        .all(|b| b.is_ascii_alphanumeric() || b" \t<>&_./+-:,@%=".contains(b))
+        .then(|| (range.start, vec![b' '; range.len()]))
+}
+
+/// Tree-sitter-bash reads `${a.b}` as an error. Bash reads it as one word
+/// and fails it as a bad substitution when it expands it, so its `.` are
+/// renamed `_`, which names a variable.
+fn dotted_expansion(error: Node, text: &[u8]) -> Option<(usize, Vec<u8>)> {
+    let body = text[error.byte_range()]
+        .strip_prefix(b"${")?
+        .strip_suffix(b"}")?;
+    let dotted = body
+        .first()
+        .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+        && body.contains(&b'.')
+        && body
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'.'));
+    dotted.then(|| {
+        let renamed = body
+            .iter()
+            .map(|b| if *b == b'.' { b'_' } else { *b })
+            .collect();
+        (error.start_byte() + 2, renamed)
+    })
+}
+
+/// Renames, at the same offsets, words tree-sitter-bash reads as syntax
+/// where bash reads a word: `==` before `;`, `&`, `|` or the end, read as a
+/// broken test (`echo ==; ls`). Also blanks a `-` before a heredoc, which
+/// it reads as an error after some lists (`a && b | c | d && e - <<E`) and
+/// drops everywhere else. Returns whether it rewrote any.
+fn rename_words(text: &mut [u8]) -> bool {
+    let blank = |b: Option<&u8>| {
+        matches!(
+            b,
+            None | Some(b' ' | b'\t' | b'\n' | b';' | b'&' | b'|' | b'(' | b')')
+        )
+    };
+    let mut renamed = false;
+    for at in 0..text.len() {
+        let before = at.checked_sub(1).and_then(|i| text.get(i));
+        if text[at..].starts_with(b"==") && blank(before) && blank(text.get(at + 2)) {
+            text[at..at + 2].copy_from_slice(b"__");
+            renamed = true;
+        } else if text[at] == b'-' && matches!(before, Some(b' ' | b'\t')) {
+            let blanks = text[at + 1..]
+                .iter()
+                .take_while(|b| matches!(b, b' ' | b'\t'))
+                .count();
+            if blanks > 0 && text[at + 1 + blanks..].starts_with(b"<<") {
+                text[at] = b' ';
+                renamed = true;
+            }
+        }
+    }
+    renamed
 }
 
 /// The words of `row` when it holds one command: its name and arguments as
@@ -114,11 +433,10 @@ pub fn row_words(row: &str) -> Option<Vec<&str>> {
 
 /// The command `row` runs: the words of the command itself, looking through
 /// the wrappers that only change how it runs (`timeout 600 cargo build` →
-/// `cargo build`). `None` when the command is not written out (`bash -c
-/// 'rm -rf /'`) or when the wrapper's own arguments cannot be told from the
-/// command.
-pub fn command_words(row: &str) -> Option<Vec<&str>> {
-    effective_words(&row_words(row)?)
+/// `cargo build`). `None` when a modifier wrapper is run by path or its own
+/// arguments cannot be told from the command, read as `reading` says.
+pub fn command_words(row: &str, reading: Reading) -> Option<Vec<&str>> {
+    Some(effective_words(&row_words(row)?, reading)?.to_vec())
 }
 
 /// The name and arguments of a command node, as written in `src`.
@@ -134,151 +452,691 @@ fn command_node_words<'src>(src: &'src str, node: Node) -> Option<Vec<&'src str>
     Some(words.iter().map(|n| &src[n.byte_range()]).collect())
 }
 
-/// Commands whose argument is a command or a string of code that is not
-/// written out, so the command they run cannot be named. Matched on the last
-/// part of the command's path.
-const CODE_WRAPPERS: &[&str] = &[
-    "bash",
-    "sh",
-    "zsh",
-    "dash",
-    "ksh",
-    "fish",
-    "xargs",
-    "eval",
-    "watch",
-    "exec",
-    "source",
-    ".",
-    "command",
-    "builtin",
-    "coproc",
-    "trap",
-    "alias",
-    "let",
-    "mapfile",
-    "readarray",
-    "compgen",
-    "complete",
-    "hash",
-    "enable",
-    "fc",
-];
-
-/// A wrapper that only changes how a command runs: the command it runs is
-/// written out after it, so the policy can still name it.
-struct ModifierWrapper {
+/// A command that runs the command written after it.
+struct Wrapper {
     /// The wrapper's name, as it is written.
     name: &'static str,
-    /// The options whose value is the next argument.
-    value_options: &'static [&'static str],
+    /// The short options that take no value.
+    flag_letters: &'static str,
+    /// The short options that take a value: the rest of their word, or the
+    /// next word when they end it (`-n` in `xargs -0n 1`).
+    value_letters: &'static str,
+    /// The short options whose value is optional, so it can only be the
+    /// rest of their word (GNU `xargs -i[R]`).
+    optional_value_letters: &'static str,
+    /// The long options whose value is the next word, unless written
+    /// `--name=value`.
+    value_long: &'static [&'static str],
+    /// The other long options: they never take the next word, and take a
+    /// value only after `=` (GNU `xargs --max-lines[=N]`).
+    flag_long: &'static [&'static str],
+    /// The options, by letter or long name, whose value changes the command
+    /// the wrapper runs.
+    roles: &'static [(&'static str, Role)],
     /// The plain arguments the wrapper takes before the command
-    /// (`timeout`'s duration).
+    /// (`timeout`'s duration, `taskset`'s mask).
     plain_args: usize,
+    /// Whether a number before the command is its priority, as `chrt` reads
+    /// one: when a word follows it, and then an optional `--`.
+    priority: bool,
 }
 
-const MODIFIER_WRAPPERS: &[ModifierWrapper] = &[
-    ModifierWrapper {
-        name: "timeout",
-        value_options: &["-s", "--signal", "-k", "--kill-after"],
+/// What the value of a [`Wrapper::roles`] option is to the command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// A string the runner replaces with its input wherever it occurs in
+    /// the command's words (`xargs -I R`). A later option of the same slot
+    /// sets it over an earlier one: `-I`, `-i` and `--replace` set GNU's,
+    /// `-J` BSD's.
+    Replace(usize),
+    /// The first words of the command (`env -S 'cmd args'`).
+    Command,
+}
+
+impl Wrapper {
+    const fn named(name: &'static str) -> Self {
+        Wrapper {
+            name,
+            flag_letters: "",
+            value_letters: "",
+            optional_value_letters: "",
+            value_long: &[],
+            flag_long: &[],
+            roles: &[],
+            plain_args: 0,
+            priority: false,
+        }
+    }
+
+    fn role(&self, option: &str) -> Option<Role> {
+        let (_, role) = self.roles.iter().find(|(name, _)| *name == option)?;
+        Some(*role)
+    }
+}
+
+/// Wrappers that only change how a command runs: the row names the command
+/// they run (`timeout 600 cargo build` runs `cargo build`), so the policy can
+/// allowlist it and the blocklist sees it.
+const MODIFIER_WRAPPERS: &[Wrapper] = &[
+    Wrapper {
+        flag_letters: "fpv",
+        value_letters: "sk",
+        value_long: &["--signal", "--kill-after"],
+        flag_long: &["--foreground", "--preserve-status", "--verbose"],
         plain_args: 1,
+        ..Wrapper::named("timeout")
     },
-    ModifierWrapper {
-        name: "time",
-        value_options: &[],
-        plain_args: 0,
+    Wrapper {
+        // The shell keyword's only option.
+        flag_letters: "p",
+        ..Wrapper::named("time")
     },
-    ModifierWrapper {
-        name: "nice",
-        value_options: &["-n", "--adjustment"],
-        plain_args: 0,
+    Wrapper {
+        // `nice -10` is the old form of `nice -n 10`.
+        flag_letters: "0123456789",
+        value_letters: "n",
+        value_long: &["--adjustment"],
+        ..Wrapper::named("nice")
     },
-    ModifierWrapper {
-        name: "nohup",
-        value_options: &[],
-        plain_args: 0,
+    Wrapper::named("nohup"),
+    Wrapper {
+        // `-c` and `-p` change how the mask, a plain argument, is read.
+        flag_letters: "acp",
+        flag_long: &["--all-tasks", "--cpu-list", "--pid"],
+        plain_args: 1,
+        ..Wrapper::named("taskset")
     },
-    ModifierWrapper {
-        name: "taskset",
-        value_options: &["-c", "--cpu-list", "-p", "--pid"],
-        plain_args: 0,
+    Wrapper {
+        value_letters: "ioe",
+        value_long: &["--input", "--output", "--error"],
+        ..Wrapper::named("stdbuf")
     },
-    ModifierWrapper {
-        name: "stdbuf",
-        value_options: &["-i", "--input", "-o", "--output", "-e", "--error"],
-        plain_args: 0,
+    Wrapper {
+        flag_letters: "t",
+        value_letters: "cnpPu",
+        value_long: &["--class", "--classdata", "--pid", "--pgid", "--uid"],
+        flag_long: &["--ignore"],
+        ..Wrapper::named("ionice")
     },
-    ModifierWrapper {
-        name: "ionice",
-        value_options: &["-c", "--class", "-n", "--classdata"],
-        plain_args: 0,
+    Wrapper {
+        flag_letters: "abdefGimOopRrv",
+        value_letters: "TPDUX",
+        value_long: &[
+            "--sched-runtime",
+            "--sched-period",
+            "--sched-deadline",
+            "--clamp-min",
+            "--clamp-max",
+        ],
+        flag_long: &[
+            "--batch",
+            "--deadline",
+            "--deadline-overrun",
+            "--ext",
+            "--fifo",
+            "--idle",
+            "--other",
+            "--rr",
+            "--reset-on-fork",
+            "--reclaim-grub",
+            "--all-tasks",
+            "--max",
+            "--pid",
+            "--verbose",
+        ],
+        priority: true,
+        ..Wrapper::named("chrt")
     },
-    ModifierWrapper {
-        name: "chrt",
-        value_options: &["--rr"],
-        plain_args: 0,
+    Wrapper {
+        flag_letters: "cfw",
+        flag_long: &["--ctty", "--fork", "--wait"],
+        ..Wrapper::named("setsid")
     },
-    ModifierWrapper {
-        name: "setsid",
-        value_options: &[],
-        plain_args: 0,
+    Wrapper {
+        flag_letters: "pVv",
+        ..Wrapper::named("command")
     },
-    ModifierWrapper {
-        name: "env",
-        value_options: &["-u", "--unset", "-C", "--chdir"],
-        plain_args: 0,
+    Wrapper::named("builtin"),
+    Wrapper {
+        flag_letters: "0iv",
+        value_letters: "auCS",
+        value_long: &[
+            "--argv0",
+            "--unset",
+            "--chdir",
+            "--env0-from",
+            "--split-string",
+        ],
+        flag_long: &[
+            "--ignore-environment",
+            "--null",
+            "--block-signal",
+            "--default-signal",
+            "--ignore-signal",
+            "--list-signal-handling",
+            "--debug",
+        ],
+        roles: &[("S", Role::Command), ("--split-string", Role::Command)],
+        ..Wrapper::named("env")
     },
 ];
 
+/// How [`wrapped_start`] reads an option its table does not list as
+/// written: getopt takes any unambiguous abbreviation (`xargs --process`
+/// is `--process-slot-var`), and an implementation may have options the
+/// table lacks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reading {
+    /// The command cannot be told: allow matching reads words this way,
+    /// so a grant never covers a command found past a misread option, or
+    /// one an option's value starts (`env -S`).
+    Exact,
+    /// As getopt would with the table: an abbreviation of one listed
+    /// option is that option, anything else takes no value. The splitter
+    /// and the blocklist read words this way.
+    Getopt,
+}
+
 /// The command the words name, looking through the wrappers that only change
-/// how it runs: `timeout 600 cargo build` names `cargo build`. `None` when
-/// the words name a command that is not written out (`bash -c 'rm -rf /'`),
-/// or when the wrapper's own arguments cannot be told from the command.
-fn effective_words<'a>(words: &[&'a str]) -> Option<Vec<&'a str>> {
-    let (name, rest) = words.split_first()?;
-    let base = name.rsplit('/').next().unwrap_or(name);
-    if CODE_WRAPPERS.contains(&base) {
-        return None;
+/// how it runs: `timeout 600 cargo build` names `cargo build`. A lookup
+/// (`command -v rm`) names itself. `None` when a wrapper is run by path or
+/// its own arguments cannot be told from the command.
+pub fn effective_words<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option<&'w [&'a str]> {
+    let mut words = words;
+    loop {
+        let (name, rest) = words.split_first()?;
+        let base = name.rsplit('/').next().unwrap_or(name);
+        let Some(wrapper) = MODIFIER_WRAPPERS.iter().find(|w| w.name == base) else {
+            return Some(words);
+        };
+        if name.contains('/') {
+            // A wrapper run by path: its own arguments are not the ones the
+            // table describes, so the command it runs is not ours to name.
+            return None;
+        }
+        if lookup_option(words).is_some() {
+            return Some(words);
+        }
+        words = rest.get(wrapped_start(wrapper, rest, reading)?.at..)?;
     }
-    let Some(wrapper) = MODIFIER_WRAPPERS.iter().find(|w| w.name == base) else {
-        return Some(words.to_vec());
-    };
-    if name.contains('/') {
-        // A wrapper run by path: its own arguments are not the ones the
-        // table describes, so the command it runs is not ours to name.
-        return None;
-    }
-    // The wrapper's own options come first.
+}
+
+/// Where the command a wrapper runs starts in the words after it, and the
+/// replace strings its options set.
+struct Start<'a> {
+    at: usize,
+    replace: [Option<&'a str>; 2],
+}
+
+/// Where the command `wrapper` runs starts in `rest`, the words after it:
+/// past the wrapper's own options, read as getopt reads them, the plain
+/// arguments it takes before the command, and the assignments `env` takes.
+/// `None` under [`Reading::Exact`] when the table does not list an option
+/// as written, or an option's value starts the command.
+fn wrapped_start<'a>(wrapper: &Wrapper, rest: &[&'a str], reading: Reading) -> Option<Start<'a>> {
     let mut at = 0;
-    while let Some(arg) = rest.get(at) {
-        if *arg == "--" {
+    let mut replace = [None; 2];
+    while let Some(&arg) = rest.get(at) {
+        if arg == "--" {
             at += 1;
             break;
         }
-        if !arg.starts_with('-') || *arg == "-" {
+        if arg == "-" && wrapper.name == "env" {
+            // `env -` is `env -i`.
+            at += 1;
+            continue;
+        }
+        if !arg.starts_with('-') || arg == "-" {
             break;
         }
-        if arg.contains('=') {
-            at += 1;
-        } else if wrapper.value_options.contains(arg) {
-            at += 2;
+        let option = option_word(wrapper, arg, reading)?;
+        let value = if option.takes_next {
+            rest.get(at + 1).copied()
         } else {
-            at += 1;
+            option.value
+        };
+        match option.role {
+            Some(Role::Replace(slot)) => replace[slot] = Some(value.unwrap_or("{}")),
+            Some(Role::Command) if reading == Reading::Exact => return None,
+            _ => {}
         }
+        at += 1 + usize::from(option.takes_next);
     }
-    // Then the arguments the wrapper takes before the command.
     for _ in 0..wrapper.plain_args {
-        let arg = *rest.get(at)?;
+        let Some(&arg) = rest.get(at) else {
+            break;
+        };
         if arg.starts_with('-') && arg != "-" {
             return None;
         }
         at += 1;
     }
-    // `env` takes assignments before the command.
+    if wrapper.priority {
+        if rest.get(at).is_some_and(|arg| is_number(arg)) && at + 1 < rest.len() {
+            at += 1;
+        }
+        if rest.get(at) == Some(&"--") {
+            at += 1;
+        }
+    }
     while rest.get(at).is_some_and(|arg| is_assignment(arg)) {
         at += 1;
     }
-    effective_words(rest.get(at..)?)
+    Some(Start { at, replace })
+}
+
+/// An option word, as getopt reads it.
+struct OptionWord<'a> {
+    /// Whether its value is the next word.
+    takes_next: bool,
+    /// Its value, when written in the word (`-n1`, `--max-args=1`).
+    value: Option<&'a str>,
+    role: Option<Role>,
+}
+
+/// `arg`, an option word of `wrapper`, as getopt reads it: the letters of a
+/// short-option cluster until one that takes a value, whose value is the
+/// rest of the cluster, or the next word when none is left; a long option
+/// by its name. `None` under [`Reading::Exact`] when the table does not
+/// list the option as written.
+fn option_word<'a>(wrapper: &Wrapper, arg: &'a str, reading: Reading) -> Option<OptionWord<'a>> {
+    let flag = OptionWord {
+        takes_next: false,
+        value: None,
+        role: None,
+    };
+    if arg.starts_with("--") {
+        let (name, value) = match arg.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (arg, None),
+        };
+        let Some((name, takes_value)) = long_option(wrapper, name, reading) else {
+            // getopt rejects it, so it takes nothing.
+            return (reading == Reading::Getopt).then_some(OptionWord { value, ..flag });
+        };
+        return Some(OptionWord {
+            takes_next: takes_value && value.is_none(),
+            value,
+            role: wrapper.role(name),
+        });
+    }
+    let cluster = arg.strip_prefix('-')?;
+    for (at, letter) in cluster.char_indices() {
+        let optional = wrapper.optional_value_letters.contains(letter);
+        if optional || wrapper.value_letters.contains(letter) {
+            let (letter, value) = cluster[at..].split_at(letter.len_utf8());
+            return Some(OptionWord {
+                takes_next: !optional && value.is_empty(),
+                value: (!value.is_empty()).then_some(value),
+                role: wrapper.role(letter),
+            });
+        }
+        if reading == Reading::Exact && !wrapper.flag_letters.contains(letter) {
+            return None;
+        }
+    }
+    Some(flag)
+}
+
+/// The long option of `wrapper` that `name` names, and whether it takes a
+/// value: `name` itself, or under [`Reading::Getopt`] the one option it
+/// abbreviates.
+fn long_option(wrapper: &Wrapper, name: &str, reading: Reading) -> Option<(&'static str, bool)> {
+    let value = wrapper.value_long.iter().map(|option| (*option, true));
+    let flag = wrapper.flag_long.iter().map(|option| (*option, false));
+    let options = value.chain(flag);
+    if let Some(option) = options.clone().find(|(option, _)| *option == name) {
+        return Some(option);
+    }
+    if reading == Reading::Exact {
+        return None;
+    }
+    let mut abbreviated = options.filter(|(option, _)| option.starts_with(name));
+    match (abbreviated.next(), abbreviated.next()) {
+        (Some(option), None) => Some(option),
+        _ => None,
+    }
+}
+
+/// A word of digits, as `chrt` reads a priority.
+fn is_number(word: &str) -> bool {
+    !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The short-option letters that make a wrapper look a command up instead
+/// of running it: `command -v rm` prints where `rm` is.
+const LOOKUP_OPTIONS: &[(&str, &[char])] = &[("command", &['v', 'V'])];
+
+/// The option that makes `words` a lookup of the command they name rather
+/// than a run of it: `-v` in `command -v rm`.
+pub fn lookup_option<'a>(words: &[&'a str]) -> Option<&'a str> {
+    let (name, rest) = words.split_first()?;
+    let (_, letters) = LOOKUP_OPTIONS.iter().find(|(n, _)| n == name)?;
+    rest.iter()
+        .take_while(|arg| arg.starts_with('-') && !matches!(**arg, "-" | "--"))
+        .find(|arg| !arg.starts_with("--") && arg.contains(*letters))
+        .copied()
+}
+
+/// Commands that run the command written in their arguments (`xargs rm`,
+/// `exec rm`, `eval rm`, `watch rm`) but whose row names them: they also run
+/// without a command (`exec >log 2>&1`, bare `xargs`), and `eval` and `watch`
+/// read their arguments as code. The blocklist looks through all of them, in
+/// [`argument_command_words`]; allow prefixes only through the ones that run
+/// the command directly ([`argument_run`]).
+const ARGUMENT_RUNNERS: &[Wrapper] = &[
+    Wrapper {
+        flag_letters: "cl",
+        value_letters: "a",
+        ..Wrapper::named("exec")
+    },
+    Wrapper::named("eval"),
+    Wrapper {
+        // GNU's options, and BSD's `-J`, `-R` and `-S`.
+        flag_letters: "0oprtx",
+        value_letters: "adEILnPsJRS",
+        optional_value_letters: "eil",
+        value_long: &[
+            "--arg-file",
+            "--delimiter",
+            "--max-args",
+            "--max-procs",
+            "--max-chars",
+            "--process-slot-var",
+        ],
+        flag_long: &[
+            "--null",
+            "--eof",
+            "--replace",
+            "--max-lines",
+            "--open-tty",
+            "--interactive",
+            "--no-run-if-empty",
+            "--show-limits",
+            "--verbose",
+            "--exit",
+        ],
+        roles: &[
+            ("I", Role::Replace(0)),
+            ("i", Role::Replace(0)),
+            ("J", Role::Replace(1)),
+            ("--replace", Role::Replace(0)),
+        ],
+        ..Wrapper::named("xargs")
+    },
+    Wrapper {
+        flag_letters: "bcCefgprtwx",
+        value_letters: "nqs",
+        optional_value_letters: "d",
+        value_long: &["--interval", "--equexit", "--shotsdir"],
+        flag_long: &[
+            "--beep",
+            "--color",
+            "--no-color",
+            "--differences",
+            "--errexit",
+            "--follow",
+            "--chgexit",
+            "--precise",
+            "--no-rerun",
+            "--no-title",
+            "--no-wrap",
+            "--exec",
+        ],
+        ..Wrapper::named("watch")
+    },
+];
+
+/// What the [`ARGUMENT_RUNNERS`] head of some words runs.
+pub struct ArgumentRun<'w, 'a> {
+    /// The runner reads its arguments as shell code (`eval`, and `watch`,
+    /// which passes them to `sh -c`), so they name no single command.
+    pub reads_code: bool,
+    /// The words after the runner's own options, as written: `grep foo` in
+    /// `xargs -n 1 grep foo`. Empty when they name no command (`exec >log
+    /// 2>&1`, bare `xargs`); `None` when the runner's options, read as
+    /// [`argument_run`] was asked to, do not tell where they start.
+    pub command: Option<&'w [&'a str]>,
+    /// The replace strings the runner's options set (`R` in `xargs -I R`).
+    pub replace: Vec<&'a str>,
+}
+
+impl<'w, 'a> ArgumentRun<'w, 'a> {
+    /// The words of [`Self::command`] the runner's input cannot change:
+    /// with a replace string, those before the first word it may occur in
+    /// (`git` in `xargs -I push git push`). `None` when that leaves no word.
+    pub fn literal_command(&self) -> Option<&'w [&'a str]> {
+        let command = self.command?;
+        if self.replace.is_empty() {
+            return Some(command);
+        }
+        // A word may hold a pattern once the shell expands both: quotes are
+        // read away, and an expansion may hold anything.
+        let literal =
+            |text: &str| (!text.contains(['$', '`'])).then(|| text.replace(['\'', '"', '\\'], ""));
+        let patterns: Vec<_> = self
+            .replace
+            .iter()
+            .map(|pattern| literal(pattern))
+            .collect();
+        let end = command
+            .iter()
+            .position(|word| {
+                let word = literal(word);
+                patterns.iter().any(|pattern| match (&word, pattern) {
+                    (Some(word), Some(pattern)) => word.contains(pattern.as_str()),
+                    _ => true,
+                })
+            })
+            .unwrap_or(command.len());
+        (end > 0).then_some(&command[..end])
+    }
+}
+
+/// The [`ArgumentRun`] of `words`, or `None` when they are not headed by an
+/// [`ARGUMENT_RUNNERS`] entry.
+pub fn argument_run<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option<ArgumentRun<'w, 'a>> {
+    let (name, rest) = words.split_first()?;
+    let base = name.rsplit('/').next().unwrap_or(name);
+    let runner = ARGUMENT_RUNNERS.iter().find(|r| r.name == base)?;
+    let start = wrapped_start(runner, rest, reading);
+    Some(ArgumentRun {
+        reads_code: matches!(runner.name, "eval" | "watch"),
+        command: start
+            .as_ref()
+            .map(|start| rest.get(start.at..).unwrap_or(&[])),
+        replace: start
+            .map(|start| start.replace.into_iter().flatten().collect())
+            .unwrap_or_default(),
+    })
+}
+
+/// The command an [`ARGUMENT_RUNNERS`] head runs from its arguments, looking
+/// through further runners and modifier wrappers: `xargs -0 timeout 5 rm`
+/// → `rm`. `None` when `row` is not headed by one, or its arguments name no
+/// command (`exec >log 2>&1`).
+pub fn argument_command_words(row: &str) -> Option<Vec<&str>> {
+    let row = row_words(row)?;
+    let mut words = effective_words(&row, Reading::Getopt)?;
+    let mut ran = false;
+    while let Some(run) = argument_run(words, Reading::Getopt) {
+        words = effective_words(run.command?, Reading::Getopt)?;
+        ran = true;
+    }
+    ran.then(|| words.to_vec())
+}
+
+/// The most words of a command the blocklist reads when the command was
+/// found under a reading other than getopt's: more than any blocked prefix
+/// and the options before its subcommand, and few enough that a row read
+/// many ways costs time linear in its words.
+const POSSIBLE_COMMAND_WORDS: usize = 32;
+
+/// The commands `words` may run, under every reading of the options of the
+/// wrappers and runners heading them: the word after an option that may
+/// take a value, by the table or by its absence from it, is also read as
+/// the start of the command (`rm` in `xargs -0I rm echo`). A wrapper or
+/// runner is given by its name, any other command by its first
+/// [`POSSIBLE_COMMAND_WORDS`] words. Deny matching only: every reading can
+/// only block more.
+pub fn possible_commands<'w, 'a>(words: &'w [&'a str]) -> Vec<&'w [&'a str]> {
+    const { assert!(MODIFIER_WRAPPERS.len() + ARGUMENT_RUNNERS.len() <= 32) };
+    let wrappers: Vec<&Wrapper> = MODIFIER_WRAPPERS.iter().chain(ARGUMENT_RUNNERS).collect();
+    // Each start is read once, and each word as an option of each wrapper
+    // once, so the readings cost time linear in the words.
+    let mut started = vec![false; words.len()];
+    let mut read_as_option = vec![0u32; words.len()];
+    let mut starts = vec![0];
+    let mut commands = Vec::new();
+    while let Some(start) = starts.pop() {
+        if start >= words.len() || std::mem::replace(&mut started[start], true) {
+            continue;
+        }
+        let command = &words[start..];
+        let base = command[0].rsplit('/').next().unwrap_or(command[0]);
+        let Some((index, wrapper)) = wrappers.iter().enumerate().find(|(_, w)| w.name == base)
+        else {
+            commands.push(&command[..command.len().min(POSSIBLE_COMMAND_WORDS)]);
+            continue;
+        };
+        commands.push(&command[..1]);
+        if lookup_option(command).is_some() {
+            continue;
+        }
+        let wrapper_bit = 1 << index;
+        // Whether the word at `at`, and the word after it, may be read as
+        // an option of `wrapper` or as its first positional word.
+        let (mut here, mut next) = (true, false);
+        for at in start + 1..words.len() {
+            if !here && !next {
+                break;
+            }
+            let word = words[at];
+            let is_option =
+                word.starts_with('-') && word != "--" && (word != "-" || wrapper.name == "env");
+            (here, next) = if !here || (is_option && read_as_option[at] & wrapper_bit != 0) {
+                (next, false)
+            } else if is_option {
+                read_as_option[at] |= wrapper_bit;
+                let may_take_value = option_word(wrapper, word, Reading::Exact)
+                    .is_none_or(|option| option.takes_next);
+                (true, may_take_value)
+            } else {
+                let positional = at + usize::from(word == "--");
+                push_command_starts(wrapper, words, positional, &mut starts);
+                (next, false)
+            };
+        }
+    }
+    commands
+}
+
+/// Pushes to `starts` where the command `wrapper` runs may start, when its
+/// positional words start at `at`: past its plain arguments and
+/// assignments, and with or without a priority.
+fn push_command_starts(wrapper: &Wrapper, words: &[&str], at: usize, starts: &mut Vec<usize>) {
+    let mut at = at + wrapper.plain_args;
+    while words.get(at).is_some_and(|word| is_assignment(word)) {
+        at += 1;
+    }
+    starts.push(at);
+    let may_be_number =
+        |word: &str| word.contains(['$', '`']) || is_number(&word.replace(['\'', '"'], ""));
+    if wrapper.priority && words.get(at).is_some_and(|word| may_be_number(word)) {
+        starts.push(at + 1);
+        if words.get(at + 1) == Some(&"--") {
+            starts.push(at + 2);
+        }
+    }
+}
+
+/// `words` with each string `env -S` may split read as the words it splits
+/// into, wherever it is written: `env -S'rm -rf' x` → `env rm -rf x`, as
+/// `env` reads on from them. Deny matching only: a word read as a split
+/// string by mistake only adds commands to check.
+pub fn with_split_strings(words: &[&str]) -> Vec<String> {
+    let mut out = Vec::with_capacity(words.len());
+    // The words still to read, last first: each with whether it is a split
+    // string, and whether it is a word split from one, which splits into
+    // itself, so each character is read a bounded number of times.
+    let mut todo: Vec<(String, bool, bool)> = words
+        .iter()
+        .rev()
+        .map(|word| (word.to_string(), false, false))
+        .collect();
+    while let Some((word, is_split, plain)) = todo.pop() {
+        if is_split && !plain {
+            let pieces = split_string_words(&word);
+            todo.extend(pieces.into_iter().rev().map(|piece| (piece, false, true)));
+            continue;
+        }
+        // A word split from a split string splits into itself, so the options
+        // it holds are read in place.
+        let mut word = word.as_str();
+        let option = loop {
+            match split_string_option(word) {
+                Some(Some(value)) if plain => word = value,
+                option => break option,
+            }
+        };
+        match option {
+            Some(Some(value)) => todo.push((value.to_string(), true, false)),
+            Some(None) => {
+                if let Some((value, _, plain)) = todo.pop() {
+                    todo.push((value, true, plain));
+                }
+            }
+            None => out.push(word.to_string()),
+        }
+    }
+    out
+}
+
+/// The words `env -S` may split `value` into, as written in the shell:
+/// split at blanks, at `\_` and `\c`, and at the escapes for blanks a
+/// nested `env -S` splits at (`\t`, ...); quotes and other backslashes are
+/// read away, as `env` joins quoted parts: `'\_r''m -rf'` → `rm`, `-rf`.
+fn split_string_words(value: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = value
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"'))
+        .peekable();
+    while let Some(c) = chars.next() {
+        let ends_word = if c == '\\' {
+            while chars.next_if_eq(&'\\').is_some() {}
+            chars.next_if(|c| "_cfnrtv".contains(*c)).is_some()
+        } else {
+            c.is_whitespace()
+        };
+        if ends_word {
+            words.extend((!word.is_empty()).then(|| std::mem::take(&mut word)));
+        } else if c != '\\' {
+            word.push(c);
+        }
+    }
+    words.extend((!word.is_empty()).then_some(word));
+    words
+}
+
+/// The value of `word` read as an `env -S` option: `Some(None)` when it is
+/// the next word, `None` when `word` is no such option.
+fn split_string_option(word: &str) -> Option<Option<&str>> {
+    let word = word.trim_start_matches(['\'', '"']);
+    let value = if let Some(long) = word.strip_prefix("--") {
+        let (name, value) = match long.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (long, None),
+        };
+        if name.is_empty() || !"split-string".starts_with(name) {
+            return None;
+        }
+        value
+    } else {
+        Some(word.strip_prefix('-')?.split_once('S')?.1)
+    };
+    Some(value.filter(|value| !value.trim_matches(['\'', '"']).is_empty()))
 }
 
 /// A `NAME=value` token, as `env` takes before the command it runs.
@@ -297,6 +1155,23 @@ fn is_assignment(token: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// True if `row` runs a shell, which reads code from its input or a script.
+fn runs_a_shell(row: &str) -> bool {
+    const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "fish", "source", "."];
+    let shell = |words: Option<Vec<&str>>| {
+        words
+            .and_then(|words| {
+                words
+                    .first()
+                    .map(|name| name.rsplit('/').next().unwrap_or(name))
+            })
+            .is_some_and(|name| SHELLS.contains(&name))
+    };
+    shell(row_words(row))
+        || shell(command_words(row, Reading::Getopt))
+        || shell(argument_command_words(row))
 }
 
 /// Variables whose value bash, or a bash it starts, expands as code.
@@ -334,6 +1209,15 @@ const ARITHMETIC_TESTS: &[&str] = &["-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-
 struct Walker<'src> {
     src: &'src str,
     out: Vec<Segment>,
+    /// The row being walked holds something it cannot name
+    /// ([`Segment::Exact`]).
+    unmodeled: bool,
+    /// The byte ranges of the comments walked.
+    comments: Vec<std::ops::Range<usize>>,
+    /// The byte ranges of the quoted heredoc bodies walked.
+    quoted_bodies: Vec<std::ops::Range<usize>>,
+    /// The node being walked is in a backtick substitution.
+    backticks: bool,
 }
 
 impl<'src> Walker<'src> {
@@ -349,7 +1233,10 @@ impl<'src> Walker<'src> {
     /// Walks a node. `None` when it holds anything not proven understood.
     fn node(&mut self, node: Node) -> Option<()> {
         match node.kind() {
-            "comment" => self.starts_word(node.start_byte()).then_some(()),
+            "comment" => {
+                self.comments.push(node.byte_range());
+                self.starts_word(node.start_byte()).then_some(())
+            }
             "program"
             | "list"
             | "pipeline"
@@ -362,14 +1249,19 @@ impl<'src> Walker<'src> {
             | "else_clause"
             | "while_statement"
             | "for_statement"
+            | "c_style_for_statement"
             | "case_statement"
             | "case_item"
             | "function_definition" => self.grammar(node),
             "command" | "declaration_command" | "unset_command" => self.command(node, node),
             "variable_assignment" | "variable_assignments" => {
-                self.word(node)?;
-                self.out
-                    .push(Segment::Simple(self.row_text(node, node.start_byte())));
+                let exact = self.row(|w| w.word(node))?;
+                let text = self.row_text(node, node.start_byte());
+                self.out.push(if exact {
+                    Segment::Exact(text)
+                } else {
+                    Segment::Simple(text)
+                });
                 Some(())
             }
             "test_command" => self.test(node),
@@ -378,14 +1270,35 @@ impl<'src> Walker<'src> {
         }
     }
 
+    /// Runs `walk` over one row. `Some(true)` when the row holds something
+    /// it cannot name, so it is a [`Segment::Exact`].
+    fn row(&mut self, walk: impl FnOnce(&mut Self) -> Option<()>) -> Option<bool> {
+        let outer = std::mem::take(&mut self.unmodeled);
+        let walked = walk(self);
+        let unmodeled = std::mem::replace(&mut self.unmodeled, outer);
+        walked.map(|()| unmodeled)
+    }
+
     /// Grammar that only sequences commands: walk what it holds.
     fn grammar(&mut self, node: Node) -> Option<()> {
         if node.kind() == "compound_statement" && self.text(node).starts_with("((") {
             return self.arithmetic(node);
         }
-        for child in Self::children(node) {
+        let children = Self::children(node);
+        let mut body = 0;
+        if matches!(
+            node.kind(),
+            "for_statement" | "c_style_for_statement" | "case_statement" | "function_definition"
+        ) {
+            let block = node.child_by_field_name("body");
+            body = children
+                .iter()
+                .position(|c| Some(*c) == block || matches!(c.kind(), "case_item" | "esac"))?;
+            self.header(node, &children[..body], children[body].start_byte())?;
+        }
+        for child in &children[body..] {
             if child.is_named() {
-                self.node(child)?;
+                self.node(*child)?;
             } else if !GRAMMAR_TOKENS.contains(&child.kind()) {
                 return None;
             }
@@ -393,43 +1306,94 @@ impl<'src> Walker<'src> {
         Some(())
     }
 
+    /// The header of a `for`, `case` or function: `node` up to `end`. It is
+    /// in no row unless it holds what the walker cannot name, and then it is
+    /// a [`Segment::Exact`] row of its own (`for ((i=0; i<n; i++))`,
+    /// `for PS4 in …`).
+    fn header(&mut self, node: Node, header: &[Node], end: usize) -> Option<()> {
+        let start = self.out.len();
+        let c_style = node.kind() == "c_style_for_statement";
+        let unmodeled = self.row(|w| {
+            for child in header {
+                if c_style && child.is_named() {
+                    if !w.is_constant(*child) {
+                        w.unmodeled = true;
+                        w.arithmetic_walk(*child)?;
+                    }
+                } else if child.is_named() {
+                    w.node(*child)?;
+                } else if !(GRAMMAR_TOKENS.contains(&child.kind())
+                    || c_style && matches!(child.kind(), "((" | "))" | ","))
+                {
+                    return None;
+                }
+            }
+            Some(())
+        })?;
+        let text = self.src[node.start_byte()..end]
+            .trim_end()
+            .trim_end_matches(';')
+            .trim_end();
+        if unmodeled || names_code_variable(text) {
+            self.out.insert(start, Segment::Exact(text.to_string()));
+        }
+        Some(())
+    }
+
     /// A command; `row` is the node whose text the user approves.
     fn command(&mut self, node: Node, row: Node) -> Option<()> {
-        let mut wrapped = false;
+        let mut wrapper = false;
+        let mut unnamed = false;
         if node.kind() == "command" {
             let name = node.child_by_field_name("name")?;
             let word = name.named_child(0)?;
             let text = self.text(word);
             let basename = text.rsplit('/').next().unwrap_or(text);
-            if word.kind() != "word" || !is_plain_name(text) || CODE_WRAPPERS.contains(&basename) {
+            // A name bash expands (`$t`, `"$@"`, `./$dir/x`) is only known at
+            // run time, and the command it runs may be written anywhere in the
+            // input (`f(){ "$@"; }; f rm -rf x`). A quoted or escaped name
+            // (`\rm`, `"a b"`) is not the name policy reads, and neither is a
+            // redirect before the name, which would head the row
+            // (`2>&1 rm -rf x`).
+            if !is_plain_name(text) && is_shell_syntax(text) {
+                // Bash rejects the input (`echo a; }`).
                 return None;
             }
-            // A wrapper runs the command written after it: the row is opaque
-            // and the command it runs is the one the policy names.
-            wrapped = MODIFIER_WRAPPERS.iter().any(|w| w.name == basename);
-            // A redirect before the name would head the row, hiding the
-            // command from prefix rules: `2>&1 rm -rf x`.
             let mut cursor = node.walk();
-            if node
-                .children(&mut cursor)
-                .take_while(|c| *c != name)
-                .any(|c| c.kind().ends_with("redirect"))
-            {
-                return None;
-            }
+            unnamed = word.kind() != "word"
+                || !is_plain_name(text)
+                || node
+                    .children(&mut cursor)
+                    .take_while(|c| *c != name)
+                    .any(|c| c.kind().ends_with("redirect"));
+            wrapper = MODIFIER_WRAPPERS.iter().any(|w| w.name == basename);
         }
         let start = self.out.len();
-        let opaque = self.words(node)? || wrapped;
+        let mut opaque = false;
+        let unmodeled = self.row(|w| {
+            opaque = w.words(node)?;
+            Some(())
+        })?;
         self.out.insert(start, Segment::Simple(String::new()));
         let text = self.row_text(row, node.start_byte());
         // Policy reads the command from the row text alone, so it must name
         // the same command.
-        let row_command = command_words(&text)?;
-        let node_command = effective_words(&command_node_words(self.src, node)?)?;
-        if row_command != node_command {
+        let node_words = command_node_words(self.src, node)?;
+        let node_command = effective_words(&node_words, Reading::Getopt);
+        if command_words(&text, Reading::Getopt).as_deref() != node_command {
             return None;
         }
-        self.out[start] = if opaque || row != node {
+        // No command it can name: an unnamed one, a wrapper run by path, one
+        // whose own arguments cannot be told from the command it runs, or one
+        // with only its own arguments (`env --help`), which runs nothing but
+        // whose saved prefix would cover every command it runs.
+        if node_command.is_none() || unnamed || unmodeled {
+            self.out[start] = Segment::Exact(text);
+            return Some(());
+        }
+        // A wrapper that runs or looks up the command written after it is
+        // Opaque, and the policy names that command.
+        self.out[start] = if opaque || wrapper || row != node {
             Segment::Opaque(text)
         } else {
             Segment::Simple(text)
@@ -437,26 +1401,35 @@ impl<'src> Walker<'src> {
         Some(())
     }
 
-    /// `[ … ]` or `[[ … ]]`, always Opaque.
+    /// `[ … ]` or `[[ … ]]`, always Opaque, and Exact when it compares a
+    /// variable as arithmetic.
     fn test(&mut self, node: Node) -> Option<()> {
+        let mut arithmetic = false;
         let mut stack = vec![node];
         while let Some(n) = stack.pop() {
             if n.kind() == "binary_expression" || n.kind() == "unary_expression" {
                 let op = n.child_by_field_name("operator").map(|o| self.text(o));
                 if op.is_some_and(|op| ARITHMETIC_TESTS.contains(&op)) {
-                    for operand in Self::children(n).into_iter().filter(|c| c.is_named()) {
-                        if operand.kind() != "test_operator" && !self.is_constant(operand) {
-                            return None;
-                        }
-                    }
+                    arithmetic |= Self::children(n).into_iter().any(|operand| {
+                        operand.is_named()
+                            && operand.kind() != "test_operator"
+                            && !self.is_constant(operand)
+                    });
                 }
             }
             stack.extend(Self::children(n));
         }
         let start = self.out.len();
-        self.parts(node, &["[", "]", "[[", "]]"])?;
-        self.out
-            .insert(start, Segment::Opaque(self.text(node).trim().to_string()));
+        let unmodeled = self.row(|w| w.parts(node, &["[", "]", "[[", "]]"]))?;
+        let text = self.text(node).trim().to_string();
+        self.out.insert(
+            start,
+            if arithmetic || unmodeled {
+                Segment::Exact(text)
+            } else {
+                Segment::Opaque(text)
+            },
+        );
         Some(())
     }
 
@@ -474,8 +1447,13 @@ impl<'src> Walker<'src> {
     fn redirected_body(&mut self, body: Node, node: Node) -> Option<()> {
         match body.kind() {
             "command" => {
+                let start = self.out.len();
                 self.command(body, node)?;
-                self.redirects(node)
+                // The redirects are in the command's row.
+                if self.row(|w| w.redirects(node))? {
+                    self.out[start] = Segment::Exact(self.out[start].text().to_string());
+                }
+                Some(())
             }
             "list" | "pipeline" => {
                 let children = Self::children(body);
@@ -492,11 +1470,18 @@ impl<'src> Walker<'src> {
             _ => {
                 self.node(body)?;
                 let start = self.out.len();
-                self.redirects(node)?;
+                let unmodeled = self.row(|w| w.redirects(node))?;
                 let redirects = self.src[body.end_byte()..node.end_byte()]
                     .trim()
                     .to_string();
-                self.out.insert(start, Segment::Opaque(redirects));
+                self.out.insert(
+                    start,
+                    if unmodeled {
+                        Segment::Exact(redirects)
+                    } else {
+                        Segment::Opaque(redirects)
+                    },
+                );
                 Some(())
             }
         }
@@ -537,7 +1522,14 @@ impl<'src> Walker<'src> {
                     | "unsetenv"
                     | "="
                     | "+="
+                    | "=="
+                    | "=~"
             ) {
+                return None;
+            } else if matches!(child.kind(), "==" | "=~") && self.text(node).contains('\n') {
+                // Tree-sitter reads the word `==` as a test operator and
+                // then reads on past a newline (`echo ==⏎rm x` as one
+                // command), where bash ends the command.
                 return None;
             }
         }
@@ -583,19 +1575,31 @@ impl<'src> Walker<'src> {
             // subshell (`${x:-$((i))}`).
             "command_substitution" if self.text(node).starts_with("$((") => None,
             "command_substitution" | "process_substitution" => {
-                for child in Self::children(node) {
+                let outer = self.backticks;
+                self.backticks |= self.text(node).starts_with('`');
+                let walked = Self::children(node).into_iter().try_for_each(|child| {
                     if child.is_named() {
-                        self.node(child)?;
-                    } else if !matches!(child.kind(), "$(" | ")" | "`" | "<(" | ">(") {
-                        return None;
+                        self.node(child)
+                    } else {
+                        (matches!(child.kind(), "$(" | ")" | "`" | "<(" | ">(")
+                            || GRAMMAR_TOKENS.contains(&child.kind()))
+                        .then_some(())
                     }
-                }
-                Some(())
+                });
+                self.backticks = outer;
+                walked
+            }
+            "expansion" if Self::children(node).iter().any(|c| c.kind() == ":") => {
+                self.substring(node)
             }
             "expansion" => self.parts(node, EXPANSION_TOKENS),
             "subscript" => {
                 let index = node.child_by_field_name("index")?;
-                (self.is_constant(index) || matches!(self.text(index), "@" | "*")).then_some(())
+                if self.is_constant(index) || matches!(self.text(index), "@" | "*") {
+                    return Some(());
+                }
+                self.unmodeled = true;
+                self.arithmetic_walk(index)
             }
             "arithmetic_expansion" => self.arithmetic(node),
             "heredoc_redirect" => self.heredoc(node),
@@ -608,10 +1612,26 @@ impl<'src> Walker<'src> {
     /// tree-sitter would otherwise have parsed as an expansion of its own
     /// (`16#$(cmd)`, `${x#$(cmd)}`, `${x#${a[i]}}`, nested backticks).
     fn leaf(&self, node: Node) -> Option<()> {
-        let literal = matches!(node.kind(), "raw_string" | "ansi_c_string");
+        if node.child_count() != 0 {
+            return None;
+        }
+        // A special parameter's name (`$` in `$$`) is not an expansion.
+        if matches!(
+            node.kind(),
+            "raw_string" | "ansi_c_string" | "special_variable_name"
+        ) {
+            return Some(());
+        }
         let text = self.text(node);
-        (node.child_count() == 0 && (literal || !text.contains('$') && !has_substitution(text)))
-            .then_some(())
+        // Bash reads the escapes in a backtick substitution again, where an
+        // escaped backtick starts one more: none is a literal there.
+        if self.backticks {
+            return (!text.contains('$') && !has_substitution(text)).then_some(());
+        }
+        let next = self.src.as_bytes().get(node.end_byte()).copied();
+        // Bash reads `<(` as a process substitution outside double quotes.
+        let quoted = node.kind() == "string_content";
+        (!expands(text, next) && (quoted || !has_substitution(&unescaped(text)))).then_some(())
     }
 
     fn parts(&mut self, node: Node, tokens: &[&str]) -> Option<()> {
@@ -632,18 +1652,77 @@ impl<'src> Walker<'src> {
         Some(())
     }
 
-    /// `$(( … ))` or `(( … ))`: accepted only on constants, since bash
-    /// evaluates a variable's value as an expression that may run commands.
+    /// `$(( … ))` or `(( … ))`. Bash evaluates a variable's value as an
+    /// expression, which may run commands (`a[$(cmd)]`), so arithmetic on
+    /// anything but constants makes its row Exact.
     fn arithmetic(&mut self, node: Node) -> Option<()> {
-        let constant = Self::children(node)
-            .into_iter()
-            .filter(|c| c.is_named())
-            .all(|c| self.is_constant(c));
-        if !constant {
-            return None;
+        if node.kind() != "compound_statement" {
+            return self.arithmetic_operands(node);
         }
-        if node.kind() == "compound_statement" {
-            self.out.push(Segment::Opaque(self.text(node).to_string()));
+        let start = self.out.len();
+        let unmodeled = self.row(|w| w.arithmetic_operands(node))?;
+        let text = self.text(node).to_string();
+        self.out.insert(
+            start,
+            if unmodeled {
+                Segment::Exact(text)
+            } else {
+                Segment::Opaque(text)
+            },
+        );
+        Some(())
+    }
+
+    fn arithmetic_operands(&mut self, node: Node) -> Option<()> {
+        for child in Self::children(node).into_iter().filter(|c| c.is_named()) {
+            if !self.is_constant(child) {
+                self.unmodeled = true;
+                self.arithmetic_walk(child)?;
+            }
+        }
+        Some(())
+    }
+
+    /// An arithmetic expression on variables: its operators are text, and
+    /// the commands it substitutes are rows of their own.
+    fn arithmetic_walk(&mut self, node: Node) -> Option<()> {
+        match node.kind() {
+            "command_substitution"
+            | "process_substitution"
+            | "expansion"
+            | "simple_expansion"
+            | "string"
+            | "raw_string"
+            | "ansi_c_string"
+            | "subscript" => self.word(node),
+            _ if node.child_count() == 0 => {
+                if node.is_named() {
+                    self.leaf(node)
+                } else {
+                    (!node.kind().contains(['$', '`'])).then_some(())
+                }
+            }
+            _ => Self::children(node)
+                .into_iter()
+                .try_for_each(|child| self.arithmetic_walk(child)),
+        }
+    }
+
+    /// `${var:offset:length}`: the offset and length are arithmetic.
+    fn substring(&mut self, node: Node) -> Option<()> {
+        let mut offsets = false;
+        for child in Self::children(node) {
+            match child.kind() {
+                "${" | "}" => {}
+                ":" => offsets = true,
+                _ if !child.is_named() => return None,
+                _ if !offsets => self.word(child)?,
+                _ if self.is_constant(child) => {}
+                _ => {
+                    self.unmodeled = true;
+                    self.arithmetic_walk(child)?;
+                }
+            }
         }
         Some(())
     }
@@ -687,19 +1766,23 @@ impl<'src> Walker<'src> {
                 "heredoc_body" => {
                     let (_, quoted) = delim.as_ref()?;
                     let text = self.text(child);
-                    // Tree-sitter starts the body after any blank lines.
-                    let moved = self
-                        .src
-                        .get(body_start?..child.start_byte())
-                        .is_none_or(|skipped| skipped.bytes().any(|b| b != b'\n'));
-                    if moved && !text.is_empty()
-                        || !quoted && (text.contains("\\\n") || text.contains('`'))
-                    {
+                    // Tree-sitter starts the body after any blank lines and
+                    // the indentation of its first line.
+                    let moved =
+                        self.src
+                            .get(body_start?..child.start_byte())
+                            .is_none_or(|skipped| {
+                                skipped.bytes().any(|b| !matches!(b, b'\n' | b' ' | b'\t'))
+                            });
+                    if moved && !text.is_empty() || !quoted && text.contains("\\\n") {
                         return None;
                     }
-                    // A quoted delimiter keeps the body literal.
-                    if !quoted {
-                        self.word(child)?;
+                    // A quoted delimiter keeps the body literal; an
+                    // unquoted one is walked for the commands it expands.
+                    if *quoted {
+                        self.quoted_bodies.push(child.byte_range());
+                    } else {
+                        self.heredoc_body_walk(child)?;
                     }
                 }
                 "heredoc_end" => {
@@ -727,6 +1810,62 @@ impl<'src> Walker<'src> {
                 _ => return None,
             }
         }
+        Some(())
+    }
+
+    /// An unquoted heredoc body. Bash expands its `$(…)`, backtick and `${…}`
+    /// text, so each command those run becomes a row of its own; the rest of
+    /// the body is text kept with the row.
+    fn heredoc_body_walk(&mut self, body: Node) -> Option<()> {
+        let mut expansions = Vec::new();
+        Self::expansions(body, &mut expansions);
+        let mut expansions = expansions.into_iter().peekable();
+        let bytes = self.src.as_bytes();
+        let mut at = body.start_byte();
+        while at < body.end_byte() {
+            // Tree-sitter does not parse backticks or escapes in a heredoc
+            // body, so an expansion it found inside either is text.
+            while expansions.next_if(|e| e.start_byte() < at).is_some() {}
+            if let Some(expansion) = expansions.next_if(|e| e.start_byte() == at) {
+                self.heredoc_expansion(expansion)?;
+                at = expansion.end_byte();
+                continue;
+            }
+            match bytes[at] {
+                b'\\' => at += 2,
+                b'`' => {
+                    let (code, len) = backtick_code(&self.src[at + 1..body.end_byte()])?;
+                    self.out.extend(split(&code)?);
+                    at += len + 2;
+                }
+                _ => at += 1,
+            }
+        }
+        Some(())
+    }
+
+    /// The `$(…)` and `${…}` nodes tree-sitter parsed in `node`, outermost
+    /// first.
+    fn expansions<'tree>(node: Node<'tree>, out: &mut Vec<Node<'tree>>) {
+        for child in Self::children(node) {
+            if matches!(child.kind(), "command_substitution" | "expansion") {
+                out.push(child);
+            } else {
+                Self::expansions(child, out);
+            }
+        }
+    }
+
+    /// A `$(…)` or `${…}` in a heredoc body, read as it is outside one.
+    /// Tree-sitter parses less inside a heredoc body: it reads every `$((`
+    /// there as a subshell, where bash reads arithmetic first, and leaves
+    /// backticks and some `${…}` operands unparsed.
+    fn heredoc_expansion(&mut self, node: Node) -> Option<()> {
+        let mut segments = split(&format!(": {}", self.text(node)))?.into_iter();
+        // The first row is the `:` that holds the expansion. When it is
+        // Exact (`$((i))`), so is the row holding the heredoc.
+        self.unmodeled |= matches!(segments.next(), Some(Segment::Exact(_)));
+        self.out.extend(segments);
         Some(())
     }
 
@@ -787,14 +1926,113 @@ impl<'src> Walker<'src> {
     }
 }
 
+/// The command in a backtick substitution, from `rest`, the text after its
+/// opening backtick: with the backslashes bash removes inside it (before
+/// `` ` ``, `$` and `\`), and the length of `rest` up to the closing
+/// backtick. `None` when it is not closed.
+fn backtick_code(rest: &str) -> Option<(String, usize)> {
+    let mut code = String::new();
+    let mut chars = rest.char_indices();
+    while let Some((i, c)) = chars.next() {
+        match c {
+            '`' => return Some((code, i)),
+            '\\' => {
+                let (_, escaped) = chars.next()?;
+                if !matches!(escaped, '`' | '$' | '\\') {
+                    code.push(c);
+                }
+                code.push(escaped);
+            }
+            _ => code.push(c),
+        }
+    }
+    None
+}
+
+/// True if bash expands a `$` or backtick in `text`, the text of one word or
+/// part of one, followed in the input by `next`. An escaped `$` (`\$t`,
+/// `"\$t"`) is a literal, and so is one followed by a blank or the end of
+/// the input (`[[ $f =~ \.d$ ]]`).
+fn expands(text: &str, next: Option<u8>) -> bool {
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 1,
+            b'`' => return true,
+            b'$' if !matches!(
+                bytes.get(i + 1).copied().or(next),
+                None | Some(b' ' | b'\t' | b'\n')
+            ) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+/// `text` with each backslash escape read as a blank and each line
+/// continuation removed, as bash reads them: an escaped `$` or backtick
+/// (`\$t`, `"\$t"`) is a literal, not an expansion.
+fn unescaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\\' {
+            out.push(c);
+        } else if chars.next().is_some_and(|escaped| escaped != '\n') {
+            out.push(' ');
+        }
+    }
+    out
+}
+
+/// Text bash and tree-sitter-bash both read as literal up to its end
+/// whatever it holds: single-quoted strings, and quoted heredoc bodies,
+/// whose ends the walker checks by bash's rule. In source order.
+fn literal_ranges(input: &str, root: Node) -> Vec<std::ops::Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut stack = vec![root];
+    while let Some(node) = stack.pop() {
+        match node.kind() {
+            "raw_string" => ranges.push(node.byte_range()),
+            "heredoc_redirect"
+                if heredoc_parts(node, input.as_bytes()).is_some_and(|(_, _, quoted)| quoted) =>
+            {
+                let children = Walker::children(node);
+                ranges.extend(
+                    children
+                        .iter()
+                        .filter(|c| c.kind() == "heredoc_body")
+                        .map(|c| c.byte_range()),
+                );
+                stack.extend(children);
+            }
+            _ => stack.extend(Walker::children(node)),
+        }
+    }
+    ranges.sort_by_key(|r| r.start);
+    ranges
+}
+
 /// False for bytes tree-sitter-bash reads as blanks or line continuations
 /// where bash does not, which would let a comment or a word hide a command:
 /// control characters other than tab and newline (`echo x\r# ; rm -rf y`),
-/// an escaped tab, and a line continuation not preceded by a blank.
-fn lexes_like_bash(input: &str) -> bool {
+/// an escaped tab, and a line continuation not preceded by a blank. Bytes in
+/// `literal` ([`literal_ranges`]) are read the same by both.
+fn lexes_like_bash(input: &str, literal: &[std::ops::Range<usize>]) -> bool {
     let bytes = input.as_bytes();
+    let mut literal = literal.iter().peekable();
     let mut i = 0;
     while i < bytes.len() {
+        while literal.next_if(|r| r.end <= i).is_some() {}
+        if let Some(range) = literal.next_if(|r| r.start <= i) {
+            i = range.end;
+            continue;
+        }
         match bytes[i] {
             b'\t' | b'\n' => {}
             0..=0x1f | 0x7f => return false,
@@ -860,6 +2098,10 @@ mod tests {
 
     fn unparsed(s: &str) -> Segment {
         Segment::Unparsed(s.to_string())
+    }
+
+    fn exact(s: &str) -> Segment {
+        Segment::Exact(s.to_string())
     }
 
     fn split(s: &str) -> Vec<Segment> {
@@ -1048,16 +2290,21 @@ mod tests {
     }
 
     #[test]
-    fn wrappers_run_by_path_are_unparsed() {
+    fn modifier_wrappers_run_by_path_are_asked_by_exact_text() {
+        // A modifier wrapper run by path cannot be told from the command
+        // it wraps, so its row is asked as its exact text. A command
+        // whose argument is code is named even when run by path.
         for input in [
             "/usr/bin/env touch PWN",
-            "/bin/sh -c 'touch PWN'",
-            "/usr/bin/xargs touch <<< PWN",
             "/usr/bin/timeout 2 touch PWN",
             "FOO=1 ./nice touch PWN",
         ] {
-            assert_eq!(split(input), vec![unparsed(input)], "{input}");
+            assert_eq!(split(input), vec![exact(input)], "{input}");
         }
+        assert_eq!(
+            split("ls; /usr/bin/env touch PWN"),
+            vec![simple("ls"), exact("/usr/bin/env touch PWN")]
+        );
     }
 
     #[test]
@@ -1186,13 +2433,13 @@ mod tests {
             split("cat <<\\EOF\nx\nEOF\ntouch t"),
             vec![opaque("cat <<\\EOF\nx\nEOF"), simple("touch t")]
         );
-        // A partly quoted delimiter, and `EOF ` (no closer for bash).
-        for input in [
-            "cat <<E\"OF\"\nx\nEOF\ntouch t",
-            "cat <<EOF\nEOF \ntouch t\nEOF",
-        ] {
-            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
-        }
+        // A partly quoted delimiter.
+        let input = "cat <<E\"OF\"\nx\nEOF\ntouch t";
+        assert_eq!(split(input), vec![unparsed(input)]);
+        // `EOF ` is no closer for bash: `touch t` is in the body. A line
+        // that starts with the delimiter is not read as body.
+        let input = "cat <<EOF\nEOF \ntouch t\nEOF";
+        assert_eq!(split(input), vec![unparsed(input)]);
     }
 
     #[test]
@@ -1385,27 +2632,45 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Executor commands at head → Opaque
+    // A command whose argument is code names the head it runs directly
     // -----------------------------------------------------------------
 
     #[test]
-    fn command_that_runs_its_arguments_is_unparsed() {
-        // The command these run is not written out, so the row cannot name
-        // it and is asked as its exact text.
+    fn commands_whose_argument_is_code_are_named() {
+        // The words name the command bash runs directly; the code inside
+        // the argument is not looked into.
         for input in [
-            r#"bash -c "rm -rf /""#,
-            r#"sh -c "echo hi""#,
-            "find . -name '*.tmp' | xargs rm",
-            r#"eval "$cmd""#,
+            "bash -c \"rm -rf /\"",
+            "sh -c \"echo hi\"",
+            "eval \"$cmd\"",
             "watch -n 1 'ls'",
-            "command touch PWN",
             "exec touch PWN",
             "source ./setup.sh",
             ". ./setup.sh",
-            "\\touch PWN",
-            "\"touch\" PWN",
+            "xargs rm",
+            "/bin/sh -c 'touch PWN'",
         ] {
-            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+            assert_eq!(split(input), vec![simple(input)], "{input:?}");
+        }
+        assert_eq!(
+            split("find . -name '*.tmp' | xargs rm"),
+            vec![simple("find . -name '*.tmp'"), simple("xargs rm")]
+        );
+        assert_eq!(
+            split("/usr/bin/xargs touch <<< PWN"),
+            vec![opaque("/usr/bin/xargs touch <<< PWN")]
+        );
+        // `command` and `builtin` write the command they run out, so the
+        // row looks through them to it (an Opaque row, like the `timeout`
+        // rows).
+        assert_eq!(
+            split("command touch PWN"),
+            vec![opaque("command touch PWN")]
+        );
+        assert_eq!(split("builtin cd /x"), vec![opaque("builtin cd /x")]);
+        // A command whose name is not a plain word still cannot be named.
+        for input in ["\\touch PWN", "\"touch\" PWN"] {
+            assert_eq!(split(input), vec![exact(input)], "{input:?}");
         }
     }
 
@@ -1427,7 +2692,7 @@ mod tests {
         ] {
             assert_eq!(split(input), vec![opaque(input)], "{input:?}");
             assert_eq!(
-                command_words(input).map(|words| words.join(" ")),
+                command_words(input, Reading::Getopt).map(|words| words.join(" ")),
                 Some(command.to_string()),
                 "{input:?}"
             );
@@ -1435,10 +2700,15 @@ mod tests {
     }
 
     #[test]
-    fn wrapper_without_a_command_written_out_stays_unparsed() {
+    fn wrapper_without_a_command_written_out_is_asked_by_exact_text() {
+        // A prefix saved for `env` would cover every command `env` runs.
         for input in ["timeout 60", "env", "env -i", "nice -n", "timeout --signal"] {
-            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+            assert_eq!(split(input), vec![exact(input)], "{input:?}");
         }
+        assert_eq!(
+            split("env --help && ls"),
+            vec![exact("env --help"), simple("ls")]
+        );
     }
 
     // -----------------------------------------------------------------
@@ -1679,12 +2949,17 @@ mod tests {
             "cat <<$(x)\n$(x)\ntouch PWN\n$",
             "cat <<`a`\n`a`\ntouch PWN",
             "cat <<E\\\nX\nEX\\\n\ntouch PWN\nEX",
-            "echo x\n((echo a) ; touch PWN )",
             "((touch PWN) )",
             "echo $((echo a) ; touch PWN )",
         ] {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
+        // The lines before such syntax still split: bash runs each before
+        // it reads the next.
+        assert_eq!(
+            split("echo x\n((echo a) ; touch PWN )"),
+            vec![simple("echo x"), exact("((echo a) ; touch PWN )")]
+        );
         assert_eq!(
             split("(( (1+2) * 3 )) ; echo $((1+2))"),
             vec![opaque("(( (1+2) * 3 ))"), simple("echo $((1+2))")]
@@ -1694,7 +2969,7 @@ mod tests {
     #[test]
     fn unquoted_heredoc_with_a_continued_line_is_unparsed() {
         // Bash joins `\`-newline in an unquoted body before it looks for the
-        // closer; tree-sitter does not. Its end of a quoted one differs too.
+        // closer; tree-sitter does not.
         for input in [
             "cat <<EOF > Dockerfile\nRUN apt-get update && \\\n    apt-get install -y curl\nEOF",
             "cat <<E\nE\\\n\ntouch PWN\nE",
@@ -1703,10 +2978,13 @@ mod tests {
             "cat <<E\na\\\\\\\nE\ntouch PWN\nE",
             "cat <<E\nhi\\\nE",
             "cat <<E\nhi\\",
-            "cat <<\"E\"\nE\\\n\ntouch PWN\nE",
         ] {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
+        // A quoted body is not joined: `E\` is body, as bash reads it, but a
+        // line that starts with the delimiter is not read as body.
+        let input = "cat <<\"E\"\nE\\\n\ntouch PWN\nE";
+        assert_eq!(split(input), vec![unparsed(input)]);
     }
 
     #[test]
@@ -1875,12 +3153,14 @@ mod tests {
             split("false && f(){ echo a; }; f").last(),
             Some(&simple("f"))
         );
-        // A name that is not a plain word: `"$@"` and brace expansion.
-        for input in [
-            "f(){ \"$@\"; }; f rm -rf x",
-            "{rm,-rf,y}(){ :; }; {rm,-rf,y}",
-            "{rm,-rf,x}",
-        ] {
+        // A name bash expands runs what any call passes it: its row is
+        // asked by exact text, and the blocklist reads every row.
+        assert_eq!(
+            split("f(){ \"$@\"; }; f rm -rf x"),
+            vec![exact("\"$@\""), simple("f rm -rf x")]
+        );
+        // Brace expansion in a name.
+        for input in ["{rm,-rf,y}(){ :; }; {rm,-rf,y}", "{rm,-rf,x}"] {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
     }
@@ -1904,12 +3184,15 @@ mod tests {
             "E\n",
             "run \"M2 drop ctx check\"\n",
         );
-        // `source` runs a file nobody has seen.
-        assert_eq!(split(input), vec![unparsed(input.trim())]);
+        // `source` names the script it runs; the file's contents are not
+        // looked into. The function body splits at its `;` into real
+        // commands, the header and braces are not segments, and the
+        // heredoc body stays with `python3`.
         assert_eq!(
-            split(&input.replace("source ./.goenv.sh && ", "")),
+            split(input),
             vec![
                 simple("cd /w"),
+                simple("source ./.goenv.sh"),
                 simple("M=$PWD/.trash/rev/mut"),
                 simple("mkdir -p $M"),
                 simple("cd cloud-devstack"),
@@ -1919,19 +3202,14 @@ mod tests {
                 opaque("cp internal/docker/diagnose.go /tmp/d.go 2>/dev/null"),
                 simple("cp internal/docker/diagnose.go ../d.orig"),
                 simple("echo \"== $1\""),
-                opaque("go test ./internal/docker/ ./internal/ops/ -run 'Diagnose|FixFor' 2>&1"),
+                opaque("go test ./internal/docker/ ./internal/ops/ -run \'Diagnose|FixFor\' 2>&1"),
                 simple("grep -E \"^(ok|FAIL|---)\""),
                 simple("head -4"),
                 simple("cp ../d.orig internal/docker/diagnose.go"),
-                simple("sed -i 's/ || strings.Contains(lower, \"cannot connect\")//' internal/docker/diagnose.go"),
+                simple("sed -i \'s/ || strings.Contains(lower, \"cannot connect\")//\' internal/docker/diagnose.go"),
                 simple("run \"M1 drop\""),
-                simple("sed -i 's/x//' internal/docker/diagnose.go"),
-                opaque(concat!(
-                    "python3 - <<'E'\n",
-                    "p='internal/docker/diagnose.go'; s=open(p).read()\n",
-                    "s=s.replace('\\tif err != nil {\\n','\\tif err != nil {\\n',1); open(p,'w').write(s)\n",
-                    "E",
-                )),
+                simple("sed -i \'s/x//\' internal/docker/diagnose.go"),
+                opaque("python3 - <<\'E\'\np=\'internal/docker/diagnose.go\'; s=open(p).read()\ns=s.replace(\'\\tif err != nil {\\n\',\'\\tif err != nil {\\n\',1); open(p,\'w\').write(s)\nE"),
                 simple("run \"M2 drop ctx check\""),
             ]
         );
@@ -2061,6 +3339,312 @@ mod tests {
         assert_eq!(
             split(r#"echo "a ; b" && ls"#),
             vec![simple(r#"echo "a ; b""#), simple("ls")]
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Unquoted heredoc bodies name every command bash expands
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn unquoted_heredoc_body_names_nested_substitutions() {
+        let input = "cat <<EOF\n${x:-$(rm -rf ~)}\nEOF";
+        assert_eq!(split(input), vec![opaque(input), simple("rm -rf ~")]);
+    }
+
+    #[test]
+    fn unquoted_heredoc_body_names_backtick_commands() {
+        let input = "cat <<EOF > notes.md\nuse `ls` here\nEOF";
+        assert_eq!(split(input), vec![opaque(input), simple("ls")]);
+        let input = "cat <<EOF\n${x:-$(rm a)} `pwd`\nEOF";
+        assert_eq!(
+            split(input),
+            vec![opaque(input), simple("rm a"), simple("pwd")]
+        );
+        // A `${…}` is read as it is outside a heredoc.
+        for input in ["cat <<EOF\n${x:-`rm a`}\nEOF", "echo ${x:-`rm a`}"] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
+        // Inside backticks, an escaped backtick nests another substitution.
+        let input = "cat <<EOF\n`echo \\`ls\\``\nEOF";
+        assert_eq!(
+            split(input),
+            vec![opaque(input), opaque("echo `ls`"), simple("ls")]
+        );
+        // An escaped backtick or `$` is text.
+        for input in ["cat <<EOF\na \\`b\\` c\nEOF", "cat <<EOF\na \\$(rm x)\nEOF"] {
+            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn quoted_heredoc_body_names_nothing() {
+        let input = "cat <<'EOF'\n`rm x` $(rm y)\nEOF";
+        assert_eq!(split(input), vec![opaque(input)]);
+    }
+
+    #[test]
+    fn heredoc_arithmetic_is_read_as_it_is_outside_a_heredoc() {
+        // Tree-sitter reads every `$((` in a heredoc body as a subshell;
+        // bash reads arithmetic first, as the splitter does elsewhere.
+        let input = "cat <<EOF\n$((1+2))\nEOF";
+        assert_eq!(split(input), vec![opaque(input)]);
+        // Arithmetic on a variable evaluates its value as code: the row
+        // is asked by exact text.
+        for input in ["cat <<EOF\n$((i))\nEOF", "echo $((i))"] {
+            assert_eq!(split(input), vec![exact(input)], "{input:?}");
+        }
+        for input in ["cat <<EOF\n$((rm x) )\nEOF", "echo $((rm x) )"] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn argument_runners_stay_named_rows() {
+        for input in ["exec >log 2>&1", "xargs grep foo", "watch -n 2 ls"] {
+            assert!(
+                !matches!(split(input).as_slice(), [Segment::Unparsed(_)]),
+                "{input}"
+            );
+        }
+        assert_eq!(
+            argument_command_words("find_x | xargs -I {} -n 1 rm -f {}"),
+            None
+        );
+        assert_eq!(
+            argument_command_words("xargs -0 -I {} -n 1 rm -f {}"),
+            Some(vec!["rm", "-f", "{}"])
+        );
+        assert_eq!(
+            argument_command_words("watch -d -n 2 timeout 5 rm x"),
+            Some(vec!["rm", "x"])
+        );
+        assert_eq!(argument_command_words("exec >log 2>&1"), None);
+        assert_eq!(argument_command_words("ls -la"), None);
+    }
+
+    // -----------------------------------------------------------------
+    // Valid bash the splitter once read as one Unparsed input
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn heredoc_body_may_start_with_indentation() {
+        for input in [
+            "cat > f.rs <<'EOF'\n  x\nEOF",
+            "cat > f.rs <<EOF\n  x\nEOF",
+            "cat > f.rs <<-EOF\n\tx\n\tEOF",
+        ] {
+            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn heredoc_line_that_starts_with_its_delimiter_after_blanks_is_body() {
+        let input = "cat <<'EOF'\n  EOF/x\n  EOF\n\tEOF\nEOF";
+        assert_eq!(
+            split(&format!("{input}\nls")),
+            vec![opaque(input), simple("ls")]
+        );
+        let input = "cat <<-EOF\n EOF/x\n\t EOF\n\tEOF";
+        assert_eq!(split(input), vec![opaque(input)]);
+        // Each heredoc is read in one parse, however many such lines it has.
+        let input = format!("cat <<EOF\n{}EOF", "  EOF\n".repeat(40));
+        assert_eq!(split(&input), vec![opaque(&input)]);
+        let inputs = vec!["cat <<EOF\n  EOF\nEOF"; 40];
+        assert_eq!(
+            split(&format!("{{\n{}\n}}", inputs.join("\n"))),
+            inputs.iter().map(|input| opaque(input)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn heredoc_line_that_starts_with_its_delimiter_is_not_read_as_body() {
+        // Inside `$(…)` or `<(…)` bash ends a heredoc at a line that starts
+        // with its delimiter (`EOF)`, after tabs for `<<-`) and runs the
+        // lines after it, here `rm -rf x`.
+        for input in [
+            "cat <<'EOF'\na\nEOF/x\nEOF",
+            "cat <<-EOF\n\tEOF/x\n\tEOF",
+            "echo $(cat <<EOF\nhi\nEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "echo $(cat <<'EOF'\nhi\nEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "echo $(cat <<-EOF\nhi\n\tEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "cat <(cat <<EOF\nhi\nEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "echo $(cat <<EOF\nhi\nEOFX)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn inputs_that_reparse_often_split_in_bounded_time() {
+        let started = std::time::Instant::now();
+        let heredoc = format!("cat <<EOF\n{}EOF", "  EOF\n".repeat(20));
+        split(&format!("{}\necho \"", [heredoc.as_str(); 10].join("\n")));
+        split(&format!("{}\n)", [heredoc.as_str(); 300].join("\n")));
+        let line = format!("echo {}", "a".repeat(4000));
+        split(&format!("echo \"\n{}", [line.as_str(); 299].join("\n")));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn code_variable_in_a_quoted_heredoc_body_is_text() {
+        let input = "python3 - <<'EOF'\nos.environ['PS4'] = 'x'\nEOF";
+        assert_eq!(split(input), vec![opaque(input)]);
+        // An unquoted body expands, and a shell reads its input as code.
+        for input in [
+            "cat <<EOF\n$PS4\nEOF",
+            "bash <<'EOF'\nPS4=x\nEOF",
+            "cat >x.sh <<'EOF'\nPS4=x\nEOF\nbash x.sh",
+            "cat <<'EOF' | sh\nENV=x\nEOF",
+        ] {
+            assert!(
+                split(input)
+                    .iter()
+                    .any(|segment| matches!(segment, Segment::Exact(_))),
+                "{input:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn heredoc_body_may_start_with_a_backslash() {
+        for input in ["cat <<'EOF'\n\\a\nEOF", "cat <<EOF\n\\a\nEOF"] {
+            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
+        }
+        assert_eq!(
+            split("x \"$(cat <<'EOF'\n\\`a\\` (\\`b\\`)\nEOF\n)\""),
+            vec![
+                opaque("x \"$(cat <<'EOF'\n\\`a\\` (\\`b\\`)\nEOF\n)\""),
+                opaque("cat <<'EOF'\n\\`a\\` (\\`b\\`)\nEOF")
+            ]
+        );
+        // In an unquoted body `\$` is a literal and `\\` an escaped `\`.
+        let input = "cat <<EOF\n\\$(rm x)\nEOF";
+        assert_eq!(split(input), vec![opaque(input)]);
+        let input = "cat <<EOF\n\\\\$(rm x)\nEOF";
+        assert_eq!(split(input), vec![opaque(input), simple("rm x")]);
+    }
+
+    #[test]
+    fn heredoc_redirects_may_come_before_a_pipe() {
+        assert_eq!(
+            split("python3 - <<'EOF' 2>&1 | tail -3\nx\nEOF"),
+            vec![opaque("python3 - <<'EOF' 2>&1 \nx\nEOF"), simple("tail -3")]
+        );
+        // A redirect that runs a command is not blanked out of it.
+        let input = "cat <<E >$(rm x) | tail\nb\nE";
+        assert_eq!(split(input), vec![unparsed(input)]);
+    }
+
+    #[test]
+    fn dash_before_a_heredoc_after_a_list() {
+        assert_eq!(
+            split("a && b | c | d && e - <<'PY'\nPY"),
+            vec![
+                simple("a"),
+                simple("b"),
+                simple("c"),
+                simple("d"),
+                opaque("e - <<'PY'\nPY")
+            ]
+        );
+    }
+
+    #[test]
+    fn dotted_expansion_is_a_word() {
+        // Bash fails `${groups.length}` when it expands it.
+        assert_eq!(
+            split("echo \"t ${groups.length}\" && ls"),
+            vec![simple("echo \"t ${groups.length}\""), simple("ls")]
+        );
+        assert_eq!(split("echo ${a.b}"), vec![simple("echo ${a.b}")]);
+        let input = "echo ${a.$(rm x)}";
+        assert_eq!(split(input), vec![unparsed(input)]);
+    }
+
+    #[test]
+    fn block_header_the_walker_cannot_name_is_a_row() {
+        assert_eq!(
+            split("for ((i=0;i<n;i++)); do y $i; done"),
+            vec![exact("for ((i=0;i<n;i++))"), simple("y $i")]
+        );
+        assert_eq!(
+            split("for x in $((n+1)) a; do y; done"),
+            vec![exact("for x in $((n+1)) a"), simple("y")]
+        );
+        assert_eq!(
+            split("case $((n)) in 1) z;; esac"),
+            vec![exact("case $((n)) in"), simple("z")]
+        );
+        assert_eq!(
+            split("for PS4 in a; do ls; done"),
+            vec![exact("for PS4 in a"), simple("ls")]
+        );
+        // A header it can name is in no row.
+        assert_eq!(
+            split("for ((;;)); do y; done; for x in a b; do ls; done"),
+            vec![simple("y"), simple("ls")]
+        );
+    }
+
+    #[test]
+    fn code_variable_in_a_comment_is_text() {
+        assert_eq!(split("ls # check ENV"), vec![simple("ls")]);
+        assert_eq!(
+            split("export ENV=x # ENV\nls"),
+            vec![exact("export ENV=x"), simple("ls")]
+        );
+    }
+
+    #[test]
+    fn escapes_in_literal_text_are_text() {
+        for input in ["sed -i '1a\\\nx' f", "echo 'a\\\tb'"] {
+            assert_eq!(split(input), vec![simple(input)], "{input:?}");
+        }
+        let input = "cat <<'E'\na\\\tb\nc\\\nE";
+        assert_eq!(split(input), vec![opaque(input)]);
+    }
+
+    #[test]
+    fn rest_after_the_last_line_that_splits_is_one_exact_row() {
+        assert_eq!(
+            split("ls\ncat <<'E'\nno end"),
+            vec![simple("ls"), exact("cat <<'E'\nno end")]
+        );
+    }
+
+    #[test]
+    fn words_bash_reads_as_text_split() {
+        assert_eq!(split("echo \"\\$t\""), vec![simple("echo \"\\$t\"")]);
+        for input in ["echo $$", "echo /tmp/$$.log"] {
+            assert_eq!(split(input), vec![simple(input)], "{input:?}");
+        }
+        assert_eq!(split("echo ==; ls"), vec![simple("echo =="), simple("ls")]);
+        assert_eq!(
+            split("echo $(a; b)"),
+            vec![opaque("echo $(a; b)"), simple("a"), simple("b")]
+        );
+        assert_eq!(split("$t --help"), vec![exact("$t --help")]);
+        assert_eq!(split("PS4='+'; ls"), vec![exact("PS4='+'"), simple("ls")]);
+    }
+
+    #[test]
+    fn escaped_backtick_in_backticks_nests_a_substitution() {
+        let input = "echo `echo \\`touch PWN\\``";
+        assert_eq!(split(input), vec![unparsed(input)]);
+    }
+
+    #[test]
+    fn line_tree_sitter_reads_on_past_ends_at_its_newline() {
+        assert_eq!(
+            split("a && b 2>&1 | c | d\ne >f"),
+            vec![
+                simple("a"),
+                opaque("b 2>&1"),
+                simple("c"),
+                simple("d"),
+                opaque("e >f")
+            ]
         );
     }
 }
