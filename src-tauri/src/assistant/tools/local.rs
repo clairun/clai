@@ -3,12 +3,16 @@ use crate::assistant::sandbox::filesystem::{
 };
 use futures::StreamExt;
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tokio::time::Duration;
 
+use crate::assistant::network::addr::{
+    is_blocked_web_fetch_hostname, reject_private_web_fetch_addrs, reject_private_web_fetch_ip,
+    strip_ipv6_url_brackets,
+};
 use crate::assistant::sandbox::{
     run_command, SandboxCommand, SandboxEnv, SandboxNetworkMode, SandboxProfile,
     SandboxSessionBusMode,
@@ -1214,89 +1218,6 @@ async fn resolve_public_web_fetch_target(
     Ok(Some((host.to_string(), addrs)))
 }
 
-fn is_blocked_web_fetch_hostname(normalized_host: &str) -> bool {
-    normalized_host == "localhost"
-        || normalized_host.ends_with(".localhost")
-        || normalized_host.ends_with(".local")
-        || normalized_host.ends_with(".internal")
-}
-
-fn strip_ipv6_url_brackets(host: &str) -> &str {
-    host.strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(host)
-}
-
-fn reject_private_web_fetch_ip(ip: IpAddr) -> Result<(), String> {
-    if is_private_web_fetch_ip(ip) {
-        Err("Fetching private/local URLs is not allowed".to_string())
-    } else {
-        Ok(())
-    }
-}
-
-fn reject_private_web_fetch_addrs(addrs: &[SocketAddr]) -> Result<(), String> {
-    for addr in addrs {
-        reject_private_web_fetch_ip(addr.ip())?;
-    }
-    Ok(())
-}
-
-fn is_private_web_fetch_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => is_private_web_fetch_ipv4(ip),
-        IpAddr::V6(ip) => is_private_web_fetch_ipv6(ip),
-    }
-}
-
-fn is_private_web_fetch_ipv4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
-    ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_multicast()
-        || ip.is_broadcast()
-        || ip.is_documentation()
-        || ip.is_unspecified()
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 198 && (b == 18 || b == 19))
-        || (a == 192 && b == 0 && c == 0)
-        || a >= 240
-}
-
-fn is_private_web_fetch_ipv6(ip: Ipv6Addr) -> bool {
-    if let Some(mapped) = ip.to_ipv4_mapped() {
-        return is_private_web_fetch_ipv4(mapped);
-    }
-
-    let octets = ip.octets();
-    let segments = ip.segments();
-
-    // NAT64: the well-known prefix 64:ff9b::/96 embeds a target IPv4 in the
-    // low 32 bits, so `64:ff9b::7f00:1` would reach 127.0.0.1. Extract and
-    // apply the IPv4 blocklist rather than trusting the v6 literal. The
-    // local-use prefix 64:ff9b:1::/48 (RFC 8215) is site-internal by
-    // definition, so block it wholesale.
-    if segments[0] == 0x0064 && segments[1] == 0xff9b {
-        if segments[2] == 0x0001 {
-            return true;
-        }
-        if segments[2] == 0 && segments[3] == 0 && segments[4] == 0 && segments[5] == 0 {
-            let embedded = std::net::Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
-            return is_private_web_fetch_ipv4(embedded);
-        }
-    }
-
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || (octets[0] & 0xfe) == 0xfc
-        || (segments[0] & 0xffc0) == 0xfe80
-        || (segments[0] & 0xffc0) == 0xfec0
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
-        || segments[0] == 0x2002
-}
-
 fn web_fetch_body_limit(content_limit: usize) -> usize {
     content_limit
         .saturating_mul(4)
@@ -1519,75 +1440,6 @@ mod tests {
         );
         assert_eq!(urldecode("a+b"), "a b");
         assert_eq!(urldecode("plain"), "plain");
-    }
-
-    #[test]
-    fn web_fetch_ip_filter_blocks_non_public_ranges() {
-        for ip in [
-            "0.0.0.0",
-            "10.0.0.1",
-            "100.64.0.1",
-            "127.0.0.1",
-            "169.254.169.254",
-            "172.16.0.1",
-            "192.168.1.1",
-            "192.0.0.1",
-            "198.18.0.1",
-            "224.0.0.1",
-            "240.0.0.1",
-            "::",
-            "::1",
-            "::ffff:127.0.0.1",
-            "fc00::1",
-            "fe80::1",
-            "fec0::1",
-            "2001:db8::1",
-            "2002:0a00:0001::1",
-            // NAT64 well-known prefix embedding 127.0.0.1 (64:ff9b::7f00:1).
-            "64:ff9b::7f00:1",
-            // NAT64 local-use prefix 64:ff9b:1::/48 (site-internal by definition).
-            "64:ff9b:1::1",
-        ] {
-            assert!(is_private_web_fetch_ip(ip.parse().unwrap()), "{ip}");
-        }
-    }
-
-    #[test]
-    fn web_fetch_ip_filter_allows_public_addresses() {
-        for ip in [
-            "8.8.8.8",
-            "1.1.1.1",
-            "2606:4700:4700::1111",
-            // NAT64 well-known prefix embedding a public IPv4 (8.8.8.8) must
-            // still be reachable — only the embedded IPv4 decides.
-            "64:ff9b::808:808",
-        ] {
-            assert!(!is_private_web_fetch_ip(ip.parse().unwrap()), "{ip}");
-        }
-    }
-
-    #[test]
-    fn web_fetch_blocks_private_dns_results() {
-        let addrs = [
-            SocketAddr::new("93.184.216.34".parse().unwrap(), 80),
-            SocketAddr::new("192.168.1.1".parse().unwrap(), 80),
-        ];
-
-        let err = reject_private_web_fetch_addrs(&addrs).unwrap_err();
-        assert!(err.contains("private/local"));
-    }
-
-    #[test]
-    fn web_fetch_hostname_filter_blocks_local_names() {
-        for host in [
-            "localhost",
-            "api.localhost",
-            "myhost.local",
-            "service.internal",
-        ] {
-            assert!(is_blocked_web_fetch_hostname(host), "{host}");
-        }
-        assert!(!is_blocked_web_fetch_hostname("example.com"));
     }
 
     #[test]

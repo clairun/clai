@@ -17,6 +17,7 @@ pub mod events;
 pub mod image_store;
 pub mod local_agent;
 pub mod local_mcp;
+pub mod network;
 pub mod providers;
 pub mod repository;
 pub mod run_context;
