@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState, type ReactNode } from 'react';
 import useAssistantStore, { type PendingAskUser } from '../../assistant/sessionStore';
+import RequestingAgent from '../Agents/RequestingAgent';
+import type { SenderAgent } from '../AssistantChat/messageSender';
 import { OTHER_INDEX, useAskAnswer } from './useAskAnswer';
 import styles from './AskUserPanel.module.css';
 
@@ -23,25 +25,31 @@ interface AskUserPanelProps {
    * answers), and the answer fills the space below.
    */
   speaker?: (prompt: ReactNode) => ReactNode;
+  /** The agent asking, drawn in the header; the spoken panel draws its own face. */
+  asker?: SenderAgent | null;
 }
 
-const AskUserPanel = ({ sessionId = null, ask, speaker }: AskUserPanelProps) => {
+const AskUserPanel = ({ sessionId = null, ask, speaker, asker = null }: AskUserPanelProps) => {
   const sessionPending = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId]?.pendingAskUser || null : null
   );
   const pending = ask ?? sessionPending;
   // Keyed by question: a new one starts with a fresh draft and expanded.
-  return pending ? <AskQuestion key={pending.pendingId} pending={pending} takeFocus={!ask} speaker={speaker} /> : null;
+  return pending ? (
+    <AskQuestion key={pending.pendingId} pending={pending} takeFocus={!ask} speaker={speaker} asker={asker} />
+  ) : null;
 };
 
 const AskQuestion = ({
   pending,
   takeFocus,
   speaker,
+  asker,
 }: {
   pending: PendingAskUser;
   takeFocus: boolean;
   speaker?: (prompt: ReactNode) => ReactNode;
+  asker: SenderAgent | null;
 }) => {
   const {
     options,
@@ -134,13 +142,14 @@ const AskQuestion = ({
       ref={containerRef}
       className={speaker ? `${styles.panel} ${styles.spoken}` : styles.panel}
       role="dialog"
-      aria-label="Agent question"
+      aria-label={asker ? `Question from ${asker.name}` : 'Agent question'}
       tabIndex={-1}
       onKeyDown={handlePanelKeyDown}
     >
       {!speaker && (
       <header className={styles.header}>
         <span className={styles.chip}>AGENT IS ASKING</span>
+        {asker && <RequestingAgent agent={asker} />}
         <button
           type="button"
           className={styles.collapseBtn}

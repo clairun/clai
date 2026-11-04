@@ -5,7 +5,11 @@ import type {
   FilesystemPathAccess,
   PathGrantDecision,
   PathGrantRequest,
+  WorkspaceAgentResponse,
+  WorkspaceTaskResponse,
 } from '../generated/bindings';
+import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender';
+import RequestingAgent from './Agents/RequestingAgent';
 import { chipText } from './requestChips';
 import styles from './InlinePathGrantCard.module.css';
 
@@ -87,13 +91,15 @@ interface PathGrantCardProps {
    * the full card.
    */
   speaker?: (prompt: ReactNode) => ReactNode;
+  /** The agent that asked, drawn in the header; the spoken card draws its own face. */
+  requester?: SenderAgent | null;
   /** The decision was accepted. */
   onDecided?: (requestId: string) => void;
   ref?: Ref<HTMLElement>;
 }
 
 /** One path-grant request and its decision. */
-export const PathGrantCard = ({ req, speaker, onDecided, ref }: PathGrantCardProps) => {
+export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathGrantCardProps) => {
   const [card, setCard] = useState<PathGrantCardState>({ path: req.requestedPath, access: req.requestedAccess });
   const [isSubmitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -136,16 +142,20 @@ export const PathGrantCard = ({ req, speaker, onDecided, ref }: PathGrantCardPro
     <article
       ref={ref}
       className={spoken ? `${styles.card} ${styles.spoken}` : styles.card}
-      aria-label="Path grant requested"
+      aria-label={requester ? `Path grant requested by ${requester.name}` : 'Path grant requested'}
     >
       {!spoken && (
         <header className={styles.cardHeader}>
           <div className={styles.cardHeaderLeft}>
             <span className={styles.tag}>Path access requested</span>
             <span className={styles.cardSubtitle}>
-              {req.agentName
-                ? `Agent "${req.agentName}" wants to extend its filesystem grants:`
-                : 'An agent wants to extend its filesystem grants:'}
+              {requester ? (
+                <>
+                  <RequestingAgent agent={requester} /> wants to extend its filesystem grants:
+                </>
+              ) : (
+                'An agent wants to extend its filesystem grants:'
+              )}
             </span>
           </div>
           <button
@@ -307,7 +317,17 @@ export const PathGrantCard = ({ req, speaker, onDecided, ref }: PathGrantCardPro
  *   - enforces the narrowing invariants client-side (no widening, no
  *     upgrading RO→RW) so the user never gets a confusing backend rejection.
  */
-const InlinePathGrantCard = ({ workspaceId }: { workspaceId: string | null }) => {
+const InlinePathGrantCard = ({
+  workspaceId,
+  roster = [],
+  loadedTasks,
+}: {
+  workspaceId: string | null;
+  /** The workspace's agents, to draw who asked each request. */
+  roster?: readonly WorkspaceAgentResponse[];
+  /** The workspace's tasks, to find an agent removed from the roster mid-task. */
+  loadedTasks?: () => readonly WorkspaceTaskResponse[];
+}) => {
   const [requests, setRequests] = useState<PathGrantRequest[]>([]);
   const firstCardRef = useRef<HTMLElement | null>(null);
   const previousCountRef = useRef(0);
@@ -401,6 +421,7 @@ const InlinePathGrantCard = ({ workspaceId }: { workspaceId: string | null }) =>
           key={req.requestId}
           ref={cardIndex === 0 ? firstCardRef : null}
           req={req}
+          requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])}
           onDecided={dismissRequest}
         />
       ))}

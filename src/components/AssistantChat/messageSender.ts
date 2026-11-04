@@ -48,6 +48,21 @@ export const resolveSessionOwner = (
   return main ? snapshotOf(main) : null;
 };
 
+/** A workspace agent by its id, as the roster draws it; `null` when the roster does not know it. */
+export const rosterAgent = (
+  workspaceAgentId: string | null | undefined,
+  roster: readonly WorkspaceAgentResponse[]
+): SenderAgent | null => {
+  const live = workspaceAgentId ? roster.find((agent) => agent.id === workspaceAgentId) : undefined;
+  if (!live) return null;
+  return {
+    workspaceAgentId: live.id,
+    name: agentDisplayName(live),
+    identity: identityFor(live),
+    presence: live.enabled ? 'active' : 'disabled',
+  };
+};
+
 /**
  * The live roster wins, so renames and face changes apply to old messages; an
  * agent that left the crew keeps the snapshot's name and face.
@@ -56,21 +71,30 @@ export const resolveAgent = (
   snapshot: AgentRefSnapshot,
   roster: readonly WorkspaceAgentResponse[]
 ): SenderAgent => {
-  const live = roster.find((agent) => agent.id === snapshot.workspaceAgentId);
-  if (live) {
-    return {
-      workspaceAgentId: live.id,
-      name: agentDisplayName(live),
-      identity: identityFor(live),
-      presence: live.enabled ? 'active' : 'disabled',
-    };
-  }
+  const live = rosterAgent(snapshot.workspaceAgentId, roster);
+  if (live) return live;
   return {
     workspaceAgentId: snapshot.workspaceAgentId,
     name: agentDisplayName(snapshot),
     identity: identityFor({ ...snapshot, id: snapshot.workspaceAgentId }),
     presence: 'removed',
   };
+};
+
+/**
+ * The agent that raised an approval or a grant: found in the roster or, for an
+ * agent removed mid-task, on its task, as that task's log draws it.
+ */
+export const requestingAgent = (
+  workspaceAgentId: string | null | undefined,
+  roster: readonly WorkspaceAgentResponse[],
+  tasks: readonly WorkspaceTaskResponse[]
+): SenderAgent | null => {
+  const live = rosterAgent(workspaceAgentId, roster);
+  if (live || !workspaceAgentId) return live;
+  const task = tasks.find((entry) => entry.assignedToWorkspaceAgentId === workspaceAgentId);
+  const owner = task ? resolveSessionOwner(roster, task) : null;
+  return owner ? resolveAgent(owner, roster) : null;
 };
 
 /**

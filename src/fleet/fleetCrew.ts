@@ -77,12 +77,19 @@ export interface FleetRequestScene {
 
 /**
  * Who made a request; `null` for Main. A question names its session, which is
- * a task's or the Main's; an approval or a grant names its agent, found in the
- * roster, and Main's name is no agent's.
+ * a task's or the Main's; an approval or a grant names its workspace agent,
+ * found in the roster or, for an agent that left it mid-task, on its task.
  */
 const askerOf = (card: FleetCard, tasks: readonly WorkspaceTaskResponse[], request: FleetRequest): FleetAgentRef | null => {
-  if (request.kind !== 'ask') return card.agents.find((a) => a.name === request.agentName) ?? null;
-  const task = tasks.find((t) => t.sessionId === request.ask.sessionId);
+  if (request.kind === 'ask') {
+    const task = tasks.find((t) => t.sessionId === request.ask.sessionId);
+    return task ? assigneeOf(card, task) : null;
+  }
+  const { agentId } = request.request;
+  if (!agentId || agentId === card.main?.id) return null;
+  const member = card.agents.find((a) => a.id === agentId);
+  if (member) return member;
+  const task = tasks.find((t) => t.assignedToWorkspaceAgentId === agentId);
   return task ? assigneeOf(card, task) : null;
 };
 
@@ -140,11 +147,13 @@ export const firstWords = (text: string, max = WORDS_CHARS): string => {
  */
 export const cardCrew = (card: FleetCard, live: FleetLive, now: number): FleetCrew => {
   const tasks = workspaceTasks(card, live).sort((a, b) => Number(b.updatedAt) - Number(a.updatedAt));
-  const members = new Map<string, FleetAgentRef & { main: boolean }>([[MAIN_SEED, { seed: MAIN_SEED, name: 'Main', main: true }]]);
-  for (const agent of card.agents) if (!members.has(agent.seed)) members.set(agent.seed, { ...agent, main: false });
+  type Member = Pick<FleetCrewMember, 'seed' | 'name' | 'main'>;
+  const member = ({ seed, name }: FleetAgentRef): Member => ({ seed, name, main: false });
+  const members = new Map<string, Member>([[MAIN_SEED, { seed: MAIN_SEED, name: 'Main', main: true }]]);
+  for (const agent of card.agents) if (!members.has(agent.seed)) members.set(agent.seed, member(agent));
   const join = (agent: FleetAgentRef | null) => {
     if (!agent) return MAIN_SEED;
-    if (!members.has(agent.seed)) members.set(agent.seed, { ...agent, main: false });
+    if (!members.has(agent.seed)) members.set(agent.seed, member(agent));
     return agent.seed;
   };
 

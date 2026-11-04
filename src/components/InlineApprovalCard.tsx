@@ -1,7 +1,15 @@
 import React, { useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { listPendingPermissionRequests, submitPermissionDecision } from '../permissions/client';
-import type { PermissionRequest, SegmentApproval, SegmentDecision } from '../generated/bindings';
+import type {
+  PermissionRequest,
+  SegmentApproval,
+  SegmentDecision,
+  WorkspaceAgentResponse,
+  WorkspaceTaskResponse,
+} from '../generated/bindings';
+import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender';
+import RequestingAgent from './Agents/RequestingAgent';
 import { chipText } from './requestChips';
 import styles from './InlineApprovalCard.module.css';
 
@@ -44,6 +52,55 @@ interface SegmentCellState {
 
 type CardState = Record<number, SegmentCellState>;
 
+/**
+ * Parts the backend can decide the same way twice — several commands that
+ * share one suggested prefix — are answered once, so the user never has to
+ * allow the same prefix twice in one request.
+ */
+interface SegmentGroup {
+  /** The member whose cell carries the row's prefix and decision. */
+  head: number;
+  /** Every member's index in the request: a decision on the row lands on all
+   * of them, so the submitted array stays one decision per segment. */
+  indices: number[];
+  /** The member texts, duplicates collapsed with a count: what the row shows. */
+  members: Array<{ text: string; count: number }>;
+  /** The prefix every member shares; empty when they matched on exact text. */
+  suggested: string;
+  /** One opaque member makes the whole row something to read carefully. */
+  isOpaque: boolean;
+}
+
+// A segment with a prefix of its own groups by that prefix. The rest can only
+// ever be saved by their exact text, so they group with identical text only.
+const groupSegments = (segments: SegmentApproval[]): SegmentGroup[] => {
+  const groups: SegmentGroup[] = [];
+  const byKey = new Map<string, SegmentGroup>();
+  segments.forEach((seg, idx) => {
+    const suggested = (seg.suggestedPrefix ?? '').trim();
+    const key = suggested ? `prefix:${suggested}` : `text:${seg.text}`;
+    const group = byKey.get(key);
+    if (!group) {
+      const fresh: SegmentGroup = {
+        head: idx,
+        indices: [idx],
+        members: [{ text: seg.text, count: 1 }],
+        suggested,
+        isOpaque: seg.kind === 'opaque',
+      };
+      byKey.set(key, fresh);
+      groups.push(fresh);
+      return;
+    }
+    group.indices.push(idx);
+    const seen = group.members.find((member) => member.text === seg.text);
+    if (seen) seen.count += 1;
+    else group.members.push({ text: seg.text, count: 1 });
+    group.isOpaque = group.isOpaque || seg.kind === 'opaque';
+  });
+  return groups;
+};
+
 // How a row's chosen decision reads in the bulk note.
 const DECISION_LABEL: Record<DecisionKind, string> = {
   allowOnce: 'Allow once',
@@ -61,13 +118,15 @@ interface ApprovalCardProps {
    * "always" chip saves the suggested prefix and shows it (`Always · cargo`).
    */
   speaker?: (prompt: ReactNode) => ReactNode;
+  /** The agent that asked, drawn in the header; the spoken card draws its own face. */
+  requester?: SenderAgent | null;
   /** The decision was accepted. */
   onDecided?: (requestId: string) => void;
   ref?: Ref<HTMLElement>;
 }
 
 /** One permission request and its decisions. */
-export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps) => {
+export const ApprovalCard = ({ req, speaker, requester, onDecided, ref }: ApprovalCardProps) => {
   const [cells, setCells] = useState<CardState>(() =>
     Object.fromEntries(req.segments.map((seg, idx) => [idx, { prefix: seg.suggestedPrefix || '', decision: null }]))
   );
@@ -86,6 +145,9 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
   // request can't swallow the conversation. Default expanded.
   const [isCollapsed, setCollapsed] = useState(false);
   const spoken = Boolean(speaker);
+  // One row per distinct decision: the parts that share a prefix are
+  // answered together.
+  const groups = groupSegments(req.segments);
 
   const sendDecisions = async (decisions: SegmentDecision[]) => {
     // One decision per request: a click that lands after the send must not
@@ -106,8 +168,14 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
     }
   };
 
-  const setSegmentPrefix = (idx: number, prefix: string) =>
-    setCells((current) => ({ ...current, [idx]: { decision: current[idx]?.decision ?? null, prefix } }));
+  // A row's prefix is the prefix of every part it stands for.
+  const setGroupPrefix = (group: SegmentGroup, prefix: string) =>
+    setCells((current) => ({
+      ...current,
+      ...Object.fromEntries(
+        group.indices.map((idx) => [idx, { decision: current[idx]?.decision ?? null, prefix }])
+      ),
+    }));
 
   const resolvedPrefix = (selected: CardState, seg: SegmentApproval, idx: number): string =>
     (selected[idx]?.prefix ?? seg.suggestedPrefix ?? '').trim();
@@ -142,12 +210,17 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
     return req.segments.map((seg, i) => decisionFor(selected, seg, i, trimmedReason));
   };
 
-  const handleSegmentDecision = (idx: number, kind: DecisionKind) => {
-    const next: CardState = { ...cells, [idx]: { prefix: cells[idx]?.prefix ?? '', decision: kind } };
+  // One click decides every part of the row: the submitted array still carries
+  // a decision for each of them.
+  const handleGroupDecision = (group: SegmentGroup, kind: DecisionKind) => {
+    const next: CardState = { ...cells };
+    group.indices.forEach((idx) => {
+      next[idx] = { prefix: cells[idx]?.prefix ?? '', decision: kind };
+    });
     setCells(next);
-    if (!req.segments.every((_, i) => next[i]?.decision)) return;
+    if (!groups.every((g) => next[g.head]?.decision)) return;
     // A denial waits for confirmation so the user can add a reason.
-    if (req.segments.some((_, i) => isDenial(next[i]?.decision ?? null))) return;
+    if (groups.some((g) => isDenial(next[g.head]?.decision ?? null))) return;
     sendDecisions(decisionsFrom(next, reason));
   };
 
@@ -163,60 +236,65 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
 
   const confirmDenial = () => sendDecisions(decisionsFrom(cells, reason));
 
-  const hasDenial = req.segments.some((_, i) => isDenial(cells[i]?.decision ?? null));
-  const allDecided = req.segments.every((_, i) => cells[i]?.decision);
+  const hasDenial = groups.some((g) => isDenial(cells[g.head]?.decision ?? null));
+  const allDecided = groups.every((g) => cells[g.head]?.decision);
   // "Deny always" writes a block rule that lasts, so the confirm says so.
-  const blocksAlways = req.segments.some((_, i) => cells[i]?.decision === 'denyAlways');
+  const blocksAlways = groups.some((g) => cells[g.head]?.decision === 'denyAlways');
   const confirmLabel = (): string => {
     if (isSubmitting) return 'Submitting…';
-    if (req.segments.length > 1) return 'Submit decisions';
+    if (groups.length > 1) return 'Submit decisions';
     return blocksAlways ? 'Deny and block always' : 'Deny command';
   };
 
-  // Batch "trust this whole command" shortcut. It decides the parts the
+  // Batch "trust this whole command" shortcut. It decides the rows the
   // user has not decided yet: those with a prefix (either Simple or
   // Opaque whose head is recognized) get AllowAlways with the user's
   // edited prefix or the suggestion, the rest fall back to AllowOnce so
-  // the run still proceeds. The parts the user already decided keep
+  // the run still proceeds. The rows the user already decided keep
   // their decision, so a deny is never turned into an allow rule by a
   // later click.
   const allowAllAlways = () => {
     const next: CardState = { ...cells };
-    req.segments.forEach((seg, idx) => {
-      if (next[idx]?.decision) return;
-      const prefix = resolvedPrefix(next, seg, idx);
-      next[idx] = { prefix: next[idx]?.prefix ?? '', decision: prefix ? 'allowAlways' : 'allowOnce' };
+    groups.forEach((group) => {
+      if (next[group.head]?.decision) return;
+      const prefix = resolvedPrefix(next, req.segments[group.head]!, group.head);
+      const kind: DecisionKind = prefix ? 'allowAlways' : 'allowOnce';
+      group.indices.forEach((idx) => {
+        next[idx] = { prefix: next[idx]?.prefix ?? '', decision: kind };
+      });
     });
-    if (req.segments.some((_, i) => isDenial(next[i]?.decision ?? null))) {
+    if (groups.some((g) => isDenial(next[g.head]?.decision ?? null))) {
       setCells(next);
       return;
     }
     sendDecisions(decisionsFrom(next, reason));
   };
 
-  // What the bulk click will do, part by part: it decides the parts the
-  // user has not decided yet and leaves the decided ones alone. A part
-  // with a prefix is saved as an allow rule, a part without one is
+  // What the bulk click will do, row by row: it decides the rows the
+  // user has not decided yet and leaves the decided ones alone. A row
+  // with a prefix is saved as an allow rule, a row without one is
   // allowed for this run only. The note under the button says exactly
   // that, so the click never decides more than it says.
-  const bulkPlan = req.segments.map((seg, idx) => {
-    const decided = cells[idx]?.decision ?? null;
+  const bulkPlan = groups.map((group, gidx) => {
+    const first = req.segments[group.head]!;
+    const decided = cells[group.head]?.decision ?? null;
     return {
-      idx,
-      text: seg.text,
-      prefix: resolvedPrefix(cells, seg, idx),
+      gidx,
+      group,
+      prefix: resolvedPrefix(cells, first, group.head),
       decided,
-      effective: effectiveDecision(seg, idx, decided),
+      effective: effectiveDecision(first, group.head, decided),
     };
   });
+  type BulkPart = (typeof bulkPlan)[number];
   const pendingParts = bulkPlan.filter((part) => part.decided === null);
   const keptParts = bulkPlan.filter((part) => part.decided !== null);
   const savedParts = pendingParts.filter((part) => part.prefix.length > 0);
   const onceOnlyParts = pendingParts.filter((part) => part.prefix.length === 0);
   // One rule for both cards: the bulk action is offered only while it
-  // can save something. When no pending part has a prefix to save, the
+  // can save something. When no pending row has a prefix to save, the
   // click would decide the rest for this run only, so the card offers
-  // one chip per remaining part instead. The Fleet card and the
+  // one chip per remaining row instead. The Fleet card and the
   // workspace card therefore always offer the same choices.
   const showsBulkChip = pendingParts.length > 0 && savedParts.length > 0;
   const hasBulkNote = onceOnlyParts.length > 0 || keptParts.length > 0;
@@ -227,21 +305,46 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
     onceOnlyParts.length === 0
       ? `Allow ${bulkScope} (always)`
       : `Allow ${bulkScope} (always where possible)`;
+  // The click decides whole rows, so the claims it makes count the parts
+  // behind the rows, not the rows: a row that stands for two commands
+  // decides two.
+  const partCount = (rows: BulkPart[]) =>
+    rows.reduce((total, row) => total + row.group.indices.length, 0);
   const bulkShortLabel =
     onceOnlyParts.length === 0
       ? `${bulkLead} always`
-      : `${bulkLead} · ${savedParts.length} of ${pendingParts.length} saved`;
+      : `${bulkLead} · ${partCount(savedParts)} of ${partCount(pendingParts)} saved`;
+  const onceOnlyCount = partCount(onceOnlyParts);
+  // A row answers every command that shares its prefix, so the two
+  // counts part company as soon as commands merge: five commands can need
+  // three decisions. A label calls them parts only while the counts agree,
+  // and names both when they do not.
+  const commandCount = partCount(bulkPlan);
+  const rowsMerged = groups.length < commandCount;
+  const needDecisionLabel = rowsMerged
+    ? `${commandCount} commands in ${groups.length} rows need a decision`
+    : `${groups.length} parts need a decision`;
   const bulkWhy =
     onceOnlyParts.length === 0
       ? 'Saves the prefix of every part this click decides and runs the command.'
-      : `Saves the prefixes of ${savedParts.length} of the ${pendingParts.length} parts this click decides and runs the command; the remaining ${onceOnlyParts.length === 1 ? 'part is' : 'parts are'} allowed once only.`;
-  // Parts are named by their position in the command: two parts with the
-  // same text stay apart, and a part without text still gets a name.
-  const partName = (part: { text: string }) => part.text.trim() || '(empty)';
-  // What the click does with a part the user already decided: it keeps the
+      : `Saves the prefixes of ${partCount(savedParts)} of the ${partCount(pendingParts)} parts this click decides and runs the command; the remaining ${onceOnlyCount === 1 ? 'part is' : 'parts are'} allowed once only.`;
+  // Rows are named by their position in the card, and a row is named by
+  // every command it stands for, so the note can't hide a part behind
+  // its twin. A row without text still gets a name.
+  const rowName = (group: SegmentGroup) => (
+    <>
+      {group.members.map((member, i) => (
+        <React.Fragment key={member.text}>
+          {i > 0 ? ', ' : ''}
+          <code className={styles.bulkNotePart}>{member.text.trim() || '(empty)'}</code>
+        </React.Fragment>
+      ))}
+    </>
+  );
+  // What the click does with a row the user already decided: it keeps the
   // decision, and an "always" decision is a rule, so this click saves it
   // too. The note has to say so, or it under-reports what is persisted.
-  const keptTail = (part: (typeof bulkPlan)[number]) => {
+  const keptTail = (part: BulkPart) => {
     if (part.effective === 'allowAlways')
       return (
         <>
@@ -252,7 +355,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
       return (
         <>
           saved as a deny rule for{' '}
-          <code className={styles.bulkNotePart}>{part.prefix || partName(part)}</code>
+          {part.prefix ? <code className={styles.bulkNotePart}>{part.prefix}</code> : rowName(part.group)}
         </>
       );
     return <>for this run only</>;
@@ -262,9 +365,9 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
       <span>
         This click saves:{' '}
         {savedParts.map((part, i) => (
-          <span key={part.idx}>
+          <span key={part.gidx}>
             {i > 0 ? ', ' : ''}
-            {part.idx + 1}) <code className={styles.bulkNotePart}>{part.prefix}</code>
+            {part.gidx + 1}) <code className={styles.bulkNotePart}>{part.prefix}</code>
           </span>
         ))}
         .{' '}
@@ -273,9 +376,9 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
         <span>
           Allowed once only:{' '}
           {onceOnlyParts.map((part, i) => (
-            <span key={part.idx}>
+            <span key={part.gidx}>
               {i > 0 ? ', ' : ''}
-              {part.idx + 1}) <code className={styles.bulkNotePart}>{partName(part)}</code>
+              {part.gidx + 1}) {rowName(part.group)}
             </span>
           ))}
           .{' '}
@@ -285,9 +388,9 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
         <span>
           Keeps your decision on{' '}
           {keptParts.map((part, i) => (
-            <span key={part.idx}>
+            <span key={part.gidx}>
               {i > 0 ? ', ' : ''}
-              {part.idx + 1}) <code className={styles.bulkNotePart}>{partName(part)}</code>{' '}
+              {part.gidx + 1}) {rowName(part.group)}{' '}
               ({DECISION_LABEL[part.effective!]}), {keptTail(part)}
             </span>
           ))}
@@ -326,18 +429,41 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
           children: `Always ${verb} (${reach})`,
         };
 
+  // Several commands left with no prefix to share are blocked each by its own
+  // text, which the row above the chips lists.
+  const manyDenyChip = (count: number) =>
+    spoken
+      ? {
+          title: `Always deny the ${count} commands of this row, each by its own text (${reach})`,
+          children: (
+            <>
+              Never · <code>{count} commands</code>
+            </>
+          ),
+        }
+      : {
+          title: `${savedOn}. Blocks the ${count} commands of this row, each by its own text.`,
+          children: `Always deny (${reach})`,
+        };
+
   return (
     <article
       ref={ref}
       className={spoken ? `${styles.card} ${styles.spoken}` : styles.card}
-      aria-label="Permission requested"
+      aria-label={requester ? `Permission requested by ${requester.name}` : 'Permission requested'}
     >
       {!spoken && (
         <header className={styles.cardHeader}>
           <div className={styles.cardHeaderLeft}>
             <span className={styles.tag}>Permission requested</span>
             <span className={styles.cardSubtitle}>
-              {req.agentName ? `Agent "${req.agentName}" wants to run:` : 'An agent wants to run:'}
+              {requester ? (
+                <>
+                  <RequestingAgent agent={requester} /> wants to run:
+                </>
+              ) : (
+                'An agent wants to run:'
+              )}
             </span>
           </div>
           <button
@@ -379,14 +505,14 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
             )}
             {!spoken && (
               <p className={styles.segmentsLabel}>
-                {req.segments.length === 1
+                {groups.length === 1
                   ? 'Choose how to handle this command (a denial needs a confirm):'
-                  : `${req.segments.length} parts need a decision (confirm after choosing any denial):`}
+                  : `${needDecisionLabel} (confirm after choosing any denial):`}
               </p>
             )}
-            {req.segments.map((seg, idx) => {
-              const cell: SegmentCellState = cells[idx] || { prefix: '', decision: null };
-              const isOpaque = seg.kind === 'opaque';
+            {groups.map((group) => {
+              const cell: SegmentCellState = cells[group.head] || { prefix: '', decision: null };
+              const first = req.segments[group.head]!;
               // The backend now fills `suggestedPrefix` for Opaque
               // segments too (the binary head IS a stable identifier
               // even when the surrounding syntax is opaque). The
@@ -394,28 +520,55 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
               // non-empty rather than the kind tag, so any Opaque
               // segment whose head was recognized gets the same
               // "Always allow" workflow as Simple ones.
-              const canPersist = Boolean(seg.suggestedPrefix);
-              // The prefix this part would be saved under. Without one
-              // the part cannot be saved as an allow rule, so the card
+              const canPersist = group.suggested.length > 0;
+              // The prefix this row would be saved under. Without one
+              // the row cannot be saved as an allow rule, so the card
               // offers no "always allow" and says what allowing means.
-              const savePrefix = resolvedPrefix(cells, seg, idx);
+              const savePrefix = resolvedPrefix(cells, first, group.head);
               const canSaveRule = savePrefix.length > 0;
-              // A deny rule needs something to name: the prefix, or the
-              // command text when there is no prefix. With neither, the
-              // rule would be saved under an empty prefix, which the
-              // backend skips, so the card offers no "always deny" either.
-              const denyRuleName = savePrefix || seg.text;
-              const canSaveDenyRule = denyRuleName.trim().length > 0;
+              // A deny rule needs something to name: the shared prefix, or
+              // with none the command text of each member. With neither the
+              // backend would skip an empty rule, so no "always deny" is
+              // offered either.
+              const denyNames = canSaveRule
+                ? [savePrefix]
+                : group.members
+                    .map((member) => member.text.trim())
+                    .filter((name) => name.length > 0);
+              const canSaveDenyRule = denyNames.length > 0;
+              // The chip counts the commands it blocks, not their distinct
+              // texts: a text that repeats is blocked once per command.
+              const deniedCommands = group.members
+                .filter((member) => member.text.trim().length > 0)
+                .reduce((total, member) => total + member.count, 0);
               // The decision this row will submit: an "always allow" with
               // an emptied prefix field saves nothing, so it is an
               // allow-once.
-              const rowDecision = effectiveDecision(seg, idx, cell.decision);
+              const rowDecision = effectiveDecision(first, group.head, cell.decision);
+              // The whole command is already above the rows, so one row that
+              // stands for one part shows no text; a row that stands for
+              // several parts shows them all, and an opaque row is tagged.
+              const showsRow = groups.length > 1 || group.members.length > 1 || group.isOpaque;
+              const showsTexts = groups.length > 1 || group.members.length > 1;
               return (
-                <div key={idx} className={styles.segmentRow}>
-                  {(req.segments.length > 1 || isOpaque) && (
+                <div key={group.head} className={styles.segmentRow}>
+                  {showsRow && (
                     <div className={styles.segmentText}>
-                      {req.segments.length > 1 && <code title={spoken ? seg.text : undefined}>{seg.text}</code>}
-                      {isOpaque && (
+                      {showsTexts && (
+                        <div className={styles.segmentTexts}>
+                          {group.members.map((member) => (
+                            <span key={member.text} className={styles.segmentMember}>
+                              <code title={spoken ? member.text : undefined}>{member.text}</code>
+                              {member.count > 1 && (
+                                <span className={styles.memberCount} title={`${member.count} parts of this command`}>
+                                  ×{member.count}
+                                </span>
+                              )}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                      {group.isOpaque && (
                         <span
                           className={styles.opaqueTag}
                           title="Uses a substitution, redirect, pipe-to-shell or control flow, so what it does isn't just the command it starts. Read it carefully before allowing."
@@ -431,7 +584,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                       <input
                         type="text"
                         value={cell.prefix || ''}
-                        onChange={(e) => setSegmentPrefix(idx, e.target.value)}
+                        onChange={(e) => setGroupPrefix(group, e.target.value)}
                         disabled={isSubmitting}
                         spellCheck={false}
                         autoComplete="off"
@@ -442,7 +595,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                     <button
                       type="button"
                       className={`${styles.btn} ${styles.btnAllowOnce} ${rowDecision === 'allowOnce' ? styles.btnSelected : ''}`}
-                      onClick={() => handleSegmentDecision(idx, 'allowOnce')}
+                      onClick={() => handleGroupDecision(group, 'allowOnce')}
                       disabled={isSubmitting}
                       {...chipText(spoken, 'Allow once', 'Once')}
                     />
@@ -450,7 +603,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                       <button
                         type="button"
                         className={`${styles.btn} ${styles.btnAllow} ${rowDecision === 'allowAlways' ? styles.btnSelected : ''}`}
-                        onClick={() => handleSegmentDecision(idx, 'allowAlways')}
+                        onClick={() => handleGroupDecision(group, 'allowAlways')}
                         disabled={isSubmitting}
                         {...alwaysChip('allow', savePrefix)}
                       />
@@ -459,15 +612,17 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                       <button
                         type="button"
                         className={`${styles.btn} ${styles.btnDeny} ${rowDecision === 'denyAlways' ? styles.btnSelected : ''}`}
-                        onClick={() => handleSegmentDecision(idx, 'denyAlways')}
+                        onClick={() => handleGroupDecision(group, 'denyAlways')}
                         disabled={isSubmitting}
-                        {...alwaysChip('deny', denyRuleName)}
+                        {...(denyNames.length === 1
+                          ? alwaysChip('deny', denyNames[0]!)
+                          : manyDenyChip(deniedCommands))}
                       />
                     )}
                     <button
                       type="button"
                       className={`${styles.btn} ${styles.btnDenyOnce} ${rowDecision === 'denyOnce' ? styles.btnSelected : ''}`}
-                      onClick={() => handleSegmentDecision(idx, 'denyOnce')}
+                      onClick={() => handleGroupDecision(group, 'denyOnce')}
                       disabled={isSubmitting}
                       {...chipText(spoken, 'Deny once', 'Deny')}
                     />
@@ -516,12 +671,16 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                 >
                   {confirmLabel()}
                 </button>
-                {!allDecided && <span className={styles.mutedHint}>Choose for every part to continue</span>}
+                {!allDecided && (
+                  <span className={styles.mutedHint}>
+                    Choose for every {rowsMerged ? 'row' : 'part'} to continue
+                  </span>
+                )}
               </div>
             </div>
           )}
           {error && !isSubmitting && <div className={styles.error}>{error}</div>}
-          {req.segments.length > 1 && (
+          {groups.length > 1 && (
             <footer className={styles.cardFooter}>
               {showsBulkChip && hasBulkNote && (
                 <p className={styles.bulkNote} id={bulkNoteId}>
@@ -566,7 +725,17 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
  * chip near the input bar surfaces the count whenever there are
  * pending requests, with click-to-scroll into view.
  */
-const InlineApprovalCard = ({ workspaceId }: { workspaceId: string | null }) => {
+const InlineApprovalCard = ({
+  workspaceId,
+  roster = [],
+  loadedTasks,
+}: {
+  workspaceId: string | null;
+  /** The workspace's agents, to draw who asked each request. */
+  roster?: readonly WorkspaceAgentResponse[];
+  /** The workspace's tasks, to find an agent removed from the roster mid-task. */
+  loadedTasks?: () => readonly WorkspaceTaskResponse[];
+}) => {
   const [requests, setRequests] = useState<PermissionRequest[]>([]);
   const firstCardRef = useRef<HTMLElement | null>(null);
   const previousCountRef = useRef(0);
@@ -671,6 +840,7 @@ const InlineApprovalCard = ({ workspaceId }: { workspaceId: string | null }) => 
           key={req.requestId}
           ref={cardIndex === 0 ? firstCardRef : null}
           req={req}
+          requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])}
           onDecided={dismissRequest}
         />
       ))}
