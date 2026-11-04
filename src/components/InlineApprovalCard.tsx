@@ -313,7 +313,7 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
               </div>
             </div>
           )}
-          {error && !isSubmitting && <div className={styles.error}>{error}</div>}
+          {error && !isSubmitting && <div className={styles.error} role="alert">{error}</div>}
         </div>
       )}
     </article>

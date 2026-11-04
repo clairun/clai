@@ -285,7 +285,7 @@ describe('ApprovalCard — Deny and its reason', () => {
     const reason = screen.getByRole('textbox', { name: /reason for denying/i });
     await userEvent.type(reason, 'no');
     await userEvent.click(screen.getByRole('button', { name: 'Deny command' }));
-    expect(await screen.findByText('Approval channel closed')).toBeInTheDocument();
+    expect(await screen.findByRole('alert')).toHaveTextContent('Approval channel closed');
     expect(reason).toHaveValue('no');
     expect(reason).toBeEnabled();
     await userEvent.click(screen.getByRole('button', { name: 'Deny command' }));
