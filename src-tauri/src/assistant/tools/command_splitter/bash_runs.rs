@@ -45,6 +45,7 @@ fn blocklist_sees_every_command_bash_runs() {
                     mode: ShellAccessMode::Full,
                     allowed_command_prefixes: vec![],
                     blocked_command_prefixes: vec![name.clone()],
+                    ..Default::default()
                 },
                 ..Default::default()
             };

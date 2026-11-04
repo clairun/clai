@@ -15,6 +15,7 @@ export interface AccessDraft {
   shellMode: ShellAccessMode;
   allowed: string[];
   blocked: string[];
+  askFirst: string[];
   web: boolean;
   sessionBus: boolean;
 }
@@ -116,6 +117,18 @@ export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, cont
 
           {draft.shellMode !== 'off' && (
             <div className={styles.prefixColumns}>
+              {draft.shellMode === 'restricted' && (
+                <div className={styles.prefixList}>
+                  <span className={form.label}>Ask first</span>
+                  <PrefixListEditor
+                    items={draft.askFirst}
+                    onChange={(askFirst) => onChange({ askFirst })}
+                    disabled={disabled}
+                    label="Ask-first command prefixes"
+                    placeholder="git push"
+                  />
+                </div>
+              )}
               {draft.shellMode === 'restricted' && (
                 <div className={styles.prefixList}>
                   <span className={form.label}>Allowed without asking</span>

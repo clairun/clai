@@ -47,7 +47,12 @@ const REVIEWER: AgentDetail = {
   execution: {
     sandbox: { network: 'enabled', sessionBus: 'allow' },
     filesystem: { extraPaths: [HOME_GRANT] },
-    shell: { mode: 'restricted', allowedCommandPrefixes: ['git status'], blockedCommandPrefixes: ['rm'] },
+    shell: {
+      mode: 'restricted',
+      allowedCommandPrefixes: ['git status'],
+      blockedCommandPrefixes: ['rm'],
+      askFirstCommandPrefixes: ['git push'],
+    },
     web: { enabled: true },
   },
 };
@@ -126,7 +131,12 @@ describe('AgentBehaviorForm', () => {
       execution: {
         sandbox: { network: 'enabled', sessionBus: 'allow' },
         filesystem: { extraPaths: [HOME_GRANT] },
-        shell: { mode: 'restricted', allowedCommandPrefixes: ['git status'], blockedCommandPrefixes: ['rm'] },
+        shell: {
+          mode: 'restricted',
+          allowedCommandPrefixes: ['git status'],
+          blockedCommandPrefixes: ['rm'],
+          askFirstCommandPrefixes: ['git push'],
+        },
         web: { enabled: true },
       },
       enabled: true,
@@ -170,7 +180,10 @@ describe('AgentBehaviorForm', () => {
     const request = api.workspaceCreateAgent.mock.calls[0]![0] as {
       name: string;
       providerConnectionIds: string[];
-      execution: { filesystem: { extraPaths: unknown[] }; shell: { mode: string; blockedCommandPrefixes: string[] } };
+      execution: {
+        filesystem: { extraPaths: unknown[] };
+        shell: { mode: string; blockedCommandPrefixes: string[]; askFirstCommandPrefixes: string[] };
+      };
     };
     expect(request.name).toBe('Scout');
     expect(request.providerConnectionIds).toEqual(['conn-b']);
@@ -179,6 +192,8 @@ describe('AgentBehaviorForm', () => {
     expect(request.execution.shell.blockedCommandPrefixes).toEqual([
       'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
     ]);
+    expect(request.execution.shell.askFirstCommandPrefixes).toHaveLength(24);
+    expect(request.execution.shell.askFirstCommandPrefixes.slice(0, 2)).toEqual(['git push', 'gh pr merge']);
     expect(api.workspaceUpdateAgent).not.toHaveBeenCalled();
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
@@ -377,6 +392,7 @@ describe('AgentBehaviorForm', () => {
       expect(screen.getByText('/home/u')).toBeInTheDocument();
       expect(screen.getByText('Preset')).toBeInTheDocument();
       expect(screen.getByRole('list', { name: 'Allowed command prefixes' })).toBeInTheDocument();
+      expect(screen.getByRole('list', { name: 'Ask-first command prefixes' })).toHaveTextContent('git push');
 
       await userEvent.click(screen.getByRole('switch', { name: 'Web access' }));
       expect(onDirtyChange).toHaveBeenLastCalledWith(true);
@@ -390,6 +406,7 @@ describe('AgentBehaviorForm', () => {
       // The blocklist applies under Full too, so it stays editable; the
       // allowlist only means something under Restricted.
       expect(screen.queryByRole('list', { name: 'Allowed command prefixes' })).toBeNull();
+      expect(screen.queryByRole('list', { name: 'Ask-first command prefixes' })).toBeNull();
       expect(screen.getByRole('list', { name: 'Blocked command prefixes' })).toBeInTheDocument();
       await userEvent.click(screen.getByRole('switch', { name: 'Web access' }));
       await userEvent.click(screen.getByRole('switch', { name: 'Session D-Bus' }));
@@ -401,7 +418,12 @@ describe('AgentBehaviorForm', () => {
       await submit(ref);
       const { execution } = sentUpdate();
       expect(execution.filesystem.extraPaths).toEqual([HOME_GRANT, { path: '/srv/data', access: 'read_write', origin: null }]);
-      expect(execution.shell).toEqual({ mode: 'full', allowedCommandPrefixes: ['git status'], blockedCommandPrefixes: ['rm'] });
+      expect(execution.shell).toEqual({
+        mode: 'full',
+        allowedCommandPrefixes: ['git status'],
+        blockedCommandPrefixes: ['rm'],
+        askFirstCommandPrefixes: ['git push'],
+      });
       expect(execution.web.enabled).toBe(false);
       expect(execution.sandbox.sessionBus).toBe('deny');
     });

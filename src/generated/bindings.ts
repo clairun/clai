@@ -515,7 +515,11 @@ export type SetSkillSourceEnabledRequest = { id: string, enabled: boolean, };
 
 export type ShellAccessMode = "off" | "restricted" | "full";
 
-export type ShellCapabilityConfig = { mode: ShellAccessMode, allowedCommandPrefixes: Array<string>, blockedCommandPrefixes: Array<string>, };
+export type ShellCapabilityConfig = { mode: ShellAccessMode, allowedCommandPrefixes: Array<string>, blockedCommandPrefixes: Array<string>, 
+/**
+ * Commands a Restricted agent asks the user about before running.
+ */
+askFirstCommandPrefixes: Array<string>, };
 
 export type SkillCatalogResponse = { sources: Array<SkillSourceResponse>, skills: Array<SkillDefinition>, diagnostics: Array<SkillSourceDiagnostic>, };
 

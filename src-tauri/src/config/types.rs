@@ -29,6 +29,48 @@ fn default_restricted_shell_blocklist() -> Vec<String> {
     ]
 }
 
+/// Ask-first rules that are not on the former default blocklist: commands
+/// that publish or delete something outside this machine.
+const NEW_ASK_FIRST_RULES: &[&str] = &[
+    "git push",
+    "gh pr merge",
+    "gh release",
+    "gh repo delete",
+    "gh api -X DELETE",
+    "gh api --method DELETE",
+    "npm publish",
+    "pnpm publish",
+    "yarn publish",
+    "cargo publish",
+    "twine upload",
+    "docker push",
+    "kubectl delete",
+    "terraform destroy",
+];
+
+/// The ask-first list a new agent starts with.
+pub fn default_ask_first_command_prefixes() -> Vec<String> {
+    ask_first_from_blocklist(&default_restricted_shell_blocklist())
+}
+
+/// The ask-first list of an agent saved before the list existed: the new
+/// rules, then the agent's own blocklist. A default entry the user had
+/// removed from the blocklist stays out.
+fn ask_first_from_blocklist(blocked: &[String]) -> Vec<String> {
+    let mut rules = Vec::new();
+    for rule in NEW_ASK_FIRST_RULES
+        .iter()
+        .copied()
+        .chain(blocked.iter().map(String::as_str))
+    {
+        let rule = rule.trim();
+        if !rule.is_empty() {
+            push_unique_prefix(&mut rules, rule.to_string());
+        }
+    }
+    rules
+}
+
 /// The subset of `standard_restricted_shell_allowlist` that creates or modifies
 /// a file. Used by `ShellCapabilityConfig::can_write_files`; see the note there
 /// about why an incomplete list is the safe direction. Nothing on the default
@@ -307,16 +349,15 @@ pub struct FilesystemCapabilityConfig {
     pub extra_paths: Vec<FilesystemPathGrant>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[derive(Debug, Clone, Serialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub struct ShellCapabilityConfig {
-    #[serde(default)]
     pub mode: ShellAccessMode,
-    #[serde(default)]
     pub allowed_command_prefixes: Vec<String>,
-    #[serde(default = "default_restricted_shell_blocklist")]
     pub blocked_command_prefixes: Vec<String>,
+    /// Commands a Restricted agent asks the user about before running.
+    pub ask_first_command_prefixes: Vec<String>,
 }
 
 impl Default for ShellCapabilityConfig {
@@ -325,7 +366,38 @@ impl Default for ShellCapabilityConfig {
             mode: ShellAccessMode::Off,
             allowed_command_prefixes: Vec::new(),
             blocked_command_prefixes: default_restricted_shell_blocklist(),
+            ask_first_command_prefixes: default_ask_first_command_prefixes(),
         }
+    }
+}
+
+/// [`ShellCapabilityConfig`] as stored. A config saved before the ask-first
+/// list existed has none, and gets one built from its blocklist.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredShellCapabilityConfig {
+    #[serde(default)]
+    mode: ShellAccessMode,
+    #[serde(default)]
+    allowed_command_prefixes: Vec<String>,
+    #[serde(default = "default_restricted_shell_blocklist")]
+    blocked_command_prefixes: Vec<String>,
+    #[serde(default)]
+    ask_first_command_prefixes: Option<Vec<String>>,
+}
+
+impl<'de> Deserialize<'de> for ShellCapabilityConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stored = StoredShellCapabilityConfig::deserialize(deserializer)?;
+        let ask_first_command_prefixes = stored
+            .ask_first_command_prefixes
+            .unwrap_or_else(|| ask_first_from_blocklist(&stored.blocked_command_prefixes));
+        Ok(Self {
+            mode: stored.mode,
+            allowed_command_prefixes: stored.allowed_command_prefixes,
+            blocked_command_prefixes: stored.blocked_command_prefixes,
+            ask_first_command_prefixes,
+        })
     }
 }
 
@@ -827,6 +899,76 @@ mod tests {
             ..Default::default()
         }
         .can_write_files());
+    }
+
+    fn stored_shell(json: serde_json::Value) -> ShellCapabilityConfig {
+        serde_json::from_value(json).expect("shell config")
+    }
+
+    #[test]
+    fn default_ask_first_list_is_the_new_rules_then_the_old_blocklist() {
+        let rules = default_ask_first_command_prefixes();
+        assert_eq!(rules.len(), 24, "{rules:?}");
+        assert_eq!(rules[0], "git push");
+        assert_eq!(rules[14..], default_restricted_shell_blocklist()[..]);
+        assert_eq!(
+            ShellCapabilityConfig::default().ask_first_command_prefixes,
+            rules
+        );
+    }
+
+    #[test]
+    fn a_config_without_an_ask_first_list_builds_it_from_its_blocklist() {
+        let shell = stored_shell(serde_json::json!({
+            "mode": "restricted",
+            "allowedCommandPrefixes": ["git status"],
+            "blockedCommandPrefixes": ["sudo", " curl ", "git push", ""],
+        }));
+        assert_eq!(shell.mode, ShellAccessMode::Restricted);
+        let mut expected: Vec<String> = NEW_ASK_FIRST_RULES.iter().map(|r| r.to_string()).collect();
+        expected.extend(["sudo".to_string(), "curl".to_string()]);
+        assert_eq!(
+            shell.ask_first_command_prefixes, expected,
+            "the new rules, then the blocklist, trimmed and without duplicates;              the rm the user removed from the blocklist stays out"
+        );
+    }
+
+    #[test]
+    fn a_config_with_neither_list_gets_the_default_ask_first_list() {
+        for mode in ["off", "restricted", "full"] {
+            let shell = stored_shell(serde_json::json!({ "mode": mode }));
+            assert_eq!(
+                shell.ask_first_command_prefixes,
+                default_ask_first_command_prefixes()
+            );
+        }
+        assert_eq!(
+            stored_shell(serde_json::json!({ "mode": "full" })).mode,
+            ShellAccessMode::Full
+        );
+    }
+
+    #[test]
+    fn a_stored_ask_first_list_is_kept_as_saved() {
+        let shell = stored_shell(serde_json::json!({
+            "mode": "restricted",
+            "blockedCommandPrefixes": ["sudo"],
+            "askFirstCommandPrefixes": [],
+        }));
+        assert!(
+            shell.ask_first_command_prefixes.is_empty(),
+            "an empty list stays empty"
+        );
+        let shell = stored_shell(serde_json::json!({
+            "askFirstCommandPrefixes": ["git push"],
+        }));
+        assert_eq!(
+            shell.ask_first_command_prefixes,
+            vec!["git push".to_string()]
+        );
+        let round_trip: ShellCapabilityConfig =
+            serde_json::from_str(&serde_json::to_string(&shell).unwrap()).unwrap();
+        assert_eq!(round_trip, shell);
     }
 
     #[test]

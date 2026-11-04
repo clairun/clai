@@ -2068,6 +2068,7 @@ mod tests {
                 mode: ShellAccessMode::Restricted,
                 allowed_command_prefixes: allowed.iter().map(|s| s.to_string()).collect(),
                 blocked_command_prefixes: blocked.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
             },
             ..Default::default()
         }
@@ -2079,6 +2080,7 @@ mod tests {
                 mode: ShellAccessMode::Full,
                 allowed_command_prefixes: vec![],
                 blocked_command_prefixes: blocked.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
             },
             ..Default::default()
         }
@@ -2207,6 +2209,7 @@ mod tests {
                 mode: ShellAccessMode::Full,
                 allowed_command_prefixes: vec![],
                 blocked_command_prefixes: vec![],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -2684,6 +2687,7 @@ mod tests {
                 mode: ShellAccessMode::Full,
                 allowed_command_prefixes: vec![],
                 blocked_command_prefixes: vec!["rm".to_string()],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -3008,6 +3012,7 @@ mod tests {
                             .filter(|p| !p.is_empty())
                             .map(String::from)
                             .collect(),
+                        ..Default::default()
                     },
                     ..Default::default()
                 };
@@ -3068,6 +3073,7 @@ mod tests {
                 mode: ShellAccessMode::Full,
                 allowed_command_prefixes: vec![],
                 blocked_command_prefixes: vec!["touch".to_string()],
+                ..Default::default()
             },
             ..Default::default()
         };
@@ -3096,6 +3102,7 @@ mod tests {
                 mode: ShellAccessMode::Full,
                 allowed_command_prefixes: vec![],
                 blocked_command_prefixes: vec![],
+                ..Default::default()
             },
             ..Default::default()
         };
