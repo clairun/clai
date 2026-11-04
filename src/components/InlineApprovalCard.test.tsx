@@ -193,12 +193,13 @@ describe('ApprovalCard — Deny and its reason', () => {
     expect(screen.getByText('3/500 characters')).toBeInTheDocument();
   });
 
-  it('accepts 500 Unicode characters and drops the next', async () => {
+  it('accepts 500 Unicode characters and drops the next, counting an emoji once', async () => {
     render(<ApprovalCard req={PUSH} />);
     await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
     const reason = screen.getByRole('textbox', { name: /reason for denying/i });
-    fireEvent.change(reason, { target: { value: 'é'.repeat(501) } });
-    expect(Array.from((reason as HTMLTextAreaElement).value)).toHaveLength(500);
+    // Two UTF-16 code units each, one character for the backend.
+    fireEvent.change(reason, { target: { value: '😀'.repeat(501) } });
+    expect((reason as HTMLTextAreaElement).value).toBe('😀'.repeat(500));
     expect(screen.getByText('500/500 characters')).toBeInTheDocument();
   });
 
