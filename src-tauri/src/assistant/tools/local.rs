@@ -436,9 +436,13 @@ pub(crate) fn evaluate_command_policy(
         })
         .collect();
 
+    // A row the splitter could not name may hide what runs in any row of the
+    // input (`x='a[$(rm -rf y)]'; echo $((x))`), so the blocklist also reads
+    // every word of each row.
+    let any_exact = segments.iter().any(|s| matches!(s, Segment::Exact(_)));
     for segment in &segments {
         let text = segment.text();
-        let unparsed = matches!(segment, Segment::Unparsed(_));
+        let unparsed = matches!(segment, Segment::Unparsed(_) | Segment::Exact(_));
 
         // Blocklist applies to every segment. Durable blocklist is checked
         // first; run-scoped blocklist (this run's accepted `DenyAlways`
@@ -460,6 +464,11 @@ pub(crate) fn evaluate_command_policy(
             .or_else(|| by_head_name(text).and_then(|head| blocked(&head)))
             .or_else(|| by_run_command(text).and_then(|cmd| blocked(&cmd)))
             .or_else(|| by_argument_command(text).and_then(|cmd| blocked(&cmd)))
+            .or_else(|| {
+                any_exact
+                    .then(|| blocked_word_run(execution, extra_blocked_prefixes, text))
+                    .flatten()
+            })
         {
             return PolicyResult::Block {
                 segment_text: text.to_string(),
@@ -522,6 +531,43 @@ pub(crate) fn evaluate_command_policy(
     } else {
         PolicyResult::NeedsApproval(approvals)
     }
+}
+
+/// The blocklist entry that starts one of the [`word_runs`] of `text`.
+fn blocked_word_run(
+    execution: &ExecutionCapabilityConfig,
+    extra_blocked_prefixes: &[String],
+    text: &str,
+) -> Option<String> {
+    word_runs(text).find_map(|run| {
+        execution
+            .shell
+            .blocked_command_prefixes
+            .iter()
+            .chain(extra_blocked_prefixes)
+            .find(|p| !p.trim().is_empty() && matches_prefix_literal(p.trim(), &run))
+            .cloned()
+    })
+}
+
+/// Words a blocklist entry may span in [`word_runs`].
+const WORD_RUN: usize = 16;
+
+/// Each word of `text` with up to [`WORD_RUN`] words after it, joined by single spaces,
+/// with quotes and backslashes removed and the directory dropped from the
+/// word: `x='a[$(/bin/rm -rf y)]'` gives `x`, `a`, `rm -rf y`, `-rf y`
+/// and `y`.
+fn word_runs(text: &str) -> impl Iterator<Item = String> {
+    let unquoted: String = text
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"' | '\\'))
+        .collect();
+    let words: Vec<String> = unquoted
+        .split(|c: char| !(c.is_alphanumeric() || "_-./+@%,:~".contains(c)))
+        .filter(|word| !word.is_empty())
+        .map(|word| word.rsplit('/').next().unwrap_or(word).to_string())
+        .collect();
+    (0..words.len()).map(move |at| words[at..words.len().min(at + WORD_RUN)].join(" "))
 }
 
 /// The rule for a row whose commands the splitter could not all identify:
@@ -2764,12 +2810,98 @@ mod tests {
     }
 
     #[test]
+    fn valid_bash_splits_into_rows_whose_prefixes_rematch() {
+        // Each input once was one row asked by its whole text. Now each
+        // command is a row, a saved suggestion re-matches its command, and
+        // Full mode never prompts.
+        for command in [
+            "cat > f.rs <<'EOF'\n  x\nEOF\nls -la",
+            "python3 - <<'EOF' 2>&1 | tail -3\nx\nEOF",
+            "cd x && rg a | grep b | head && python3 - <<'PY'\nPY",
+            "echo \"t ${groups.length}\" && ls",
+            "for ((i=0;i<n;i++)); do grep x f; done",
+        ] {
+            let exec = restricted_execution_config(&[], &[]);
+            let PolicyResult::NeedsApproval(rows) =
+                evaluate_command_policy(&exec, command, &[], &[])
+            else {
+                panic!("{command:?} must ask");
+            };
+            assert!(rows.len() > 1, "{command:?}");
+            let prefixes: Vec<&str> = rows
+                .iter()
+                .map(|row| row.suggested_prefix.as_str())
+                .filter(|prefix| !prefix.is_empty())
+                .collect();
+            let exact: Vec<RunCommandGrant> = rows
+                .iter()
+                .filter(|row| row.suggested_prefix.is_empty())
+                .map(|row| RunCommandGrant::Exact(row.text.clone()))
+                .collect();
+            let saved = restricted_execution_config(&prefixes, &[]);
+            assert!(
+                matches!(
+                    evaluate_command_policy(&saved, command, &exact, &[]),
+                    PolicyResult::Allow
+                ),
+                "{command:?}"
+            );
+            assert!(matches!(
+                evaluate_command_policy(&full_execution_config(&[]), command, &[], &[]),
+                PolicyResult::Allow
+            ));
+        }
+    }
+
+    #[test]
+    fn blocklist_reads_every_row_when_one_is_asked_by_exact_text() {
+        // The value arithmetic evaluates, or the arguments a call passes to
+        // `"$@"`, are written in another row.
+        for command in [
+            "i='a[$(rm -rf x)]'; cat <<EOF\n$((i))\nEOF",
+            "i='a[$(rm -rf x)]'; for ((j=0;j<i;j++)); do :; done",
+            "f(){ \"$@\"; }; f rm -rf x",
+            "ls\nrm -rf x <<'E'\nno end",
+        ] {
+            for exec in [
+                full_execution_config(&["rm"]),
+                restricted_execution_config(&[], &["rm"]),
+            ] {
+                assert!(
+                    matches!(
+                        evaluate_command_policy(&exec, command, &[], &[]),
+                        PolicyResult::Block { .. }
+                    ),
+                    "{command:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wrapper_without_a_command_offers_no_prefix() {
+        // A saved `env` would cover `env rm -rf x`.
+        let exec = restricted_execution_config(&[], &[]);
+        for command in ["env", "env --help", "timeout 60"] {
+            let PolicyResult::NeedsApproval(rows) =
+                evaluate_command_policy(&exec, command, &[], &[])
+            else {
+                panic!("{command:?} must ask");
+            };
+            assert!(
+                rows.iter().all(|row| row.suggested_prefix.is_empty()),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
     fn unparsed_input_is_asked_in_restricted_but_not_in_full_mode() {
         // bash runs the `touch PWN` in each; the splitter cannot find it,
-        // so each input is one Unparsed row. Restricted asks for it as one
-        // exact row even without a blocklist; Full mode runs it without a
-        // prompt — the blocklist is best-effort for input it cannot see
-        // into, whether entries are active or not.
+        // so it is in a row asked by its exact text: the whole input when no
+        // line of it splits. Restricted asks for that row even without a
+        // blocklist; Full mode never prompts — the blocklist is best-effort
+        // for input it cannot see into, whether entries are active or not.
         let commands = [
             "echo $(case a in a) echo;& b) echo;; esac); touch PWN",
             "cat <<EOF|touch PWN\nhi\nEOF",
@@ -2826,8 +2958,15 @@ mod tests {
                     .collect();
                 for command in commands {
                     let result = evaluate_command_policy(&exec, command, &[], &run_blocked);
+                    let whole = matches!(
+                        crate::assistant::tools::command_splitter::split_command(command)
+                            .as_slice(),
+                        [crate::assistant::tools::command_splitter::Segment::Unparsed(_)]
+                    );
                     match (mode.clone(), result) {
-                        (ShellAccessMode::Restricted, PolicyResult::NeedsApproval(rows)) => {
+                        (ShellAccessMode::Restricted, PolicyResult::NeedsApproval(rows))
+                            if whole =>
+                        {
                             let [row] = rows.as_slice() else {
                                 panic!("one row expected for {command:?}");
                             };
@@ -2836,7 +2975,18 @@ mod tests {
                                 row.kind == SegmentKind::Opaque && row.suggested_prefix.is_empty()
                             );
                         }
+                        // A line that splits is a row of its own; the
+                        // `touch PWN` is still in a row the user is asked.
+                        (ShellAccessMode::Restricted, PolicyResult::NeedsApproval(rows)) => {
+                            assert!(
+                                rows.iter().any(|row| row.text.contains("touch PWN")),
+                                "{command:?}"
+                            );
+                        }
                         (ShellAccessMode::Full, PolicyResult::Allow) => {}
+                        // Seen in a row, a blocked command is denied.
+                        (_, PolicyResult::Block { .. })
+                            if !whole && (durable == "touch" || run == "touch") => {}
                         (mode, result) => {
                             panic!(
                                 "{mode:?} {durable:?} {run:?} {command:?} -> {}",
@@ -2995,6 +3145,7 @@ mod tests {
                     Segment::Simple(_) => "Simple",
                     Segment::Opaque(_) => "Opaque",
                     Segment::Unparsed(_) => "Unparsed",
+                    Segment::Exact(_) => "Exact",
                 })
                 .collect()
         };
