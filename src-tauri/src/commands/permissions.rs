@@ -15,7 +15,8 @@
 //!    backend looks up the sender and, for "Always allow", removes the
 //!    matched rules from the agent's ask-first list *before* delivering the
 //!    decision through the oneshot. The bash tool resumes and either runs
-//!    the command or returns an error carrying the user's reason.
+//!    the command or returns an error carrying the user's reason. If that
+//!    save fails, the request stays pending and the card shows the error.
 //!
 //! Sequencing: persistence happens *before* the oneshot delivery so that a
 //! crash between user click and command execution still leaves the removal
@@ -359,6 +360,22 @@ impl PendingApprovals {
         Some((entry, count))
     }
 
+    /// Puts back an entry [`take`](Self::take) removed, unless the tool
+    /// stopped waiting on it meanwhile. Returns whether it is pending again.
+    pub async fn restore(&self, entry: PendingEntry) -> bool {
+        let mut inner = self.inner.lock().await;
+        // Checked under the lock: a waiter dropped later reaps the entry
+        // through `take` once this returns.
+        if entry.sender.is_closed() {
+            return false;
+        }
+        *inner.counts.entry(entry.workspace_id.clone()).or_insert(0) += 1;
+        inner
+            .entries
+            .insert(entry.request.request_id.clone(), entry);
+        true
+    }
+
     /// Removes every pending entry for the same run + command and returns
     /// each with the post-removal workspace count. Called by the bash
     /// approval flow right before registering a fresh request: when a CLI
@@ -450,35 +467,58 @@ pub async fn submit_permission_decision(
     mut decision: AskFirstDecision,
 ) -> Result<(), String> {
     normalize_denial_reason(&mut decision)?;
-    let Some((entry, remaining)) = state.pending_approvals.take(&request_id).await else {
+    resolve_pending_approval(
+        state.inner(),
+        &request_id,
+        decision,
+        |workspace_id, remaining| {
+            emit_permission_resolved(&app, &request_id);
+            emit_attention(&app, workspace_id, remaining);
+        },
+    )
+    .await
+}
+
+/// Delivers `decision` to the tool waiting on request `request_id`, saving
+/// an "Always allow" first. `left_queue` gets the request's workspace and
+/// that workspace's pending count once the request has left the queue.
+///
+/// When the save fails, the request goes back on the queue and the error
+/// is returned: its card stays open with the error, the command keeps
+/// waiting, and the user can answer again.
+async fn resolve_pending_approval(
+    state: &AppState,
+    request_id: &str,
+    decision: AskFirstDecision,
+    left_queue: impl FnOnce(Option<String>, u32),
+) -> Result<(), String> {
+    let Some((entry, remaining)) = state.pending_approvals.take(request_id).await else {
         return Err(format!(
             "No pending approval with request_id `{}` (already resolved or cleared)",
             request_id
         ));
     };
-    // The request has left the queue, so say so even if persisting fails.
-    emit_permission_resolved(&app, &request_id);
-    emit_attention(&app, entry.workspace_id.clone(), remaining);
-    deliver_decision(state.inner(), entry, decision)
-}
-
-/// Save an "Always allow", then deliver the decision to the tool waiting on
-/// the approval.
-fn deliver_decision(
-    state: &AppState,
-    entry: PendingEntry,
-    decision: AskFirstDecision,
-) -> Result<(), String> {
-    // Persist before delivery so the removal survives a crash. Missing
-    // identity leaves "Always allow" scoped to this run only.
-    if decision == AskFirstDecision::AlwaysAllow {
-        if let (Some(workspace_id), Some(agent_id)) = (
-            entry.workspace_id.as_deref(),
-            entry.request.agent_id.as_deref(),
-        ) {
-            persist_always_allow(state, workspace_id, agent_id, &entry.request.rules())?;
+    // Missing identity leaves "Always allow" scoped to this run only.
+    if let (AskFirstDecision::AlwaysAllow, Some(workspace_id), Some(agent_id)) = (
+        &decision,
+        entry.workspace_id.as_deref(),
+        entry.request.agent_id.as_deref(),
+    ) {
+        if let Err(error) =
+            persist_always_allow(state, workspace_id, agent_id, &entry.request.rules())
+        {
+            tracing::warn!(
+                "Could not save Always allow for `{}`: {error}",
+                entry.request.command
+            );
+            let workspace_id = entry.workspace_id.clone();
+            if !state.pending_approvals.restore(entry).await {
+                left_queue(workspace_id, remaining);
+            }
+            return Err(format!("Could not save Always allow: {error}"));
         }
     }
+    left_queue(entry.workspace_id.clone(), remaining);
     let _ = entry
         .sender
         .send(PendingApprovalOutcome::Decision(decision));
@@ -993,8 +1033,8 @@ mod approval_routing_tests {
         assert!(request.also_affects_workspaces.is_empty());
     }
 
-    async fn decide(fixture: &Fixture, agent_id: &str, decision: AskFirstDecision) {
-        let request = PermissionRequest {
+    fn request_for(agent_id: &str) -> PermissionRequest {
+        PermissionRequest {
             request_id: uuid::Uuid::new_v4().to_string(),
             workspace_id: Some(WORKSPACE_ID.to_string()),
             agent_id: Some(agent_id.to_string()),
@@ -1006,11 +1046,21 @@ mod approval_routing_tests {
             }],
             persists_to_shared_agent: false,
             also_affects_workspaces: Vec::new(),
-        };
+        }
+    }
+
+    async fn decide(fixture: &Fixture, agent_id: &str, decision: AskFirstDecision) {
+        let request = request_for(agent_id);
         let pending = &fixture.state.pending_approvals;
         let (rx, _) = pending.register(request.clone(), "run-1".to_string()).await;
-        let (entry, _) = pending.take(&request.request_id).await.expect("pending");
-        deliver_decision(&fixture.state, entry, decision.clone()).expect("deliver");
+        resolve_pending_approval(
+            &fixture.state,
+            &request.request_id,
+            decision.clone(),
+            |_, _| {},
+        )
+        .await
+        .expect("deliver");
         let Ok(PendingApprovalOutcome::Decision(received)) = rx.await else {
             panic!("expected a decision");
         };
@@ -1047,6 +1097,76 @@ mod approval_routing_tests {
         assert!(asks_first(
             &fixture.config().main_agent.expect("main").execution.shell
         ));
+    }
+
+    #[tokio::test]
+    async fn an_always_allow_that_cannot_be_saved_keeps_the_request_open() {
+        let fixture = Fixture::new();
+        // No agent by this id: the save fails.
+        let request = request_for("nobody");
+        let pending = &fixture.state.pending_approvals;
+        let (mut rx, _) = pending.register(request.clone(), "run-1".to_string()).await;
+        let mut left = Vec::new();
+
+        let error = resolve_pending_approval(
+            &fixture.state,
+            &request.request_id,
+            AskFirstDecision::AlwaysAllow,
+            |workspace, remaining| left.push((workspace, remaining)),
+        )
+        .await
+        .expect_err("the save fails");
+
+        assert!(error.contains("nobody"), "{error}");
+        assert!(left.is_empty(), "the card stays open");
+        assert!(
+            matches!(
+                rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "the command keeps waiting, and the run goes on"
+        );
+        assert_eq!(pending.list_for_workspace(WORKSPACE_ID).await.len(), 1);
+        assert_eq!(pending.counts_snapshot().await.get(WORKSPACE_ID), Some(&1));
+
+        // The user answers again from the same card.
+        resolve_pending_approval(
+            &fixture.state,
+            &request.request_id,
+            AskFirstDecision::AllowOnce,
+            |workspace, remaining| left.push((workspace, remaining)),
+        )
+        .await
+        .expect("allow once");
+        assert_eq!(left, [(Some(WORKSPACE_ID.to_string()), 0)]);
+        assert!(matches!(
+            rx.await,
+            Ok(PendingApprovalOutcome::Decision(
+                AskFirstDecision::AllowOnce
+            ))
+        ));
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_closes_the_request_when_nothing_waits_on_it() {
+        let fixture = Fixture::new();
+        let request = request_for("nobody");
+        let pending = &fixture.state.pending_approvals;
+        let (rx, _) = pending.register(request.clone(), "run-1".to_string()).await;
+        drop(rx);
+        let mut left = Vec::new();
+
+        resolve_pending_approval(
+            &fixture.state,
+            &request.request_id,
+            AskFirstDecision::AlwaysAllow,
+            |workspace, remaining| left.push((workspace, remaining)),
+        )
+        .await
+        .expect_err("the save fails");
+
+        assert_eq!(left, [(Some(WORKSPACE_ID.to_string()), 0)]);
+        assert!(pending.list_for_workspace(WORKSPACE_ID).await.is_empty());
     }
 }
 
@@ -1092,13 +1212,9 @@ mod denial_reason_tests {
 
         // The submit command removes the request from the queue and hands the
         // decision to the waiting tool.
-        let (entry, _remaining) = fixture
-            .state
-            .pending_approvals
-            .take(&request.request_id)
+        resolve_pending_approval(&fixture.state, &request.request_id, decision, |_, _| {})
             .await
-            .expect("pending approval");
-        deliver_decision(&fixture.state, entry, decision).expect("deliver");
+            .expect("deliver");
 
         // The tool turns the decision into the error the model reads.
         let PendingApprovalOutcome::Decision(AskFirstDecision::Deny { reason }) =
