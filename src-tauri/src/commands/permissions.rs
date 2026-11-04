@@ -22,8 +22,6 @@
 //! crash between user click and command execution still leaves the removal
 //! on disk.
 
-#![allow(dead_code)] // wired into local::execute_bash_exec; some helpers also called from tests
-
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
