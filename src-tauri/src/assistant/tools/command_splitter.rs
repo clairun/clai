@@ -1960,13 +1960,12 @@ fn expands(text: &str, next: Option<u8>) -> bool {
         match bytes[i] {
             b'\\' => i += 1,
             b'`' => return true,
-            b'$' => {
-                if !matches!(
-                    bytes.get(i + 1).copied().or(next),
-                    None | Some(b' ' | b'\t' | b'\n')
-                ) {
-                    return true;
-                }
+            b'$' if !matches!(
+                bytes.get(i + 1).copied().or(next),
+                None | Some(b' ' | b'\t' | b'\n')
+            ) =>
+            {
+                return true;
             }
             _ => {}
         }
