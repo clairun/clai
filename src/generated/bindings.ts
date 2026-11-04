@@ -458,6 +458,11 @@ export type RunStatus = "queued" | "running" | "waiting_for_tool" | "completed" 
 
 export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "workspace_task" | "signal_wake";
 
+/**
+ * The OS mechanism that sandboxes shell commands on this PC.
+ */
+export type SandboxBackend = "bubblewrap" | "seatbelt";
+
 export type SandboxNetworkConfig = "enabled" | "disabled";
 
 /**
@@ -478,6 +483,25 @@ export type SandboxNetworkConfig = "enabled" | "disabled";
  * want keyring contents kept out of reach.
  */
 export type SandboxSessionBusConfig = "deny" | "allow";
+
+/**
+ * What the sandbox can enforce on this PC; the settings UI reads it to
+ * enable or disable controls instead of naming platforms.
+ */
+export type SandboxStatus = { 
+/**
+ * Whether shell commands run sandboxed at all. Without a sandbox there
+ * is no network control, web tools included.
+ */
+available: boolean, backend: SandboxBackend | null, 
+/**
+ * Whether the Allowlist network mode can be enforced for shell commands.
+ */
+allowlistAvailable: boolean, 
+/**
+ * Why Allowlist is unavailable, worded for the user.
+ */
+allowlistUnavailableReason: string | null, };
 
 /**
  * Discriminated union describing *how* the manager's next run is

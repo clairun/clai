@@ -12,6 +12,7 @@ pub mod mcp_servers;
 pub mod path_grants;
 pub mod permissions;
 pub mod provider_connections;
+pub mod sandbox;
 pub mod skills;
 pub mod system_apps;
 pub mod terminal;
