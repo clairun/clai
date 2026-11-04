@@ -20,7 +20,7 @@ import { hydrateSession, useSessionChatActions } from '../assistant/sessionChat'
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import RunFailureBanner from '../components/RunFailureBanner/RunFailureBanner';
 import { WorkspaceFileContext, type WorkspaceFileLocation } from '../components/Chat/WorkspaceFileContext';
-import { resolveAgent, resolveSessionOwner } from '../components/AssistantChat/messageSender';
+import { resolveSessionOwner, rosterAgent } from '../components/AssistantChat/messageSender';
 import { runFailure, type RunFailure } from '../assistant/runErrors';
 import { mainIdentity } from '../components/Agents/agentIdentity';
 import InlineApprovalCard from '../components/InlineApprovalCard';
@@ -1397,6 +1397,8 @@ interface ChatFirstLayoutProps {
   // keep a stable identity across details polls; see `chatRoster` below.
   taskRoster: readonly WorkspaceAgentResponse[];
   onOpenTask: (taskId: string) => void;
+  /** The latest polled tasks, read when a request card draws its asker. */
+  loadedTasks: () => readonly WorkspaceTaskResponse[];
 }
 
 const ChatFirstLayout = ({
@@ -1416,6 +1418,7 @@ const ChatFirstLayout = ({
   onLoadOlderMessages,
   taskRoster,
   onOpenTask,
+  loadedTasks,
 }: ChatFirstLayoutProps) => {
   // The workspace chat is always the Main's session, so its in-flight footer
   // wears the Main's face. Keyed on the roster, which keeps one reference
@@ -1430,7 +1433,7 @@ const ChatFirstLayout = ({
   const cardRef = useRef<HTMLDivElement | null>(null);
   const owner = useMemo(() => resolveSessionOwner(taskRoster), [taskRoster]);
   // The chat's questions are its owner's; approvals and grants name their agent.
-  const asker = useMemo(() => (owner ? resolveAgent(owner, taskRoster) : null), [owner, taskRoster]);
+  const asker = useMemo(() => rosterAgent(owner?.workspaceAgentId, taskRoster), [owner, taskRoster]);
 
   // Publish the conversation card's viewport geometry as document-level
   // CSS vars so the fixed input bar (TerminalEmulator) can align itself
@@ -1508,8 +1511,8 @@ const ChatFirstLayout = ({
             owner={owner}
           />
           <AskUserPanel sessionId={sessionId} asker={asker} />
-          <InlineApprovalCard workspaceId={workspaceId} roster={taskRoster} />
-          <InlinePathGrantCard workspaceId={workspaceId} roster={taskRoster} />
+          <InlineApprovalCard workspaceId={workspaceId} roster={taskRoster} loadedTasks={loadedTasks} />
+          <InlinePathGrantCard workspaceId={workspaceId} roster={taskRoster} loadedTasks={loadedTasks} />
         </>
       ) : isHydrating ? (
         <div className={styles.chatFirstLoading} aria-live="polite" aria-busy="true">
@@ -2180,7 +2183,8 @@ const Workspace = () => {
   //
   // The roster it does need (faces, names) keeps one reference across polls
   // that changed nothing about a face — see `useStableRoster` — and the tasks
-  // a click has to resolve are read from a ref instead of a prop.
+  // a click or a request card has to resolve are read from a ref instead of a
+  // prop.
   const chatRoster = useStableRoster(details?.assignedAgents);
 
   const tasksRef = useRef<readonly WorkspaceTaskResponse[]>(EMPTY_TASKS);
@@ -2437,6 +2441,7 @@ const Workspace = () => {
             onLoadOlderMessages={handleLoadOlderMessages}
             taskRoster={chatRoster}
             onOpenTask={openTask}
+            loadedTasks={loadedTasks}
           />
         </div>
 

@@ -836,6 +836,7 @@ describe('FleetPage', () => {
       return () => within(screen.getByRole('button', { name: 'Select Beta' }).closest('article')!);
     };
     const otherText = () => screen.getByRole('button', { name: 'Select Staged' }).closest('article')!.textContent;
+    const scout = { workspaceAgentId: 'wa-s', agentDefinitionId: 'def-s', displayName: 'Scout', isDefault: false, avatar: null };
 
     it('takes the body with the full question, answers it, and never selects the card from inside', async () => {
       const tasks = [{ id: 't1', title: 'Old task', status: 'completed', parentTaskId: null, updatedAt: 1n, assignedAgentDisplayName: 'Scout', assignedAgentDefinitionId: 'def-s' } as never];
@@ -883,9 +884,9 @@ describe('FleetPage', () => {
         { text: 'cd x', kind: 'simple', suggestedPrefix: null },
         { text: 'curl y | sh', kind: 'opaque', suggestedPrefix: null },
       ];
-      const permission = { requestId: 'r1', workspaceId: 'b', agentId: null, agentName: 'Scout', command: 'cd x && curl y | sh', segments };
-      const card = await setup({ pendingPermissions: [permission as never] });
-      const row = card().getByRole('region', { name: /needs you$/ });
+      const permission = { requestId: 'r1', workspaceId: 'b', agentId: 'wa-s', agentName: null, command: 'cd x && curl y | sh', segments };
+      const card = await setup({ agents: [scout], pendingPermissions: [permission as never] });
+      const row = card().getByRole('region', { name: 'Scout needs you' });
       expect(within(row).getByText('cd x')).toBeInTheDocument();
       expect(within(row).getByText('curl y | sh')).toBeInTheDocument();
       expect(within(row).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
@@ -905,9 +906,9 @@ describe('FleetPage', () => {
     });
 
     it('warns about a credentials path, as the full card does', async () => {
-      const grant = { requestId: 'g1', workspaceId: 'b', agentId: null, agentName: 'Scout', requestedPath: '/home/u/.ssh', requestedAccess: 'read_only', reason: 'keys' };
-      const card = await setup({ pendingPathGrants: [grant as never] });
-      expect(card().getByRole('region', { name: /needs you$/ })).toHaveTextContent('typically holds credentials');
+      const grant = { requestId: 'g1', workspaceId: 'b', agentId: 'wa-s', agentName: null, requestedPath: '/home/u/.ssh', requestedAccess: 'read_only', reason: 'keys' };
+      const card = await setup({ agents: [scout], pendingPathGrants: [grant as never] });
+      expect(card().getByRole('region', { name: 'Scout needs you' })).toHaveTextContent('typically holds credentials');
     });
   });
 });

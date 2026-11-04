@@ -6,8 +6,9 @@ import type {
   PathGrantDecision,
   PathGrantRequest,
   WorkspaceAgentResponse,
+  WorkspaceTaskResponse,
 } from '../generated/bindings';
-import { rosterAgent, type SenderAgent } from './AssistantChat/messageSender';
+import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender';
 import RequestingAgent from './Agents/RequestingAgent';
 import { chipText } from './requestChips';
 import styles from './InlinePathGrantCard.module.css';
@@ -152,8 +153,6 @@ export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathG
                 <>
                   <RequestingAgent agent={requester} /> wants to extend its filesystem grants:
                 </>
-              ) : req.agentName ? (
-                `Agent "${req.agentName}" wants to extend its filesystem grants:`
               ) : (
                 'An agent wants to extend its filesystem grants:'
               )}
@@ -321,10 +320,13 @@ export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathG
 const InlinePathGrantCard = ({
   workspaceId,
   roster = [],
+  loadedTasks,
 }: {
   workspaceId: string | null;
   /** The workspace's agents, to draw who asked each request. */
   roster?: readonly WorkspaceAgentResponse[];
+  /** The workspace's tasks, to find an agent removed from the roster mid-task. */
+  loadedTasks?: () => readonly WorkspaceTaskResponse[];
 }) => {
   const [requests, setRequests] = useState<PathGrantRequest[]>([]);
   const firstCardRef = useRef<HTMLElement | null>(null);
@@ -419,7 +421,7 @@ const InlinePathGrantCard = ({
           key={req.requestId}
           ref={cardIndex === 0 ? firstCardRef : null}
           req={req}
-          requester={rosterAgent(req.agentId, roster)}
+          requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])}
           onDecided={dismissRequest}
         />
       ))}

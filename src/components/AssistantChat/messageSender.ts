@@ -82,6 +82,22 @@ export const resolveAgent = (
 };
 
 /**
+ * The agent that raised an approval or a grant: found in the roster or, for an
+ * agent removed mid-task, on its task, as that task's log draws it.
+ */
+export const requestingAgent = (
+  workspaceAgentId: string | null | undefined,
+  roster: readonly WorkspaceAgentResponse[],
+  tasks: readonly WorkspaceTaskResponse[]
+): SenderAgent | null => {
+  const live = rosterAgent(workspaceAgentId, roster);
+  if (live || !workspaceAgentId) return live;
+  const task = tasks.find((entry) => entry.assignedToWorkspaceAgentId === workspaceAgentId);
+  const owner = task ? resolveSessionOwner(roster, task) : null;
+  return owner ? resolveAgent(owner, roster) : null;
+};
+
+/**
  * Who wrote a message. Only `user` renders in the user's style; anything the
  * user did not type is an agent, a task, or (for an origin this build does not
  * know) "System".

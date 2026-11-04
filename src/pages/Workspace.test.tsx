@@ -388,6 +388,16 @@ describe('Workspace — who asks', () => {
           crew({ id: 'wa-main', agentDefinitionId: 'def-main', displayName: 'Manager', isDefault: true }),
           crew({ id: 'wa-rust', agentDefinitionId: 'def-rust', displayName: 'Rust Architect' }),
         ],
+        // Scout left the roster with this task still running.
+        tasks: [
+          {
+            ...FAILED_TASK,
+            assignedToWorkspaceAgentId: 'wa-gone',
+            assignedAgentDefinitionId: 'def-gone',
+            assignedAgentDisplayName: 'Scout',
+            status: 'running',
+          },
+        ],
       })
     );
     loadSessionMessagesPage.mockResolvedValue(messagePage([userMessage('sess-a', 'm-1', 'first question')]));
@@ -398,7 +408,8 @@ describe('Workspace — who asks', () => {
     renderWorkspace();
     expect(await screen.findByText('first question')).toBeInTheDocument();
     const question = await screen.findByRole('dialog', { name: 'Question from Main' });
-    expect(within(question).getByRole('img', { name: 'Main' })).toBeInTheDocument();
+    expect(within(question).getByText('Main')).toBeInTheDocument();
+    expect(question.querySelector('[data-activity]')).not.toBeNull();
 
     // A sub-agent's task raised these: they name it, not the chat's Main.
     emit('permissions://request', {
@@ -421,9 +432,25 @@ describe('Workspace — who asks', () => {
       reason: 'token',
     });
     const approval = await screen.findByRole('article', { name: 'Permission requested by Rust Architect' });
-    expect(within(approval).getByRole('img', { name: 'Rust Architect' })).toBeInTheDocument();
+    expect(approval).toHaveTextContent('Rust Architect wants to run:');
+    expect(approval.querySelector('[data-activity]')).not.toBeNull();
     const grant = screen.getByRole('article', { name: 'Path grant requested by Rust Architect' });
-    expect(within(grant).getByRole('img', { name: 'Rust Architect' })).toBeInTheDocument();
+    expect(grant).toHaveTextContent('Rust Architect wants to extend its filesystem grants:');
+
+    // An agent removed mid-task is found on its task, as the Fleet finds it.
+    emit('permissions://request', {
+      requestId: 'perm-2',
+      workspaceId: 'a',
+      agentId: 'wa-gone',
+      agentName: null,
+      command: 'ls',
+      segments: [{ text: 'ls', kind: 'simple', suggestedPrefix: 'ls' }],
+      persistsToSharedAgent: false,
+      alsoAffectsWorkspaces: [],
+    });
+    expect(await screen.findByRole('article', { name: 'Permission requested by Scout' })).toHaveTextContent(
+      'Scout wants to run:'
+    );
   });
 });
 

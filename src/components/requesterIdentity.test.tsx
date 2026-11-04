@@ -8,11 +8,14 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(()
 import InlineApprovalCard, { ApprovalCard } from './InlineApprovalCard';
 import InlinePathGrantCard from './InlinePathGrantCard';
 import AskUserPanel from './AskUserPanel/AskUserPanel';
+import AgentAvatar from './Agents/AgentAvatar';
+import { identityFor } from './Agents/agentIdentity';
 import { rosterAgent } from './AssistantChat/messageSender';
 import type {
   PathGrantRequest,
   PermissionRequest,
   WorkspaceAgentResponse,
+  WorkspaceTaskResponse,
 } from '../generated/bindings';
 
 const agentRow = (over: Partial<WorkspaceAgentResponse>): WorkspaceAgentResponse => ({
@@ -34,15 +37,14 @@ const agentRow = (over: Partial<WorkspaceAgentResponse>): WorkspaceAgentResponse
   ...over,
 });
 
-const roster = [
-  agentRow({
-    id: 'wa-main',
-    agentDefinitionId: 'def-main',
-    displayName: 'Manager',
-    isDefault: true,
-  }),
-  agentRow({ id: 'wa-rust', agentDefinitionId: 'def-rust', displayName: 'Rust Architect' }),
-];
+const MAIN = agentRow({
+  id: 'wa-main',
+  agentDefinitionId: 'def-main',
+  displayName: 'Manager',
+  isDefault: true,
+});
+const RUST = agentRow({ id: 'wa-rust', agentDefinitionId: 'def-rust', displayName: 'Rust Architect' });
+const roster = [MAIN, RUST];
 
 const permission = (agentId: string | null): PermissionRequest => ({
   requestId: `perm-${agentId}`,
@@ -64,6 +66,11 @@ const grant = (agentId: string | null): PathGrantRequest => ({
   requestedAccess: 'read_only',
   reason: 'Read the gh token',
 });
+
+/** The face a card draws, hidden from assistive technology like the task cards' faces. */
+const faceOf = (scope: HTMLElement) => scope.querySelector('[data-activity]');
+const svgOf = (agent: Parameters<typeof identityFor>[0]) =>
+  render(<AgentAvatar identity={identityFor(agent)} size={18} />).container.querySelector('span')?.innerHTML;
 
 // Seed each card from the backend's pending list, as a reload would.
 const pending = (requests: { permissions?: PermissionRequest[]; grants?: PathGrantRequest[] }) =>
@@ -89,8 +96,8 @@ describe('a command approval names the agent that asked', () => {
     const card = await screen.findByRole('article', {
       name: 'Permission requested by Rust Architect',
     });
-    expect(within(card).getByRole('img', { name: 'Rust Architect' })).toBeInTheDocument();
-    expect(within(card).queryByRole('img', { name: 'Main' })).not.toBeInTheDocument();
+    expect(faceOf(card)).toHaveAttribute('aria-hidden', 'true');
+    expect(faceOf(card)?.innerHTML).toBe(svgOf(RUST));
     expect(card).toHaveTextContent('Rust Architect wants to run:');
   });
 
@@ -99,7 +106,8 @@ describe('a command approval names the agent that asked', () => {
     render(<InlineApprovalCard workspaceId="ws-1" roster={roster} />);
 
     const card = await screen.findByRole('article', { name: 'Permission requested by Main' });
-    expect(within(card).getByRole('img', { name: 'Main' })).toBeInTheDocument();
+    expect(faceOf(card)?.innerHTML).toBe(svgOf(MAIN));
+    expect(card).toHaveTextContent('Main wants to run:');
   });
 
   it.each([
@@ -110,8 +118,24 @@ describe('a command approval names the agent that asked', () => {
     render(<InlineApprovalCard workspaceId="ws-1" roster={roster} />);
 
     const card = await screen.findByRole('article', { name: 'Permission requested' });
-    expect(within(card).queryByRole('img')).not.toBeInTheDocument();
+    expect(faceOf(card)).toBeNull();
     expect(card).toHaveTextContent('An agent wants to run:');
+  });
+
+  it('finds an agent removed from the roster mid-task on its task', async () => {
+    pending({ permissions: [permission('wa-gone')] });
+    const tasks = [
+      {
+        assignedToWorkspaceAgentId: 'wa-gone',
+        assignedAgentDefinitionId: 'def-gone',
+        assignedAgentDisplayName: 'Scout',
+      } as WorkspaceTaskResponse,
+    ];
+    render(<InlineApprovalCard workspaceId="ws-1" roster={roster} loadedTasks={() => tasks} />);
+
+    const card = await screen.findByRole('article', { name: 'Permission requested by Scout' });
+    expect(faceOf(card)?.innerHTML).toBe(svgOf({ id: 'wa-gone', agentDefinitionId: 'def-gone', isDefault: false }));
+    expect(card).toHaveTextContent('Scout wants to run:');
   });
 
   it('leaves the face to the Fleet when the card is spoken', () => {
@@ -122,7 +146,8 @@ describe('a command approval names the agent that asked', () => {
         speaker={(prompt) => prompt}
       />
     );
-    expect(screen.queryByRole('img', { name: 'Rust Architect' })).not.toBeInTheDocument();
+    expect(faceOf(document.body)).toBeNull();
+    expect(screen.queryByText(/Rust Architect/)).not.toBeInTheDocument();
   });
 });
 
@@ -134,7 +159,7 @@ describe('a path grant names the agent that asked', () => {
     const card = await screen.findByRole('article', {
       name: 'Path grant requested by Rust Architect',
     });
-    expect(within(card).getByRole('img', { name: 'Rust Architect' })).toBeInTheDocument();
+    expect(faceOf(card)?.innerHTML).toBe(svgOf(RUST));
     expect(card).toHaveTextContent('Rust Architect wants to extend its filesystem grants:');
   });
 
@@ -143,7 +168,7 @@ describe('a path grant names the agent that asked', () => {
     render(<InlinePathGrantCard workspaceId="ws-1" roster={roster} />);
 
     const card = await screen.findByRole('article', { name: 'Path grant requested' });
-    expect(within(card).queryByRole('img')).not.toBeInTheDocument();
+    expect(faceOf(card)).toBeNull();
     expect(card).toHaveTextContent('An agent wants to extend its filesystem grants:');
   });
 });
@@ -155,7 +180,8 @@ describe('a question names the agent that asked', () => {
     render(<AskUserPanel ask={ask} asker={rosterAgent('wa-rust', roster)} />);
 
     const panel = screen.getByRole('dialog', { name: 'Question from Rust Architect' });
-    expect(within(panel).getByRole('img', { name: 'Rust Architect' })).toBeInTheDocument();
+    expect(faceOf(panel)?.innerHTML).toBe(svgOf(RUST));
+    expect(within(panel).getByText('Rust Architect')).toBeInTheDocument();
     expect(within(panel).getByText('AGENT IS ASKING')).toBeInTheDocument();
   });
 
@@ -163,6 +189,6 @@ describe('a question names the agent that asked', () => {
     render(<AskUserPanel ask={ask} />);
 
     const panel = screen.getByRole('dialog', { name: 'Agent question' });
-    expect(within(panel).queryByRole('img')).not.toBeInTheDocument();
+    expect(faceOf(panel)).toBeNull();
   });
 });

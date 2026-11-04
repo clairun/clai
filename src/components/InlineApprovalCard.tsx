@@ -6,8 +6,9 @@ import type {
   SegmentApproval,
   SegmentDecision,
   WorkspaceAgentResponse,
+  WorkspaceTaskResponse,
 } from '../generated/bindings';
-import { rosterAgent, type SenderAgent } from './AssistantChat/messageSender';
+import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender';
 import RequestingAgent from './Agents/RequestingAgent';
 import { chipText } from './requestChips';
 import styles from './InlineApprovalCard.module.css';
@@ -460,8 +461,6 @@ export const ApprovalCard = ({ req, speaker, requester, onDecided, ref }: Approv
                 <>
                   <RequestingAgent agent={requester} /> wants to run:
                 </>
-              ) : req.agentName ? (
-                `Agent "${req.agentName}" wants to run:`
               ) : (
                 'An agent wants to run:'
               )}
@@ -729,10 +728,13 @@ export const ApprovalCard = ({ req, speaker, requester, onDecided, ref }: Approv
 const InlineApprovalCard = ({
   workspaceId,
   roster = [],
+  loadedTasks,
 }: {
   workspaceId: string | null;
   /** The workspace's agents, to draw who asked each request. */
   roster?: readonly WorkspaceAgentResponse[];
+  /** The workspace's tasks, to find an agent removed from the roster mid-task. */
+  loadedTasks?: () => readonly WorkspaceTaskResponse[];
 }) => {
   const [requests, setRequests] = useState<PermissionRequest[]>([]);
   const firstCardRef = useRef<HTMLElement | null>(null);
@@ -838,7 +840,7 @@ const InlineApprovalCard = ({
           key={req.requestId}
           ref={cardIndex === 0 ? firstCardRef : null}
           req={req}
-          requester={rosterAgent(req.agentId, roster)}
+          requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])}
           onDecided={dismissRequest}
         />
       ))}
