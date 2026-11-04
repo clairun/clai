@@ -382,19 +382,21 @@ fn matching_rules(rules: &[String], text: &str, any_exact: bool) -> Vec<String> 
         .chain(by_head_name(text))
         .chain(by_run_command(text))
         .chain(by_argument_command(text))
+        .chain(by_any_reading(text))
         .collect();
-    // `by_any_reading` can give a reading per word of a long row, so only
-    // these are read for `find` actions and the `gh api` method.
-    let derived: Vec<String> = readings
+    // `find` first, so the method of a `gh api` that `find` runs is read too.
+    let find_actions: Vec<String> = readings
         .iter()
-        .flat_map(|reading| {
-            by_find_action(reading)
-                .into_iter()
-                .chain(gh_api_method_forms(reading))
-        })
+        .map(String::as_str)
+        .flat_map(by_find_action)
         .collect();
-    readings.extend(derived);
-    readings.extend(by_any_reading(text));
+    readings.extend(find_actions);
+    let gh_api_methods: Vec<String> = readings
+        .iter()
+        .map(String::as_str)
+        .flat_map(gh_api_method_forms)
+        .collect();
+    readings.extend(gh_api_methods);
     // A rule cannot hide behind leading assignments or global options either:
     // `FOO=bar rm` reads as `rm`, `git -C repo push` as `git push`.
     let canonical: Vec<String> = readings
@@ -1901,6 +1903,14 @@ mod tests {
             ("gh api --method=DELETE repos/o/r", "gh api -X DELETE"),
             (
                 "gh api repos/o/r/git/refs/heads/x -X DELETE",
+                "gh api -X DELETE",
+            ),
+            (
+                "env -S \"gh api --method DELETE repos/o/r\"",
+                "gh api -X DELETE",
+            ),
+            (
+                "find . -exec gh api --method DELETE {} \\;",
                 "gh api -X DELETE",
             ),
         ] {
