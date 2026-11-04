@@ -176,8 +176,10 @@ struct Wrapper {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     /// A string the runner replaces with its input wherever it occurs in
-    /// the command's words (`xargs -I R`).
-    Replace,
+    /// the command's words (`xargs -I R`). A later option of the same slot
+    /// sets it over an earlier one: `-I`, `-i` and `--replace` set GNU's,
+    /// `-J` BSD's.
+    Replace(usize),
     /// The first words of the command (`env -S 'cmd args'`).
     Command,
 }
@@ -354,7 +356,7 @@ pub fn effective_words<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option
 /// replace strings its options set.
 struct Start<'a> {
     at: usize,
-    replace: Vec<&'a str>,
+    replace: [Option<&'a str>; 2],
 }
 
 /// Where the command `wrapper` runs starts in `rest`, the words after it:
@@ -364,7 +366,7 @@ struct Start<'a> {
 /// as written, or an option's value starts the command.
 fn wrapped_start<'a>(wrapper: &Wrapper, rest: &[&'a str], reading: Reading) -> Option<Start<'a>> {
     let mut at = 0;
-    let mut replace = Vec::new();
+    let mut replace = [None; 2];
     while let Some(&arg) = rest.get(at) {
         if arg == "--" {
             at += 1;
@@ -385,7 +387,7 @@ fn wrapped_start<'a>(wrapper: &Wrapper, rest: &[&'a str], reading: Reading) -> O
             option.value
         };
         match option.role {
-            Some(Role::Replace) => replace.push(value.unwrap_or("{}")),
+            Some(Role::Replace(slot)) => replace[slot] = Some(value.unwrap_or("{}")),
             Some(Role::Command) if reading == Reading::Exact => return None,
             _ => {}
         }
@@ -544,10 +546,10 @@ const ARGUMENT_RUNNERS: &[Wrapper] = &[
             "--exit",
         ],
         roles: &[
-            ("I", Role::Replace),
-            ("i", Role::Replace),
-            ("J", Role::Replace),
-            ("--replace", Role::Replace),
+            ("I", Role::Replace(0)),
+            ("i", Role::Replace(0)),
+            ("J", Role::Replace(1)),
+            ("--replace", Role::Replace(0)),
         ],
         ..Wrapper::named("xargs")
     },
@@ -597,26 +599,26 @@ impl<'w, 'a> ArgumentRun<'w, 'a> {
         if self.replace.is_empty() {
             return Some(command);
         }
+        // A word may hold a pattern once the shell expands both: quotes are
+        // read away, and an expansion may hold anything.
+        let literal =
+            |text: &str| (!text.contains(['$', '`'])).then(|| text.replace(['\'', '"', '\\'], ""));
+        let patterns: Vec<_> = self
+            .replace
+            .iter()
+            .map(|pattern| literal(pattern))
+            .collect();
         let end = command
             .iter()
             .position(|word| {
-                self.replace
-                    .iter()
-                    .any(|replace| may_contain(word, replace))
+                let word = literal(word);
+                patterns.iter().any(|pattern| match (&word, pattern) {
+                    (Some(word), Some(pattern)) => word.contains(pattern.as_str()),
+                    _ => true,
+                })
             })
             .unwrap_or(command.len());
         (end > 0).then_some(&command[..end])
-    }
-}
-
-/// Whether `word` may hold `pattern` once the shell expands both: quotes
-/// are read away, and an expansion may hold anything.
-fn may_contain(word: &str, pattern: &str) -> bool {
-    let literal =
-        |text: &str| (!text.contains(['$', '`'])).then(|| text.replace(['\'', '"', '\\'], ""));
-    match (literal(word), literal(pattern)) {
-        (Some(word), Some(pattern)) => word.contains(&pattern),
-        _ => true,
     }
 }
 
@@ -632,7 +634,9 @@ pub fn argument_run<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option<Ar
         command: start
             .as_ref()
             .map(|start| rest.get(start.at..).unwrap_or(&[])),
-        replace: start.map(|start| start.replace).unwrap_or_default(),
+        replace: start
+            .map(|start| start.replace.into_iter().flatten().collect())
+            .unwrap_or_default(),
     })
 }
 
@@ -739,43 +743,70 @@ fn push_command_starts(wrapper: &Wrapper, words: &[&str], at: usize, starts: &mu
 /// into, wherever it is written: `env -S'rm -rf' x` → `env rm -rf x`, as
 /// `env` reads on from them. Deny matching only: a word read as a split
 /// string by mistake only adds commands to check.
-pub fn with_split_strings<'a>(words: &[&'a str]) -> Vec<&'a str> {
+pub fn with_split_strings(words: &[&str]) -> Vec<String> {
     let mut out = Vec::with_capacity(words.len());
     // The words still to read, last first: each with whether it is a split
-    // string, and whether it is known to hold no quote or blank, so each
-    // character is read a bounded number of times.
-    let mut todo: Vec<(&'a str, bool, bool)> = words
+    // string, and whether it is a word split from one, which splits into
+    // itself, so each character is read a bounded number of times.
+    let mut todo: Vec<(String, bool, bool)> = words
         .iter()
         .rev()
-        .map(|word| (*word, false, false))
+        .map(|word| (word.to_string(), false, false))
         .collect();
     while let Some((word, is_split, plain)) = todo.pop() {
-        if is_split {
-            if plain {
-                todo.push((word, false, true));
-            } else {
-                let pieces =
-                    word.split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '\\'));
-                todo.extend(
-                    pieces
-                        .filter(|piece| !piece.is_empty())
-                        .rev()
-                        .map(|piece| (piece, false, true)),
-                );
-            }
+        if is_split && !plain {
+            let pieces = split_string_words(&word);
+            todo.extend(pieces.into_iter().rev().map(|piece| (piece, false, true)));
             continue;
         }
-        match split_string_option(word) {
-            Some(Some(value)) => todo.push((value, true, plain)),
+        // A word split from a split string splits into itself, so the options
+        // it holds are read in place.
+        let mut word = word.as_str();
+        let option = loop {
+            match split_string_option(word) {
+                Some(Some(value)) if plain => word = value,
+                option => break option,
+            }
+        };
+        match option {
+            Some(Some(value)) => todo.push((value.to_string(), true, false)),
             Some(None) => {
                 if let Some((value, _, plain)) = todo.pop() {
                     todo.push((value, true, plain));
                 }
             }
-            None => out.push(word),
+            None => out.push(word.to_string()),
         }
     }
     out
+}
+
+/// The words `env -S` may split `value` into, as written in the shell:
+/// split at blanks, at `\_` and `\c`, and at the escapes for blanks a
+/// nested `env -S` splits at (`\t`, ...); quotes and other backslashes are
+/// read away, as `env` joins quoted parts: `'\_r''m -rf'` → `rm`, `-rf`.
+fn split_string_words(value: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut chars = value
+        .chars()
+        .filter(|c| !matches!(c, '\'' | '"'))
+        .peekable();
+    while let Some(c) = chars.next() {
+        let ends_word = if c == '\\' {
+            while chars.next_if_eq(&'\\').is_some() {}
+            chars.next_if(|c| "_cfnrtv".contains(*c)).is_some()
+        } else {
+            c.is_whitespace()
+        };
+        if ends_word {
+            words.extend((!word.is_empty()).then(|| std::mem::take(&mut word)));
+        } else if c != '\\' {
+            word.push(c);
+        }
+    }
+    words.extend((!word.is_empty()).then_some(word));
+    words
 }
 
 /// The value of `word` read as an `env -S` option: `Some(None)` when it is

@@ -3863,6 +3863,7 @@ mod tests {
                 "xargs --replace rm",
                 "xargs --replace=rm rm x",
                 "xargs --frob rm echo x",
+                "xargs --frob x rm -rf y",
                 "exec xargs -0I rm echo x",
                 "env -S'rm -rf' x",
                 "env -Srm -rf x",
@@ -3870,6 +3871,9 @@ mod tests {
                 "env \"-Srm -rf\" x",
                 "env --split-string='rm -rf' x",
                 "env -i -S'timeout 5 rm -rf' x",
+                "env -S'\\_rm -rf' x",
+                "env -S'env -S\\_rm' x",
+                "env -S'r''m -rf' x",
                 "taskset 1 rm -rf x",
                 "taskset 0x3 rm -rf x",
                 "taskset -c 0,1 rm x",
@@ -3900,6 +3904,31 @@ mod tests {
                 "{command} runs no rm"
             );
         }
+    }
+
+    #[test]
+    fn blocklist_sees_a_blocked_subcommand_under_every_reading() {
+        for exec in [
+            full_execution_config(&["git push"]),
+            restricted_execution_config(&[], &["git push"]),
+        ] {
+            for command in ["xargs -0I git push origin", "env -S'\\_git push'"] {
+                assert!(is_block(&exec, command), "{command} must be blocked");
+            }
+        }
+    }
+
+    #[test]
+    fn many_replace_strings_take_linear_time() {
+        let command = format!("xargs {}git {}", "-I zq ".repeat(5_000), "w ".repeat(5_000));
+        let started = std::time::Instant::now();
+        for exec in [
+            full_execution_config(&["rm"]),
+            restricted_execution_config(&[], &["rm"]),
+        ] {
+            evaluate_command_policy(&exec, &command, &[], &[]);
+        }
+        assert!(started.elapsed() < Duration::from_secs(30));
     }
 
     #[test]

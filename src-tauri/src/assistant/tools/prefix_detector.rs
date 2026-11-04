@@ -670,6 +670,7 @@ pub fn by_any_reading(segment: &str) -> Vec<String> {
         return Vec::new();
     };
     let split = with_split_strings(&words);
+    let split: Vec<&str> = split.iter().map(String::as_str).collect();
     let mut commands: Vec<String> = possible_commands(&words)
         .into_iter()
         .chain(possible_commands(&split))
