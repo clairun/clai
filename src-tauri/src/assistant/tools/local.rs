@@ -368,7 +368,7 @@ pub(crate) fn evaluate_command_policy(
 /// row of the input could not be named, so every run of words is read.
 fn matching_rule(rules: &[String], text: &str, any_exact: bool) -> Option<String> {
     use crate::assistant::tools::prefix_detector::{
-        by_any_reading, by_argument_command, by_head_name, by_run_command,
+        by_any_reading, by_argument_command, by_head_name, by_run_command, gh_api_method_forms,
     };
 
     let find = |text: &str| find_matching_prefix(rules, text);
@@ -377,6 +377,7 @@ fn matching_rule(rules: &[String], text: &str, any_exact: bool) -> Option<String
         .or_else(|| by_run_command(text).and_then(|cmd| find(&cmd)))
         .or_else(|| by_argument_command(text).and_then(|cmd| find(&cmd)))
         .or_else(|| by_any_reading(text).iter().find_map(|cmd| find(cmd)))
+        .or_else(|| gh_api_method_forms(text).iter().find_map(|form| find(form)))
         .or_else(|| any_exact.then(|| word_run_rule(rules, text)).flatten())
 }
 
@@ -1852,6 +1853,60 @@ mod tests {
         // A former Restricted agent runs everyday commands without a card.
         for command in ["cargo test", "ls -la", "git status", "touch x && cat x"] {
             assert!(!asks_first(&restricted, command), "`{command}` must run");
+        }
+    }
+
+    #[test]
+    fn the_default_list_asks_for_common_spellings_of_its_commands() {
+        let mut exec = ask_first_config(&[]);
+        exec.shell.ask_first_command_prefixes =
+            crate::config::types::default_ask_first_command_prefixes();
+        for (command, rule) in [
+            ("kubectl -n ns delete pod x", "kubectl delete"),
+            ("kubectl --context prod delete pod x", "kubectl delete"),
+            ("kubectl --namespace=ns delete pod x", "kubectl delete"),
+            ("docker --context x push img", "docker push"),
+            ("docker -H tcp://x push img", "docker push"),
+            ("docker image push img", "docker image push"),
+            ("docker --context x image push img", "docker image push"),
+            ("npm --prefix x publish", "npm publish"),
+            ("npm -w pkg publish", "npm publish"),
+            ("cargo +nightly publish", "cargo publish"),
+            ("cargo -Z unstable publish", "cargo publish"),
+            ("pnpm --filter x publish", "pnpm publish"),
+            ("pnpm -C dir publish", "pnpm publish"),
+            ("yarn npm publish", "yarn npm publish"),
+            ("gh -R o/r release create v1", "gh release"),
+            ("gh --repo o/r release delete v1", "gh release"),
+            ("gh api -X DELETE repos/o/r", "gh api -X DELETE"),
+            ("gh api -XDELETE repos/o/r", "gh api -X DELETE"),
+            ("gh api --method DELETE repos/o/r", "gh api -X DELETE"),
+            ("gh api --method=DELETE repos/o/r", "gh api -X DELETE"),
+            (
+                "gh api repos/o/r/git/refs/heads/x -X DELETE",
+                "gh api -X DELETE",
+            ),
+        ] {
+            let rules: Vec<String> = asked(&exec, command)
+                .into_iter()
+                .map(|row| row.rule)
+                .collect();
+            assert_eq!(rules, [rule], "`{command}`");
+        }
+        for command in [
+            "kubectl -n ns get pods",
+            "kubectl --context prod get pods",
+            "docker --context x ps",
+            "docker image ls",
+            "npm --prefix x run build",
+            "cargo +nightly build",
+            "pnpm --filter x test",
+            "yarn npm info x",
+            "gh -R o/r pr view 1",
+            "gh api repos/o/r",
+            "gh api -X GET repos/o/r",
+        ] {
+            assert!(!asks_first(&exec, command), "`{command}` must run");
         }
     }
 

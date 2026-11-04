@@ -185,9 +185,9 @@ describe('AgentBehaviorForm', () => {
     expect(request.providerConnectionIds).toEqual(['conn-b']);
     expect(request.execution.filesystem.extraPaths).toEqual([HOME_GRANT]);
     expect(request.execution.shell.mode).toBe('off');
-    expect(request.execution.shell.askFirstCommandPrefixes).toHaveLength(24);
+    expect(request.execution.shell.askFirstCommandPrefixes).toHaveLength(25);
     expect(request.execution.shell.askFirstCommandPrefixes.slice(0, 2)).toEqual(['git push', 'gh pr merge']);
-    expect(request.execution.shell.askFirstCommandPrefixes.slice(14)).toEqual([
+    expect(request.execution.shell.askFirstCommandPrefixes.slice(15)).toEqual([
       'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
     ]);
     expect(api.workspaceUpdateAgent).not.toHaveBeenCalled();

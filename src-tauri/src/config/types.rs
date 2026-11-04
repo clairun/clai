@@ -39,13 +39,14 @@ const NEW_ASK_FIRST_RULES: &[&str] = &[
     "gh release",
     "gh repo delete",
     "gh api -X DELETE",
-    "gh api --method DELETE",
     "npm publish",
     "pnpm publish",
     "yarn publish",
+    "yarn npm publish",
     "cargo publish",
     "twine upload",
     "docker push",
+    "docker image push",
     "kubectl delete",
     "terraform destroy",
 ];
@@ -756,9 +757,9 @@ mod tests {
     #[test]
     fn default_ask_first_list_is_the_new_rules_then_the_old_blocklist() {
         let rules = default_ask_first_command_prefixes();
-        assert_eq!(rules.len(), 24, "{rules:?}");
+        assert_eq!(rules.len(), 25, "{rules:?}");
         assert_eq!(rules[0], "git push");
-        assert_eq!(rules[14..], default_restricted_shell_blocklist()[..]);
+        assert_eq!(rules[15..], default_restricted_shell_blocklist()[..]);
         assert_eq!(
             ShellCapabilityConfig::default().ask_first_command_prefixes,
             rules

@@ -23,7 +23,14 @@ fn after_global_options<'w, 'a>(binary: &str, rest: &'w [&'a str]) -> &'w [&'a s
     if is_path_shaped(binary) {
         return rest;
     }
-    skip_global_options(value_options_for(binary), rest)
+    let Some(spec) = spec_for(binary) else {
+        return skip_global_options(&[], rest);
+    };
+    let rest = match rest {
+        [first, after @ ..] if spec.toolchain && first.starts_with('+') => after,
+        _ => rest,
+    };
+    skip_global_options(spec.options, rest)
 }
 
 /// A binary's documented value-taking global options.
@@ -34,6 +41,19 @@ struct GlobalOptionSpec {
     /// (`-C`, `--git-dir`, …). A long option also matches its attached
     /// form (`--git-dir=.git`).
     options: &'static [&'static str],
+    /// Whether a rustup `+toolchain` word may come first (`cargo +nightly
+    /// publish`).
+    toolchain: bool,
+}
+
+impl GlobalOptionSpec {
+    const fn new(binary: &'static str, options: &'static [&'static str]) -> Self {
+        Self {
+            binary,
+            options,
+            toolchain: false,
+        }
+    }
 }
 
 /// Python's value options before the script.
@@ -41,17 +61,16 @@ const PYTHON_OPTIONS: &[&str] = &["-m", "-W", "-X"];
 
 /// The per-binary option knowledge behind [`after_global_options`] — the
 /// only place a binary is named for option-value skipping. Supporting
-/// another CLI's documented, subcommand-preceding value options (kubectl
-/// `-n`, docker `--context` are candidates) is an entry here, not a
-/// parser change: the skipping semantics live once in
+/// another CLI's documented, subcommand-preceding value options is an
+/// entry here, not a parser change: the skipping semantics live once in
 /// [`skip_global_options`], which this table merely feeds.
 const GLOBAL_OPTION_SPECS: &[GlobalOptionSpec] = &[
-    GlobalOptionSpec {
-        binary: "git",
-        // From git's synopsis (`git --bogus` usage). `-C` and `-c` accept
-        // no attached short form (git rejects `-Cdir`); the long options
-        // accept both spellings (`--git-dir=x`, `--git-dir x`).
-        options: &[
+    // From git's synopsis (`git --bogus` usage). `-C` and `-c` accept no
+    // attached short form (git rejects `-Cdir`); the long options accept
+    // both spellings (`--git-dir=x`, `--git-dir x`).
+    GlobalOptionSpec::new(
+        "git",
+        &[
             "-C",
             "-c",
             "--git-dir",
@@ -60,45 +79,91 @@ const GLOBAL_OPTION_SPECS: &[GlobalOptionSpec] = &[
             "--config-env",
             "--attr-source",
         ],
-    },
+    ),
+    GlobalOptionSpec::new("python", PYTHON_OPTIONS),
+    GlobalOptionSpec::new("python3", PYTHON_OPTIONS),
+    GlobalOptionSpec::new("bash", &["-o", "-O", "--rcfile", "--init-file"]),
+    GlobalOptionSpec::new("sh", &["-o"]),
+    GlobalOptionSpec::new("dash", &["-o"]),
+    GlobalOptionSpec::new("ksh", &["-o"]),
+    GlobalOptionSpec::new("zsh", &["-o"]),
+    // `kubectl options`.
+    GlobalOptionSpec::new(
+        "kubectl",
+        &[
+            "-n",
+            "--namespace",
+            "--context",
+            "--cluster",
+            "--kubeconfig",
+            "-s",
+            "--server",
+            "--user",
+            "--as",
+            "--as-group",
+            "--token",
+            "--request-timeout",
+            "--cache-dir",
+            "-v",
+            "--v",
+        ],
+    ),
+    // `docker --help`.
+    GlobalOptionSpec::new(
+        "docker",
+        &[
+            "-c",
+            "--context",
+            "-H",
+            "--host",
+            "--config",
+            "-l",
+            "--log-level",
+            "--tlscacert",
+            "--tlscert",
+            "--tlskey",
+        ],
+    ),
+    GlobalOptionSpec::new("gh", &["-R", "--repo"]),
+    GlobalOptionSpec::new(
+        "npm",
+        &[
+            "-w",
+            "--workspace",
+            "-C",
+            "--prefix",
+            "--userconfig",
+            "--registry",
+            "--cache",
+            "--loglevel",
+        ],
+    ),
+    GlobalOptionSpec::new(
+        "pnpm",
+        &[
+            "-F",
+            "--filter",
+            "--filter-prod",
+            "-C",
+            "--dir",
+            "--loglevel",
+            "--reporter",
+        ],
+    ),
+    GlobalOptionSpec::new("yarn", &["--cwd"]),
+    // `cargo --help`.
     GlobalOptionSpec {
-        binary: "python",
-        options: PYTHON_OPTIONS,
-    },
-    GlobalOptionSpec {
-        binary: "python3",
-        options: PYTHON_OPTIONS,
-    },
-    GlobalOptionSpec {
-        binary: "bash",
-        options: &["-o", "-O", "--rcfile", "--init-file"],
-    },
-    GlobalOptionSpec {
-        binary: "sh",
-        options: &["-o"],
-    },
-    GlobalOptionSpec {
-        binary: "dash",
-        options: &["-o"],
-    },
-    GlobalOptionSpec {
-        binary: "ksh",
-        options: &["-o"],
-    },
-    GlobalOptionSpec {
-        binary: "zsh",
-        options: &["-o"],
+        toolchain: true,
+        ..GlobalOptionSpec::new("cargo", &["-Z", "-C", "--config", "--color"])
     },
 ];
 
-/// `binary`'s value-taking global options, or none when its option table
-/// is unknown: an unlisted binary must never have a word consumed.
-fn value_options_for(binary: &str) -> &'static [&'static str] {
+/// `binary`'s entry in [`GLOBAL_OPTION_SPECS`], or none when its option
+/// table is unknown: an unlisted binary must never have a word consumed.
+fn spec_for(binary: &str) -> Option<&'static GlobalOptionSpec> {
     GLOBAL_OPTION_SPECS
         .iter()
         .find(|spec| spec.binary == binary)
-        .map(|spec| spec.options)
-        .unwrap_or(&[])
 }
 
 /// Whether `token` is the value option `name`: the bare name (`--git-dir
@@ -147,6 +212,40 @@ pub fn canonicalize_for_deny(segment: &str) -> Option<String> {
             .collect::<Vec<_>>()
             .join(" "),
     )
+}
+
+/// The method `gh api` requests in `reading`, in both spellings a rule may
+/// name it with (`gh api -X DELETE`, `gh api --method DELETE`). gh takes
+/// the option anywhere among its arguments, as `-X M`, `-XM`, `--method M`
+/// or `--method=M`, more places and spellings than a prefix rule can list:
+/// `gh api repos/o/r -XDELETE` gives both forms with `DELETE`.
+pub fn gh_api_method_forms(reading: &str) -> Vec<String> {
+    let Some(canonical) = canonicalize_for_deny(reading) else {
+        return Vec::new();
+    };
+    let words: Vec<&str> = canonical.split_whitespace().collect();
+    let ["gh", "api", args @ ..] = words.as_slice() else {
+        return Vec::new();
+    };
+    let mut forms = Vec::new();
+    for (at, word) in args.iter().enumerate() {
+        let method = match *word {
+            "-X" | "--method" => args.get(at + 1).copied(),
+            _ => word
+                .strip_prefix("--method=")
+                .or_else(|| word.strip_prefix("-X")),
+        };
+        let Some(method) = method
+            .map(|method| method.trim_start_matches('=').trim_matches(['\'', '"']))
+            .filter(|method| !method.is_empty())
+        else {
+            continue;
+        };
+        let method = method.to_ascii_uppercase();
+        forms.push(format!("gh api -X {method}"));
+        forms.push(format!("gh api --method {method}"));
+    }
+    forms
 }
 
 /// The head of `segment` as the shell runs it, joined by single spaces, with
@@ -319,7 +418,56 @@ mod tests {
         );
         // A binary without an entry has an unknown option table: no word
         // is ever consumed.
-        assert!(value_options_for("no-such-tool").is_empty());
+        assert!(spec_for("no-such-tool").is_none());
+    }
+
+    #[test]
+    fn deny_form_drops_the_global_options_of_listed_clis() {
+        for (segment, form) in [
+            ("kubectl -n ns delete pod x", "kubectl delete pod x"),
+            (
+                "kubectl --context prod delete pod x",
+                "kubectl delete pod x",
+            ),
+            ("kubectl -n ns get pods", "kubectl get pods"),
+            ("docker --context x push img", "docker push img"),
+            ("docker -H tcp://x push img", "docker push img"),
+            ("gh -R o/r release create v1", "gh release create v1"),
+            ("gh --repo=o/r release list", "gh release list"),
+            ("npm --prefix x publish", "npm publish"),
+            ("npm -w pkg publish", "npm publish"),
+            ("pnpm --filter x publish", "pnpm publish"),
+            ("pnpm -C dir publish", "pnpm publish"),
+            ("yarn --cwd dir npm publish", "yarn npm publish"),
+            ("cargo +nightly publish", "cargo publish"),
+            ("cargo -Z unstable publish", "cargo publish"),
+            ("cargo +nightly -Z unstable publish", "cargo publish"),
+        ] {
+            assert_eq!(deny_form(segment).as_deref(), Some(form), "{segment}");
+        }
+        // Only cargo takes a `+toolchain` word.
+        assert_eq!(deny_form("date +%s").as_deref(), Some("date +%s"));
+    }
+
+    #[test]
+    fn gh_api_method_is_read_in_every_spelling_and_place() {
+        let delete = vec![
+            "gh api -X DELETE".to_string(),
+            "gh api --method DELETE".to_string(),
+        ];
+        for reading in [
+            "gh api -X DELETE repos/o/r",
+            "gh api -XDELETE repos/o/r",
+            "gh api --method DELETE repos/o/r",
+            "gh api --method=DELETE repos/o/r",
+            "gh api repos/o/r -X DELETE",
+            "gh api repos/o/r --method delete",
+            "gh -R o/r api repos/o/r -X 'DELETE'",
+        ] {
+            assert_eq!(gh_api_method_forms(reading), delete, "{reading}");
+        }
+        assert!(gh_api_method_forms("gh api repos/o/r").is_empty());
+        assert!(gh_api_method_forms("gh pr view -X DELETE").is_empty());
     }
 
     #[test]

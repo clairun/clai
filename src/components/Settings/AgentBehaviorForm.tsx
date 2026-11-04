@@ -83,8 +83,9 @@ type View = { kind: 'overview' } | { kind: 'source'; key: string } | { kind: 'ac
 // The backend's default ask-first list (config/types.rs), for an agent drafted
 // without the backend's defaults.
 const DEFAULT_ASK_FIRST = [
-  'git push', 'gh pr merge', 'gh release', 'gh repo delete', 'gh api -X DELETE', 'gh api --method DELETE',
-  'npm publish', 'pnpm publish', 'yarn publish', 'cargo publish', 'twine upload', 'docker push',
+  'git push', 'gh pr merge', 'gh release', 'gh repo delete', 'gh api -X DELETE',
+  'npm publish', 'pnpm publish', 'yarn publish', 'yarn npm publish', 'cargo publish', 'twine upload',
+  'docker push', 'docker image push',
   'kubectl delete', 'terraform destroy',
   'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
 ];
