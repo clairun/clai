@@ -754,10 +754,6 @@ fn access_to_str(access: FilesystemPathAccess) -> &'static str {
     }
 }
 
-/// Awaits the user's decision on a path-grant request. Mirrors
-/// [`await_ask_first`] for shape; the only differences are the
-/// request type, the registry it talks to, and the single-decision
-/// return shape (path grants aren't per-segment).
 /// Path-grant analogue of [`AbandonedApprovalGuard`]: clears a pending
 /// filesystem path-grant request, drops its card, and cancels the run when
 /// the approval-wait future is abandoned (run cancellation, or run-end
@@ -812,6 +808,9 @@ impl Drop for AbandonedPathGrantGuard {
     }
 }
 
+/// Awaits the user's decision on a path-grant request. Mirrors
+/// [`await_ask_first`] for shape; the only differences are the
+/// request type and the registry it talks to.
 async fn await_path_grant_decision(
     deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
