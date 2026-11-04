@@ -139,6 +139,8 @@ const GLOBAL_OPTION_SPECS: &[GlobalOptionSpec] = &[
         ],
     ),
     GlobalOptionSpec::new("gh", &["-R", "--repo"]),
+    // npm takes any of its config options before the command; these are
+    // the common ones that take a value, from `npm help config`.
     GlobalOptionSpec::new(
         "npm",
         &[
@@ -150,6 +152,13 @@ const GLOBAL_OPTION_SPECS: &[GlobalOptionSpec] = &[
             "--registry",
             "--cache",
             "--loglevel",
+            "--tag",
+            "--otp",
+            "--access",
+            "-L",
+            "--location",
+            "--scope",
+            "--auth-type",
         ],
     ),
     GlobalOptionSpec::new(
@@ -488,6 +497,8 @@ mod tests {
             ("gh --repo=o/r release list", "gh release list"),
             ("npm --prefix x publish", "npm publish"),
             ("npm -w pkg publish", "npm publish"),
+            ("npm --tag beta --otp 123456 publish", "npm publish"),
+            ("npm --access public -L project publish", "npm publish"),
             ("pnpm --filter x publish", "pnpm publish"),
             ("pnpm -C dir publish", "pnpm publish"),
             ("yarn --cwd dir npm publish", "yarn npm publish"),
