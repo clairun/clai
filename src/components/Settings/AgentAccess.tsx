@@ -119,8 +119,7 @@ export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, cont
                 <span className={form.label}>Ask first</span>
                 <p className={form.hint}>
                   A command that starts with one of these, anywhere in what the agent runs, waits for your
-                  approval. It catches common accidents, not a determined agent. Always allow on a card
-                  removes the rule here; add it back to be asked again.
+                  approval. Always allow on a card removes the rule here; add it back to be asked again.
                 </p>
                 <PrefixListEditor
                   items={draft.askFirst}

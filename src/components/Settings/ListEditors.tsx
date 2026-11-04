@@ -118,7 +118,7 @@ export const PrefixListEditor = ({
   items: string[];
   onChange: (next: string[]) => void;
   disabled?: boolean;
-  /** Accessible name of the list, e.g. "Allowed command prefixes". */
+  /** Accessible name of the list, e.g. "Ask-first command prefixes". */
   label: string;
   placeholder: string;
 }) => {
