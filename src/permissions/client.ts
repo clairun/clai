@@ -1,19 +1,19 @@
 import { invoke } from '@tauri-apps/api/core';
-import type { PermissionRequest, SegmentDecision } from '../generated/bindings';
+import type { AskFirstDecision, PermissionRequest } from '../generated/bindings';
 
 /**
- * Send the user's per-segment decisions for a pending shell-permission
- * approval. The backend persists any AllowAlways/DenyAlways entries to
- * disk before resolving the awaiting bash tool, so grants are durable
- * across crashes between user click and command execution.
+ * Send the user's decision on a pending ask-first request. For "Always
+ * allow" the backend removes the matched rules from the agent's ask-first
+ * list before resolving the awaiting bash tool, so the removal survives a
+ * crash between the click and the command.
  */
 export async function submitPermissionDecision(
   requestId: string,
-  decisions: SegmentDecision[],
+  decision: AskFirstDecision,
 ): Promise<void> {
   return invoke('submit_permission_decision', {
     requestId,
-    decisions,
+    decision,
   });
 }
 

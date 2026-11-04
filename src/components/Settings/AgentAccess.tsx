@@ -13,8 +13,7 @@ import styles from './AgentBehaviorForm.module.css';
 export interface AccessDraft {
   grants: FilesystemPathGrant[];
   shellMode: ShellAccessMode;
-  allowed: string[];
-  blocked: string[];
+  askFirst: string[];
   web: boolean;
   sessionBus: boolean;
 }
@@ -27,13 +26,13 @@ const SHELL_MODES: { mode: ShellAccessMode; label: string; hint: string }[] = [
   },
   {
     mode: 'restricted',
-    label: 'Restricted',
-    hint: 'A command outside the allowed list stops for your approval. An allowed list with nothing that writes leaves the agent able to read but not save.',
+    label: 'Ask first',
+    hint: 'Asks before commands on the ask-first list; everything else runs. It catches common accidents, not a determined agent.',
   },
   {
     mode: 'full',
-    label: 'Full',
-    hint: 'Any command runs without asking, except the blocked ones.',
+    label: "Don't ask",
+    hint: 'Runs every command without asking.',
   },
 ];
 
@@ -54,7 +53,7 @@ export const grantOrigin = (grant: FilesystemPathGrant): { text: string; title?:
 
 /** The overview's one-line answer to "what can it touch?". */
 export const accessSummary = (draft: AccessDraft): string[] => [
-  `Shell ${SHELL_MODES.find((m) => m.mode === draft.shellMode)?.label.toLowerCase() ?? draft.shellMode}`,
+  `Shell: ${SHELL_MODES.find((m) => m.mode === draft.shellMode)?.label ?? draft.shellMode}`,
   draft.grants.length ? plural(draft.grants.length, 'path') : 'No paths',
   draft.web ? 'Web on' : 'Web off',
   draft.sessionBus ? 'Keyring on' : 'Keyring off',
@@ -114,28 +113,20 @@ export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, cont
           </div>
           <p className={form.hint}>{shellHint}</p>
 
-          {draft.shellMode !== 'off' && (
+          {draft.shellMode === 'restricted' && (
             <div className={styles.prefixColumns}>
-              {draft.shellMode === 'restricted' && (
-                <div className={styles.prefixList}>
-                  <span className={form.label}>Allowed without asking</span>
-                  <PrefixListEditor
-                    items={draft.allowed}
-                    onChange={(allowed) => onChange({ allowed })}
-                    disabled={disabled}
-                    label="Allowed command prefixes"
-                    placeholder="git status"
-                  />
-                </div>
-              )}
               <div className={styles.prefixList}>
-                <span className={form.label}>Always blocked</span>
+                <span className={form.label}>Ask first</span>
+                <p className={form.hint}>
+                  A command that starts with one of these, anywhere in what the agent runs, waits for your
+                  approval. Always allow on a card removes the rule here; add it back to be asked again.
+                </p>
                 <PrefixListEditor
-                  items={draft.blocked}
-                  onChange={(blocked) => onChange({ blocked })}
+                  items={draft.askFirst}
+                  onChange={(askFirst) => onChange({ askFirst })}
                   disabled={disabled}
-                  label="Blocked command prefixes"
-                  placeholder="rm -rf"
+                  label="Ask-first command prefixes"
+                  placeholder="git push"
                 />
               </div>
             </div>

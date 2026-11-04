@@ -51,4 +51,23 @@ describe('PrefixListEditor', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Remove sudo' }));
     expect(onChange).toHaveBeenLastCalledWith([]);
   });
+
+  it('collapses the spaces inside an entry', async () => {
+    const onChange = vi.fn();
+    render(<PrefixListEditor items={[]} onChange={onChange} label="Ask first" placeholder="git push" />);
+
+    await userEvent.type(screen.getByRole('textbox', { name: 'New entry for ask first' }), ' git   push {Enter}');
+    expect(onChange).toHaveBeenCalledWith(['git push']);
+  });
+
+  it('ignores a duplicate, including one that differs only in spacing', async () => {
+    const onChange = vi.fn();
+    render(<PrefixListEditor items={['git push']} onChange={onChange} label="Ask first" placeholder="git push" />);
+    const input = screen.getByRole('textbox', { name: 'New entry for ask first' });
+
+    await userEvent.type(input, 'git push{Enter}');
+    await userEvent.type(input, 'git    push{Enter}');
+    expect(onChange).not.toHaveBeenCalled();
+    expect(input).toHaveValue('');
+  });
 });

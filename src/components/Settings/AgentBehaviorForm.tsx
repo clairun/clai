@@ -80,7 +80,15 @@ type View = { kind: 'overview' } | { kind: 'source'; key: string } | { kind: 'ac
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
-const DEFAULT_BLOCKED = ['rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot'];
+// The backend's default ask-first list (config/types.rs), for an agent drafted
+// without the backend's defaults. A test there keeps the two lists equal.
+const DEFAULT_ASK_FIRST = [
+  'git push', 'gh pr merge', 'gh release', 'gh repo delete', 'gh api -X DELETE',
+  'npm publish', 'pnpm publish', 'yarn publish', 'yarn npm publish', 'cargo publish', 'twine upload',
+  'docker push', 'docker image push',
+  'kubectl delete', 'terraform destroy',
+  'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
+];
 
 const clean = (items: string[] = []): string[] => items.map((item) => item.trim()).filter(Boolean);
 
@@ -93,8 +101,7 @@ const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessD
     }))
     .filter((grant) => grant.path),
   shellMode: execution.shell?.mode || 'off',
-  allowed: clean(execution.shell?.allowedCommandPrefixes || []),
-  blocked: clean(execution.shell?.blockedCommandPrefixes || DEFAULT_BLOCKED),
+  askFirst: clean(execution.shell?.askFirstCommandPrefixes || DEFAULT_ASK_FIRST),
   web: execution.web?.enabled || false,
   sessionBus: (execution.sandbox?.sessionBus || 'allow') === 'allow',
 });
@@ -104,8 +111,7 @@ const executionFrom = (access: AccessDraft): ExecutionCapabilityConfig => ({
   filesystem: { extraPaths: access.grants },
   shell: {
     mode: access.shellMode,
-    allowedCommandPrefixes: access.allowed,
-    blockedCommandPrefixes: access.blocked,
+    askFirstCommandPrefixes: access.askFirst,
   },
   web: { enabled: access.web },
 });
@@ -154,7 +160,9 @@ const blankAgent = (execution?: Partial<ExecutionCapabilityConfig>): AgentDetail
   selectedSkillIds: [],
   selectedMcpServerIds: [],
   providerConnectionIds: [],
-  execution: execution || { shell: { mode: 'off', allowedCommandPrefixes: [], blockedCommandPrefixes: DEFAULT_BLOCKED } },
+  execution: execution || {
+    shell: { mode: 'off', askFirstCommandPrefixes: DEFAULT_ASK_FIRST },
+  },
   enabled: true,
 });
 

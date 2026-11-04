@@ -609,8 +609,7 @@ mod tests {
             }),
             had_warnings: Default::default(),
             session_grants: Arc::new(Mutex::new(vec![])),
-            session_allowed_command_prefixes: Arc::new(Mutex::new(vec![])),
-            session_blocked_command_prefixes: Arc::new(Mutex::new(vec![])),
+            run_removed_ask_first: Arc::new(Mutex::new(vec![])),
         }
     }
 

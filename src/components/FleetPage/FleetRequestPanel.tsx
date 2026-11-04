@@ -18,11 +18,19 @@ import styles from './FleetPage.module.css';
 const stop = (e: MouseEvent) => e.stopPropagation();
 
 /** The request, answered with the workspace chat's own UI; `speaker` draws its words. */
-const RequestAnswer = ({ request, speaker }: { request: FleetRequest; speaker: (prompt: ReactNode) => ReactNode }) =>
+const RequestAnswer = ({
+  request,
+  speaker,
+  workspaceTitle,
+}: {
+  request: FleetRequest;
+  speaker: (prompt: ReactNode) => ReactNode;
+  workspaceTitle?: string;
+}) =>
   request.kind === 'ask' ? (
     <AskUserPanel ask={request.ask} speaker={speaker} />
   ) : request.kind === 'approval' ? (
-    <ApprovalCard key={request.request.requestId} req={request.request} speaker={speaker} />
+    <ApprovalCard key={request.request.requestId} req={request.request} speaker={speaker} workspaceName={workspaceTitle} />
   ) : (
     <PathGrantCard key={request.request.requestId} req={request.request} speaker={speaker} />
   );
@@ -34,6 +42,8 @@ interface FleetRequestPanelProps {
   loud: boolean;
   /** The page's clock: the last Fleet event or the minute tick, whichever is later. */
   now: number;
+  /** The workspace's title, so a card on a page of many workspaces can name it. */
+  workspaceTitle?: string;
 }
 
 /**
@@ -46,6 +56,7 @@ const FleetRequestPanel = ({
   faces,
   loud,
   now,
+  workspaceTitle,
 }: FleetRequestPanelProps) => {
   const theme = useAppTheme();
   const { request, asker, count, caption } = scene;
@@ -80,7 +91,7 @@ const FleetRequestPanel = ({
           {count > 1 && <span className={styles.requestCount}>1 of {count}</span>}
           {loud && <Sfx word={request.kind === 'ask' ? '!?' : '!!'} tone="warn" />}
         </p>
-        <RequestAnswer request={request} speaker={speaker} />
+        <RequestAnswer request={request} speaker={speaker} workspaceTitle={workspaceTitle} />
       </section>
     </div>
   );

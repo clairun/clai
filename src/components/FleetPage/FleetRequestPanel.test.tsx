@@ -30,11 +30,8 @@ const approval = {
   agentName: null,
   persistsToSharedAgent: false,
   alsoAffectsWorkspaces: [],
-  command: 'cd /srv/app && cargo test',
-  segments: [
-    { text: 'cd /srv/app', kind: 'simple', suggestedPrefix: 'cd' },
-    { text: 'cargo test', kind: 'simple', suggestedPrefix: 'cargo test' },
-  ],
+  command: 'cd /srv/app && git push',
+  rows: [{ text: 'git push', rule: 'git push' }],
 } as unknown as PermissionRequest;
 
 beforeEach(() => {
@@ -45,13 +42,11 @@ beforeEach(() => {
 describe('FleetRequestPanel', () => {
   it('keeps a long, many-line command out of its decisions; the bubble has it whole', () => {
     const note = '"Loki 8f42532a DONE: errors 348/338/133.\nConfirms alert-config blocker (model switch 10-21 14:11— 18:02) → 10 eval"';
-    const long = { ...approval, command: note, segments: [{ text: note, kind: 'simple', suggestedPrefix: note }] } as PermissionRequest;
+    const long = { ...approval, command: note, rows: [{ text: note, rule: 'git push' }] } as PermissionRequest;
     const card = { ...emptyCard('ws-1'), requests: { 'approval:perm-1': { kind: 'approval', request: long, at: 1 } as unknown as FleetRequest } };
     render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} })!} faces={castFor({}, null)} loud={false} now={10} />);
     const buttons = screen.getAllByRole('button');
-    // A chip names the prefix it saves by its first words; the tooltip has it whole.
-    expect(buttons.map((b) => b.textContent)).toEqual(['Once', 'Always · "Loki 8f42532a …', 'Never · "Loki 8f42532a …', 'Deny']);
-    expect(buttons[1]!.title).toContain('Confirms alert-config blocker');
+    expect(buttons.map((b) => b.textContent)).toEqual(['Once', 'Always', 'Deny']);
     expect(screen.getByLabelText('Command').textContent).toBe(note);
   });
 
@@ -87,16 +82,32 @@ describe('FleetRequestPanel', () => {
     render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} })!} faces={castFor({}, null)} loud={false} now={10} />);
     const section = screen.getByRole('region', { name: 'Committer needs you' });
     expect(within(section).getByLabelText('Command').tagName).toBe('PRE');
-    expect(within(section).getByLabelText('Command')).toHaveTextContent('cd /srv/app && cargo test');
+    expect(within(section).getByLabelText('Command')).toHaveTextContent('cd /srv/app && git push');
     expect(within(section).queryByText('Permission requested')).not.toBeInTheDocument();
     // The chip only opens the denial: the decision waits for the confirm.
-    await userEvent.click(within(section).getByRole('button', { name: /Deny all/ }));
+    await userEvent.click(within(section).getByRole('button', { name: 'Deny' }));
     expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
-    // One reason field for the whole command.
     expect(within(section).getAllByRole('textbox', { name: /reason for denying/i })).toHaveLength(1);
-    await userEvent.click(within(section).getByRole('button', { name: 'Submit decisions' }));
+    await userEvent.click(within(section).getByRole('button', { name: 'Deny command' }));
     // No reason typed, so none is sent.
-    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', { requestId: 'perm-1', decisions: [{ kind: 'denyOnce' }, { kind: 'denyOnce' }] });
+    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', { requestId: 'perm-1', decision: { kind: 'deny' } });
+  });
+
+  it('names the workspace in the Always allow line', () => {
+    const request = { kind: 'approval', request: { ...approval, agentId: 'wa-c' }, text: approval.command } as unknown as FleetRequest;
+    const card = { ...emptyCard('ws-1'), agents: [{ id: 'wa-c', name: 'Committer', seed: 'def-c' }], requests: { 'approval:perm-1': { ...request, at: 1 } } };
+    render(
+      <FleetRequestPanel
+        scene={requestScene(card, { runs: {}, tasks: {} })!}
+        faces={castFor({}, null)}
+        loud={false}
+        now={10}
+        workspaceTitle="Alpha"
+      />
+    );
+    expect(screen.getByText(/^Always allow removes/)).toHaveTextContent(
+      /^Always allow removes git push from this agent's ask-first list in “Alpha” only\.$/
+    );
   });
 
   it('sends one reason for the whole command when the Fleet user types one', async () => {
@@ -104,13 +115,13 @@ describe('FleetRequestPanel', () => {
     const card = { ...emptyCard('ws-1'), agents: [{ id: 'wa-c', name: 'Committer', seed: 'def-c' }], requests: { 'approval:perm-1': { ...request, at: 1 } } };
     render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} })!} faces={castFor({}, null)} loud={false} now={10} />);
     const section = screen.getByRole('region', { name: 'Committer needs you' });
-    await userEvent.click(within(section).getByRole('button', { name: /Deny all/ }));
+    await userEvent.click(within(section).getByRole('button', { name: 'Deny' }));
     await userEvent.type(within(section).getByRole('textbox', { name: /reason for denying/i }), 'Wrong target');
-    await userEvent.click(within(section).getByRole('button', { name: 'Submit decisions' }));
+    await userEvent.click(within(section).getByRole('button', { name: 'Deny command' }));
 
     expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
       requestId: 'perm-1',
-      decisions: [{ kind: 'denyOnce', reason: 'Wrong target' }, { kind: 'denyOnce', reason: 'Wrong target' }],
+      decision: { kind: 'deny', reason: 'Wrong target' },
     });
   });
 });

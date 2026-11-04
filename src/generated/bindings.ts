@@ -52,6 +52,20 @@ supported: boolean,
  */
 canCheck: boolean, platform: string, arch: string, channel: string, bundleType: string | null, reason: string | null, };
 
+/**
+ * The user's answer to an ask-first request.
+ */
+export type AskFirstDecision = { "kind": "allowOnce" } | { "kind": "alwaysAllow" } | { "kind": "deny", reason?: string, };
+
+/**
+ * A row of a command that matched an ask-first rule.
+ */
+export type AskFirstRow = { text: string, 
+/**
+ * The rule on the agent's ask-first list that the row matched.
+ */
+rule: string, };
+
 export type AskUserOption = { label: string, description: string | null, };
 
 export type AssistantCompaction = { id: string, sessionId: string, trigger: CompactionTrigger, strategy: CompactionStrategy, status: CompactionStatus, sourceFromMessageId: string | null, sourceToMessageId: string | null, summaryMessageId: string | null, createdRunId: string | null, protocolId: string, modelId: string, inputMessageCount: bigint, createdAt: bigint, completedAt: bigint | null, error: string | null, };
@@ -331,15 +345,15 @@ export type PathGrantRequest = { requestId: string, workspaceId: string | null, 
  */
 export type PendingAsk = { pendingId: string, workspaceId: string, sessionId: string, question: string, options: Array<AskUserOption> | null, multiSelect: boolean, extraContext: string | null, requestedAt: bigint, };
 
-export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, segments: Array<SegmentApproval>, 
+export type PermissionRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, command: string, rows: Array<AskFirstRow>, 
 /**
- * True when an "always" decision is saved on a shared agent definition
- * rather than in this workspace.
+ * True when "Always allow" edits a shared agent definition rather than
+ * this workspace's Main.
  *
- * A command allowlist entry skips this prompt entirely next time, so where
- * the decision lands has to be visible while the user is deciding — and
- * for a shared teammate it lands on the definition, in force wherever that
- * agent works, including workspaces that assign it later.
+ * Removing a rule stops it asking wherever the list lives, so where that
+ * is has to be visible while the user is deciding: for a shared teammate
+ * it is the definition, in force wherever that agent works, including
+ * workspaces that assign it later.
  */
 persistsToSharedAgent: boolean, 
 /**
@@ -491,12 +505,6 @@ export type ScheduleKind = { "type": "interval", intervalMinutes: number, } | { 
  */
 timezone: string, };
 
-export type SegmentApproval = { text: string, kind: SegmentKind, suggestedPrefix: string, };
-
-export type SegmentDecision = { "kind": "allowOnce" } | { "kind": "allowAlways", scope: PermissionScope, prefix: string, } | { "kind": "denyOnce", reason?: string, } | { "kind": "denyAlways", scope: PermissionScope, prefix: string, reason?: string, };
-
-export type SegmentKind = "simple" | "opaque";
-
 export type SessionContext = { 
 /**
  * The agent that owns this session; its configuration is resolved when
@@ -515,7 +523,11 @@ export type SetSkillSourceEnabledRequest = { id: string, enabled: boolean, };
 
 export type ShellAccessMode = "off" | "restricted" | "full";
 
-export type ShellCapabilityConfig = { mode: ShellAccessMode, allowedCommandPrefixes: Array<string>, blockedCommandPrefixes: Array<string>, };
+export type ShellCapabilityConfig = { mode: ShellAccessMode, 
+/**
+ * Commands a Restricted agent asks the user about before running.
+ */
+askFirstCommandPrefixes: Array<string>, };
 
 export type SkillCatalogResponse = { sources: Array<SkillSourceResponse>, skills: Array<SkillDefinition>, diagnostics: Array<SkillSourceDiagnostic>, };
 

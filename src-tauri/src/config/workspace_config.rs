@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::config::types::standard_restricted_shell_allowlist;
 use crate::config::{bundled, AppConfig, SkillSourceKind};
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode,
@@ -534,11 +533,11 @@ pub fn default_agent_execution() -> ExecutionCapabilityConfig {
             origin: None,
         });
     }
-    execution.shell.allowed_command_prefixes = standard_restricted_shell_allowlist();
     // Generic file operations run through `bash_exec`, so a shell-off agent has
     // no filesystem at all — it cannot read its own memory or write an artifact.
-    // Start every new agent on the restricted tier (allowlisted commands inside
-    // the sandbox); the user can still set it back to off in agent settings.
+    // Start every new agent in Restricted mode, which asks only before the
+    // commands on its ask-first list; the user can still set it back to off in
+    // agent settings.
     execution.shell.mode = ShellAccessMode::Restricted;
     execution
 }
@@ -547,8 +546,8 @@ impl WorkspaceAgent {
     pub fn new_manager(id: String, now: i64) -> Self {
         // A freshly created workspace should be ready to work without a detour
         // to Settings: give its manager restricted shell access (sandboxed
-        // bash_exec with the default blocklist) and web access by default. The
-        // user can still tighten either in agent settings.
+        // bash_exec with the default ask-first list) and web access by default.
+        // The user can still tighten either in agent settings.
         let mut execution = default_agent_execution();
         execution.web.enabled = true;
         Self {
@@ -984,10 +983,10 @@ mod attach_provider_tests {
         // brand-new agent must not start there.
         let execution = default_agent_execution();
         assert_eq!(execution.shell.mode, ShellAccessMode::Restricted);
-        assert!(execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"cat".to_string()));
+        assert_eq!(
+            execution.shell.ask_first_command_prefixes,
+            crate::config::types::default_ask_first_command_prefixes()
+        );
         // Members stay off the network until the user opts in.
         assert!(!execution.web.enabled);
     }
@@ -997,21 +996,10 @@ mod attach_provider_tests {
         let manager = WorkspaceAgent::new_manager("mgr".to_string(), 1);
         assert_eq!(manager.execution.shell.mode, ShellAccessMode::Restricted);
         assert!(manager.execution.web.enabled);
-        assert!(manager
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"rg".to_string()));
-        assert!(manager
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"cat".to_string()));
-        assert!(manager
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"mkdir".to_string()));
+        assert_eq!(
+            manager.execution.shell.ask_first_command_prefixes,
+            crate::config::types::default_ask_first_command_prefixes()
+        );
     }
 
     // -------------------------------------------------------------------

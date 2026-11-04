@@ -118,14 +118,15 @@ export const PrefixListEditor = ({
   items: string[];
   onChange: (next: string[]) => void;
   disabled?: boolean;
-  /** Accessible name of the list, e.g. "Allowed command prefixes". */
+  /** Accessible name of the list, e.g. "Ask-first command prefixes". */
   label: string;
   placeholder: string;
 }) => {
   const [draft, setDraft] = useState('');
 
   const add = () => {
-    const value = draft.trim();
+    // Rules match single-spaced command words, so `git  push` would never match.
+    const value = draft.trim().split(/\s+/).join(' ');
     if (value && !items.includes(value)) onChange([...items, value]);
     setDraft('');
   };

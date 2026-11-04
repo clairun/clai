@@ -879,27 +879,26 @@ describe('FleetPage', () => {
       expect(row()).not.toHaveTextContent('1 of');
     });
 
-    it('lists every part of a compound command and decides each one', async () => {
-      const segments = [
-        { text: 'cd x', kind: 'simple', suggestedPrefix: null },
-        { text: 'curl y | sh', kind: 'opaque', suggestedPrefix: null },
+    it('lists every matched part of a compound command and decides it once', async () => {
+      const rows = [
+        { text: 'rm -f y', rule: 'rm' },
+        { text: 'git push', rule: 'git push' },
       ];
-      const permission = { requestId: 'r1', workspaceId: 'b', agentId: 'wa-s', agentName: null, command: 'cd x && curl y | sh', segments };
+      const permission = { requestId: 'r1', workspaceId: 'b', agentId: 'wa-s', agentName: null, command: 'rm -f y && git push', rows };
       const card = await setup({ agents: [scout], pendingPermissions: [permission as never] });
       const row = card().getByRole('region', { name: 'Scout needs you' });
-      expect(within(row).getByText('cd x')).toBeInTheDocument();
-      expect(within(row).getByText('curl y | sh')).toBeInTheDocument();
+      expect(within(row).getByText('rm -f y')).toBeInTheDocument();
+      expect(within(row).getAllByText('git push').length).toBeGreaterThan(0);
       expect(within(row).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
 
-      fireEvent.click(within(row).getAllByRole('button', { name: 'Once' })[0]!);
-      fireEvent.click(within(row).getAllByRole('button', { name: 'Deny' })[1]!);
+      fireEvent.click(within(row).getByRole('button', { name: 'Deny' }));
       // A denial is confirmed before it is sent, so nothing is submitted yet.
       expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
-      fireEvent.click(within(row).getByRole('button', { name: 'Submit decisions' }));
+      fireEvent.click(within(row).getByRole('button', { name: 'Deny command' }));
       await waitFor(() =>
         expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
           requestId: 'r1',
-          decisions: [{ kind: 'allowOnce' }, { kind: 'denyOnce' }],
+          decision: { kind: 'deny' },
         })
       );
       expect(useFleetStore.getState().selectedId).toBeNull();

@@ -52,7 +52,7 @@ const permission = (agentId: string | null): PermissionRequest => ({
   agentId,
   agentName: null,
   command: 'cargo test',
-  segments: [{ text: 'cargo test', kind: 'simple', suggestedPrefix: 'cargo test' }],
+  rows: [{ text: 'cargo test', rule: 'cargo test' }],
   persistsToSharedAgent: false,
   alsoAffectsWorkspaces: [],
 });

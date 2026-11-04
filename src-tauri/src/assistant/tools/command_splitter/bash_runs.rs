@@ -19,13 +19,12 @@ fn cases() -> Vec<Case> {
     serde_json::from_str(include_str!("bash_runs.json")).expect("bash_runs.json")
 }
 
-/// Every command bash runs that the splitter writes out is blocked by a
-/// blocklist entry naming it. The rest is invisible by design: the command
+/// Every command bash runs that the splitter writes out asks first under an
+/// ask-first rule naming it. The rest is invisible by design: the command
 /// sits inside a quoted code string or an alias, which the policy does not
-/// look into, or the input does not parse. Full mode must still never
-/// produce an approval row.
+/// look into, or the input does not parse. Full mode never asks.
 #[test]
-fn blocklist_sees_every_command_bash_runs() {
+fn ask_first_sees_every_command_bash_runs() {
     let invisible = [
         // Code inside a quoted string the policy does not read.
         (r#"trap 'touch PWN' EXIT"#, "touch"),
@@ -40,28 +39,36 @@ fn blocklist_sees_every_command_bash_runs() {
     let mut missed = Vec::new();
     for case in cases() {
         for name in &case.runs {
-            let exec = ExecutionCapabilityConfig {
+            let config = |mode| ExecutionCapabilityConfig {
                 shell: ShellCapabilityConfig {
-                    mode: ShellAccessMode::Full,
-                    allowed_command_prefixes: vec![],
-                    blocked_command_prefixes: vec![name.clone()],
+                    mode,
+                    ask_first_command_prefixes: vec![name.clone()],
                 },
                 ..Default::default()
             };
-            let ok = match evaluate_command_policy(&exec, &case.input, &[], &[]) {
-                PolicyResult::Block { .. } => true,
+            let ok = match evaluate_command_policy(
+                &config(ShellAccessMode::Restricted),
+                &case.input,
+                &[],
+            ) {
+                PolicyResult::AskFirst(_) => true,
                 PolicyResult::Allow => {
                     invisible.iter().any(|(i, n)| n == name && case.input.starts_with(i))
-                        // Allowed because the splitter could not parse the
-                        // input at all; Full mode runs such input, asking
-                        // only for its exact text in Restricted mode.
+                        // The splitter could not parse the input at all.
                         || matches!(split_command(&case.input).as_slice(), [Segment::Unparsed(_)])
                 }
-                PolicyResult::NeedsApproval(_) => false,
             };
             if !ok {
                 missed.push(format!("{:?} runs {name:?}", case.input));
             }
+            assert!(
+                matches!(
+                    evaluate_command_policy(&config(ShellAccessMode::Full), &case.input, &[]),
+                    PolicyResult::Allow
+                ),
+                "Full mode asked for {:?}",
+                case.input
+            );
         }
     }
     assert!(missed.is_empty(), "{missed:#?}");

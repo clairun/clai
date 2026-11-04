@@ -26,11 +26,11 @@
 //! by the words it is written with; code inside a quoted argument or a
 //! script file (`source x.sh`) is not looked into. A wrapper that only
 //! changes how a command runs still names the command it runs (`timeout 600
-//! cargo build` runs `cargo build`), so its row keeps that command: the
-//! policy can allowlist it, and the blocklist sees it. The blocklist also
-//! reads the command written in the arguments of `xargs`, `exec`, `eval` and
-//! `watch` ([`argument_command_words`]), and every command a misread option
-//! could hide ([`possible_commands`]); their rows stay named by their head.
+//! cargo build` runs `cargo build`), so its row keeps that command and the
+//! ask-first list sees it. The list is also read against the command written
+//! in the arguments of `xargs`, `exec`, `eval` and `watch`
+//! ([`argument_command_words`]), and every command a misread option could
+//! hide ([`possible_commands`]); their rows stay named by their head.
 //!
 //! A quoted heredoc body is text. Bash expands an unquoted one: the commands
 //! its `$(…)`, backticks and `${…}` run become rows of their own, each
@@ -65,10 +65,6 @@ impl Segment {
         match self {
             Segment::Simple(s) | Segment::Opaque(s) | Segment::Unparsed(s) | Segment::Exact(s) => s,
         }
-    }
-
-    pub fn is_opaque(&self) -> bool {
-        !matches!(self, Segment::Simple(_))
     }
 }
 
@@ -434,9 +430,9 @@ pub fn row_words(row: &str) -> Option<Vec<&str>> {
 /// The command `row` runs: the words of the command itself, looking through
 /// the wrappers that only change how it runs (`timeout 600 cargo build` →
 /// `cargo build`). `None` when a modifier wrapper is run by path or its own
-/// arguments cannot be told from the command, read as `reading` says.
-pub fn command_words(row: &str, reading: Reading) -> Option<Vec<&str>> {
-    Some(effective_words(&row_words(row)?, reading)?.to_vec())
+/// arguments cannot be told from the command.
+pub fn command_words(row: &str) -> Option<Vec<&str>> {
+    Some(effective_words(&row_words(row)?)?.to_vec())
 }
 
 /// The name and arguments of a command node, as written in `src`.
@@ -470,27 +466,12 @@ struct Wrapper {
     /// The other long options: they never take the next word, and take a
     /// value only after `=` (GNU `xargs --max-lines[=N]`).
     flag_long: &'static [&'static str],
-    /// The options, by letter or long name, whose value changes the command
-    /// the wrapper runs.
-    roles: &'static [(&'static str, Role)],
     /// The plain arguments the wrapper takes before the command
     /// (`timeout`'s duration, `taskset`'s mask).
     plain_args: usize,
     /// Whether a number before the command is its priority, as `chrt` reads
     /// one: when a word follows it, and then an optional `--`.
     priority: bool,
-}
-
-/// What the value of a [`Wrapper::roles`] option is to the command.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Role {
-    /// A string the runner replaces with its input wherever it occurs in
-    /// the command's words (`xargs -I R`). A later option of the same slot
-    /// sets it over an earlier one: `-I`, `-i` and `--replace` set GNU's,
-    /// `-J` BSD's.
-    Replace(usize),
-    /// The first words of the command (`env -S 'cmd args'`).
-    Command,
 }
 
 impl Wrapper {
@@ -502,21 +483,15 @@ impl Wrapper {
             optional_value_letters: "",
             value_long: &[],
             flag_long: &[],
-            roles: &[],
             plain_args: 0,
             priority: false,
         }
     }
-
-    fn role(&self, option: &str) -> Option<Role> {
-        let (_, role) = self.roles.iter().find(|(name, _)| *name == option)?;
-        Some(*role)
-    }
 }
 
 /// Wrappers that only change how a command runs: the row names the command
-/// they run (`timeout 600 cargo build` runs `cargo build`), so the policy can
-/// allowlist it and the blocklist sees it.
+/// they run (`timeout 600 cargo build` runs `cargo build`), so the ask-first
+/// list sees it.
 const MODIFIER_WRAPPERS: &[Wrapper] = &[
     Wrapper {
         flag_letters: "fpv",
@@ -616,24 +591,22 @@ const MODIFIER_WRAPPERS: &[Wrapper] = &[
             "--list-signal-handling",
             "--debug",
         ],
-        roles: &[("S", Role::Command), ("--split-string", Role::Command)],
         ..Wrapper::named("env")
     },
 ];
 
-/// How [`wrapped_start`] reads an option its table does not list as
+/// How [`option_word`] reads an option its table does not list as
 /// written: getopt takes any unambiguous abbreviation (`xargs --process`
 /// is `--process-slot-var`), and an implementation may have options the
 /// table lacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Reading {
-    /// The command cannot be told: allow matching reads words this way,
-    /// so a grant never covers a command found past a misread option, or
-    /// one an option's value starts (`env -S`).
+enum Reading {
+    /// Only an option the table lists as written is known. Every reading of
+    /// [`possible_commands`] lets an unknown option take the next word.
     Exact,
     /// As getopt would with the table: an abbreviation of one listed
     /// option is that option, anything else takes no value. The splitter
-    /// and the blocklist read words this way.
+    /// reads where a wrapped command starts this way.
     Getopt,
 }
 
@@ -641,7 +614,7 @@ pub enum Reading {
 /// how it runs: `timeout 600 cargo build` names `cargo build`. A lookup
 /// (`command -v rm`) names itself. `None` when a wrapper is run by path or
 /// its own arguments cannot be told from the command.
-pub fn effective_words<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option<&'w [&'a str]> {
+pub fn effective_words<'w, 'a>(words: &'w [&'a str]) -> Option<&'w [&'a str]> {
     let mut words = words;
     loop {
         let (name, rest) = words.split_first()?;
@@ -657,25 +630,15 @@ pub fn effective_words<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option
         if lookup_option(words).is_some() {
             return Some(words);
         }
-        words = rest.get(wrapped_start(wrapper, rest, reading)?.at..)?;
+        words = rest.get(wrapped_start(wrapper, rest)?..)?;
     }
-}
-
-/// Where the command a wrapper runs starts in the words after it, and the
-/// replace strings its options set.
-struct Start<'a> {
-    at: usize,
-    replace: [Option<&'a str>; 2],
 }
 
 /// Where the command `wrapper` runs starts in `rest`, the words after it:
 /// past the wrapper's own options, read as getopt reads them, the plain
 /// arguments it takes before the command, and the assignments `env` takes.
-/// `None` under [`Reading::Exact`] when the table does not list an option
-/// as written, or an option's value starts the command.
-fn wrapped_start<'a>(wrapper: &Wrapper, rest: &[&'a str], reading: Reading) -> Option<Start<'a>> {
+fn wrapped_start(wrapper: &Wrapper, rest: &[&str]) -> Option<usize> {
     let mut at = 0;
-    let mut replace = [None; 2];
     while let Some(&arg) = rest.get(at) {
         if arg == "--" {
             at += 1;
@@ -689,17 +652,7 @@ fn wrapped_start<'a>(wrapper: &Wrapper, rest: &[&'a str], reading: Reading) -> O
         if !arg.starts_with('-') || arg == "-" {
             break;
         }
-        let option = option_word(wrapper, arg, reading)?;
-        let value = if option.takes_next {
-            rest.get(at + 1).copied()
-        } else {
-            option.value
-        };
-        match option.role {
-            Some(Role::Replace(slot)) => replace[slot] = Some(value.unwrap_or("{}")),
-            Some(Role::Command) if reading == Reading::Exact => return None,
-            _ => {}
-        }
+        let option = option_word(wrapper, arg, Reading::Getopt)?;
         at += 1 + usize::from(option.takes_next);
     }
     for _ in 0..wrapper.plain_args {
@@ -722,16 +675,13 @@ fn wrapped_start<'a>(wrapper: &Wrapper, rest: &[&'a str], reading: Reading) -> O
     while rest.get(at).is_some_and(|arg| is_assignment(arg)) {
         at += 1;
     }
-    Some(Start { at, replace })
+    Some(at)
 }
 
 /// An option word, as getopt reads it.
-struct OptionWord<'a> {
+struct OptionWord {
     /// Whether its value is the next word.
     takes_next: bool,
-    /// Its value, when written in the word (`-n1`, `--max-args=1`).
-    value: Option<&'a str>,
-    role: Option<Role>,
 }
 
 /// `arg`, an option word of `wrapper`, as getopt reads it: the letters of a
@@ -739,36 +689,28 @@ struct OptionWord<'a> {
 /// rest of the cluster, or the next word when none is left; a long option
 /// by its name. `None` under [`Reading::Exact`] when the table does not
 /// list the option as written.
-fn option_word<'a>(wrapper: &Wrapper, arg: &'a str, reading: Reading) -> Option<OptionWord<'a>> {
-    let flag = OptionWord {
-        takes_next: false,
-        value: None,
-        role: None,
-    };
+fn option_word(wrapper: &Wrapper, arg: &str, reading: Reading) -> Option<OptionWord> {
+    let flag = OptionWord { takes_next: false };
     if arg.starts_with("--") {
-        let (name, value) = match arg.split_once('=') {
-            Some((name, value)) => (name, Some(value)),
-            None => (arg, None),
+        let (name, inline_value) = match arg.split_once('=') {
+            Some((name, _)) => (name, true),
+            None => (arg, false),
         };
-        let Some((name, takes_value)) = long_option(wrapper, name, reading) else {
+        let Some((_, takes_value)) = long_option(wrapper, name, reading) else {
             // getopt rejects it, so it takes nothing.
-            return (reading == Reading::Getopt).then_some(OptionWord { value, ..flag });
+            return (reading == Reading::Getopt).then_some(flag);
         };
         return Some(OptionWord {
-            takes_next: takes_value && value.is_none(),
-            value,
-            role: wrapper.role(name),
+            takes_next: takes_value && !inline_value,
         });
     }
     let cluster = arg.strip_prefix('-')?;
     for (at, letter) in cluster.char_indices() {
         let optional = wrapper.optional_value_letters.contains(letter);
         if optional || wrapper.value_letters.contains(letter) {
-            let (letter, value) = cluster[at..].split_at(letter.len_utf8());
+            let ends_the_word = at + letter.len_utf8() == cluster.len();
             return Some(OptionWord {
-                takes_next: !optional && value.is_empty(),
-                value: (!value.is_empty()).then_some(value),
-                role: wrapper.role(letter),
+                takes_next: !optional && ends_the_word,
             });
         }
         if reading == Reading::Exact && !wrapper.flag_letters.contains(letter) {
@@ -821,9 +763,8 @@ pub fn lookup_option<'a>(words: &[&'a str]) -> Option<&'a str> {
 /// Commands that run the command written in their arguments (`xargs rm`,
 /// `exec rm`, `eval rm`, `watch rm`) but whose row names them: they also run
 /// without a command (`exec >log 2>&1`, bare `xargs`), and `eval` and `watch`
-/// read their arguments as code. The blocklist looks through all of them, in
-/// [`argument_command_words`]; allow prefixes only through the ones that run
-/// the command directly ([`argument_run`]).
+/// read their arguments as code. The ask-first list looks through all of
+/// them, in [`argument_command_words`].
 const ARGUMENT_RUNNERS: &[Wrapper] = &[
     Wrapper {
         flag_letters: "cl",
@@ -856,12 +797,6 @@ const ARGUMENT_RUNNERS: &[Wrapper] = &[
             "--verbose",
             "--exit",
         ],
-        roles: &[
-            ("I", Role::Replace(0)),
-            ("i", Role::Replace(0)),
-            ("J", Role::Replace(1)),
-            ("--replace", Role::Replace(0)),
-        ],
         ..Wrapper::named("xargs")
     },
     Wrapper {
@@ -889,65 +824,21 @@ const ARGUMENT_RUNNERS: &[Wrapper] = &[
 
 /// What the [`ARGUMENT_RUNNERS`] head of some words runs.
 pub struct ArgumentRun<'w, 'a> {
-    /// The runner reads its arguments as shell code (`eval`, and `watch`,
-    /// which passes them to `sh -c`), so they name no single command.
-    pub reads_code: bool,
     /// The words after the runner's own options, as written: `grep foo` in
     /// `xargs -n 1 grep foo`. Empty when they name no command (`exec >log
     /// 2>&1`, bare `xargs`); `None` when the runner's options, read as
     /// [`argument_run`] was asked to, do not tell where they start.
     pub command: Option<&'w [&'a str]>,
-    /// The replace strings the runner's options set (`R` in `xargs -I R`).
-    pub replace: Vec<&'a str>,
-}
-
-impl<'w, 'a> ArgumentRun<'w, 'a> {
-    /// The words of [`Self::command`] the runner's input cannot change:
-    /// with a replace string, those before the first word it may occur in
-    /// (`git` in `xargs -I push git push`). `None` when that leaves no word.
-    pub fn literal_command(&self) -> Option<&'w [&'a str]> {
-        let command = self.command?;
-        if self.replace.is_empty() {
-            return Some(command);
-        }
-        // A word may hold a pattern once the shell expands both: quotes are
-        // read away, and an expansion may hold anything.
-        let literal =
-            |text: &str| (!text.contains(['$', '`'])).then(|| text.replace(['\'', '"', '\\'], ""));
-        let patterns: Vec<_> = self
-            .replace
-            .iter()
-            .map(|pattern| literal(pattern))
-            .collect();
-        let end = command
-            .iter()
-            .position(|word| {
-                let word = literal(word);
-                patterns.iter().any(|pattern| match (&word, pattern) {
-                    (Some(word), Some(pattern)) => word.contains(pattern.as_str()),
-                    _ => true,
-                })
-            })
-            .unwrap_or(command.len());
-        (end > 0).then_some(&command[..end])
-    }
 }
 
 /// The [`ArgumentRun`] of `words`, or `None` when they are not headed by an
 /// [`ARGUMENT_RUNNERS`] entry.
-pub fn argument_run<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option<ArgumentRun<'w, 'a>> {
+pub fn argument_run<'w, 'a>(words: &'w [&'a str]) -> Option<ArgumentRun<'w, 'a>> {
     let (name, rest) = words.split_first()?;
     let base = name.rsplit('/').next().unwrap_or(name);
     let runner = ARGUMENT_RUNNERS.iter().find(|r| r.name == base)?;
-    let start = wrapped_start(runner, rest, reading);
     Some(ArgumentRun {
-        reads_code: matches!(runner.name, "eval" | "watch"),
-        command: start
-            .as_ref()
-            .map(|start| rest.get(start.at..).unwrap_or(&[])),
-        replace: start
-            .map(|start| start.replace.into_iter().flatten().collect())
-            .unwrap_or_default(),
+        command: wrapped_start(runner, rest).map(|at| rest.get(at..).unwrap_or(&[])),
     })
 }
 
@@ -957,17 +848,17 @@ pub fn argument_run<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option<Ar
 /// command (`exec >log 2>&1`).
 pub fn argument_command_words(row: &str) -> Option<Vec<&str>> {
     let row = row_words(row)?;
-    let mut words = effective_words(&row, Reading::Getopt)?;
+    let mut words = effective_words(&row)?;
     let mut ran = false;
-    while let Some(run) = argument_run(words, Reading::Getopt) {
-        words = effective_words(run.command?, Reading::Getopt)?;
+    while let Some(run) = argument_run(words) {
+        words = effective_words(run.command?)?;
         ran = true;
     }
     ran.then(|| words.to_vec())
 }
 
-/// The most words of a command the blocklist reads when the command was
-/// found under a reading other than getopt's: more than any blocked prefix
+/// The most words of a command the ask-first list reads when the command was
+/// found under a reading other than getopt's: more than any rule
 /// and the options before its subcommand, and few enough that a row read
 /// many ways costs time linear in its words.
 const POSSIBLE_COMMAND_WORDS: usize = 32;
@@ -977,8 +868,8 @@ const POSSIBLE_COMMAND_WORDS: usize = 32;
 /// take a value, by the table or by its absence from it, is also read as
 /// the start of the command (`rm` in `xargs -0I rm echo`). A wrapper or
 /// runner is given by its name, any other command by its first
-/// [`POSSIBLE_COMMAND_WORDS`] words. Deny matching only: every reading can
-/// only block more.
+/// [`POSSIBLE_COMMAND_WORDS`] words. Every extra reading can only make a
+/// rule match more often, so a misread costs a card, never a missed rule.
 pub fn possible_commands<'w, 'a>(words: &'w [&'a str]) -> Vec<&'w [&'a str]> {
     const { assert!(MODIFIER_WRAPPERS.len() + ARGUMENT_RUNNERS.len() <= 32) };
     let wrappers: Vec<&Wrapper> = MODIFIER_WRAPPERS.iter().chain(ARGUMENT_RUNNERS).collect();
@@ -1169,9 +1060,7 @@ fn runs_a_shell(row: &str) -> bool {
             })
             .is_some_and(|name| SHELLS.contains(&name))
     };
-    shell(row_words(row))
-        || shell(command_words(row, Reading::Getopt))
-        || shell(argument_command_words(row))
+    shell(row_words(row)) || shell(command_words(row)) || shell(argument_command_words(row))
 }
 
 /// Variables whose value bash, or a bash it starts, expands as code.
@@ -1379,8 +1268,8 @@ impl<'src> Walker<'src> {
         // Policy reads the command from the row text alone, so it must name
         // the same command.
         let node_words = command_node_words(self.src, node)?;
-        let node_command = effective_words(&node_words, Reading::Getopt);
-        if command_words(&text, Reading::Getopt).as_deref() != node_command {
+        let node_command = effective_words(&node_words);
+        if command_words(&text).as_deref() != node_command {
             return None;
         }
         // No command it can name: an unnamed one, a wrapper run by path, one
@@ -2271,7 +2160,7 @@ mod tests {
         let input = "cat <<EOF\nline one\nline two\nEOF";
         let segs = split(input);
         assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque(), "got {:?}", segs[0]);
+        assert!(!matches!(segs[0], Segment::Simple(_)), "got {:?}", segs[0]);
         let text = segs[0].text();
         assert!(text.contains("line one"));
         assert!(text.contains("line two"));
@@ -2284,7 +2173,7 @@ mod tests {
         let input = "cat > file << 'EOF'\n//! comment\npub mod x;\nEOF";
         let segs = split(input);
         assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
+        assert!(!matches!(segs[0], Segment::Simple(_)));
         assert!(segs[0].text().contains("//! comment"));
         assert!(segs[0].text().contains("pub mod x"));
     }
@@ -2373,7 +2262,7 @@ mod tests {
         let input = "cat <<EOF\nbody\nEOF\necho done";
         let segs = split(input);
         assert_eq!(segs.len(), 2);
-        assert!(segs[0].is_opaque());
+        assert!(!matches!(segs[0], Segment::Simple(_)));
         assert!(segs[0].text().contains("body"));
         assert_eq!(segs[1], simple("echo done"));
     }
@@ -2384,7 +2273,7 @@ mod tests {
         let input = "cat <<-EOF\n\tindented body\n\tEOF";
         let segs = split(input);
         assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
+        assert!(!matches!(segs[0], Segment::Simple(_)));
         assert!(segs[0].text().contains("indented body"));
     }
 
@@ -2620,7 +2509,7 @@ mod tests {
         let segs = split("[ -f foo ] && echo yes");
         // First segment is opaque due to `[`, second is Simple ("echo yes").
         assert_eq!(segs.len(), 2);
-        assert!(segs[0].is_opaque(), "got {:?}", segs[0]);
+        assert!(!matches!(segs[0], Segment::Simple(_)), "got {:?}", segs[0]);
         assert_eq!(segs[1], simple("echo yes"));
     }
 
@@ -2628,7 +2517,7 @@ mod tests {
     fn double_bracket_test_opaque() {
         let segs = split("[[ -f foo ]]");
         assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
+        assert!(!matches!(segs[0], Segment::Simple(_)));
     }
 
     // -----------------------------------------------------------------
@@ -2676,8 +2565,7 @@ mod tests {
 
     #[test]
     fn wrapper_that_only_changes_how_a_command_runs_keeps_the_command() {
-        // The command the wrapper runs is written out, so the row names it
-        // and the policy can allowlist it.
+        // The command the wrapper runs is written out, so the row names it.
         for (input, command) in [
             ("timeout 60 cargo test", "cargo test"),
             ("timeout --signal=KILL 60 cargo test", "cargo test"),
@@ -2692,7 +2580,7 @@ mod tests {
         ] {
             assert_eq!(split(input), vec![opaque(input)], "{input:?}");
             assert_eq!(
-                command_words(input, Reading::Getopt).map(|words| words.join(" ")),
+                command_words(input).map(|words| words.join(" ")),
                 Some(command.to_string()),
                 "{input:?}"
             );
@@ -3154,7 +3042,7 @@ mod tests {
             Some(&simple("f"))
         );
         // A name bash expands runs what any call passes it: its row is
-        // asked by exact text, and the blocklist reads every row.
+        // asked by exact text, and the ask-first list reads every row.
         assert_eq!(
             split("f(){ \"$@\"; }; f rm -rf x"),
             vec![exact("\"$@\""), simple("f rm -rf x")]
@@ -3248,19 +3136,15 @@ mod tests {
         let segs = split("git log > /tmp/log | grep foo");
         // First segment has `>`, opaque. Second is simple.
         assert_eq!(segs.len(), 2);
-        assert!(segs[0].is_opaque());
+        assert!(!matches!(segs[0], Segment::Simple(_)));
         assert_eq!(segs[1], simple("grep foo"));
     }
 
     #[test]
     fn closes_pipe_bypass_foot_gun() {
-        // The motivating attack: a saved `git log` prefix would
-        // word-boundary-match the whole string today, silently approving
-        // `rm -rf ~/`. Under per-segment evaluation, the `rm` segment
-        // stands alone and (a) gets blocklisted by the default blocklist
-        // upstream, or (b) requires fresh approval if the user removed
-        // the default. Either way, the saved `git log` prefix never
-        // approves the `rm` segment.
+        // A prefix match on the whole string would read `rm -rf ~/` as an
+        // argument of `git log`. Under per-segment evaluation, the `rm`
+        // segment stands alone, so an `rm` rule sees it.
         let segs = split("git log | rm -rf ~/");
         assert_eq!(segs, vec![simple("git log"), simple("rm -rf ~/")]);
     }
@@ -3273,12 +3157,6 @@ mod tests {
     fn segment_text_accessor() {
         assert_eq!(simple("a").text(), "a");
         assert_eq!(opaque("b").text(), "b");
-    }
-
-    #[test]
-    fn segment_is_opaque_predicate() {
-        assert!(!simple("a").is_opaque());
-        assert!(opaque("b").is_opaque());
     }
 
     // -----------------------------------------------------------------
@@ -3316,7 +3194,7 @@ mod tests {
         // one Opaque segment for review.
         let segs = split("echo \"unterminated ; rm -rf / && cd /a");
         assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
+        assert!(!matches!(segs[0], Segment::Simple(_)));
         assert_eq!(segs[0].text(), "echo \"unterminated ; rm -rf / && cd /a");
     }
 
@@ -3330,7 +3208,7 @@ mod tests {
     fn unbalanced_paren_group_collapses_to_single_opaque() {
         let segs = split("( cd /a && echo hi");
         assert_eq!(segs.len(), 1);
-        assert!(segs[0].is_opaque());
+        assert!(!matches!(segs[0], Segment::Simple(_)));
     }
 
     #[test]

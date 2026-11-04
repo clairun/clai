@@ -95,7 +95,7 @@ const askEvent = (pendingId: string, at: number) =>
   env({ type: 'ask_user_requested', payload: { pending_id: pendingId, question: 'Ship it?', options: null, multi_select: false } } as AssistantUiEvent, at);
 
 const approval = (requestId: string) =>
-  ({ requestId, workspaceId: WS, agentId: null, agentName: null, command: 'ls', segments: [] }) as never;
+  ({ requestId, workspaceId: WS, agentId: null, agentName: null, command: 'ls', rows: [] }) as never;
 
 const apply = (state: FleetState, ...envelopes: AssistantEventEnvelope[]) =>
   envelopes.reduce(applyAssistantEvent, state);

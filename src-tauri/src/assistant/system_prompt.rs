@@ -32,15 +32,12 @@ pub(crate) fn build_system_prompt(
     trigger: &RunTrigger,
 ) -> ProviderInputMessage {
     let tool_names: Vec<&str> = tool_defs.iter().map(|t| t.name.as_str()).collect();
-    // `bash_exec` is the only tool that reads or writes arbitrary files, and in
-    // restricted mode the *write* capability is the allowlist rather than the
-    // mode. Guidance that assumes either is gated on these two flags: telling an
-    // agent to produce a file it cannot write stalls it on an approval prompt.
+    // `bash_exec` is the only tool that reads or writes arbitrary files, so
+    // guidance about files is gated on having a shell.
     let shell_enabled = !matches!(
         context.execution.shell.mode,
         crate::config::ShellAccessMode::Off
     );
-    let can_write_files = context.execution.shell.can_write_files();
     let current_datetime = chrono::Local::now()
         .format("%Y-%m-%d %H:%M:%S %:z")
         .to_string();
@@ -165,11 +162,9 @@ pub(crate) fn build_system_prompt(
          - First inspect what is available in this session and choose the smallest set of tools needed.\n\
          - Use the configured MCP tools available in this session for domain-specific work.\n",
     );
-    if can_write_files {
+    if shell_enabled {
         prompt
             .push_str("         - Use `bash_exec` for local filesystem inspection and changes.\n");
-    } else if shell_enabled {
-        prompt.push_str("         - Use `bash_exec` for local filesystem inspection.\n");
     }
     prompt.push_str(
         "         - Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
@@ -182,7 +177,7 @@ pub(crate) fn build_system_prompt(
             "         - When looking for code, files, or prior work, ALWAYS search your workspace first with `bash_exec` before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n",
         );
     }
-    if can_write_files {
+    if shell_enabled {
         prompt.push_str(
             "         - Durable outputs belong in the workspace: write them there with `bash_exec` so they persist after the run as user-visible artifacts.\n\
              - Before creating a new durable artifact, search the workspace for an existing relevant one and update it rather than creating a duplicate.\n",
@@ -304,7 +299,7 @@ pub(crate) fn build_system_prompt(
         prompt.push_str(
             "Your assistant text is visible to the user in chat. Treat chat as the primary way to communicate progress and outcomes.\n",
         );
-        if can_write_files {
+        if shell_enabled {
             prompt.push_str(
                 "Save durable outputs as files in the workspace (via `bash_exec`) so they surface as artifacts.\n",
             );
@@ -326,11 +321,7 @@ pub(crate) fn build_system_prompt(
     }
 
     prompt.push_str("\n## Local Execution Capabilities\n");
-    if shell_enabled && !can_write_files {
-        prompt.push_str(&format!(
-            "- Your workspace (id `{workspace_id}`) is your default shell working directory (run `pwd` for its path) and holds this workspace's artifacts, which you can read. Your command allowlist contains no command that writes a file, so any write you attempt through `bash_exec` stops and waits for the user to approve that command — which an unattended run has nobody to answer. Put your results in chat, save charts with `create_vega_chart` (it writes its own file and needs no shell), and say plainly when a request needs a file you cannot write.\n",
-        ));
-    } else if shell_enabled {
+    if shell_enabled {
         prompt.push_str(&format!(
             "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
         ));
@@ -345,7 +336,7 @@ pub(crate) fn build_system_prompt(
     prompt.push_str(
         "- Charts: create every chart with the `create_vega_chart` tool, one chart per call — never hand-write a Vega-Lite spec into a file or paste one into chat. The tool validates the spec (fix and retry on a schema error). Give it the complete workspace-relative `.vl.json` path and choose a visible artifact location that keeps the chart with its related task or document instead of defaulting to a shared charts directory (for example, `reports/q3/revenue.vl.json`); avoid cache, dependency, and build-output directories. Reuse an existing chart's exact path when updating it instead of creating a near-duplicate. The tool does not show the chart in chat: it returns a `markdown` snippet such as `![title](/reports/q3/revenue.vl.json)`, and embedding that snippet in your reply or in a markdown report is the only way the chart is displayed — put it exactly where the chart belongs, once. Leading `/` = workspace root, so the link works from a report in any folder. Saved charts also appear as artifacts.\n",
     );
-    if can_write_files {
+    if shell_enabled {
         prompt.push_str(
             "- Keep data out of the spec above ~50 rows: write it to a CSV/JSON file in the workspace with `bash_exec` and point the spec's `data.url` at it (a leading `/` is workspace-root-relative, e.g. `/data/sales.csv`).\n",
         );
@@ -371,10 +362,10 @@ pub(crate) fn build_system_prompt(
     }
 
     if shell_enabled {
-        push_filesystem_boundary(&mut prompt, can_write_files, trigger);
+        push_filesystem_boundary(&mut prompt, trigger);
     }
     // The memory protocol is all reads and writes of `.clai/memory/` files.
-    if can_write_files {
+    if shell_enabled {
         push_agent_memory(&mut prompt, trigger);
     }
 
@@ -444,10 +435,11 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
         )),
     }
 
+    // The label the user sees in agent settings, then the stored value.
     let shell_mode = match context.execution.shell.mode {
-        crate::config::ShellAccessMode::Off => "off",
-        crate::config::ShellAccessMode::Restricted => "restricted",
-        crate::config::ShellAccessMode::Full => "full",
+        crate::config::ShellAccessMode::Off => "Off (off)",
+        crate::config::ShellAccessMode::Restricted => "Ask first (restricted)",
+        crate::config::ShellAccessMode::Full => "Don't ask (full)",
     };
     prompt.push_str(&format!("- Shell mode: {}\n", shell_mode));
     let network_status = match context.execution.sandbox.network {
@@ -471,11 +463,8 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
     } else {
         // No sandbox implementation on this platform (see
         // `assistant::sandbox::unsupported`), so the path grants are advisory
-        // there. The allow/blocklists are a different mechanism — CLAI parses
-        // every command against them in `shell_policy` before spawning
-        // anything, on every platform — so do not let the warning imply that
-        // nothing is enforced.
-        "host shell — no OS sandbox on this platform, so the path grants are NOT enforced by the kernel and the boundary below is a rule you keep yourself. Your allowed and blocked command prefixes are still enforced by CLAI before any command runs".to_string()
+        // there.
+        "host shell — no OS sandbox on this platform, so the path grants are NOT enforced by the kernel and the boundary below is a rule you keep yourself".to_string()
     };
     prompt.push_str(&format!("- Shell sandbox: {}\n", sandbox_status));
     if cfg!(target_os = "linux")
@@ -489,38 +478,30 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
         );
     }
 
-    if !context.execution.shell.blocked_command_prefixes.is_empty() {
+    if matches!(
+        context.execution.shell.mode,
+        crate::config::ShellAccessMode::Restricted
+    ) {
+        let rules = &context.execution.shell.ask_first_command_prefixes;
+        let rules_text = if rules.is_empty() {
+            "none".to_string()
+        } else {
+            rules.join(", ")
+        };
         prompt.push_str(&format!(
-            "- Blocked command prefixes: {}\n",
-            context.execution.shell.blocked_command_prefixes.join(", ")
+            "- Ask first (the user approves each one; a denial comes back as an error with the user's reason): {}\n",
+            rules_text
         ));
-    }
-
-    match context.execution.shell.mode {
-        crate::config::ShellAccessMode::Restricted => {
-            let allowed = context.execution.shell.effective_allowed_command_prefixes();
-            let allowed_text = if allowed.is_empty() {
-                "none".to_string()
-            } else {
-                allowed.join(", ")
-            };
-            prompt.push_str(&format!("- Allowed command prefixes: {}\n", allowed_text));
-        }
-        crate::config::ShellAccessMode::Full => {
-            prompt.push_str("- Allowed command prefixes: any command not blocked\n");
-        }
-        // Unreachable: the caller only reaches this helper with a shell.
-        crate::config::ShellAccessMode::Off => {}
     }
 }
 
 /// The authorization boundary and the git/SSH etiquette that goes with it.
 /// Both describe how to behave *while running commands*, so they are
 /// omitted for agents without a shell.
-fn push_filesystem_boundary(prompt: &mut String, can_write_files: bool, trigger: &RunTrigger) {
+fn push_filesystem_boundary(prompt: &mut String, trigger: &RunTrigger) {
     prompt.push_str(
         "\n## Filesystem boundary\n\
-         The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. On Linux and macOS, `bash_exec` runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms with no sandbox implementation, `bash_exec` is labeled as a host shell: the command policy still applies, but nothing outside this paragraph stops you from reaching an ungranted path, so treat these rules as the boundary itself.\n\
+         The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. On Linux and macOS, `bash_exec` runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms with no sandbox implementation, `bash_exec` is labeled as a host shell: nothing outside this paragraph stops you from reaching an ungranted path, so treat these rules as the boundary itself.\n\
          - Do not `cd`, redirect to, or pass paths outside the listed grants — not even via subshells, heredocs, scripts, or absolute paths.\n\
          - Do not invoke commands that touch paths outside the grants (no editing the user's other repos, no installing to global locations, no reading personal files like `~/.ssh`, etc.).\n\
          - If a task genuinely needs a path outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI), call `fs_request_grant({path, access, reason})` BEFORE attempting the work. The requested path must already exist because the shell sandbox cannot bind a nonexistent target; to create a new path, request its existing parent directory. The user can approve once (lasts this run), approve always (persists to agent settings), narrow the path, or deny. Request the narrowest path that satisfies the task — prefer `~/.config/gh` over `~/.config`, prefer a specific file over its parent directory. Prefer `read_only` unless writes are genuinely needed.\n\
@@ -530,11 +511,9 @@ fn push_filesystem_boundary(prompt: &mut String, can_write_files: bool, trigger:
     if !matches!(trigger, RunTrigger::WorkspaceTask) {
         prompt.push_str("         - If a denied grant requires a human answer, use `ask_user`.\n");
     }
-    if can_write_files {
-        prompt.push_str(
-            "         - Default your writes to the workspace. Other grants (often `$HOME`) are commonly read_only, so writing there fails — check the access listed above first, and if you genuinely need to write to a read_only or ungranted path, `fs_request_grant` it rather than attempting the write and failing.\n",
-        );
-    }
+    prompt.push_str(
+        "         - Default your writes to the workspace. Other grants (often `$HOME`) are commonly read_only, so writing there fails — check the access listed above first, and if you genuinely need to write to a read_only or ungranted path, `fs_request_grant` it rather than attempting the write and failing.\n",
+    );
     prompt.push_str(
         "         - Other CLAI workspaces exist on this machine but are intentionally isolated: you cannot see, list, or read them, and they will never appear in your grants. If the user asks you to work with a different workspace, ask them for its workspace id (the value they can read most easily in the CLAI app; you cannot enumerate workspaces). That workspace lives next to yours — same parent directory as your workspace, named with that id — so `fs_request_grant` that path (e.g. read_only first) to gain access.\n",
     );
@@ -654,8 +633,6 @@ mod tests {
         ExecutionCapabilityConfig {
             shell: crate::config::types::ShellCapabilityConfig {
                 mode: ShellAccessMode::Restricted,
-                allowed_command_prefixes: crate::config::types::standard_restricted_shell_allowlist(
-                ),
                 ..Default::default()
             },
             ..Default::default()
@@ -950,56 +927,10 @@ mod tests {
     }
 
     #[test]
-    fn build_system_prompt_withholds_write_guidance_from_a_read_only_allowlist() {
-        // The shipped `code-reviewer` template's shape: a shell, but nothing in
-        // the allowlist that writes. Every write it attempted would stop on an
-        // approval prompt, which an unattended scheduled run cannot answer — so
-        // it must not be told to keep memory or save durable outputs.
-        let mut execution = ExecutionCapabilityConfig::default();
-        execution.shell.mode = ShellAccessMode::Restricted;
-        execution.shell.allowed_command_prefixes = ["rg", "cat", "git diff"]
-            .iter()
-            .map(|command| (*command).to_string())
-            .collect();
-
-        let context = RunContext {
-            // An automation, so the "save durable outputs as files" line is
-            // reachable — otherwise reverting its gate survives this test.
-            automation_name: Some("Nightly review".to_string()),
-            execution,
-            ..Default::default()
-        };
-
-        let message =
-            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
-        let text = match &message.content[0] {
-            ContentPart::Text { text } => text,
-            other => panic!("expected text content, got {:?}", other),
-        };
-
-        assert!(text.contains("This session belongs to the automation"));
-        assert!(!text.contains("## Agent Memory"));
-        assert!(!text.contains("Durable outputs belong in the workspace"));
-        assert!(!text.contains("Save durable outputs as files"));
-        assert!(!text.contains("Default your writes to the workspace"));
-        assert!(!text.contains("inspection and changes"));
-        assert!(text.contains("no command that writes a file"));
-        // Approval-blocked, not denied, and charts are still writable.
-        assert!(text.contains("waits for the user to approve"));
-        assert!(text.contains("save charts with `create_vega_chart`"));
-        // It still has a shell, so the boundary and the search guidance apply.
-        assert!(text.contains("## Filesystem boundary"));
-        assert!(text.contains("ALWAYS search your workspace first"));
-    }
-
-    #[test]
     fn build_system_prompt_describes_shell_mode_alongside_memory_guidance() {
         let mut execution = ExecutionCapabilityConfig::default();
         execution.shell.mode = ShellAccessMode::Restricted;
-        // `tee` is what makes this agent write-capable; without it the memory
-        // protocol below would be guidance it cannot act on.
-        execution.shell.allowed_command_prefixes =
-            vec!["cargo check".to_string(), "tee".to_string()];
+        execution.shell.ask_first_command_prefixes = vec!["git push".to_string(), "rm".to_string()];
 
         let context = RunContext {
             execution,
@@ -1013,10 +944,35 @@ mod tests {
             other => panic!("expected text content, got {:?}", other),
         };
 
-        assert!(text.contains("- Shell mode: restricted"));
-        assert!(text.contains("- Allowed command prefixes: cargo check"));
-        assert!(text.contains("cargo check"));
+        assert!(text.contains("- Shell mode: Ask first (restricted)\n"));
+        assert!(text.contains(
+            "- Ask first (the user approves each one; a denial comes back as an error \
+             with the user's reason): git push, rm\n"
+        ));
+        assert!(!text.contains("Blocked command prefixes"));
+        assert!(!text.contains("Allowed command prefixes"));
         assert!(text.contains("## Agent Memory"));
+    }
+
+    #[test]
+    fn build_system_prompt_gives_a_full_agent_no_ask_first_line() {
+        let mut execution = ExecutionCapabilityConfig::default();
+        execution.shell.mode = ShellAccessMode::Full;
+        let context = RunContext {
+            execution,
+            ..Default::default()
+        };
+
+        let message =
+            build_workspace_prompt("agent-123", &context, None, &[], &RunTrigger::Scheduled);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(text.contains("- Shell mode: Don't ask (full)\n"));
+        assert!(!text.contains("Ask first"));
+        assert!(!text.contains("command prefixes"));
     }
 
     #[test]

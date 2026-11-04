@@ -418,7 +418,7 @@ describe('Workspace — who asks', () => {
       agentId: 'wa-rust',
       agentName: null,
       command: 'cargo test',
-      segments: [{ text: 'cargo test', kind: 'simple', suggestedPrefix: 'cargo test' }],
+      rows: [{ text: 'cargo test', rule: 'cargo test' }],
       persistsToSharedAgent: false,
       alsoAffectsWorkspaces: [],
     });
@@ -444,7 +444,7 @@ describe('Workspace — who asks', () => {
       agentId: 'wa-gone',
       agentName: null,
       command: 'ls',
-      segments: [{ text: 'ls', kind: 'simple', suggestedPrefix: 'ls' }],
+      rows: [{ text: 'ls', rule: 'ls' }],
       persistsToSharedAgent: false,
       alsoAffectsWorkspaces: [],
     });
