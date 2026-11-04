@@ -1,7 +1,15 @@
 import React, { useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { listPendingPermissionRequests, submitPermissionDecision } from '../permissions/client';
-import type { PermissionRequest, SegmentApproval, SegmentDecision } from '../generated/bindings';
+import type {
+  PermissionRequest,
+  SegmentApproval,
+  SegmentDecision,
+  WorkspaceAgentResponse,
+  WorkspaceTaskResponse,
+} from '../generated/bindings';
+import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender';
+import RequestingAgent from './Agents/RequestingAgent';
 import { chipText } from './requestChips';
 import styles from './InlineApprovalCard.module.css';
 
@@ -110,13 +118,15 @@ interface ApprovalCardProps {
    * "always" chip saves the suggested prefix and shows it (`Always · cargo`).
    */
   speaker?: (prompt: ReactNode) => ReactNode;
+  /** The agent that asked, drawn in the header; the spoken card draws its own face. */
+  requester?: SenderAgent | null;
   /** The decision was accepted. */
   onDecided?: (requestId: string) => void;
   ref?: Ref<HTMLElement>;
 }
 
 /** One permission request and its decisions. */
-export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps) => {
+export const ApprovalCard = ({ req, speaker, requester, onDecided, ref }: ApprovalCardProps) => {
   const [cells, setCells] = useState<CardState>(() =>
     Object.fromEntries(req.segments.map((seg, idx) => [idx, { prefix: seg.suggestedPrefix || '', decision: null }]))
   );
@@ -440,14 +450,20 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
     <article
       ref={ref}
       className={spoken ? `${styles.card} ${styles.spoken}` : styles.card}
-      aria-label="Permission requested"
+      aria-label={requester ? `Permission requested by ${requester.name}` : 'Permission requested'}
     >
       {!spoken && (
         <header className={styles.cardHeader}>
           <div className={styles.cardHeaderLeft}>
             <span className={styles.tag}>Permission requested</span>
             <span className={styles.cardSubtitle}>
-              {req.agentName ? `Agent "${req.agentName}" wants to run:` : 'An agent wants to run:'}
+              {requester ? (
+                <>
+                  <RequestingAgent agent={requester} /> wants to run:
+                </>
+              ) : (
+                'An agent wants to run:'
+              )}
             </span>
           </div>
           <button
@@ -709,7 +725,17 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
  * chip near the input bar surfaces the count whenever there are
  * pending requests, with click-to-scroll into view.
  */
-const InlineApprovalCard = ({ workspaceId }: { workspaceId: string | null }) => {
+const InlineApprovalCard = ({
+  workspaceId,
+  roster = [],
+  loadedTasks,
+}: {
+  workspaceId: string | null;
+  /** The workspace's agents, to draw who asked each request. */
+  roster?: readonly WorkspaceAgentResponse[];
+  /** The workspace's tasks, to find an agent removed from the roster mid-task. */
+  loadedTasks?: () => readonly WorkspaceTaskResponse[];
+}) => {
   const [requests, setRequests] = useState<PermissionRequest[]>([]);
   const firstCardRef = useRef<HTMLElement | null>(null);
   const previousCountRef = useRef(0);
@@ -814,6 +840,7 @@ const InlineApprovalCard = ({ workspaceId }: { workspaceId: string | null }) => 
           key={req.requestId}
           ref={cardIndex === 0 ? firstCardRef : null}
           req={req}
+          requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])}
           onDecided={dismissRequest}
         />
       ))}

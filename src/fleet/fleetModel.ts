@@ -51,7 +51,6 @@ export type FleetAsk = PendingAskUser & { sessionId: string };
  */
 export type FleetRequest = {
   text: string;
-  agentName: string | null;
   at: number;
 } & ({ kind: 'ask'; ask: FleetAsk } | FleetPendingRequest);
 
@@ -106,6 +105,8 @@ export interface FleetCard {
 }
 
 export interface FleetAgentRef {
+  /** Its workspace agent id: what an approval or a grant names it by. */
+  id: string;
   name: string;
   seed: string;
 }
@@ -250,7 +251,6 @@ const askRequest = (ask: FleetAsk, at: number): FleetRequest => ({
   kind: 'ask',
   ask,
   text: ask.question,
-  agentName: null,
   at,
 });
 
@@ -348,7 +348,6 @@ const requestText = (request: PermissionRequest | PathGrantRequest): string =>
 const toRequest = (pending: FleetPendingRequest, at: number): FleetRequest => ({
   ...pending,
   text: requestText(pending.request),
-  agentName: pending.request.agentName,
   at,
 });
 
@@ -484,11 +483,17 @@ export const cardPhase = (card: FleetCard, live: FleetLive): FleetPhase => {
 export const assigneeOf = (card: FleetCard, task: WorkspaceTaskResponse): FleetAgentRef | null =>
   card.main && task.assignedToWorkspaceAgentId === card.main.id
     ? null
-    : { name: task.assignedAgentDisplayName, seed: task.assignedAgentDefinitionId || task.assignedToWorkspaceAgentId };
+    : {
+        id: task.assignedToWorkspaceAgentId,
+        name: task.assignedAgentDisplayName,
+        seed: task.assignedAgentDefinitionId || task.assignedToWorkspaceAgentId,
+      };
 
 /** An agent as a message names it, with the same face seed as its tasks; `null` for the Main. */
 export const agentRef = (agent: AgentRefSnapshot): FleetAgentRef | null =>
-  agent.isDefault ? null : { name: agent.displayName, seed: agent.agentDefinitionId || agent.workspaceAgentId };
+  agent.isDefault
+    ? null
+    : { id: agent.workspaceAgentId, name: agent.displayName, seed: agent.agentDefinitionId || agent.workspaceAgentId };
 
 const mainRef = (agents: readonly AgentRefSnapshot[]): FleetMainRef | null => {
   const main = agents.find((a) => a.isDefault);

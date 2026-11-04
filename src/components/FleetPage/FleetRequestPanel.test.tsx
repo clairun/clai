@@ -82,8 +82,8 @@ describe('FleetRequestPanel', () => {
   });
 
   it('says a command in monospace in the bubble, without the approval card\'s tag, and still decides it', async () => {
-    const request = { kind: 'approval', request: { ...approval, agentName: 'Committer' }, agentName: 'Committer', text: approval.command } as unknown as FleetRequest;
-    const card = { ...emptyCard('ws-1'), agents: [{ name: 'Committer', seed: 'def-c' }], requests: { 'approval:perm-1': { ...request, at: 1 } } };
+    const request = { kind: 'approval', request: { ...approval, agentId: 'wa-c' }, text: approval.command } as unknown as FleetRequest;
+    const card = { ...emptyCard('ws-1'), agents: [{ id: 'wa-c', name: 'Committer', seed: 'def-c' }], requests: { 'approval:perm-1': { ...request, at: 1 } } };
     render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} })!} faces={castFor({}, null)} loud={false} now={10} />);
     const section = screen.getByRole('region', { name: 'Committer needs you' });
     expect(within(section).getByLabelText('Command').tagName).toBe('PRE');
@@ -100,8 +100,8 @@ describe('FleetRequestPanel', () => {
   });
 
   it('sends one reason for the whole command when the Fleet user types one', async () => {
-    const request = { kind: 'approval', request: { ...approval, agentName: 'Committer' }, agentName: 'Committer', text: approval.command } as unknown as FleetRequest;
-    const card = { ...emptyCard('ws-1'), agents: [{ name: 'Committer', seed: 'def-c' }], requests: { 'approval:perm-1': { ...request, at: 1 } } };
+    const request = { kind: 'approval', request: { ...approval, agentId: 'wa-c' }, text: approval.command } as unknown as FleetRequest;
+    const card = { ...emptyCard('ws-1'), agents: [{ id: 'wa-c', name: 'Committer', seed: 'def-c' }], requests: { 'approval:perm-1': { ...request, at: 1 } } };
     render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} })!} faces={castFor({}, null)} loud={false} now={10} />);
     const section = screen.getByRole('region', { name: 'Committer needs you' });
     await userEvent.click(within(section).getByRole('button', { name: /Deny all/ }));
