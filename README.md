@@ -61,10 +61,11 @@ flagged, and selecting a card slides in a live chat preview.
   `git push`, `rm` or `npm publish`, wait for your approval), and *Don't
   ask* (every command runs without asking). The ask-first list catches
   common accidents, not a determined agent: on Linux and macOS the OS
-  sandbox and your path grants are the boundary. On an ask-first card, *Always allow* removes the
-  rule from the agent's list: for a shared teammate in every workspace that
-  uses it, for a workspace's main agent in that workspace only. Add a rule
-  back in the agent's settings to be asked again.
+  sandbox and your path grants are the boundary. On an ask-first card,
+  *Always allow* removes the rule from the agent's list: for a shared
+  teammate in every workspace that uses it, for a workspace's main agent
+  in that workspace only. Add a rule back in the agent's settings to be
+  asked again.
 - **A shared agent library** — Teammates are defined once in Settings →
   *Agents* and added to the workspaces that need them. Editing one reaches every
   workspace using it; each workspace still owns its own main agent, history and
