@@ -71,9 +71,10 @@ const submitted = () =>
 describe('ApprovalCard — the three actions', () => {
   it('lists each matched part with the rule it matched', () => {
     render(<ApprovalCard req={TWO_RULES} />);
-    const matches = within(screen.getByRole('list', { name: 'Ask-first matches' })).getAllByRole('listitem');
+    const list = within(screen.getByRole('list', { name: 'Ask-first matches' }));
+    const matches = list.getAllByRole('listitem');
     expect(matches.map((item) => item.textContent)).toEqual(['rm -f build.logrm', 'git pushgit push']);
-    expect(screen.getByText('rm')).toHaveAttribute('title', 'Matches the ask-first rule `rm`');
+    expect(list.getByText('rm')).toHaveAttribute('title', 'Matches the ask-first rule `rm`');
   });
 
   it('sends Allow once with no reason', async () => {
@@ -109,26 +110,54 @@ describe('ApprovalCard — the three actions', () => {
 });
 
 describe('ApprovalCard — where Always allow applies', () => {
-  it('says "this workspace only" for the workspace\'s own Main', () => {
+  const scopeLine = () => screen.getByText(/^Always allow (removes|stops asking about)/);
+
+  it('says "this workspace only" for the workspace\'s own Main, naming each rule as code', () => {
     render(<ApprovalCard req={TWO_RULES} />);
-    expect(
-      screen.getByText(
-        'Always allow: Removes `rm`, `git push` from this agent\'s ask-first list in this workspace only, and runs the command.'
-      )
-    ).toBeInTheDocument();
-    expect(screen.queryByText(/every workspace/)).toBeNull();
+    expect(scopeLine()).toHaveTextContent(
+      /^Always allow removes rm and git push from this agent's ask-first list in this workspace only\.$/
+    );
+    expect(within(scopeLine()).getByText('git push').tagName).toBe('CODE');
+    expect(scopeLine()).not.toHaveTextContent('`');
+    expect(screen.getByRole('button', { name: 'Always allow (this workspace)' })).toBeInTheDocument();
   });
 
-  it('names the other workspaces a shared agent works in', () => {
+  it('names every workspace a shared agent works in', () => {
     render(<ApprovalCard req={{ ...PUSH, persistsToSharedAgent: true, alsoAffectsWorkspaces: ['Docs', 'Infra'] }} />);
     expect(screen.getByRole('button', { name: 'Always allow (every workspace)' })).toBeInTheDocument();
-    expect(screen.getByText(/shared agent's ask-first list, so it also stops asking in: Docs, Infra/)).toBeInTheDocument();
+    expect(scopeLine()).toHaveTextContent(
+      /^Always allow removes git push from this shared agent's ask-first list in every workspace that has it, now and later\. Today that is this one, “Docs” and “Infra”\.$/
+    );
   });
 
   it('still says "every workspace" for a shared agent nobody else has added yet', () => {
     render(<ApprovalCard req={{ ...PUSH, persistsToSharedAgent: true }} />);
     expect(screen.getByRole('button', { name: 'Always allow (every workspace)' })).toBeInTheDocument();
-    expect(screen.getByText(/wherever this agent is added/)).toBeInTheDocument();
+    expect(scopeLine()).toHaveTextContent(/in every workspace that has it, now and later\.$/);
+  });
+
+  it('says this run only when there is no agent to save to', () => {
+    render(<ApprovalCard req={{ ...PUSH, agentId: null }} />);
+    expect(screen.getByRole('button', { name: 'Always allow (this run)' })).toBeInTheDocument();
+    expect(scopeLine()).toHaveTextContent(
+      /^Always allow stops asking about git push for the rest of this run only\. Nothing is saved\.$/
+    );
+  });
+
+  it('names the workspace instead of "this workspace" where one is given (the Fleet)', () => {
+    const { unmount } = render(<ApprovalCard req={PUSH} speaker={speaker} workspaceName="Alpha" />);
+    expect(scopeLine()).toHaveTextContent(/in “Alpha” only\.$/);
+    expect(screen.getByRole('button', { name: 'Always' })).toHaveAttribute('title', 'Always allow (Alpha)');
+    unmount();
+
+    render(
+      <ApprovalCard
+        req={{ ...PUSH, persistsToSharedAgent: true, alsoAffectsWorkspaces: ['Docs'] }}
+        speaker={speaker}
+        workspaceName="Alpha"
+      />
+    );
+    expect(scopeLine()).toHaveTextContent(/Today that is “Alpha” and “Docs”\.$/);
   });
 });
 
@@ -189,13 +218,14 @@ describe('ApprovalCard — Deny and its reason', () => {
 });
 
 describe('ApprovalCard — spoken (the Fleet)', () => {
-  it('drops the tag, the collapse and the reach line, and speaks short chips', () => {
+  it('drops the tag and the collapse, speaks short chips, and still says where Always allow applies', () => {
     render(<ApprovalCard req={PUSH} speaker={speaker} />);
     expect(screen.queryByText('Permission requested')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /collapse/i })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Command')).toHaveTextContent('cargo test && git push origin main');
     expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Once', 'Always', 'Deny']);
-    expect(screen.getByRole('button', { name: 'Always' }).title).toMatch(/^Always allow \(this workspace\)\. Removes `git push`/);
+    expect(screen.getByRole('button', { name: 'Always' }).title).toBe('Always allow (this workspace)');
+    expect(screen.getByText(/^Always allow removes/)).toHaveTextContent(/in this workspace only\.$/);
   });
 
   it('sends the same decision as the full card', async () => {

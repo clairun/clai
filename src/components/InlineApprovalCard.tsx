@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
+import { Fragment, useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { listPendingPermissionRequests, submitPermissionDecision } from '../permissions/client';
 import type {
@@ -23,7 +23,59 @@ const PERMISSION_RESOLVED_EVENT = 'permissions://resolved';
 const MAX_REASON_LENGTH = 500;
 const limitReason = (value: string) => Array.from(value).slice(0, MAX_REASON_LENGTH).join('');
 
-const quoteRules = (rules: string[]) => rules.map((rule) => `\`${rule}\``).join(', ');
+/** "a", "a and b", "a, b and c". */
+const listOf = (items: ReactNode[]) =>
+  items.map((item, i) => (
+    <Fragment key={i}>
+      {i === 0 ? '' : i === items.length - 1 ? ' and ' : ', '}
+      {item}
+    </Fragment>
+  ));
+
+const quoted = (name: string) => `“${name}”`;
+
+/**
+ * Where "Always allow" saves: a shared teammate's definition, in force in
+ * every workspace it works in, or this workspace's Main. With no workspace or
+ * agent id the backend saves nothing and stops asking for the rest of the run.
+ */
+type AlwaysScope = 'run' | 'workspace' | 'everywhere';
+
+const alwaysScope = (req: PermissionRequest): AlwaysScope =>
+  !req.workspaceId || !req.agentId ? 'run' : req.persistsToSharedAgent ? 'everywhere' : 'workspace';
+
+const AlwaysAllowScope = ({
+  req,
+  rules,
+  workspaceName,
+}: {
+  req: PermissionRequest;
+  rules: string[];
+  workspaceName?: string;
+}) => {
+  const named = listOf(rules.map((rule) => <code key={rule}>{rule}</code>));
+  const here = workspaceName ? quoted(workspaceName) : null;
+  switch (alwaysScope(req)) {
+    case 'run':
+      return <>Always allow stops asking about {named} for the rest of this run only. Nothing is saved.</>;
+    case 'workspace':
+      return (
+        <>
+          Always allow removes {named} from this agent's ask-first list in {here ?? 'this workspace'} only.
+        </>
+      );
+    case 'everywhere': {
+      const others = req.alsoAffectsWorkspaces.map(quoted);
+      return (
+        <>
+          Always allow removes {named} from this shared agent's ask-first list in every workspace that has it, now
+          and later.
+          {others.length > 0 && <> Today that is {listOf([here ?? 'this one', ...others])}.</>}
+        </>
+      );
+    }
+  }
+};
 
 interface ApprovalCardProps {
   req: PermissionRequest;
@@ -35,13 +87,15 @@ interface ApprovalCardProps {
   speaker?: (prompt: ReactNode) => ReactNode;
   /** The agent that asked, drawn in the header; the spoken card draws its own face. */
   requester?: SenderAgent | null;
+  /** Names the request's workspace where "this workspace" would be unclear (the Fleet). */
+  workspaceName?: string;
   /** The decision was accepted. */
   onDecided?: (requestId: string) => void;
   ref?: Ref<HTMLElement>;
 }
 
 /** One ask-first request and its decision. */
-export const ApprovalCard = ({ req, speaker, requester, onDecided, ref }: ApprovalCardProps) => {
+export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided, ref }: ApprovalCardProps) => {
   const [isSubmitting, setSubmitting] = useState(false);
   // Latched once the decision is sent, so it cannot be sent twice.
   const sent = useRef(false);
@@ -60,18 +114,8 @@ export const ApprovalCard = ({ req, speaker, requester, onDecided, ref }: Approv
   const spoken = Boolean(speaker);
 
   const rules = [...new Set(req.rows.map((row) => row.rule))];
-  // "Always allow" removes the rules where the agent's settings live: a shared
-  // teammate's definition, in force in every workspace it works in, or this
-  // workspace's own Main.
-  const isSharedAgent = req.persistsToSharedAgent;
-  const sharedReach = req.alsoAffectsWorkspaces || [];
-  const reach = isSharedAgent ? 'every workspace' : 'this workspace';
-  const removes = `Removes ${quoteRules(rules)} from ${isSharedAgent ? 'this shared agent' : 'this agent'}'s ask-first list`;
-  const reachLine = !isSharedAgent
-    ? `${removes} in this workspace only, and runs the command.`
-    : sharedReach.length > 0
-      ? `${removes}, so it also stops asking in: ${sharedReach.join(', ')}, and runs the command.`
-      : `${removes}, wherever this agent is added, and runs the command.`;
+  const scope = alwaysScope(req);
+  const reach = scope === 'run' ? 'this run' : scope === 'everywhere' ? 'every workspace' : (workspaceName ?? 'this workspace');
 
   const send = async (decision: AskFirstDecision) => {
     // One decision per request: a click that lands after the send must not
@@ -161,7 +205,9 @@ export const ApprovalCard = ({ req, speaker, requester, onDecided, ref }: Approv
                 </li>
               ))}
             </ul>
-            {!spoken && <p className={styles.segmentHint}>Always allow: {reachLine}</p>}
+            <p className={styles.segmentHint}>
+              <AlwaysAllowScope req={req} rules={rules} workspaceName={workspaceName} />
+            </p>
             <div className={styles.segmentButtons}>
               <button
                 type="button"
@@ -175,7 +221,7 @@ export const ApprovalCard = ({ req, speaker, requester, onDecided, ref }: Approv
                 className={`${styles.btn} ${styles.btnAllow}`}
                 onClick={() => send({ kind: 'alwaysAllow' })}
                 disabled={isSubmitting}
-                {...chipText(spoken, `Always allow (${reach})`, 'Always', reachLine)}
+                {...chipText(spoken, `Always allow (${reach})`, 'Always')}
               />
               <button
                 type="button"

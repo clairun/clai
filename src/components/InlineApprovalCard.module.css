@@ -262,6 +262,12 @@
   color: var(--color-text-secondary);
 }
 
+.segmentHint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-size: 11px;
+  color: var(--color-text-primary);
+}
+
 .collapseBtn {
   margin-left: auto;
   align-self: flex-start;

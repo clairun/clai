@@ -93,6 +93,23 @@ describe('FleetRequestPanel', () => {
     expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', { requestId: 'perm-1', decision: { kind: 'deny' } });
   });
 
+  it('names the workspace in the Always allow line', () => {
+    const request = { kind: 'approval', request: { ...approval, agentId: 'wa-c' }, text: approval.command } as unknown as FleetRequest;
+    const card = { ...emptyCard('ws-1'), agents: [{ id: 'wa-c', name: 'Committer', seed: 'def-c' }], requests: { 'approval:perm-1': { ...request, at: 1 } } };
+    render(
+      <FleetRequestPanel
+        scene={requestScene(card, { runs: {}, tasks: {} })!}
+        faces={castFor({}, null)}
+        loud={false}
+        now={10}
+        workspaceTitle="Alpha"
+      />
+    );
+    expect(screen.getByText(/^Always allow removes/)).toHaveTextContent(
+      /^Always allow removes git push from this agent's ask-first list in “Alpha” only\.$/
+    );
+  });
+
   it('sends one reason for the whole command when the Fleet user types one', async () => {
     const request = { kind: 'approval', request: { ...approval, agentId: 'wa-c' }, text: approval.command } as unknown as FleetRequest;
     const card = { ...emptyCard('ws-1'), agents: [{ id: 'wa-c', name: 'Committer', seed: 'def-c' }], requests: { 'approval:perm-1': { ...request, at: 1 } } };
