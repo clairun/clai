@@ -59,7 +59,7 @@ pub fn status() -> SandboxStatus {
     status_for(backend)
 }
 
-fn status_for(backend: Option<SandboxBackend>) -> SandboxStatus {
+pub(crate) fn status_for(backend: Option<SandboxBackend>) -> SandboxStatus {
     let (allowlist_available, allowlist_unavailable_reason) = match backend {
         Some(SandboxBackend::Bubblewrap) => (true, None),
         Some(SandboxBackend::Seatbelt) => (false, Some("Not available on macOS yet")),

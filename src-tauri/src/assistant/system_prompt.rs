@@ -442,10 +442,10 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
         crate::config::ShellAccessMode::Full => "Don't ask (full)",
     };
     prompt.push_str(&format!("- Shell mode: {}\n", shell_mode));
-    let network_status = match context.execution.sandbox.network {
-        crate::config::SandboxNetworkConfig::Enabled => "network allowed",
-        crate::config::SandboxNetworkConfig::Disabled => "network disabled",
-    };
+    let network_status = network_status(
+        context.execution.sandbox.network_access.mode,
+        &crate::assistant::sandbox::status(),
+    );
     let sandbox_status = if cfg!(target_os = "linux") {
         let session_bus_status = match context.execution.sandbox.session_bus {
             crate::config::SandboxSessionBusConfig::Allow => "session bus available",
@@ -536,6 +536,22 @@ fn push_filesystem_boundary(prompt: &mut String, trigger: &RunTrigger) {
         prompt.push_str(
             "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh`, so OpenSSH only consults `~/.ssh/config` and its built-in defaults. You do not need `-F /dev/null` workarounds; if you see `Bad owner or permissions` from ssh, the cause is something else (likely an explicit `-F` pointing at an unreadable path).\n",
         );
+    }
+}
+
+/// The network mode under the names agent settings show.
+fn network_status(
+    mode: crate::config::NetworkMode,
+    sandbox: &crate::assistant::sandbox::SandboxStatus,
+) -> &'static str {
+    use crate::config::NetworkMode;
+    match mode {
+        NetworkMode::Off => "network: Off",
+        NetworkMode::Allowlist if sandbox.allowlist_available => "network: Allowlist",
+        NetworkMode::Allowlist => {
+            "network: Allowlist, which this sandbox cannot enforce yet, so `bash_exec` refuses to run until the user chooses Off or Host network"
+        }
+        NetworkMode::HostNetwork => "network: Host network (unfiltered)",
     }
 }
 
@@ -1384,5 +1400,22 @@ mod tests {
             assert!(text.contains("Do not store secrets in memory"));
             assert!(text.contains("Knowledge is not a dashboard"));
         }
+    }
+    #[test]
+    fn network_status_names_the_mode_as_settings_do() {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
+        use crate::config::NetworkMode;
+        let linux = status_for(Some(SandboxBackend::Bubblewrap));
+        let macos = status_for(Some(SandboxBackend::Seatbelt));
+        assert_eq!(network_status(NetworkMode::Off, &linux), "network: Off");
+        assert_eq!(
+            network_status(NetworkMode::Allowlist, &linux),
+            "network: Allowlist"
+        );
+        assert_eq!(
+            network_status(NetworkMode::HostNetwork, &macos),
+            "network: Host network (unfiltered)"
+        );
+        assert!(network_status(NetworkMode::Allowlist, &macos).contains("refuses to run"));
     }
 }

@@ -134,7 +134,7 @@ providerId: string | null, apiKey: string | null, authMode: AuthMode | null, bas
 
 export type ExecutionCapabilityConfig = { sandbox: ExecutionSandboxConfig, filesystem: FilesystemCapabilityConfig, shell: ShellCapabilityConfig, web: WebCapabilityConfig, };
 
-export type ExecutionSandboxConfig = { network: SandboxNetworkConfig, sessionBus: SandboxSessionBusConfig, };
+export type ExecutionSandboxConfig = { networkAccess: NetworkPolicy, sessionBus: SandboxSessionBusConfig, };
 
 /**
  * Why a `failed` task failed; set exactly when the status is `failed`.
@@ -315,6 +315,22 @@ supportsImages: boolean, };
  */
 export type ModelsEndpointStyle = "standard" | "none" | { "open_ai_compatible": { url: string, } };
 
+/**
+ * How an agent's shell commands and web tools reach the network.
+ */
+export type NetworkMode = "off" | "allowlist" | "host_network";
+
+export type NetworkPolicy = { mode: NetworkMode, 
+/**
+ * Kept in every mode, so leaving Allowlist and coming back keeps the
+ * user's edits. Read only in Allowlist.
+ */
+allowDomains: Array<string>, 
+/**
+ * Checked before the allow list.
+ */
+denyDomains: Array<string>, };
+
 export type PathGrantAttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
 /**
@@ -462,8 +478,6 @@ export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "w
  * The OS mechanism that sandboxes shell commands on this PC.
  */
 export type SandboxBackend = "bubblewrap" | "seatbelt";
-
-export type SandboxNetworkConfig = "enabled" | "disabled";
 
 /**
  * Whether the agent's sandbox can reach the user's session D-Bus.

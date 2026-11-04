@@ -21,6 +21,7 @@ import {
 } from '../../api/client';
 import type {
   ExecutionCapabilityConfig,
+  ExecutionSandboxConfig,
   FilesystemPathGrant,
   ProviderConnection,
 } from '../../generated/bindings';
@@ -104,10 +105,15 @@ const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessD
   askFirst: clean(execution.shell?.askFirstCommandPrefixes || DEFAULT_ASK_FIRST),
   web: execution.web?.enabled || false,
   sessionBus: (execution.sandbox?.sessionBus || 'allow') === 'allow',
+  networkAccess: execution.sandbox?.networkAccess ?? null,
 });
 
 const executionFrom = (access: AccessDraft): ExecutionCapabilityConfig => ({
-  sandbox: { network: 'enabled', sessionBus: access.sessionBus ? 'allow' : 'deny' },
+  // Without a policy the backend applies this PC's default.
+  sandbox: {
+    sessionBus: access.sessionBus ? 'allow' : 'deny',
+    ...(access.networkAccess ? { networkAccess: access.networkAccess } : {}),
+  } as ExecutionSandboxConfig,
   filesystem: { extraPaths: access.grants },
   shell: {
     mode: access.shellMode,

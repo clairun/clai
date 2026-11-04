@@ -13,7 +13,7 @@ vi.mock('../../api/client', () => api);
 
 import { AgentBehaviorForm, type AgentDetail, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
-import type { FilesystemPathGrant, ProviderConnection } from '../../generated/bindings';
+import type { FilesystemPathGrant, NetworkPolicy, ProviderConnection } from '../../generated/bindings';
 
 const connection = (id: string, name: string, extra: Partial<ProviderConnection> = {}): ProviderConnection =>
   ({ id, name, enabled: true, modelId: '', ...extra } as unknown as ProviderConnection);
@@ -35,6 +35,9 @@ const DEPS: AgentFormDeps = {
 
 const HOME_GRANT: FilesystemPathGrant = { path: '/home/u', access: 'read_only', origin: { kind: 'credentialsPreset' } };
 
+// A stored policy the form must save back unchanged.
+const NETWORK: NetworkPolicy = { mode: 'host_network', allowDomains: ['github.com', '*.example.org'], denyDomains: ['bad.example.org'] };
+
 const REVIEWER: AgentDetail = {
   id: 'agent-1',
   name: 'Reviewer',
@@ -45,7 +48,7 @@ const REVIEWER: AgentDetail = {
   selectedMcpServerIds: ['srv-a'],
   providerConnectionIds: ['conn-a'],
   execution: {
-    sandbox: { network: 'enabled', sessionBus: 'allow' },
+    sandbox: { networkAccess: NETWORK, sessionBus: 'allow' },
     filesystem: { extraPaths: [HOME_GRANT] },
     shell: {
       mode: 'restricted',
@@ -127,7 +130,7 @@ describe('AgentBehaviorForm', () => {
       selectedMcpServerIds: ['srv-a'],
       providerConnectionIds: ['conn-a'],
       execution: {
-        sandbox: { network: 'enabled', sessionBus: 'allow' },
+        sandbox: { networkAccess: NETWORK, sessionBus: 'allow' },
         filesystem: { extraPaths: [HOME_GRANT] },
         shell: {
           mode: 'restricted',
@@ -179,9 +182,12 @@ describe('AgentBehaviorForm', () => {
       execution: {
         filesystem: { extraPaths: unknown[] };
         shell: { mode: string; askFirstCommandPrefixes: string[] };
+        sandbox: object;
       };
     };
     expect(request.name).toBe('Scout');
+    // The defaults carried no network policy, so the backend picks this PC's.
+    expect(request.execution.sandbox).toEqual({ sessionBus: 'allow' });
     expect(request.providerConnectionIds).toEqual(['conn-b']);
     expect(request.execution.filesystem.extraPaths).toEqual([HOME_GRANT]);
     expect(request.execution.shell.mode).toBe('off');

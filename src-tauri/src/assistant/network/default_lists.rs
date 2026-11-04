@@ -5,7 +5,6 @@
 
 /// Developer hosts allowed by default: code hosting, package registries,
 /// model providers, cloud APIs and documentation.
-#[cfg_attr(not(test), expect(dead_code, reason = "agent configs read it later"))]
 pub const DEFAULT_ALLOW_DOMAINS: &[&str] = &[
     // Code hosting
     "github.com",
@@ -128,7 +127,6 @@ pub const DEFAULT_ALLOW_DOMAINS: &[&str] = &[
 
 /// Object storage inside the broad cloud entries above, which accepts
 /// presigned or anonymous uploads. Checked before the allow list.
-#[cfg_attr(not(test), expect(dead_code, reason = "agent configs read it later"))]
 pub const DEFAULT_DENY_DOMAINS: &[&str] = &[
     // S3, global and per bucket
     "s3.amazonaws.com",

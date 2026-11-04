@@ -18,8 +18,8 @@ use crate::assistant::sandbox::{
     SandboxSessionBusMode,
 };
 use crate::config::{
-    ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin,
-    SandboxNetworkConfig, SandboxSessionBusConfig, ShellAccessMode,
+    ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
+    NetworkPolicy, SandboxSessionBusConfig, ShellAccessMode,
 };
 
 use super::ToolExecutionContext;
@@ -123,6 +123,12 @@ async fn execute_bash_exec(
         ShellAccessMode::Off
     ) {
         return Err("Shell access is disabled for this agent".to_string());
+    }
+    if let Some(error) = unenforceable_network_error(
+        &context.run_context.execution.sandbox.network_access,
+        &crate::assistant::sandbox::status(),
+    ) {
+        return Err(error);
     }
 
     let filesystem = filesystem_policy(context)?;
@@ -258,9 +264,11 @@ fn sandbox_profile(
     workspace_root: PathBuf,
     filesystem: EffectiveFilesystemPolicy,
 ) -> SandboxProfile {
-    let network = match context.run_context.execution.sandbox.network {
-        SandboxNetworkConfig::Enabled => SandboxNetworkMode::Host,
-        SandboxNetworkConfig::Disabled => SandboxNetworkMode::Disabled,
+    let network = match context.run_context.execution.sandbox.network_access.mode {
+        NetworkMode::Off => SandboxNetworkMode::Disabled,
+        // Shell commands keep the host network in Allowlist until the sandbox
+        // routes them through the network proxy.
+        NetworkMode::Allowlist | NetworkMode::HostNetwork => SandboxNetworkMode::Host,
     };
 
     let session_bus = match context.run_context.execution.sandbox.session_bus {
@@ -281,6 +289,25 @@ fn sandbox_profile(
         session_bus,
         scratch_tmp,
     }
+}
+
+/// A stored Allowlist where the sandbox cannot enforce it (macOS for now, a
+/// hand-edited or copied config) must not run with the host network instead.
+fn unenforceable_network_error(
+    network: &NetworkPolicy,
+    sandbox: &crate::assistant::sandbox::SandboxStatus,
+) -> Option<String> {
+    (network.mode == NetworkMode::Allowlist && sandbox.available && !sandbox.allowlist_available)
+        .then(|| {
+            format!(
+                "Allowlist network mode is not available here ({}); choose Off or Host network \
+                 in the agent's Access settings.",
+                sandbox
+                    .allowlist_unavailable_reason
+                    .as_deref()
+                    .unwrap_or("unsupported by this sandbox")
+            )
+        })
 }
 
 /// The tool error for a denied ask-first request: what was denied, the rule
@@ -1552,6 +1579,67 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("private/local"));
+    }
+
+    // ------------------------------------------------------------------
+    // Network mode in bash_exec
+    // ------------------------------------------------------------------
+
+    fn network(mode: NetworkMode) -> NetworkPolicy {
+        NetworkPolicy {
+            mode,
+            allow_domains: Vec::new(),
+            deny_domains: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_stored_allowlist_fails_closed_where_the_sandbox_cannot_enforce_it() {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
+        let macos = status_for(Some(SandboxBackend::Seatbelt));
+        let error = unenforceable_network_error(&network(NetworkMode::Allowlist), &macos).unwrap();
+        assert!(error.contains("Not available on macOS yet"), "{error}");
+        assert!(error.contains("choose Off or Host network"), "{error}");
+        assert_eq!(
+            unenforceable_network_error(&network(NetworkMode::HostNetwork), &macos),
+            None
+        );
+        assert_eq!(
+            unenforceable_network_error(&network(NetworkMode::Off), &macos),
+            None
+        );
+
+        let linux = status_for(Some(SandboxBackend::Bubblewrap));
+        assert_eq!(
+            unenforceable_network_error(&network(NetworkMode::Allowlist), &linux),
+            None
+        );
+        // Without a sandbox nothing is enforced, so nothing is refused (D17).
+        assert_eq!(
+            unenforceable_network_error(&network(NetworkMode::Allowlist), &status_for(None)),
+            None
+        );
+    }
+
+    #[test]
+    fn network_modes_map_onto_the_sandbox_network() {
+        let workspace = tempdir().unwrap();
+        for (mode, expected) in [
+            (NetworkMode::Off, SandboxNetworkMode::Disabled),
+            (NetworkMode::Allowlist, SandboxNetworkMode::Host),
+            (NetworkMode::HostNetwork, SandboxNetworkMode::Host),
+        ] {
+            let mut context = context_with_grants(workspace.path(), Vec::new());
+            let mut execution = context.run_context.execution.clone();
+            execution.sandbox.network_access = network(mode);
+            context.run_context = std::sync::Arc::new(RunContext {
+                execution,
+                ..(*context.run_context).clone()
+            });
+            let filesystem = filesystem_policy(&context).unwrap();
+            let profile = sandbox_profile(&context, workspace.path().to_path_buf(), filesystem);
+            assert_eq!(profile.network, expected, "{mode:?}");
+        }
     }
 
     // ------------------------------------------------------------------

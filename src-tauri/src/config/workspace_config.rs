@@ -1000,6 +1000,54 @@ mod attach_provider_tests {
             manager.execution.shell.ask_first_command_prefixes,
             crate::config::types::default_ask_first_command_prefixes()
         );
+        let here = crate::config::types::allowlist_available_here();
+        assert_eq!(
+            manager.execution.sandbox.network_access,
+            crate::config::types::network_access_from_legacy(None, here)
+        );
+        assert_eq!(
+            default_agent_execution().sandbox.network_access,
+            manager.execution.sandbox.network_access
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            manager.execution.sandbox.network_access.mode,
+            crate::config::NetworkMode::Allowlist
+        );
+    }
+
+    #[test]
+    fn a_config_saved_before_network_access_migrates_and_saves_both_keys() {
+        let mut config =
+            WorkspaceConfig::new("ws".to_string(), "T".to_string(), 1, "main".to_string());
+        config.assignments.push(WorkspaceAssignment {
+            id: "assign-1".to_string(),
+            agent_definition_id: "def-1".to_string(),
+            enabled: true,
+            context: String::new(),
+            filesystem_grants: Vec::new(),
+            created_at: 3,
+            updated_at: 4,
+        });
+        let mut legacy = serde_json::to_value(&config).unwrap();
+        crate::config::types::to_pre_network_access_json(&mut legacy, "disabled");
+        assert!(!legacy.to_string().contains("networkAccess"));
+
+        let loaded: WorkspaceConfig = serde_json::from_value(legacy).unwrap();
+        let main = loaded.main_agent.as_ref().expect("the Main survives");
+        let policy = &main.execution.sandbox.network_access;
+        assert_eq!(policy.mode, crate::config::NetworkMode::Off);
+        assert_eq!(
+            policy.allow_domains.len(),
+            crate::assistant::network::default_lists::DEFAULT_ALLOW_DOMAINS.len()
+        );
+        assert_eq!(loaded.assignments.len(), 1);
+
+        let saved = serde_json::to_value(&loaded).unwrap();
+        let sandbox = &saved["mainAgent"]["execution"]["sandbox"];
+        assert_eq!(sandbox["network"], "disabled");
+        assert_eq!(sandbox["networkAccess"]["mode"], "off");
+        assert_eq!(saved["assignments"][0]["id"], "assign-1");
     }
 
     // -------------------------------------------------------------------

@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
+use crate::assistant::network::default_lists::{DEFAULT_ALLOW_DOMAINS, DEFAULT_DENY_DOMAINS};
 use crate::assistant::types::ProviderConnection;
 use crate::paths;
 
@@ -349,13 +350,96 @@ pub struct WebCapabilityConfig {
     pub enabled: bool,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
+/// The network switch stored before [`NetworkPolicy`] existed. Still written
+/// on save, derived from the policy, so an older build loads the agent.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-#[ts(export, export_to = "bindings.ts")]
 pub enum SandboxNetworkConfig {
-    #[default]
     Enabled,
     Disabled,
+}
+
+/// How an agent's shell commands and web tools reach the network.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export, export_to = "bindings.ts")]
+pub enum NetworkMode {
+    Off,
+    /// Only hosts on the allow list and not on the deny list.
+    Allowlist,
+    /// The host's network, unfiltered.
+    HostNetwork,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct NetworkPolicy {
+    pub mode: NetworkMode,
+    /// Kept in every mode, so leaving Allowlist and coming back keeps the
+    /// user's edits. Read only in Allowlist.
+    #[serde(default = "default_allow_domains")]
+    pub allow_domains: Vec<String>,
+    /// Checked before the allow list.
+    #[serde(default = "default_deny_domains")]
+    pub deny_domains: Vec<String>,
+}
+
+fn default_allow_domains() -> Vec<String> {
+    DEFAULT_ALLOW_DOMAINS
+        .iter()
+        .map(|entry| entry.to_string())
+        .collect()
+}
+
+fn default_deny_domains() -> Vec<String> {
+    DEFAULT_DENY_DOMAINS
+        .iter()
+        .map(|entry| entry.to_string())
+        .collect()
+}
+
+/// The policy of an agent stored before `networkAccess` existed, or created
+/// now, with the default lists. Legacy `disabled` stays Off. `enabled` or
+/// nothing becomes Allowlist where the sandbox can enforce it, and Host
+/// network elsewhere, which is what the shell does there.
+pub fn network_access_from_legacy(
+    legacy: Option<SandboxNetworkConfig>,
+    allowlist_available: bool,
+) -> NetworkPolicy {
+    let mode = match legacy {
+        Some(SandboxNetworkConfig::Disabled) => NetworkMode::Off,
+        Some(SandboxNetworkConfig::Enabled) | None if allowlist_available => NetworkMode::Allowlist,
+        Some(SandboxNetworkConfig::Enabled) | None => NetworkMode::HostNetwork,
+    };
+    NetworkPolicy {
+        mode,
+        allow_domains: default_allow_domains(),
+        deny_domains: default_deny_domains(),
+    }
+}
+
+pub(crate) fn allowlist_available_here() -> bool {
+    crate::assistant::sandbox::status().allowlist_available
+}
+
+/// Rewrites every sandbox config in `value` to the shape saved before
+/// `networkAccess` existed, with `network` set to `legacy`.
+#[cfg(test)]
+pub(crate) fn to_pre_network_access_json(value: &mut serde_json::Value, legacy: &str) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if map.remove("networkAccess").is_some() {
+                map.insert("network".to_string(), serde_json::json!(legacy));
+            }
+            map.values_mut()
+                .for_each(|value| to_pre_network_access_json(value, legacy));
+        }
+        serde_json::Value::Array(items) => items
+            .iter_mut()
+            .for_each(|value| to_pre_network_access_json(value, legacy)),
+        _ => {}
+    }
 }
 
 /// Whether the agent's sandbox can reach the user's session D-Bus.
@@ -382,14 +466,66 @@ pub enum SandboxSessionBusConfig {
     Allow,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
+#[derive(Debug, Clone, PartialEq, Eq, ts_rs::TS)]
+#[ts(export, export_to = "bindings.ts", rename_all = "camelCase")]
 pub struct ExecutionSandboxConfig {
-    #[serde(default)]
-    pub network: SandboxNetworkConfig,
-    #[serde(default)]
+    pub network_access: NetworkPolicy,
     pub session_bus: SandboxSessionBusConfig,
+}
+
+impl Default for ExecutionSandboxConfig {
+    fn default() -> Self {
+        Self {
+            network_access: network_access_from_legacy(None, allowlist_available_here()),
+            session_bus: SandboxSessionBusConfig::default(),
+        }
+    }
+}
+
+impl ExecutionSandboxConfig {
+    fn legacy_network(&self) -> SandboxNetworkConfig {
+        match self.network_access.mode {
+            NetworkMode::Off => SandboxNetworkConfig::Disabled,
+            NetworkMode::Allowlist | NetworkMode::HostNetwork => SandboxNetworkConfig::Enabled,
+        }
+    }
+}
+
+/// [`ExecutionSandboxConfig`] as stored: the policy in `networkAccess`, and
+/// the legacy `network` string an older build reads. A config without
+/// `networkAccess` gets one from `network` (see [`network_access_from_legacy`]).
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredExecutionSandboxConfig {
+    #[serde(default)]
+    network: Option<SandboxNetworkConfig>,
+    #[serde(default)]
+    network_access: Option<NetworkPolicy>,
+    #[serde(default)]
+    session_bus: SandboxSessionBusConfig,
+}
+
+impl Serialize for ExecutionSandboxConfig {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        StoredExecutionSandboxConfig {
+            network: Some(self.legacy_network()),
+            network_access: Some(self.network_access.clone()),
+            session_bus: self.session_bus,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ExecutionSandboxConfig {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let stored = StoredExecutionSandboxConfig::deserialize(deserializer)?;
+        Ok(Self {
+            network_access: stored.network_access.unwrap_or_else(|| {
+                network_access_from_legacy(stored.network, allowlist_available_here())
+            }),
+            session_bus: stored.session_bus,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default, ts_rs::TS)]
@@ -1039,5 +1175,159 @@ mod tests {
         assert!(j.contains("secretRef"));
         assert!(!j.contains("\"value\""));
         assert_eq!(serde_json::from_str::<McpEnvVar>(&j).unwrap(), secret);
+    }
+
+    // ------------------------------------------------------------------
+    // Network policy: migration from the legacy switch, downgrade
+    // ------------------------------------------------------------------
+
+    use crate::assistant::sandbox::{status_for, SandboxBackend};
+
+    fn allowlist_on(backend: Option<SandboxBackend>) -> bool {
+        status_for(backend).allowlist_available
+    }
+
+    #[test]
+    fn legacy_network_migrates_per_platform() {
+        use NetworkMode::{Allowlist, HostNetwork, Off};
+        let linux = Some(SandboxBackend::Bubblewrap);
+        let macos = Some(SandboxBackend::Seatbelt);
+        let no_sandbox = None;
+        let enabled = Some(SandboxNetworkConfig::Enabled);
+        let disabled = Some(SandboxNetworkConfig::Disabled);
+        for (backend, legacy, expected) in [
+            (linux, enabled, Allowlist),
+            (linux, None, Allowlist),
+            (linux, disabled, Off),
+            (macos, enabled, HostNetwork),
+            (macos, None, HostNetwork),
+            (macos, disabled, Off),
+            (no_sandbox, enabled, HostNetwork),
+            (no_sandbox, None, HostNetwork),
+            (no_sandbox, disabled, Off),
+        ] {
+            let policy = network_access_from_legacy(legacy, allowlist_on(backend));
+            assert_eq!(policy.mode, expected, "{backend:?} {legacy:?}");
+            assert_eq!(policy.allow_domains, default_allow_domains());
+            assert_eq!(policy.deny_domains, default_deny_domains());
+        }
+    }
+
+    fn sandbox_json(value: serde_json::Value) -> ExecutionSandboxConfig {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn a_missing_network_access_is_derived_from_the_legacy_switch_here() {
+        let here = allowlist_available_here();
+        for (legacy, json) in [
+            (
+                Some(SandboxNetworkConfig::Enabled),
+                serde_json::json!({ "network": "enabled" }),
+            ),
+            (
+                Some(SandboxNetworkConfig::Disabled),
+                serde_json::json!({ "network": "disabled" }),
+            ),
+            (None, serde_json::json!({})),
+        ] {
+            assert_eq!(
+                sandbox_json(json).network_access,
+                network_access_from_legacy(legacy, here)
+            );
+        }
+        assert_eq!(
+            ExecutionSandboxConfig::default().network_access,
+            network_access_from_legacy(None, here)
+        );
+    }
+
+    #[test]
+    fn a_stored_network_access_wins_over_the_legacy_switch() {
+        let config = sandbox_json(serde_json::json!({
+            "network": "disabled",
+            "networkAccess": { "mode": "host_network", "allowDomains": ["example.org"], "denyDomains": [] },
+            "sessionBus": "deny",
+        }));
+        assert_eq!(
+            config,
+            ExecutionSandboxConfig {
+                network_access: NetworkPolicy {
+                    mode: NetworkMode::HostNetwork,
+                    allow_domains: vec!["example.org".to_string()],
+                    deny_domains: Vec::new(),
+                },
+                session_bus: SandboxSessionBusConfig::Deny,
+            }
+        );
+        // Lists missing from a hand-written policy are the defaults.
+        let config = sandbox_json(serde_json::json!({ "networkAccess": { "mode": "off" } }));
+        assert_eq!(config.network_access.allow_domains, default_allow_domains());
+        assert_eq!(config.network_access.deny_domains, default_deny_domains());
+    }
+
+    fn policy(mode: NetworkMode) -> ExecutionSandboxConfig {
+        ExecutionSandboxConfig {
+            network_access: NetworkPolicy {
+                mode,
+                allow_domains: vec!["github.com".to_string(), "*.example.org".to_string()],
+                deny_domains: vec!["bad.example.org".to_string()],
+            },
+            session_bus: SandboxSessionBusConfig::Allow,
+        }
+    }
+
+    #[test]
+    fn saving_writes_the_policy_and_the_legacy_switch() {
+        for (mode, legacy) in [
+            (NetworkMode::Off, "disabled"),
+            (NetworkMode::Allowlist, "enabled"),
+            (NetworkMode::HostNetwork, "enabled"),
+        ] {
+            let config = policy(mode);
+            let json = serde_json::to_value(&config).unwrap();
+            assert_eq!(json["network"], legacy, "{mode:?}");
+            assert_eq!(json["networkAccess"]["allowDomains"][1], "*.example.org");
+            assert_eq!(json["sessionBus"], "allow");
+            assert_eq!(sandbox_json(json), config, "{mode:?} round-trips");
+        }
+    }
+
+    /// `ExecutionSandboxConfig` as the build before `networkAccess` reads it.
+    #[derive(Deserialize, Debug, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    struct PreviousSandboxConfig {
+        #[serde(default)]
+        network: PreviousNetwork,
+        #[serde(default)]
+        session_bus: SandboxSessionBusConfig,
+    }
+
+    #[derive(Deserialize, Debug, PartialEq, Default)]
+    #[serde(rename_all = "snake_case")]
+    enum PreviousNetwork {
+        #[default]
+        Enabled,
+        Disabled,
+    }
+
+    #[test]
+    fn an_older_build_reads_the_saved_config_with_the_same_network_switch() {
+        for (mode, expected) in [
+            (NetworkMode::Off, PreviousNetwork::Disabled),
+            (NetworkMode::Allowlist, PreviousNetwork::Enabled),
+            (NetworkMode::HostNetwork, PreviousNetwork::Enabled),
+        ] {
+            let json = serde_json::to_value(policy(mode)).unwrap();
+            let previous: PreviousSandboxConfig = serde_json::from_value(json).unwrap();
+            assert_eq!(
+                previous,
+                PreviousSandboxConfig {
+                    network: expected,
+                    session_bus: SandboxSessionBusConfig::Allow,
+                },
+                "{mode:?}"
+            );
+        }
     }
 }

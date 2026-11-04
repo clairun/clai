@@ -5,7 +5,7 @@
  */
 
 import React, { useId } from 'react';
-import type { FilesystemPathGrant, GrantOrigin, ShellAccessMode } from '../../generated/bindings';
+import type { FilesystemPathGrant, GrantOrigin, NetworkPolicy, ShellAccessMode } from '../../generated/bindings';
 import { PathGrantEditor, PrefixListEditor, Switch } from './ListEditors';
 import form from './SettingsForm.module.css';
 import styles from './AgentBehaviorForm.module.css';
@@ -16,6 +16,8 @@ export interface AccessDraft {
   askFirst: string[];
   web: boolean;
   sessionBus: boolean;
+  /** Null only when the backend defaults could not be loaded; saving then lets the backend pick. */
+  networkAccess: NetworkPolicy | null;
 }
 
 const SHELL_MODES: { mode: ShellAccessMode; label: string; hint: string }[] = [
