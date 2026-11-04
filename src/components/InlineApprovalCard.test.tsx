@@ -79,6 +79,14 @@ const fireResolved = (requestId: string) => {
 const submitted = () =>
   mockInvoke.mock.calls.filter(([cmd]) => cmd === 'submit_permission_decision').map(([, args]) => args);
 
+/** The backend rejects Always allow when it cannot save the rule; every other call succeeds. */
+const failAlwaysAllow = (message: string) =>
+  mockInvoke.mockImplementation((cmd: string, args?: { decision?: { kind: string } }) =>
+    cmd === 'submit_permission_decision' && args?.decision?.kind === 'alwaysAllow'
+      ? Promise.reject(message)
+      : Promise.resolve([])
+  );
+
 describe('ApprovalCard — the three actions', () => {
   it('lists each matched part with the rule it matched', () => {
     render(<ApprovalCard req={TWO_RULES} />);
@@ -311,6 +319,22 @@ describe('ApprovalCard — spoken (the Fleet)', () => {
     await userEvent.click(always);
     expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'alwaysAllow' } }]);
   });
+
+  it('keeps the answer open when Always allow cannot be saved, and a denial still answers it', async () => {
+    failAlwaysAllow('Could not save Always allow: disk full');
+    render(<ApprovalCard req={PUSH} speaker={speaker} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Always' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not save Always allow: disk full');
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
+    await userEvent.type(screen.getByRole('textbox', { name: /reason for denying/i }), 'later');
+    await userEvent.click(screen.getByRole('button', { name: 'Deny command' }));
+    expect(submitted()).toEqual([
+      { requestId: 'req-1', decision: { kind: 'alwaysAllow' } },
+      { requestId: 'req-1', decision: { kind: 'deny', reason: 'later' } },
+    ]);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+  });
 });
 
 describe('InlineApprovalCard', () => {
@@ -357,6 +381,26 @@ describe('InlineApprovalCard', () => {
     await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
     fireRequest(PUSH);
     await userEvent.click(await screen.findByRole('button', { name: 'Allow once' }));
+    await waitFor(() => expect(screen.queryByRole('article')).toBeNull());
+  });
+
+  it('keeps the card when Always allow cannot be saved, and Allow once then answers it', async () => {
+    const failure = 'Could not save Always allow: Workspace agent not found: agent-1';
+    failAlwaysAllow(failure);
+    render(<InlineApprovalCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+    fireRequest(PUSH);
+    await userEvent.click(await screen.findByRole('button', { name: 'Always allow (this workspace)' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(failure);
+    expect(screen.getByRole('article')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Deny' })).toBeEnabled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Allow once' }));
+    expect(submitted()).toEqual([
+      { requestId: 'req-1', decision: { kind: 'alwaysAllow' } },
+      { requestId: 'req-1', decision: { kind: 'allowOnce' } },
+    ]);
     await waitFor(() => expect(screen.queryByRole('article')).toBeNull());
   });
 
