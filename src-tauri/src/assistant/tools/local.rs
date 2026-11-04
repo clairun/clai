@@ -19,7 +19,7 @@ use crate::config::{
 };
 
 use super::ToolExecutionContext;
-use crate::commands::permissions::AskFirstRow;
+use crate::commands::permissions::{AskFirstDecision, AskFirstRow};
 
 const DEFAULT_BASH_TIMEOUT_MS: u64 = 300_000;
 const MAX_BASH_TIMEOUT_MS: u64 = 1_800_000;
@@ -519,8 +519,7 @@ async fn await_ask_first(
     rows: Vec<AskFirstRow>,
 ) -> Result<(), String> {
     use crate::commands::permissions::{
-        emit_attention, AskFirstDecision, PendingApprovalOutcome, PermissionRequest,
-        PERMISSION_REQUEST_EVENT,
+        emit_attention, PendingApprovalOutcome, PermissionRequest, PERMISSION_REQUEST_EVENT,
     };
     use tauri::{Emitter, Manager};
 
@@ -603,17 +602,29 @@ async fn await_ask_first(
         }
     };
 
+    apply_ask_first_decision(context, &rows, &rules, decision)
+}
+
+/// Applies the user's answer to the command waiting on it: `Ok(())` runs
+/// it, and a denial is the tool error. `rules` are the rules the command
+/// matched, which "Always allow" removed from the agent's list.
+fn apply_ask_first_decision(
+    context: &ToolExecutionContext,
+    rows: &[AskFirstRow],
+    rules: &[String],
+    decision: AskFirstDecision,
+) -> Result<(), String> {
     match decision {
         AskFirstDecision::AllowOnce => Ok(()),
         AskFirstDecision::AlwaysAllow => {
             // This run reads its settings from a snapshot taken at start, so
             // the removal saved on the agent would not reach it.
-            context.add_run_removed_ask_first(&rules);
+            context.add_run_removed_ask_first(rules);
             Ok(())
         }
         AskFirstDecision::Deny { reason } => {
             context.note_warning();
-            Err(ask_first_denied_message(&rows, reason.as_deref()))
+            Err(ask_first_denied_message(rows, reason.as_deref()))
         }
     }
 }
@@ -1930,6 +1941,45 @@ mod tests {
             PolicyResult::Allow
         ));
         assert!(asks_first(&exec, "git status"), "`git` still asks");
+    }
+
+    #[test]
+    fn always_allow_stops_the_rules_asking_for_the_rest_of_this_run_only() {
+        let workspace = tempdir().unwrap();
+        let run = context_with_grants(workspace.path(), Vec::new());
+        let other_run = context_with_grants(workspace.path(), Vec::new());
+        let exec = ask_first_config(&["git push", "git"]);
+        let command = "git push origin main";
+        let asks_in = |context: &ToolExecutionContext| {
+            matches!(
+                evaluate_command_policy(&exec, command, &context.run_removed_ask_first_snapshot()),
+                PolicyResult::AskFirst(_)
+            )
+        };
+        let PolicyResult::AskFirst(rows) = evaluate_command_policy(&exec, command, &[]) else {
+            panic!("`{command}` must ask");
+        };
+        let rules = vec!["git push".to_string(), "git".to_string()];
+
+        apply_ask_first_decision(&run, &rows, &rules, AskFirstDecision::AllowOnce)
+            .expect("Allow once runs the command");
+        assert!(asks_in(&run), "Allow once keeps the rules");
+
+        apply_ask_first_decision(&run, &rows, &rules, AskFirstDecision::AlwaysAllow)
+            .expect("Always allow runs the command");
+        assert!(!asks_in(&run), "the same run asks no more");
+        assert!(asks_in(&other_run), "another run keeps its own snapshot");
+
+        let denied = apply_ask_first_decision(
+            &other_run,
+            &rows,
+            &rules,
+            AskFirstDecision::Deny {
+                reason: Some("no".to_string()),
+            },
+        );
+        assert_eq!(denied, Err(ask_first_denied_message(&rows, Some("no"))));
+        assert!(other_run.had_warnings() && !run.had_warnings());
     }
 
     #[test]
