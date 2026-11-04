@@ -867,10 +867,8 @@ fn matches_prefix(prefix: &str, command: &str) -> bool {
     // Fall back to the command's canonical forms, so a rule cannot hide
     // behind leading assignments or global options: `FOO=bar rm` reads as
     // `rm`, `git -C repo push` and `git --no-pager push` as `git push`.
-    let matches_form =
-        |form: Option<String>| form.is_some_and(|canonical| matches_prefix_literal(p, &canonical));
-    matches_form(crate::assistant::tools::prefix_detector::canonicalize_for_allow(command))
-        || matches_form(crate::assistant::tools::prefix_detector::canonicalize_for_deny(command))
+    crate::assistant::tools::prefix_detector::canonicalize_for_deny(command)
+        .is_some_and(|canonical| matches_prefix_literal(p, &canonical))
 }
 
 /// Literal word-boundary prefix test: `command` equals `p`, or starts with
@@ -2401,14 +2399,15 @@ mod tests {
 
     #[test]
     fn deeply_nested_runners_do_not_overflow_the_stack() {
-        use crate::assistant::tools::prefix_detector::{canonicalize_for_allow, suggest_prefix};
         let handle = std::thread::Builder::new()
             .stack_size(2 << 20)
             .spawn(|| {
                 for runner in ["exec ", "nohup "] {
                     let command = format!("{}grep x", runner.repeat(20_000));
-                    assert!(!suggest_prefix(&command).is_empty(), "{runner}");
-                    assert!(canonicalize_for_allow(&command).is_some(), "{runner}");
+                    assert!(
+                        !asks_first(&ask_first_config(&["rm"]), &command),
+                        "{runner}"
+                    );
                 }
                 let command = format!("{}rm x", "exec ".repeat(20_000));
                 assert!(asks_first(&ask_first_config(&["rm"]), &command));
