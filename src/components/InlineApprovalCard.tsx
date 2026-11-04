@@ -106,6 +106,9 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
   const reasonId = useId();
   const reasonHintId = `${reasonId}-hint`;
   const reasonCountId = `${reasonId}-count`;
+  const denialId = `${reasonId}-denial`;
+  const denyRef = useRef<HTMLButtonElement>(null);
+  const reasonRef = useRef<HTMLTextAreaElement>(null);
   // The backend counts code points, so the count does too.
   const reasonLength = Array.from(reason).length;
   // Collapse: squish the card to a one-line summary so a tall (or stacked)
@@ -140,6 +143,15 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
     } finally {
       setSubmitting(false);
     }
+  };
+
+  useEffect(() => {
+    if (denying) reasonRef.current?.focus();
+  }, [denying]);
+
+  const closeDenial = () => {
+    setDenying(false);
+    denyRef.current?.focus();
   };
 
   const confirmDenial = () => {
@@ -229,19 +241,31 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
               />
               <button
                 type="button"
+                ref={denyRef}
                 className={`${styles.btn} ${styles.btnDenyOnce} ${denying ? styles.btnSelected : ''}`}
-                onClick={() => setDenying(true)}
+                onClick={() => (denying ? closeDenial() : setDenying(true))}
                 disabled={isSubmitting}
                 aria-expanded={denying}
+                aria-controls={denying ? denialId : undefined}
                 {...chipText(spoken, 'Deny', 'Deny')}
               />
             </div>
           </section>
           {denying && (
-            <div className={styles.denialArea}>
+            <div
+              id={denialId}
+              className={styles.denialArea}
+              onKeyDown={(e) => {
+                if (e.key === 'Escape' && !isSubmitting) {
+                  e.stopPropagation();
+                  closeDenial();
+                }
+              }}
+            >
               <div className={styles.reasonField}>
                 <label htmlFor={reasonId}>Reason for denying (optional)</label>
                 <textarea
+                  ref={reasonRef}
                   id={reasonId}
                   value={reason}
                   onChange={(e) => setReason(limitReason(e.target.value))}
@@ -267,6 +291,9 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
                   disabled={isSubmitting}
                 >
                   {isSubmitting ? 'Submitting…' : 'Deny command'}
+                </button>
+                <button type="button" className={styles.btn} onClick={closeDenial} disabled={isSubmitting}>
+                  Cancel
                 </button>
               </div>
             </div>

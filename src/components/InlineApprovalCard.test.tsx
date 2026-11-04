@@ -193,6 +193,42 @@ describe('ApprovalCard — Deny and its reason', () => {
     expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'deny', reason: 'Push after review' } }]);
   });
 
+  it('moves focus into the reason field, and Escape closes it back on Deny', async () => {
+    const user = userEvent.setup();
+    render(<ApprovalCard req={PUSH} />);
+    const deny = screen.getByRole('button', { name: 'Deny' });
+    expect(deny).not.toHaveAttribute('aria-controls');
+
+    deny.focus();
+    await user.keyboard('{Enter}');
+    const reason = screen.getByRole('textbox', { name: /reason for denying/i });
+    expect(reason).toHaveFocus();
+    expect(deny).toHaveAttribute('aria-expanded', 'true');
+    expect(document.getElementById(deny.getAttribute('aria-controls')!)).toContainElement(reason);
+
+    await user.keyboard('{Escape}');
+    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
+    expect(deny).toHaveFocus();
+    expect(deny).toHaveAttribute('aria-expanded', 'false');
+    expect(submitted()).toEqual([]);
+  });
+
+  it('closes the reason field with Cancel or a second Deny, sending nothing', async () => {
+    const user = userEvent.setup();
+    render(<ApprovalCard req={PUSH} />);
+    const deny = screen.getByRole('button', { name: 'Deny' });
+
+    await user.click(deny);
+    await user.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
+    expect(deny).toHaveFocus();
+
+    await user.click(deny);
+    await user.click(deny);
+    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
+    expect(submitted()).toEqual([]);
+  });
+
   it('omits the reason when the field holds only whitespace', async () => {
     render(<ApprovalCard req={PUSH} />);
     await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
