@@ -407,9 +407,7 @@ pub(crate) fn evaluate_command_policy(
     extra_blocked_prefixes: &[String],
 ) -> PolicyResult {
     use crate::assistant::tools::command_splitter::{split_command, Segment};
-    use crate::assistant::tools::prefix_detector::{
-        by_any_reading, by_argument_command, by_head_name, by_run_command, suggest_prefix,
-    };
+    use crate::assistant::tools::prefix_detector::suggest_prefix;
     use crate::commands::permissions::SegmentApproval;
 
     if command.trim().is_empty() {
@@ -436,6 +434,16 @@ pub(crate) fn evaluate_command_policy(
         })
         .collect();
 
+    // The durable blocklist, then the run-scoped one (this run's accepted
+    // `DenyAlways` decisions), so a fresh deny-always takes effect mid-run.
+    let blocklist: Vec<String> = execution
+        .shell
+        .blocked_command_prefixes
+        .iter()
+        .chain(extra_blocked_prefixes)
+        .cloned()
+        .collect();
+
     // A row the splitter could not name or parse may hide what runs in any
     // row of the input (`x='a[$(rm -rf y)]'; echo $((x))`), so the
     // blocklist also reads every word of each row.
@@ -446,34 +454,8 @@ pub(crate) fn evaluate_command_policy(
         let text = segment.text();
         let unparsed = matches!(segment, Segment::Unparsed(_) | Segment::Exact(_));
 
-        // Blocklist applies to every segment. Durable blocklist is checked
-        // first; run-scoped blocklist (this run's accepted `DenyAlways`
-        // decisions) is checked next so a fresh deny-always takes effect
-        // mid-run. A blocked name is also blocked when run by path or after
-        // assignments (`FOO=1 /usr/bin/rm`); the allowlist is not widened.
-        let blocked = |text: &str| {
-            find_matching_prefix(
-                &execution.shell.blocked_command_prefixes,
-                text,
-                PolicySide::Deny,
-            )
-            .or_else(|| find_matching_prefix(extra_blocked_prefixes, text, PolicySide::Deny))
-        };
-        // The blocklist sees the command the segment runs, and the head it
-        // runs it with: `timeout 60 rm -rf x` is blocked by `rm` and by
-        // `timeout`, `xargs rm` by `rm` and by `xargs`. It also sees every
-        // command a misread option could hide: `xargs -0I rm echo` by `rm`.
-        if let Some(matched) = blocked(text)
-            .or_else(|| by_head_name(text).and_then(|head| blocked(&head)))
-            .or_else(|| by_run_command(text).and_then(|cmd| blocked(&cmd)))
-            .or_else(|| by_argument_command(text).and_then(|cmd| blocked(&cmd)))
-            .or_else(|| by_any_reading(text).iter().find_map(|cmd| blocked(cmd)))
-            .or_else(|| {
-                any_exact
-                    .then(|| blocked_word_run(execution, extra_blocked_prefixes, text))
-                    .flatten()
-            })
-        {
+        // Blocklist applies to every segment.
+        if let Some(matched) = matching_rule(&blocklist, text, any_exact) {
             return PolicyResult::Block {
                 segment_text: text.to_string(),
                 matched_prefix: matched,
@@ -537,18 +519,34 @@ pub(crate) fn evaluate_command_policy(
     }
 }
 
-/// The blocklist entry that starts one of the [`word_runs`] of `text`.
-fn blocked_word_run(
-    execution: &ExecutionCapabilityConfig,
-    extra_blocked_prefixes: &[String],
-    text: &str,
-) -> Option<String> {
+/// The first of `rules` that names a command the row `text` runs.
+///
+/// A rule matches the row as written, and also when the command is run by
+/// path or after assignments (`FOO=1 /usr/bin/rm`). The row is also read
+/// as the head it runs a command with and the command that head runs:
+/// `timeout 60 rm -rf x` matches `rm` and `timeout`, `xargs rm` matches
+/// `rm` and `xargs`. Every command a misread option could hide is read
+/// too: `xargs -0I rm echo` matches `rm`. When `any_exact` is set, some
+/// row of the input could not be named, so every run of words is read.
+fn matching_rule(rules: &[String], text: &str, any_exact: bool) -> Option<String> {
+    use crate::assistant::tools::prefix_detector::{
+        by_any_reading, by_argument_command, by_head_name, by_run_command,
+    };
+
+    let find = |text: &str| find_matching_prefix(rules, text, PolicySide::Deny);
+    find(text)
+        .or_else(|| by_head_name(text).and_then(|head| find(&head)))
+        .or_else(|| by_run_command(text).and_then(|cmd| find(&cmd)))
+        .or_else(|| by_argument_command(text).and_then(|cmd| find(&cmd)))
+        .or_else(|| by_any_reading(text).iter().find_map(|cmd| find(cmd)))
+        .or_else(|| any_exact.then(|| word_run_rule(rules, text)).flatten())
+}
+
+/// The first of `rules` that starts one of the [`word_runs`] of `text`.
+fn word_run_rule(rules: &[String], text: &str) -> Option<String> {
     word_runs(text).find_map(|run| {
-        execution
-            .shell
-            .blocked_command_prefixes
+        rules
             .iter()
-            .chain(extra_blocked_prefixes)
             .find(|p| !p.trim().is_empty() && matches_prefix_literal(p.trim(), &run))
             .cloned()
     })
