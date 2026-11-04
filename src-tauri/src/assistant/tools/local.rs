@@ -1884,6 +1884,11 @@ mod tests {
             ("kubectl -n ns delete pod x", "kubectl delete"),
             ("kubectl --context prod delete pod x", "kubectl delete"),
             ("kubectl --namespace=ns delete pod x", "kubectl delete"),
+            (
+                "kubectl --certificate-authority ca.crt delete pod x",
+                "kubectl delete",
+            ),
+            ("kubectl --profile cpu delete pod x", "kubectl delete"),
             ("docker --context x push img", "docker push"),
             ("docker -H tcp://x push img", "docker push"),
             ("docker image push img", "docker image push"),
