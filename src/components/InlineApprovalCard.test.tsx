@@ -43,6 +43,17 @@ const TWO_RULES: PermissionRequest = {
   ],
 };
 
+// One part on two rules: the backend sends a row for each.
+const ONE_PART_TWO_RULES: PermissionRequest = {
+  ...PUSH,
+  requestId: 'req-3',
+  command: 'cargo build && sudo rm -rf target',
+  rows: [
+    { text: 'sudo rm -rf target', rule: 'sudo' },
+    { text: 'sudo rm -rf target', rule: 'rm' },
+  ],
+};
+
 const speaker = (prompt: ReactNode) => <div>{prompt}</div>;
 
 beforeEach(() => {
@@ -75,6 +86,17 @@ describe('ApprovalCard — the three actions', () => {
     const matches = list.getAllByRole('listitem');
     expect(matches.map((item) => item.textContent)).toEqual(['rm -f build.logrm', 'git pushgit push']);
     expect(list.getByText('rm')).toHaveAttribute('title', 'Matches the ask-first rule “rm”');
+  });
+
+  it('lists a part that matches two rules once, with a chip for each rule', () => {
+    render(<ApprovalCard req={ONE_PART_TWO_RULES} />);
+    expect(screen.getByText('Part of this command is on the ask-first list:')).toBeInTheDocument();
+    const matches = within(screen.getByRole('list', { name: 'Ask-first matches' })).getAllByRole('listitem');
+    expect(matches).toHaveLength(1);
+    const part = within(matches[0]!);
+    expect(part.getByText('sudo rm -rf target').tagName).toBe('CODE');
+    expect(part.getAllByTitle(/^Matches the ask-first rule/).map((chip) => chip.textContent)).toEqual(['sudo', 'rm']);
+    expect(screen.getByText(/^Always allow removes/)).toHaveTextContent(/^Always allow removes sudo and rm from /);
   });
 
   it('says whether the whole command or only part of it is on the list', () => {

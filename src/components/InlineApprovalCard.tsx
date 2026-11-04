@@ -3,6 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { listPendingPermissionRequests, submitPermissionDecision } from '../permissions/client';
 import type {
   AskFirstDecision,
+  AskFirstRow,
   PermissionRequest,
   WorkspaceAgentResponse,
   WorkspaceTaskResponse,
@@ -33,6 +34,17 @@ const listOf = (items: ReactNode[]) =>
   ));
 
 const quoted = (name: string) => `“${name}”`;
+
+/** The backend sends a row per (part, rule); a part matching several rules is still one part. */
+const partsOf = (rows: AskFirstRow[]) => {
+  const parts: { text: string; rules: string[] }[] = [];
+  for (const { text, rule } of rows) {
+    const part = parts.find((p) => p.text === text);
+    if (!part) parts.push({ text, rules: [rule] });
+    else if (!part.rules.includes(rule)) part.rules.push(rule);
+  }
+  return parts;
+};
 
 /**
  * Where "Always allow" saves: a shared teammate's definition, in force in
@@ -117,10 +129,11 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
   const spoken = Boolean(speaker);
 
   const rules = [...new Set(req.rows.map((row) => row.rule))];
+  const parts = partsOf(req.rows);
   const matchesLabel =
-    req.rows.length > 1
+    parts.length > 1
       ? 'These parts of the command are on the ask-first list:'
-      : req.rows[0]?.text.trim() === req.command.trim()
+      : parts[0]?.text.trim() === req.command.trim()
         ? 'This command is on the ask-first list:'
         : 'Part of this command is on the ask-first list:';
   const scope = alwaysScope(req);
@@ -210,13 +223,15 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
           <section className={styles.segments}>
             <p className={styles.segmentsLabel}>{matchesLabel}</p>
             <ul className={styles.matchList} aria-label="Ask-first matches">
-              {req.rows.map((row, idx) => (
-                <li key={idx} className={styles.segmentRow}>
+              {parts.map((part) => (
+                <li key={part.text} className={styles.segmentRow}>
                   <div className={styles.segmentText}>
-                    <code title={spoken ? row.text : undefined}>{row.text}</code>
-                    <span className={styles.ruleChip} title={`Matches the ask-first rule “${row.rule}”`}>
-                      {row.rule}
-                    </span>
+                    <code title={spoken ? part.text : undefined}>{part.text}</code>
+                    {part.rules.map((rule) => (
+                      <span key={rule} className={styles.ruleChip} title={`Matches the ask-first rule “${rule}”`}>
+                        {rule}
+                      </span>
+                    ))}
                   </div>
                 </li>
               ))}
