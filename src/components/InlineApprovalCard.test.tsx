@@ -102,9 +102,13 @@ describe('ApprovalCard — the three actions', () => {
     mockInvoke.mockImplementation(() => new Promise<void>((done) => { resolve = done; }));
     render(<ApprovalCard req={PUSH} />);
     const once = screen.getByRole('button', { name: 'Allow once' });
-    fireEvent.click(once);
-    fireEvent.click(screen.getByRole('button', { name: 'Always allow (this workspace)' }));
-    expect(submitted()).toHaveLength(1);
+    const always = screen.getByRole('button', { name: 'Always allow (this workspace)' });
+    // Both land before React re-renders, so the buttons are not disabled yet.
+    act(() => {
+      once.click();
+      always.click();
+    });
+    expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'allowOnce' } }]);
     await act(async () => resolve());
   });
 });
