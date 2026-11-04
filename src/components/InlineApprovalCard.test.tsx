@@ -54,6 +54,17 @@ const ONE_PART_TWO_RULES: PermissionRequest = {
   ],
 };
 
+// The same part on the same rule twice: the backend can send identical rows.
+const REPEATED_ROW: PermissionRequest = {
+  ...PUSH,
+  requestId: 'req-4',
+  command: 'rm -rf y; rm -rf y',
+  rows: [
+    { text: 'rm -rf y', rule: 'rm' },
+    { text: 'rm -rf y', rule: 'rm' },
+  ],
+};
+
 const speaker = (prompt: ReactNode) => <div>{prompt}</div>;
 
 beforeEach(() => {
@@ -105,6 +116,13 @@ describe('ApprovalCard — the three actions', () => {
     expect(part.getByText('sudo rm -rf target').tagName).toBe('CODE');
     expect(part.getAllByTitle(/^Matches the ask-first rule/).map((chip) => chip.textContent)).toEqual(['sudo', 'rm']);
     expect(screen.getByText(/^Always allow removes/)).toHaveTextContent(/^Always allow removes sudo and rm from /);
+  });
+
+  it('lists identical rows as one part with one chip', () => {
+    render(<ApprovalCard req={REPEATED_ROW} />);
+    const matches = within(screen.getByRole('list', { name: 'Ask-first matches' })).getAllByRole('listitem');
+    expect(matches).toHaveLength(1);
+    expect(within(matches[0]!).getAllByTitle(/^Matches the ask-first rule/).map((chip) => chip.textContent)).toEqual(['rm']);
   });
 
   it('says whether the whole command or only part of it is on the list', () => {
@@ -393,7 +411,10 @@ describe('InlineApprovalCard', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Always allow (this workspace)' }));
 
     expect(await screen.findByRole('alert')).toHaveTextContent(failure);
-    expect(screen.getByRole('article')).toBeInTheDocument();
+    // The failed save re-emits the request; a view already showing its card ignores the repeat.
+    fireRequest(PUSH);
+    expect(screen.getAllByRole('article')).toHaveLength(1);
+    expect(screen.getByRole('alert')).toHaveTextContent(failure);
     expect(screen.getByRole('button', { name: 'Deny' })).toBeEnabled();
 
     await userEvent.click(screen.getByRole('button', { name: 'Allow once' }));
