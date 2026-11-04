@@ -269,6 +269,36 @@ pub fn by_argument_command(segment: &str) -> Option<String> {
     Some(by_name(&argument_command_words(segment)?))
 }
 
+/// The `find` actions that run a command for each match.
+const FIND_ACTIONS: &[&str] = &["-exec", "-execdir", "-ok", "-okdir"];
+
+/// The commands a `find` row runs for its matches, one per action, joined
+/// like [`by_run_command`]: `find . -name x -exec rm {} +` → `rm {}`.
+/// Empty when `segment` is not a `find` command.
+pub fn by_find_action(segment: &str) -> Vec<String> {
+    let Some(words) = command_words(segment) else {
+        return Vec::new();
+    };
+    let Some((name, args)) = words.split_first() else {
+        return Vec::new();
+    };
+    if name.rsplit('/').next() != Some("find") {
+        return Vec::new();
+    }
+    args.iter()
+        .enumerate()
+        .filter(|(_, word)| FIND_ACTIONS.contains(word))
+        .filter_map(|(at, _)| {
+            let command = &args[at + 1..];
+            let end = command
+                .iter()
+                .position(|word| matches!(*word, ";" | "\\;" | "';'" | "\";\"" | "+"))
+                .unwrap_or(command.len());
+            (end > 0).then(|| by_name(&command[..end]))
+        })
+        .collect()
+}
+
 /// The commands `segment` may run under every reading of its wrappers'
 /// and runners' options and of the strings `env -S` splits
 /// ([`possible_commands`]), each joined like [`by_run_command`], once.
@@ -493,6 +523,25 @@ mod tests {
             by_head_name("FOO=1 /usr/bin/rm -rf x").as_deref(),
             Some("rm -rf x")
         );
+    }
+
+    #[test]
+    fn by_find_action_reads_the_command_find_runs() {
+        for (segment, commands) in [
+            ("find . -exec rm {} +", &["rm {}"][..]),
+            ("find . -name x -execdir rm -f {} \\;", &["rm -f {}"]),
+            ("/usr/bin/find . -ok rm {} ';'", &["rm {}"]),
+            ("timeout 5 find . -exec /bin/rm {} +", &["rm {}"]),
+            (
+                "find . -exec chmod 600 {} + -exec rm {} +",
+                &["chmod 600 {}", "rm {}"],
+            ),
+            ("find . -name x", &[]),
+            ("find . -exec", &[]),
+            ("echo -exec rm", &[]),
+        ] {
+            assert_eq!(by_find_action(segment), commands, "{segment}");
+        }
     }
 
     #[test]

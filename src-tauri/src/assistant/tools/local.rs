@@ -368,7 +368,8 @@ pub(crate) fn evaluate_command_policy(
 /// row of the input could not be named, so every run of words is read.
 fn matching_rule(rules: &[String], text: &str, any_exact: bool) -> Option<String> {
     use crate::assistant::tools::prefix_detector::{
-        by_any_reading, by_argument_command, by_head_name, by_run_command, gh_api_method_forms,
+        by_any_reading, by_argument_command, by_find_action, by_head_name, by_run_command,
+        gh_api_method_forms,
     };
 
     let find = |text: &str| find_matching_prefix(rules, text);
@@ -377,6 +378,7 @@ fn matching_rule(rules: &[String], text: &str, any_exact: bool) -> Option<String
         .or_else(|| by_run_command(text).and_then(|cmd| find(&cmd)))
         .or_else(|| by_argument_command(text).and_then(|cmd| find(&cmd)))
         .or_else(|| by_any_reading(text).iter().find_map(|cmd| find(cmd)))
+        .or_else(|| by_find_action(text).iter().find_map(|cmd| find(cmd)))
         .or_else(|| gh_api_method_forms(text).iter().find_map(|form| find(form)))
         .or_else(|| any_exact.then(|| word_run_rule(rules, text)).flatten())
 }
@@ -1760,6 +1762,9 @@ mod tests {
             ("rm", "timeout 5 rm x"),
             ("rm", "xargs rm"),
             ("rm", "find . | xargs rm -f"),
+            ("rm", "find . -exec rm {} +"),
+            ("rm", "find . -name x -execdir rm -f {} \\;"),
+            ("rm", "find . -ok /bin/rm {} ';'"),
             ("rm", "FOO=bar rm -rf /tmp/x"),
             ("rm", "/usr/bin/rm -rf x"),
             ("rm", "./rm x"),
@@ -1801,6 +1806,9 @@ mod tests {
             "rmdir x",
             "bash -c \"git push\"",
             "gh api repos/o/r -X DELETE",
+            "find . -name x",
+            "find . -name rm -print",
+            "find . -exec ls {} +",
         ] {
             assert!(asked(&exec, command).is_empty(), "`{command}` must run");
         }
