@@ -26,7 +26,6 @@ enum Host {
     Ip(IpAddr),
 }
 
-#[cfg_attr(not(test), expect(dead_code, reason = "the web tools call it later"))]
 pub fn host_decision<S: AsRef<str>>(allow: &[S], deny: &[S], host: &str) -> HostDecision {
     let Some(host) = normalize(host).filter(|host| !has_wildcard(host)) else {
         return HostDecision::Unlisted;
