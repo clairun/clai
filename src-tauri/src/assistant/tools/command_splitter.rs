@@ -97,6 +97,8 @@ pub fn split_command(input: &str) -> Vec<Segment> {
 /// Lines [`split_lines`] reads one by one at most, since each try parses
 /// the lines before it again.
 const MAX_LINES: usize = 256;
+/// Bytes [`split_lines`] parses at most, over all its tries.
+const MAX_LINE_BYTES: usize = 256 * 1024;
 
 /// Splits `input` one complete command at a time, as bash reads it: each
 /// part ends at the first newline before which the walker accepts it whole.
@@ -111,11 +113,16 @@ const MAX_LINES: usize = 256;
 fn split_lines(input: &str) -> Option<Vec<Segment>> {
     let mut out = Vec::new();
     let mut start = 0;
+    let mut parsed = 0;
     for (end, _) in input.match_indices('\n').take(MAX_LINES) {
         let part = &input[start..end];
         let escapes = part.bytes().rev().take_while(|b| *b == b'\\').count();
         if escapes % 2 == 1 {
             continue;
+        }
+        parsed += part.len();
+        if parsed > MAX_LINE_BYTES {
+            break;
         }
         if let Some(segments) = split(part) {
             out.extend(segments);
@@ -144,6 +151,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
         out: Vec::new(),
         unmodeled: false,
         comments: Vec::new(),
+        quoted_bodies: Vec::new(),
         backticks: false,
     };
     walker.node(root)?;
@@ -153,10 +161,19 @@ fn split(input: &str) -> Option<Vec<Segment>> {
     }
     let mut out = walker.out;
     let mut code = input.to_string();
-    for comment in walker.comments {
-        code.replace_range(comment.clone(), &" ".repeat(comment.len()));
+    let blank = |code: &mut String, ranges: Vec<std::ops::Range<usize>>| {
+        for range in ranges {
+            code.replace_range(range.clone(), &" ".repeat(range.len()));
+        }
+    };
+    blank(&mut code, walker.comments);
+    let mut names = names_code_variable(&code);
+    // A quoted heredoc body is data, unless a shell may read it as code.
+    if names && !out.iter().any(|segment| runs_a_shell(segment.text())) {
+        blank(&mut code, walker.quoted_bodies);
+        names = names_code_variable(&code);
     }
-    if names_code_variable(&code) {
+    if names {
         // The value acts on the commands after the one that sets it, which
         // the policy cannot follow, so each row naming it is asked by its
         // exact text.
@@ -174,7 +191,7 @@ fn split(input: &str) -> Option<Vec<Segment>> {
     Some(out)
 }
 
-/// Rewrites [`parse`] makes at most, one before each parse.
+/// Times [`parse`] rewrites the input at most, each before parsing it again.
 const MAX_REPAIRS: usize = 16;
 
 /// Parses `input`, first rewriting each place tree-sitter-bash reads
@@ -204,10 +221,13 @@ fn parse(input: &str) -> Option<tree_sitter::Tree> {
     None
 }
 
-/// Rewrites in `text` the first place found where tree-sitter-bash, which
-/// parsed it as `root`, reads a heredoc or an expansion differently from
-/// bash. Returns whether it rewrote one.
+/// Rewrites in `text` the places where tree-sitter-bash, which parsed it as
+/// `root`, reads a heredoc or an expansion differently from bash, skipping
+/// those inside or overlapping one found before. Returns whether it rewrote
+/// any. A place found in text tree-sitter misread may end a heredoc where
+/// bash does not; [`Walker::heredoc`] rejects that heredoc.
 fn repair(root: Node, text: &mut [u8]) -> bool {
+    let mut rewrites = Vec::new();
     let mut stack = vec![root];
     while let Some(node) = stack.pop() {
         let rewrite = match node.kind() {
@@ -218,13 +238,20 @@ fn repair(root: Node, text: &mut [u8]) -> bool {
             "ERROR" => dotted_expansion(node, text).or_else(|| escaped_heredoc_body(node, text)),
             _ => None,
         };
-        if let Some((at, bytes)) = rewrite {
-            text[at..at + bytes.len()].copy_from_slice(&bytes);
-            return true;
+        match rewrite {
+            Some(rewrite) => rewrites.push(rewrite),
+            None => stack.extend(Walker::children(node)),
         }
-        stack.extend(Walker::children(node));
     }
-    false
+    rewrites.sort_by_key(|(at, _)| *at);
+    let mut free = 0;
+    for (at, bytes) in &rewrites {
+        if *at >= free {
+            text[*at..*at + bytes.len()].copy_from_slice(bytes);
+            free = at + bytes.len();
+        }
+    }
+    !rewrites.is_empty()
 }
 
 /// Whether a heredoc strips leading tabs (`<<-`), its delimiter, and
@@ -246,31 +273,49 @@ fn heredoc_parts(redirect: Node, text: &[u8]) -> Option<(bool, String, bool)> {
 }
 
 /// Tree-sitter-bash ends a heredoc at a line that starts with its delimiter
-/// after blanks or goes on after it (`  EOF`, `EOF/x`), where bash ends it
-/// only at the delimiter alone, after tabs for `<<-`. The first letter of
-/// such a line is renamed, so the body goes on as in bash.
+/// after blanks (`  EOF`), where bash ends it only at the delimiter alone,
+/// after tabs for `<<-`. The first letter of each such line up to the one
+/// bash ends it at is renamed, so the body goes on as in bash. A line with
+/// the delimiter at its start (after tabs for `<<-`) is left alone: inside
+/// `$(…)` bash ends the heredoc at `EOF)`.
 fn early_heredoc_end(redirect: Node, text: &[u8]) -> Option<(usize, Vec<u8>)> {
     let (strip_tabs, word, _) = heredoc_parts(redirect, text)?;
+    let word = word.as_bytes();
+    let first = *word.first()?;
+    if !(first.is_ascii_alphanumeric() || first == b'_') {
+        return None;
+    }
     let end = Walker::children(redirect)
         .into_iter()
         .find(|c| c.kind() == "heredoc_end" && !c.is_missing())?;
-    let at = end.start_byte();
-    let line_start = text[..at].iter().rposition(|b| *b == b'\n')? + 1;
-    let line_end = text[at..]
-        .iter()
-        .position(|b| *b == b'\n')
-        .map_or(text.len(), |i| at + i);
-    let mut line = &text[line_start..line_end];
-    if strip_tabs {
-        line = &line[line.iter().take_while(|b| **b == b'\t').count()..];
-    }
-    let first = *text.get(at)?;
-    (line != word.as_bytes()
-        && text[line_start..at]
+    let from = text[..end.start_byte()].iter().rposition(|b| *b == b'\n')? + 1;
+    let mut renamed = Vec::new();
+    let mut line_start = from;
+    for line in text[from..].split(|b| *b == b'\n') {
+        let indent = line
             .iter()
-            .all(|b| matches!(b, b' ' | b'\t'))
-        && (first.is_ascii_alphanumeric() || first == b'_'))
-        .then(|| (at, vec![if first == b'_' { b'x' } else { b'_' }]))
+            .take_while(|b| matches!(b, b' ' | b'\t'))
+            .count();
+        let tabs = line.iter().take_while(|b| **b == b'\t').count();
+        let column_zero = if strip_tabs {
+            tabs == indent
+        } else {
+            indent == 0
+        };
+        if line[indent..].starts_with(word) {
+            if column_zero {
+                break;
+            }
+            renamed.push(line_start + indent);
+        }
+        line_start += line.len() + 1;
+    }
+    let (&at, &last) = (renamed.first()?, renamed.last()?);
+    let mut bytes = text[at..=last].to_vec();
+    for i in renamed {
+        bytes[i - at] = if first == b'_' { b'x' } else { b'_' };
+    }
+    Some((at, bytes))
 }
 
 /// Tree-sitter-bash reads a heredoc body that starts with `\` as words of
@@ -1112,6 +1157,23 @@ fn is_assignment(token: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// True if `row` runs a shell, which reads code from its input or a script.
+fn runs_a_shell(row: &str) -> bool {
+    const SHELLS: &[&str] = &["bash", "sh", "zsh", "dash", "ksh", "fish", "source", "."];
+    let shell = |words: Option<Vec<&str>>| {
+        words
+            .and_then(|words| {
+                words
+                    .first()
+                    .map(|name| name.rsplit('/').next().unwrap_or(name))
+            })
+            .is_some_and(|name| SHELLS.contains(&name))
+    };
+    shell(row_words(row))
+        || shell(command_words(row, Reading::Getopt))
+        || shell(argument_command_words(row))
+}
+
 /// Variables whose value bash, or a bash it starts, expands as code.
 const CODE_VARIABLES: &[&str] = &["PS4", "PROMPT_COMMAND", "BASH_ENV", "ENV"];
 
@@ -1152,6 +1214,8 @@ struct Walker<'src> {
     unmodeled: bool,
     /// The byte ranges of the comments walked.
     comments: Vec<std::ops::Range<usize>>,
+    /// The byte ranges of the quoted heredoc bodies walked.
+    quoted_bodies: Vec<std::ops::Range<usize>>,
     /// The node being walked is in a backtick substitution.
     backticks: bool,
 }
@@ -1715,7 +1779,9 @@ impl<'src> Walker<'src> {
                     }
                     // A quoted delimiter keeps the body literal; an
                     // unquoted one is walked for the commands it expands.
-                    if !quoted {
+                    if *quoted {
+                        self.quoted_bodies.push(child.byte_range());
+                    } else {
                         self.heredoc_body_walk(child)?;
                     }
                 }
@@ -2371,9 +2437,10 @@ mod tests {
         // A partly quoted delimiter.
         let input = "cat <<E\"OF\"\nx\nEOF\ntouch t";
         assert_eq!(split(input), vec![unparsed(input)]);
-        // `EOF ` is no closer for bash: `touch t` is in the body.
+        // `EOF ` is no closer for bash: `touch t` is in the body. A line
+        // that starts with the delimiter is not read as body.
         let input = "cat <<EOF\nEOF \ntouch t\nEOF";
-        assert_eq!(split(input), vec![opaque(input)]);
+        assert_eq!(split(input), vec![unparsed(input)]);
     }
 
     #[test]
@@ -2915,9 +2982,10 @@ mod tests {
         ] {
             assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
         }
-        // A quoted body is not joined: `E\` is body, as bash reads it.
+        // A quoted body is not joined: `E\` is body, as bash reads it, but a
+        // line that starts with the delimiter is not read as body.
         let input = "cat <<\"E\"\nE\\\n\ntouch PWN\nE";
-        assert_eq!(split(input), vec![opaque(input)]);
+        assert_eq!(split(input), vec![unparsed(input)]);
     }
 
     #[test]
@@ -3372,13 +3440,70 @@ mod tests {
     }
 
     #[test]
-    fn heredoc_line_that_starts_with_its_delimiter_is_body() {
+    fn heredoc_line_that_starts_with_its_delimiter_after_blanks_is_body() {
+        let input = "cat <<'EOF'\n  EOF/x\n  EOF\n\tEOF\nEOF";
         assert_eq!(
-            split("cat <<'EOF'\n  EOF/x\nEOF\nls"),
-            vec![opaque("cat <<'EOF'\n  EOF/x\nEOF"), simple("ls")]
+            split(&format!("{input}\nls")),
+            vec![opaque(input), simple("ls")]
         );
-        for input in ["cat <<'EOF'\na\nEOF/x\nEOF", "cat <<-EOF\n\tEOF/x\n\tEOF"] {
-            assert_eq!(split(input), vec![opaque(input)], "{input:?}");
+        let input = "cat <<-EOF\n EOF/x\n\t EOF\n\tEOF";
+        assert_eq!(split(input), vec![opaque(input)]);
+        // Each heredoc is read in one parse, however many such lines it has.
+        let input = format!("cat <<EOF\n{}EOF", "  EOF\n".repeat(40));
+        assert_eq!(split(&input), vec![opaque(&input)]);
+        let inputs = vec!["cat <<EOF\n  EOF\nEOF"; 40];
+        assert_eq!(
+            split(&format!("{{\n{}\n}}", inputs.join("\n"))),
+            inputs.iter().map(|input| opaque(input)).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn heredoc_line_that_starts_with_its_delimiter_is_not_read_as_body() {
+        // Inside `$(…)` or `<(…)` bash ends a heredoc at a line that starts
+        // with its delimiter (`EOF)`, after tabs for `<<-`) and runs the
+        // lines after it, here `rm -rf x`.
+        for input in [
+            "cat <<'EOF'\na\nEOF/x\nEOF",
+            "cat <<-EOF\n\tEOF/x\n\tEOF",
+            "echo $(cat <<EOF\nhi\nEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "echo $(cat <<'EOF'\nhi\nEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "echo $(cat <<-EOF\nhi\n\tEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "cat <(cat <<EOF\nhi\nEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "echo $(cat <<EOF\nhi\nEOFX)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+        ] {
+            assert_eq!(split(input), vec![unparsed(input)], "{input:?}");
+        }
+    }
+
+    #[test]
+    fn inputs_that_reparse_often_split_in_bounded_time() {
+        let started = std::time::Instant::now();
+        let heredoc = format!("cat <<EOF\n{}EOF", "  EOF\n".repeat(20));
+        split(&format!("{}\necho \"", [heredoc.as_str(); 10].join("\n")));
+        split(&format!("{}\n)", [heredoc.as_str(); 300].join("\n")));
+        let line = format!("echo {}", "a".repeat(4000));
+        split(&format!("echo \"\n{}", [line.as_str(); 299].join("\n")));
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn code_variable_in_a_quoted_heredoc_body_is_text() {
+        let input = "python3 - <<'EOF'\nos.environ['PS4'] = 'x'\nEOF";
+        assert_eq!(split(input), vec![opaque(input)]);
+        // An unquoted body expands, and a shell reads its input as code.
+        for input in [
+            "cat <<EOF\n$PS4\nEOF",
+            "bash <<'EOF'\nPS4=x\nEOF",
+            "cat >x.sh <<'EOF'\nPS4=x\nEOF\nbash x.sh",
+            "cat <<'EOF' | sh\nENV=x\nEOF",
+        ] {
+            assert!(
+                split(input)
+                    .iter()
+                    .any(|segment| matches!(segment, Segment::Exact(_))),
+                "{input:?}"
+            );
         }
     }
 

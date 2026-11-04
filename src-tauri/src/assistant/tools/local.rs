@@ -436,10 +436,12 @@ pub(crate) fn evaluate_command_policy(
         })
         .collect();
 
-    // A row the splitter could not name may hide what runs in any row of the
-    // input (`x='a[$(rm -rf y)]'; echo $((x))`), so the blocklist also reads
-    // every word of each row.
-    let any_exact = segments.iter().any(|s| matches!(s, Segment::Exact(_)));
+    // A row the splitter could not name or parse may hide what runs in any
+    // row of the input (`x='a[$(rm -rf y)]'; echo $((x))`), so the
+    // blocklist also reads every word of each row.
+    let any_exact = segments
+        .iter()
+        .any(|s| matches!(s, Segment::Exact(_) | Segment::Unparsed(_)));
     for segment in &segments {
         let text = segment.text();
         let unparsed = matches!(segment, Segment::Unparsed(_) | Segment::Exact(_));
@@ -2882,6 +2884,63 @@ mod tests {
     }
 
     #[test]
+    fn blocklist_word_scan_reads_paths_and_entries_of_several_words() {
+        for (blocked, command) in [
+            ("rm", "x='a[$(/bin/rm -rf y)]'; echo $((x))"),
+            ("git push", "x='a[$(git push origin)]'; echo $((x))"),
+        ] {
+            for exec in [
+                full_execution_config(&[blocked]),
+                restricted_execution_config(&[], &[blocked]),
+            ] {
+                assert!(is_block(&exec, command), "{blocked:?} {command:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn heredoc_bash_ends_inside_a_substitution_hides_no_command() {
+        // In `$(…)` and `<(…)` bash ends a heredoc at a line that starts
+        // with its delimiter (`EOF)`) and runs `rm -rf x`.
+        for command in [
+            "echo $(cat <<EOF\nhi\nEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "echo $(cat <<'EOF'\nhi\nEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "echo $(cat <<-EOF\nhi\n\tEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "cat <(cat <<EOF\nhi\nEOF)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+            "echo $(cat <<EOF\nhi\nEOFX)\nrm -rf x\n: <<ls\nEOF\n)\nls",
+        ] {
+            for exec in [
+                full_execution_config(&["rm"]),
+                restricted_execution_config(&[], &["rm"]),
+            ] {
+                assert!(is_block(&exec, command), "{command:?}");
+            }
+            let saved = restricted_execution_config(&["echo", "cat", "ls"], &[]);
+            assert!(
+                matches!(
+                    evaluate_command_policy(&saved, command, &[], &[]),
+                    PolicyResult::NeedsApproval(_)
+                ),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn saved_runner_prefix_does_not_cover_a_command_held_in_a_variable() {
+        let exec = restricted_execution_config(&["xargs", "exec"], &[]);
+        for command in ["xargs $t", "exec $t x"] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::NeedsApproval(_)
+                ),
+                "{command:?}"
+            );
+        }
+    }
+
+    #[test]
     fn wrapper_without_a_command_offers_no_prefix() {
         // A saved `env` would cover `env rm -rf x`.
         let exec = restricted_execution_config(&[], &[]);
@@ -2903,8 +2962,8 @@ mod tests {
         // bash runs the `touch PWN` in each; the splitter cannot find it,
         // so it is in a row asked by its exact text: the whole input when no
         // line of it splits. Restricted asks for that row even without a
-        // blocklist; Full mode never prompts — the blocklist is best-effort
-        // for input it cannot see into, whether entries are active or not.
+        // blocklist; Full mode never prompts. A blocked `touch` is denied in
+        // both, since the blocklist reads every word of such input.
         let commands = [
             "echo $(case a in a) echo;& b) echo;; esac); touch PWN",
             "cat <<EOF|touch PWN\nhi\nEOF",
@@ -2966,7 +3025,12 @@ mod tests {
                             .as_slice(),
                         [crate::assistant::tools::command_splitter::Segment::Unparsed(_)]
                     );
+                    let touch_blocked = durable == "touch" || run == "touch";
                     match (mode.clone(), result) {
+                        (_, PolicyResult::Block { .. }) if touch_blocked => {}
+                        (mode, result) if touch_blocked => {
+                            panic!("{mode:?} {command:?} -> {}", policy_label(&result));
+                        }
                         (ShellAccessMode::Restricted, PolicyResult::NeedsApproval(rows))
                             if whole =>
                         {
@@ -2987,9 +3051,6 @@ mod tests {
                             );
                         }
                         (ShellAccessMode::Full, PolicyResult::Allow) => {}
-                        // Seen in a row, a blocked command is denied.
-                        (_, PolicyResult::Block { .. })
-                            if !whole && (durable == "touch" || run == "touch") => {}
                         (mode, result) => {
                             panic!(
                                 "{mode:?} {durable:?} {run:?} {command:?} -> {}",
@@ -3017,15 +3078,14 @@ mod tests {
             PolicyResult::Block { segment_text, .. } if segment_text == "touch PWN"
         ));
         let continued = "echo a\\ \\\n#; touch PWN";
-        // The continued form is Unparsed: Full mode runs it without a
-        // prompt, Restricted asks for it as one exact row.
-        assert!(matches!(
-            evaluate_command_policy(&exec, continued, &[], &[]),
-            PolicyResult::Allow
+        // The continued form is Unparsed: the blocklist reads its words.
+        assert!(is_block(&exec, continued));
+        assert!(is_block(
+            &restricted_execution_config(&[], &["touch"]),
+            continued
         ));
-        let restricted = restricted_execution_config(&[], &["touch"]);
         assert_eq!(
-            approval_texts(&restricted, continued),
+            approval_texts(&restricted_execution_config(&[], &[]), continued),
             vec![(continued.to_string(), String::new())]
         );
     }
