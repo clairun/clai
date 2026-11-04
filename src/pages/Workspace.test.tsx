@@ -375,6 +375,58 @@ describe('Workspace details poll', () => {
   });
 });
 
+describe('Workspace — who asks', () => {
+  const crew = (over: Partial<WorkspaceAgentResponse>) =>
+    ({ workspaceId: 'a', enabled: true, isDefault: false, agentName: null, agentDescription: null, avatar: null, ...over }) as WorkspaceAgentResponse;
+  const emit = (name: string, payload: unknown) =>
+    act(() => eventHandlers.get(name)?.forEach((handler) => handler({ payload })));
+
+  it("draws the chat's question as its owner's and each request as the agent that raised it", async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, {
+        assignedAgents: [
+          crew({ id: 'wa-main', agentDefinitionId: 'def-main', displayName: 'Manager', isDefault: true }),
+          crew({ id: 'wa-rust', agentDefinitionId: 'def-rust', displayName: 'Rust Architect' }),
+        ],
+      })
+    );
+    loadSessionMessagesPage.mockResolvedValue(messagePage([userMessage('sess-a', 'm-1', 'first question')]));
+    vi.mocked(assistantClient.listPendingAsks).mockResolvedValue([
+      { pendingId: 'q-1', workspaceId: 'a', sessionId: 'sess-a', question: 'Ship it?', options: null, multiSelect: false, extraContext: null, requestedAt: 1n },
+    ]);
+
+    renderWorkspace();
+    expect(await screen.findByText('first question')).toBeInTheDocument();
+    const question = await screen.findByRole('dialog', { name: 'Question from Main' });
+    expect(within(question).getByRole('img', { name: 'Main' })).toBeInTheDocument();
+
+    // A sub-agent's task raised these: they name it, not the chat's Main.
+    emit('permissions://request', {
+      requestId: 'perm-1',
+      workspaceId: 'a',
+      agentId: 'wa-rust',
+      agentName: null,
+      command: 'cargo test',
+      segments: [{ text: 'cargo test', kind: 'simple', suggestedPrefix: 'cargo test' }],
+      persistsToSharedAgent: false,
+      alsoAffectsWorkspaces: [],
+    });
+    emit('path-grants://request', {
+      requestId: 'grant-1',
+      workspaceId: 'a',
+      agentId: 'wa-rust',
+      agentName: null,
+      requestedPath: '/home/u/.config/gh',
+      requestedAccess: 'read_only',
+      reason: 'token',
+    });
+    const approval = await screen.findByRole('article', { name: 'Permission requested by Rust Architect' });
+    expect(within(approval).getByRole('img', { name: 'Rust Architect' })).toBeInTheDocument();
+    const grant = screen.getByRole('article', { name: 'Path grant requested by Rust Architect' });
+    expect(within(grant).getByRole('img', { name: 'Rust Architect' })).toBeInTheDocument();
+  });
+});
+
 describe('Workspace session hydration', () => {
   it('seeds the queued chips from the details payload on first hydration', async () => {
     getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>

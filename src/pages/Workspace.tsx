@@ -20,7 +20,7 @@ import { hydrateSession, useSessionChatActions } from '../assistant/sessionChat'
 import ChatMessageList from '../components/AssistantChat/ChatMessageList';
 import RunFailureBanner from '../components/RunFailureBanner/RunFailureBanner';
 import { WorkspaceFileContext, type WorkspaceFileLocation } from '../components/Chat/WorkspaceFileContext';
-import { resolveSessionOwner } from '../components/AssistantChat/messageSender';
+import { resolveAgent, resolveSessionOwner } from '../components/AssistantChat/messageSender';
 import { runFailure, type RunFailure } from '../assistant/runErrors';
 import { mainIdentity } from '../components/Agents/agentIdentity';
 import InlineApprovalCard from '../components/InlineApprovalCard';
@@ -1429,6 +1429,8 @@ const ChatFirstLayout = ({
   );
   const cardRef = useRef<HTMLDivElement | null>(null);
   const owner = useMemo(() => resolveSessionOwner(taskRoster), [taskRoster]);
+  // The chat's questions are its owner's; approvals and grants name their agent.
+  const asker = useMemo(() => (owner ? resolveAgent(owner, taskRoster) : null), [owner, taskRoster]);
 
   // Publish the conversation card's viewport geometry as document-level
   // CSS vars so the fixed input bar (TerminalEmulator) can align itself
@@ -1505,9 +1507,9 @@ const ChatFirstLayout = ({
             onOpenTask={onOpenTask}
             owner={owner}
           />
-          <AskUserPanel sessionId={sessionId} />
-          <InlineApprovalCard workspaceId={workspaceId} />
-          <InlinePathGrantCard workspaceId={workspaceId} />
+          <AskUserPanel sessionId={sessionId} asker={asker} />
+          <InlineApprovalCard workspaceId={workspaceId} roster={taskRoster} />
+          <InlinePathGrantCard workspaceId={workspaceId} roster={taskRoster} />
         </>
       ) : isHydrating ? (
         <div className={styles.chatFirstLoading} aria-live="polite" aria-busy="true">

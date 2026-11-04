@@ -1,0 +1,17 @@
+/* Inline with the sentence it opens: "<face> Rust Architect wants to run:". */
+.requester {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  vertical-align: middle;
+  max-width: 100%;
+}
+
+.name {
+  font-weight: 600;
+  color: var(--color-text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
