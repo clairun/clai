@@ -408,7 +408,7 @@ pub(crate) fn evaluate_command_policy(
 ) -> PolicyResult {
     use crate::assistant::tools::command_splitter::{split_command, Segment};
     use crate::assistant::tools::prefix_detector::{
-        by_argument_command, by_head_name, by_run_command, suggest_prefix,
+        by_any_reading, by_argument_command, by_head_name, by_run_command, suggest_prefix,
     };
     use crate::commands::permissions::SegmentApproval;
 
@@ -455,11 +455,13 @@ pub(crate) fn evaluate_command_policy(
         };
         // The blocklist sees the command the segment runs, and the head it
         // runs it with: `timeout 60 rm -rf x` is blocked by `rm` and by
-        // `timeout`, `xargs rm` by `rm` and by `xargs`.
+        // `timeout`, `xargs rm` by `rm` and by `xargs`. It also sees every
+        // command a misread option could hide: `xargs -0I rm echo` by `rm`.
         if let Some(matched) = blocked(text)
             .or_else(|| by_head_name(text).and_then(|head| blocked(&head)))
             .or_else(|| by_run_command(text).and_then(|cmd| blocked(&cmd)))
             .or_else(|| by_argument_command(text).and_then(|cmd| blocked(&cmd)))
+            .or_else(|| by_any_reading(text).iter().find_map(|cmd| blocked(cmd)))
         {
             return PolicyResult::Block {
                 segment_text: text.to_string(),
@@ -3601,6 +3603,17 @@ mod tests {
             "exec -la grep echo RAN",
             "env -iu FOO cargo build",
             "cat <<EOF > notes.md\nuse `ls` here\nEOF",
+            "xargs --max-lines grep foo",
+            "xargs --max-lines=2 -E x grep foo",
+            "xargs -I {} git push {}",
+            "xargs -i git push {}",
+            "xargs --replace=% git push origin %",
+            "xargs -I % sh -c 'echo %'",
+            "taskset 1 grep x",
+            "taskset -c 0,1 grep x",
+            "chrt -f 10 grep x",
+            "chrt -o grep x",
+            "chrt 10 -- grep x",
         ] {
             let rows = approval_texts(&restricted_execution_config(&[], &[]), command);
             let prefixes: Vec<&str> = rows.iter().map(|(_, p)| p.as_str()).collect();
@@ -3750,6 +3763,142 @@ mod tests {
             ] {
                 assert!(is_block(&exec, command), "{command} must be blocked");
             }
+        }
+    }
+
+    #[test]
+    fn saved_grant_never_covers_a_command_an_option_hides() {
+        // GNU `xargs --max-lines[=N]` takes a value only after `=`, xargs
+        // writes its input over a replace string wherever it occurs in the
+        // command, and `env -S` splits its value into the command's start.
+        for (grant, command) in [
+            ("xargs grep", "xargs --max-lines -I grep sh -c evil"),
+            ("xargs grep", "xargs --max-lines -E grep sh -c evil"),
+            ("xargs git push", "xargs -I push git push --hard"),
+            ("xargs git push", "xargs -Ipush git push --hard"),
+            ("xargs git push", "xargs -ipush git push --hard"),
+            ("xargs git push", "xargs --replace=push git push --hard"),
+            ("xargs git push", "xargs -I 'push' git push --hard"),
+            ("xargs git push", "xargs -I u git pu''sh --hard"),
+            ("xargs git push", "xargs -i git -C {} push --hard"),
+            ("grep", "env -S'sh -c evil' grep x"),
+            ("grep", "env -Ssh grep x"),
+            ("grep", "env -S 'sh -c evil' grep x"),
+            ("grep", "env -iS'sh -c evil' grep x"),
+            ("grep", "env --split-string='sh -c evil' grep x"),
+            ("grep", "env --sp='sh -c evil' grep x"),
+            ("grep", "taskset 1 sh -c evil"),
+        ] {
+            let exec = restricted_execution_config(&[grant], &[]);
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::NeedsApproval(_)
+                ),
+                "a saved {grant:?} must not allow {command:?}"
+            );
+        }
+        for (grant, command) in [
+            ("xargs git push", "xargs -I {} git push {}"),
+            ("xargs git push", "xargs --replace git push origin {}"),
+            ("xargs grep", "xargs --max-lines grep foo"),
+            ("grep", "taskset 1 grep x"),
+            ("grep", "taskset 0x3 grep x"),
+            ("grep", "chrt -f 10 grep x"),
+            ("grep", "chrt 10 -- grep x"),
+        ] {
+            let exec = restricted_execution_config(&[grant], &[]);
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::Allow
+                ),
+                "a saved {grant:?} allows {command:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn options_that_hide_the_command_suggest_no_prefix() {
+        let exec = restricted_execution_config(&[], &[]);
+        for (command, prefix) in [
+            ("xargs -I push git push --hard", ""),
+            ("xargs -I {} git {} --hard", ""),
+            ("xargs -I 'grep' grep x", ""),
+            ("xargs -I '' grep x", ""),
+            ("xargs -I {} grep x {}", "xargs grep"),
+            ("env -S'grep x' y", ""),
+            ("env --split-string=grep y", ""),
+            ("env -iSgrep y", ""),
+            ("xargs --frob grep x", ""),
+            ("xargs --frob=1 grep x", ""),
+            ("xargs --max-l grep x", ""),
+            ("xargs -Z grep x", ""),
+            ("env --sp=x grep", ""),
+            ("xargs --max-lines grep foo", "xargs grep"),
+            ("taskset 1 grep x", "grep"),
+            ("chrt -f 10 grep x", "grep"),
+            ("chrt -o grep x", "grep"),
+        ] {
+            assert_eq!(
+                approval_texts(&exec, command),
+                vec![(command.to_string(), prefix.to_string())],
+                "{command}"
+            );
+        }
+    }
+
+    #[test]
+    fn blocklist_sees_a_command_under_every_reading_of_runner_options() {
+        for exec in [
+            full_execution_config(&["rm"]),
+            restricted_execution_config(&[], &["rm"]),
+        ] {
+            for command in [
+                "xargs --max-lines rm -rf x",
+                "xargs --max-l rm -rf x",
+                "xargs -0I rm echo x",
+                "xargs -I rm rm x",
+                "xargs -Irm rm",
+                "xargs --replace rm",
+                "xargs --replace=rm rm x",
+                "xargs --frob rm echo x",
+                "exec xargs -0I rm echo x",
+                "env -S'rm -rf' x",
+                "env -Srm -rf x",
+                "env -S 'rm -rf' x",
+                "env \"-Srm -rf\" x",
+                "env --split-string='rm -rf' x",
+                "env -i -S'timeout 5 rm -rf' x",
+                "taskset 1 rm -rf x",
+                "taskset 0x3 rm -rf x",
+                "taskset -c 0,1 rm x",
+                "chrt 10 rm -rf x",
+                "chrt -f 10 rm -rf x",
+                "chrt -o rm x",
+                "chrt 10 -- rm x",
+            ] {
+                assert!(is_block(&exec, command), "{command} must be blocked");
+            }
+        }
+        // Only a word an option may take is read as the command.
+        let exec = full_execution_config(&["rm"]);
+        for command in [
+            "xargs -0 git rm x",
+            "xargs -n 1 git rm",
+            "xargs grep rm",
+            "env -u FOO git rm",
+            "timeout 5 git rm",
+            "chrt -o echo rm",
+            "taskset 1 git rm x",
+        ] {
+            assert!(
+                matches!(
+                    evaluate_command_policy(&exec, command, &[], &[]),
+                    PolicyResult::Allow
+                ),
+                "{command} runs no rm"
+            );
         }
     }
 

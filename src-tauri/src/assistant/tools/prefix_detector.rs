@@ -42,8 +42,8 @@
 //! field so the user can narrow or broaden before confirming.
 
 use crate::assistant::tools::command_splitter::{
-    argument_command_words, argument_run, command_words, effective_words, lookup_option, row_words,
-    Reading,
+    argument_command_words, argument_run, command_words, effective_words, lookup_option,
+    possible_commands, row_words, with_split_strings, Reading,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,16 +227,24 @@ const TWO_WORD_PERMISSIVE: &[&str] = &[
 pub fn suggest_prefix(segment: &str) -> String {
     // 1–2. The command's words, without leading env assignments. Anything
     // else (`> file`, `for f in …`) has no prefix to save.
-    match command_words(segment, Reading::Exact) {
-        Some(tokens) => prefix_for_words(&tokens),
-        None => String::new(),
+    let Some(tokens) = command_words(segment, Reading::Exact) else {
+        return String::new();
+    };
+    // A prefix that reads past a replace string names words the runner's
+    // input may change (`push` in `xargs -I push git push`).
+    let prefix = prefix_for_words(&tokens, true);
+    if prefix == prefix_for_words(&tokens, false) {
+        prefix
+    } else {
+        String::new()
     }
 }
 
 /// [`suggest_prefix`] for a command's words: the argument runners heading
 /// them, without their own options (as the allow form drops them), then
-/// the prefix of the command they run.
-fn prefix_for_words(tokens: &[&str]) -> String {
+/// the prefix of the command they run, read only as far as no replace
+/// string can change it when `literal`.
+fn prefix_for_words(tokens: &[&str], literal: bool) -> String {
     let mut runners = Vec::new();
     let mut tokens = tokens;
     while let Some(run) = argument_run(tokens, Reading::Exact) {
@@ -247,10 +255,12 @@ fn prefix_for_words(tokens: &[&str]) -> String {
         // A runner with no command written after it (`exec >log 2>&1`, bare
         // `xargs`) has no prefix that names one: saving the runner alone
         // would allow every command it can run.
-        match run
-            .command
-            .and_then(|command| effective_words(command, Reading::Exact))
-        {
+        let command = if literal {
+            run.literal_command()
+        } else {
+            run.command
+        };
+        match command.and_then(|command| effective_words(command, Reading::Exact)) {
             Some(command) => tokens = command,
             None => return String::new(),
         }
@@ -595,7 +605,7 @@ fn canonical_words<'a>(words: &[&'a str], skipping: OptionSkipping) -> Option<Ve
     if skipping == OptionSkipping::AllButConfig {
         while let Some(run) = argument_run(words, Reading::Exact).filter(|run| !run.reads_code) {
             form.push(words[0]);
-            match run.command? {
+            match run.literal_command()? {
                 [] => return Some(form),
                 command => words = effective_words(command, Reading::Exact)?,
             }
@@ -649,6 +659,25 @@ pub fn by_run_command(segment: &str) -> Option<String> {
 /// Deny matching only: the row itself stays named by its head.
 pub fn by_argument_command(segment: &str) -> Option<String> {
     Some(by_name(&argument_command_words(segment)?))
+}
+
+/// The commands `segment` may run under every reading of its wrappers'
+/// and runners' options and of the strings `env -S` splits
+/// ([`possible_commands`]), each joined like [`by_run_command`], once.
+/// Deny matching only.
+pub fn by_any_reading(segment: &str) -> Vec<String> {
+    let Some(words) = row_words(segment) else {
+        return Vec::new();
+    };
+    let split = with_split_strings(&words);
+    let mut commands: Vec<String> = possible_commands(&words)
+        .into_iter()
+        .chain(possible_commands(&split))
+        .map(by_name)
+        .collect();
+    commands.sort_unstable();
+    commands.dedup();
+    commands
 }
 
 /// `words` joined by single spaces, with the directory dropped from the

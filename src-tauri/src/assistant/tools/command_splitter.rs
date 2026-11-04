@@ -27,7 +27,8 @@
 //! cargo build` runs `cargo build`), so its row keeps that command: the
 //! policy can allowlist it, and the blocklist sees it. The blocklist also
 //! reads the command written in the arguments of `xargs`, `exec`, `eval` and
-//! `watch` ([`argument_command_words`]); their rows stay named by their head.
+//! `watch` ([`argument_command_words`]), and every command a misread option
+//! could hide ([`possible_commands`]); their rows stay named by their head.
 //!
 //! A quoted heredoc body is text. Bash expands an unquoted one: the commands
 //! its `$(…)`, backticks and `${…}` run become rows of their own, each
@@ -146,6 +147,8 @@ fn command_node_words<'src>(src: &'src str, node: Node) -> Option<Vec<&'src str>
 struct Wrapper {
     /// The wrapper's name, as it is written.
     name: &'static str,
+    /// The short options that take no value.
+    flag_letters: &'static str,
     /// The short options that take a value: the rest of their word, or the
     /// next word when they end it (`-n` in `xargs -0n 1`).
     value_letters: &'static str,
@@ -155,23 +158,48 @@ struct Wrapper {
     /// The long options whose value is the next word, unless written
     /// `--name=value`.
     value_long: &'static [&'static str],
-    /// The other long options: they never take the next word.
+    /// The other long options: they never take the next word, and take a
+    /// value only after `=` (GNU `xargs --max-lines[=N]`).
     flag_long: &'static [&'static str],
+    /// The options, by letter or long name, whose value changes the command
+    /// the wrapper runs.
+    roles: &'static [(&'static str, Role)],
     /// The plain arguments the wrapper takes before the command
-    /// (`timeout`'s duration).
+    /// (`timeout`'s duration, `taskset`'s mask).
     plain_args: usize,
+    /// Whether a number before the command is its priority, as `chrt` reads
+    /// one: when a word follows it, and then an optional `--`.
+    priority: bool,
+}
+
+/// What the value of a [`Wrapper::roles`] option is to the command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// A string the runner replaces with its input wherever it occurs in
+    /// the command's words (`xargs -I R`).
+    Replace,
+    /// The first words of the command (`env -S 'cmd args'`).
+    Command,
 }
 
 impl Wrapper {
     const fn named(name: &'static str) -> Self {
         Wrapper {
             name,
+            flag_letters: "",
             value_letters: "",
             optional_value_letters: "",
             value_long: &[],
             flag_long: &[],
+            roles: &[],
             plain_args: 0,
+            priority: false,
         }
+    }
+
+    fn role(&self, option: &str) -> Option<Role> {
+        let (_, role) = self.roles.iter().find(|(name, _)| *name == option)?;
+        Some(*role)
     }
 }
 
@@ -180,23 +208,31 @@ impl Wrapper {
 /// allowlist it and the blocklist sees it.
 const MODIFIER_WRAPPERS: &[Wrapper] = &[
     Wrapper {
+        flag_letters: "fpv",
         value_letters: "sk",
         value_long: &["--signal", "--kill-after"],
         flag_long: &["--foreground", "--preserve-status", "--verbose"],
         plain_args: 1,
         ..Wrapper::named("timeout")
     },
-    Wrapper::named("time"),
     Wrapper {
+        // The shell keyword's only option.
+        flag_letters: "p",
+        ..Wrapper::named("time")
+    },
+    Wrapper {
+        // `nice -10` is the old form of `nice -n 10`.
+        flag_letters: "0123456789",
         value_letters: "n",
         value_long: &["--adjustment"],
         ..Wrapper::named("nice")
     },
     Wrapper::named("nohup"),
     Wrapper {
-        value_letters: "cp",
-        value_long: &["--cpu-list", "--pid"],
-        flag_long: &["--all-tasks"],
+        // `-c` and `-p` change how the mask, a plain argument, is read.
+        flag_letters: "acp",
+        flag_long: &["--all-tasks", "--cpu-list", "--pid"],
+        plain_args: 1,
         ..Wrapper::named("taskset")
     },
     Wrapper {
@@ -205,65 +241,84 @@ const MODIFIER_WRAPPERS: &[Wrapper] = &[
         ..Wrapper::named("stdbuf")
     },
     Wrapper {
+        flag_letters: "t",
         value_letters: "cnpPu",
         value_long: &["--class", "--classdata", "--pid", "--pgid", "--uid"],
         flag_long: &["--ignore"],
         ..Wrapper::named("ionice")
     },
     Wrapper {
-        value_letters: "TPD",
+        flag_letters: "abdefGimOopRrv",
+        value_letters: "TPDUX",
         value_long: &[
-            "--rr",
             "--sched-runtime",
             "--sched-period",
             "--sched-deadline",
+            "--clamp-min",
+            "--clamp-max",
         ],
         flag_long: &[
             "--batch",
             "--deadline",
+            "--deadline-overrun",
             "--ext",
             "--fifo",
             "--idle",
             "--other",
+            "--rr",
             "--reset-on-fork",
+            "--reclaim-grub",
             "--all-tasks",
             "--max",
             "--pid",
             "--verbose",
         ],
+        priority: true,
         ..Wrapper::named("chrt")
     },
     Wrapper {
+        flag_letters: "cfw",
         flag_long: &["--ctty", "--fork", "--wait"],
         ..Wrapper::named("setsid")
     },
-    Wrapper::named("command"),
+    Wrapper {
+        flag_letters: "pVv",
+        ..Wrapper::named("command")
+    },
     Wrapper::named("builtin"),
     Wrapper {
-        value_letters: "auC",
-        value_long: &["--argv0", "--unset", "--chdir", "--env0-from"],
+        flag_letters: "0iv",
+        value_letters: "auCS",
+        value_long: &[
+            "--argv0",
+            "--unset",
+            "--chdir",
+            "--env0-from",
+            "--split-string",
+        ],
         flag_long: &[
             "--ignore-environment",
             "--null",
-            "--split-string",
             "--block-signal",
             "--default-signal",
             "--ignore-signal",
             "--list-signal-handling",
             "--debug",
         ],
+        roles: &[("S", Role::Command), ("--split-string", Role::Command)],
         ..Wrapper::named("env")
     },
 ];
 
-/// How [`wrapped_start`] reads a long option its table does not list as
+/// How [`wrapped_start`] reads an option its table does not list as
 /// written: getopt takes any unambiguous abbreviation (`xargs --process`
 /// is `--process-slot-var`), and an implementation may have options the
 /// table lacks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reading {
     /// The command cannot be told: allow matching reads words this way,
-    /// so a grant never covers a command found past a misread option.
+    /// so a grant never covers a command found past a misread option, or
+    /// one an option's value starts (`env -S`).
     Exact,
     /// As getopt would with the table: an abbreviation of one listed
     /// option is that option, anything else takes no value. The splitter
@@ -291,31 +346,50 @@ pub fn effective_words<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option
         if lookup_option(words).is_some() {
             return Some(words);
         }
-        words = rest.get(wrapped_start(wrapper, rest, reading)?..)?;
+        words = rest.get(wrapped_start(wrapper, rest, reading)?.at..)?;
     }
+}
+
+/// Where the command a wrapper runs starts in the words after it, and the
+/// replace strings its options set.
+struct Start<'a> {
+    at: usize,
+    replace: Vec<&'a str>,
 }
 
 /// Where the command `wrapper` runs starts in `rest`, the words after it:
 /// past the wrapper's own options, read as getopt reads them, the plain
 /// arguments it takes before the command, and the assignments `env` takes.
-fn wrapped_start(wrapper: &Wrapper, rest: &[&str], reading: Reading) -> Option<usize> {
+/// `None` under [`Reading::Exact`] when the table does not list an option
+/// as written, or an option's value starts the command.
+fn wrapped_start<'a>(wrapper: &Wrapper, rest: &[&'a str], reading: Reading) -> Option<Start<'a>> {
     let mut at = 0;
+    let mut replace = Vec::new();
     while let Some(&arg) = rest.get(at) {
         if arg == "--" {
             at += 1;
             break;
         }
-        let takes_next_word = if arg.starts_with("--") {
-            !arg.contains('=') && long_option_takes_value(wrapper, arg, reading)?
-        } else if let Some(cluster) = arg.strip_prefix('-').filter(|c| !c.is_empty()) {
-            cluster_takes_next_word(wrapper, cluster)
-        } else if arg == "-" && wrapper.name == "env" {
+        if arg == "-" && wrapper.name == "env" {
             // `env -` is `env -i`.
-            false
-        } else {
+            at += 1;
+            continue;
+        }
+        if !arg.starts_with('-') || arg == "-" {
             break;
+        }
+        let option = option_word(wrapper, arg, reading)?;
+        let value = if option.takes_next {
+            rest.get(at + 1).copied()
+        } else {
+            option.value
         };
-        at += 1 + usize::from(takes_next_word);
+        match option.role {
+            Some(Role::Replace) => replace.push(value.unwrap_or("{}")),
+            Some(Role::Command) if reading == Reading::Exact => return None,
+            _ => {}
+        }
+        at += 1 + usize::from(option.takes_next);
     }
     for _ in 0..wrapper.plain_args {
         let arg = *rest.get(at)?;
@@ -324,49 +398,96 @@ fn wrapped_start(wrapper: &Wrapper, rest: &[&str], reading: Reading) -> Option<u
         }
         at += 1;
     }
+    if wrapper.priority {
+        if rest.get(at).is_some_and(|arg| is_number(arg)) && at + 1 < rest.len() {
+            at += 1;
+        }
+        if rest.get(at) == Some(&"--") {
+            at += 1;
+        }
+    }
     while rest.get(at).is_some_and(|arg| is_assignment(arg)) {
         at += 1;
     }
-    Some(at)
+    Some(Start { at, replace })
 }
 
-/// Whether a cluster of short options (`0n` in `-0n 1`) takes the next
-/// word: getopt reads its letters until one that takes a value, whose
-/// value is the rest of the cluster, or the next word when none is left.
-fn cluster_takes_next_word(wrapper: &Wrapper, cluster: &str) -> bool {
+/// An option word, as getopt reads it.
+struct OptionWord<'a> {
+    /// Whether its value is the next word.
+    takes_next: bool,
+    /// Its value, when written in the word (`-n1`, `--max-args=1`).
+    value: Option<&'a str>,
+    role: Option<Role>,
+}
+
+/// `arg`, an option word of `wrapper`, as getopt reads it: the letters of a
+/// short-option cluster until one that takes a value, whose value is the
+/// rest of the cluster, or the next word when none is left; a long option
+/// by its name. `None` under [`Reading::Exact`] when the table does not
+/// list the option as written.
+fn option_word<'a>(wrapper: &Wrapper, arg: &'a str, reading: Reading) -> Option<OptionWord<'a>> {
+    let flag = OptionWord {
+        takes_next: false,
+        value: None,
+        role: None,
+    };
+    if arg.starts_with("--") {
+        let (name, value) = match arg.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (arg, None),
+        };
+        let Some((name, takes_value)) = long_option(wrapper, name, reading) else {
+            // getopt rejects it, so it takes nothing.
+            return (reading == Reading::Getopt).then_some(OptionWord { value, ..flag });
+        };
+        return Some(OptionWord {
+            takes_next: takes_value && value.is_none(),
+            value,
+            role: wrapper.role(name),
+        });
+    }
+    let cluster = arg.strip_prefix('-')?;
     for (at, letter) in cluster.char_indices() {
-        if wrapper.optional_value_letters.contains(letter) {
-            return false;
+        let optional = wrapper.optional_value_letters.contains(letter);
+        if optional || wrapper.value_letters.contains(letter) {
+            let (letter, value) = cluster[at..].split_at(letter.len_utf8());
+            return Some(OptionWord {
+                takes_next: !optional && value.is_empty(),
+                value: (!value.is_empty()).then_some(value),
+                role: wrapper.role(letter),
+            });
         }
-        if wrapper.value_letters.contains(letter) {
-            return at + letter.len_utf8() == cluster.len();
+        if reading == Reading::Exact && !wrapper.flag_letters.contains(letter) {
+            return None;
         }
     }
-    false
+    Some(flag)
 }
 
-/// Whether the long option `arg`, written without `=`, takes the next word.
-/// `None` under [`Reading::Exact`] when the table does not list it as
-/// written.
-fn long_option_takes_value(wrapper: &Wrapper, arg: &str, reading: Reading) -> Option<bool> {
-    if wrapper.value_long.contains(&arg) {
-        return Some(true);
-    }
-    if wrapper.flag_long.contains(&arg) {
-        return Some(false);
+/// The long option of `wrapper` that `name` names, and whether it takes a
+/// value: `name` itself, or under [`Reading::Getopt`] the one option it
+/// abbreviates.
+fn long_option(wrapper: &Wrapper, name: &str, reading: Reading) -> Option<(&'static str, bool)> {
+    let value = wrapper.value_long.iter().map(|option| (*option, true));
+    let flag = wrapper.flag_long.iter().map(|option| (*option, false));
+    let options = value.chain(flag);
+    if let Some(option) = options.clone().find(|(option, _)| *option == name) {
+        return Some(option);
     }
     if reading == Reading::Exact {
         return None;
     }
-    let value = wrapper.value_long.iter().map(|option| (option, true));
-    let flag = wrapper.flag_long.iter().map(|option| (option, false));
-    let mut abbreviated = value
-        .chain(flag)
-        .filter(|(option, _)| option.starts_with(arg));
+    let mut abbreviated = options.filter(|(option, _)| option.starts_with(name));
     match (abbreviated.next(), abbreviated.next()) {
-        (Some((_, takes_value)), None) => Some(takes_value),
-        _ => Some(false),
+        (Some(option), None) => Some(option),
+        _ => None,
     }
+}
+
+/// A word of digits, as `chrt` reads a priority.
+fn is_number(word: &str) -> bool {
+    !word.is_empty() && word.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// The short-option letters that make a wrapper look a command up instead
@@ -392,18 +513,19 @@ pub fn lookup_option<'a>(words: &[&'a str]) -> Option<&'a str> {
 /// the command directly ([`argument_run`]).
 const ARGUMENT_RUNNERS: &[Wrapper] = &[
     Wrapper {
+        flag_letters: "cl",
         value_letters: "a",
         ..Wrapper::named("exec")
     },
     Wrapper::named("eval"),
     Wrapper {
         // GNU's options, and BSD's `-J`, `-R` and `-S`.
+        flag_letters: "0oprtx",
         value_letters: "adEILnPsJRS",
         optional_value_letters: "eil",
         value_long: &[
             "--arg-file",
             "--delimiter",
-            "--max-lines",
             "--max-args",
             "--max-procs",
             "--max-chars",
@@ -413,6 +535,7 @@ const ARGUMENT_RUNNERS: &[Wrapper] = &[
             "--null",
             "--eof",
             "--replace",
+            "--max-lines",
             "--open-tty",
             "--interactive",
             "--no-run-if-empty",
@@ -420,9 +543,16 @@ const ARGUMENT_RUNNERS: &[Wrapper] = &[
             "--verbose",
             "--exit",
         ],
+        roles: &[
+            ("I", Role::Replace),
+            ("i", Role::Replace),
+            ("J", Role::Replace),
+            ("--replace", Role::Replace),
+        ],
         ..Wrapper::named("xargs")
     },
     Wrapper {
+        flag_letters: "bcCefgprtwx",
         value_letters: "nqs",
         optional_value_letters: "d",
         value_long: &["--interval", "--equexit", "--shotsdir"],
@@ -454,6 +584,40 @@ pub struct ArgumentRun<'w, 'a> {
     /// 2>&1`, bare `xargs`); `None` when the runner's options, read as
     /// [`argument_run`] was asked to, do not tell where they start.
     pub command: Option<&'w [&'a str]>,
+    /// The replace strings the runner's options set (`R` in `xargs -I R`).
+    pub replace: Vec<&'a str>,
+}
+
+impl<'w, 'a> ArgumentRun<'w, 'a> {
+    /// The words of [`Self::command`] the runner's input cannot change:
+    /// with a replace string, those before the first word it may occur in
+    /// (`git` in `xargs -I push git push`). `None` when that leaves no word.
+    pub fn literal_command(&self) -> Option<&'w [&'a str]> {
+        let command = self.command?;
+        if self.replace.is_empty() {
+            return Some(command);
+        }
+        let end = command
+            .iter()
+            .position(|word| {
+                self.replace
+                    .iter()
+                    .any(|replace| may_contain(word, replace))
+            })
+            .unwrap_or(command.len());
+        (end > 0).then_some(&command[..end])
+    }
+}
+
+/// Whether `word` may hold `pattern` once the shell expands both: quotes
+/// are read away, and an expansion may hold anything.
+fn may_contain(word: &str, pattern: &str) -> bool {
+    let literal =
+        |text: &str| (!text.contains(['$', '`'])).then(|| text.replace(['\'', '"', '\\'], ""));
+    match (literal(word), literal(pattern)) {
+        (Some(word), Some(pattern)) => word.contains(&pattern),
+        _ => true,
+    }
 }
 
 /// The [`ArgumentRun`] of `words`, or `None` when they are not headed by an
@@ -462,9 +626,13 @@ pub fn argument_run<'w, 'a>(words: &'w [&'a str], reading: Reading) -> Option<Ar
     let (name, rest) = words.split_first()?;
     let base = name.rsplit('/').next().unwrap_or(name);
     let runner = ARGUMENT_RUNNERS.iter().find(|r| r.name == base)?;
+    let start = wrapped_start(runner, rest, reading);
     Some(ArgumentRun {
         reads_code: matches!(runner.name, "eval" | "watch"),
-        command: wrapped_start(runner, rest, reading).map(|at| rest.get(at..).unwrap_or(&[])),
+        command: start
+            .as_ref()
+            .map(|start| rest.get(start.at..).unwrap_or(&[])),
+        replace: start.map(|start| start.replace).unwrap_or_default(),
     })
 }
 
@@ -481,6 +649,152 @@ pub fn argument_command_words(row: &str) -> Option<Vec<&str>> {
         ran = true;
     }
     ran.then(|| words.to_vec())
+}
+
+/// The most words of a command the blocklist reads when the command was
+/// found under a reading other than getopt's: more than any blocked prefix
+/// and the options before its subcommand, and few enough that a row read
+/// many ways costs time linear in its words.
+const POSSIBLE_COMMAND_WORDS: usize = 32;
+
+/// The commands `words` may run, under every reading of the options of the
+/// wrappers and runners heading them: the word after an option that may
+/// take a value, by the table or by its absence from it, is also read as
+/// the start of the command (`rm` in `xargs -0I rm echo`). A wrapper or
+/// runner is given by its name, any other command by its first
+/// [`POSSIBLE_COMMAND_WORDS`] words. Deny matching only: every reading can
+/// only block more.
+pub fn possible_commands<'w, 'a>(words: &'w [&'a str]) -> Vec<&'w [&'a str]> {
+    const { assert!(MODIFIER_WRAPPERS.len() + ARGUMENT_RUNNERS.len() <= 32) };
+    let wrappers: Vec<&Wrapper> = MODIFIER_WRAPPERS.iter().chain(ARGUMENT_RUNNERS).collect();
+    // Each start is read once, and each word as an option of each wrapper
+    // once, so the readings cost time linear in the words.
+    let mut started = vec![false; words.len()];
+    let mut read_as_option = vec![0u32; words.len()];
+    let mut starts = vec![0];
+    let mut commands = Vec::new();
+    while let Some(start) = starts.pop() {
+        if start >= words.len() || std::mem::replace(&mut started[start], true) {
+            continue;
+        }
+        let command = &words[start..];
+        let base = command[0].rsplit('/').next().unwrap_or(command[0]);
+        let Some((index, wrapper)) = wrappers.iter().enumerate().find(|(_, w)| w.name == base)
+        else {
+            commands.push(&command[..command.len().min(POSSIBLE_COMMAND_WORDS)]);
+            continue;
+        };
+        commands.push(&command[..1]);
+        if lookup_option(command).is_some() {
+            continue;
+        }
+        let wrapper_bit = 1 << index;
+        // Whether the word at `at`, and the word after it, may be read as
+        // an option of `wrapper` or as its first positional word.
+        let (mut here, mut next) = (true, false);
+        for at in start + 1..words.len() {
+            if !here && !next {
+                break;
+            }
+            let word = words[at];
+            let is_option =
+                word.starts_with('-') && word != "--" && (word != "-" || wrapper.name == "env");
+            (here, next) = if !here || (is_option && read_as_option[at] & wrapper_bit != 0) {
+                (next, false)
+            } else if is_option {
+                read_as_option[at] |= wrapper_bit;
+                let may_take_value = option_word(wrapper, word, Reading::Exact)
+                    .is_none_or(|option| option.takes_next);
+                (true, may_take_value)
+            } else {
+                let positional = at + usize::from(word == "--");
+                push_command_starts(wrapper, words, positional, &mut starts);
+                (next, false)
+            };
+        }
+    }
+    commands
+}
+
+/// Pushes to `starts` where the command `wrapper` runs may start, when its
+/// positional words start at `at`: past its plain arguments and
+/// assignments, and with or without a priority.
+fn push_command_starts(wrapper: &Wrapper, words: &[&str], at: usize, starts: &mut Vec<usize>) {
+    let mut at = at + wrapper.plain_args;
+    while words.get(at).is_some_and(|word| is_assignment(word)) {
+        at += 1;
+    }
+    starts.push(at);
+    let may_be_number =
+        |word: &str| word.contains(['$', '`']) || is_number(&word.replace(['\'', '"'], ""));
+    if wrapper.priority && words.get(at).is_some_and(|word| may_be_number(word)) {
+        starts.push(at + 1);
+        if words.get(at + 1) == Some(&"--") {
+            starts.push(at + 2);
+        }
+    }
+}
+
+/// `words` with each string `env -S` may split read as the words it splits
+/// into, wherever it is written: `env -S'rm -rf' x` → `env rm -rf x`, as
+/// `env` reads on from them. Deny matching only: a word read as a split
+/// string by mistake only adds commands to check.
+pub fn with_split_strings<'a>(words: &[&'a str]) -> Vec<&'a str> {
+    let mut out = Vec::with_capacity(words.len());
+    // The words still to read, last first: each with whether it is a split
+    // string, and whether it is known to hold no quote or blank, so each
+    // character is read a bounded number of times.
+    let mut todo: Vec<(&'a str, bool, bool)> = words
+        .iter()
+        .rev()
+        .map(|word| (*word, false, false))
+        .collect();
+    while let Some((word, is_split, plain)) = todo.pop() {
+        if is_split {
+            if plain {
+                todo.push((word, false, true));
+            } else {
+                let pieces =
+                    word.split(|c: char| c.is_whitespace() || matches!(c, '\'' | '"' | '\\'));
+                todo.extend(
+                    pieces
+                        .filter(|piece| !piece.is_empty())
+                        .rev()
+                        .map(|piece| (piece, false, true)),
+                );
+            }
+            continue;
+        }
+        match split_string_option(word) {
+            Some(Some(value)) => todo.push((value, true, plain)),
+            Some(None) => {
+                if let Some((value, _, plain)) = todo.pop() {
+                    todo.push((value, true, plain));
+                }
+            }
+            None => out.push(word),
+        }
+    }
+    out
+}
+
+/// The value of `word` read as an `env -S` option: `Some(None)` when it is
+/// the next word, `None` when `word` is no such option.
+fn split_string_option(word: &str) -> Option<Option<&str>> {
+    let word = word.trim_start_matches(['\'', '"']);
+    let value = if let Some(long) = word.strip_prefix("--") {
+        let (name, value) = match long.split_once('=') {
+            Some((name, value)) => (name, Some(value)),
+            None => (long, None),
+        };
+        if name.is_empty() || !"split-string".starts_with(name) {
+            return None;
+        }
+        value
+    } else {
+        Some(word.strip_prefix('-')?.split_once('S')?.1)
+    };
+    Some(value.filter(|value| !value.trim_matches(['\'', '"']).is_empty()))
 }
 
 /// A `NAME=value` token, as `env` takes before the command it runs.
