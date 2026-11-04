@@ -359,19 +359,22 @@ impl PendingApprovals {
     }
 
     /// Puts back an entry [`take`](Self::take) removed, unless the tool
-    /// stopped waiting on it meanwhile. Returns whether it is pending again.
-    pub async fn restore(&self, entry: PendingEntry) -> bool {
+    /// stopped waiting on it meanwhile. Returns the workspace pending count
+    /// once the entry is pending again, or none when it is not.
+    pub async fn restore(&self, entry: PendingEntry) -> Option<u32> {
         let mut inner = self.inner.lock().await;
         // Checked under the lock: a waiter dropped later reaps the entry
         // through `take` once this returns.
         if entry.sender.is_closed() {
-            return false;
+            return None;
         }
-        *inner.counts.entry(entry.workspace_id.clone()).or_insert(0) += 1;
+        let count = inner.counts.entry(entry.workspace_id.clone()).or_insert(0);
+        *count += 1;
+        let count = *count;
         inner
             .entries
             .insert(entry.request.request_id.clone(), entry);
-        true
+        Some(count)
     }
 
     /// Removes every pending entry for the same run + command and returns
@@ -473,6 +476,12 @@ pub async fn submit_permission_decision(
             emit_permission_resolved(&app, &request_id);
             emit_attention(&app, workspace_id, remaining);
         },
+        |request, pending| {
+            if let Err(e) = app.emit(PERMISSION_REQUEST_EVENT, request) {
+                tracing::warn!("Failed to emit permission request event: {}", e);
+            }
+            emit_attention(&app, request.workspace_id.clone(), pending);
+        },
     )
     .await
 }
@@ -483,12 +492,15 @@ pub async fn submit_permission_decision(
 ///
 /// When the save fails, the request goes back on the queue and the error
 /// is returned: its card stays open with the error, the command keeps
-/// waiting, and the user can answer again.
+/// waiting, and the user can answer again. `back_on_queue` then gets the
+/// request and its workspace's pending count, so a view that listed the
+/// queue during the save can show the request again.
 async fn resolve_pending_approval(
     state: &AppState,
     request_id: &str,
     decision: AskFirstDecision,
     left_queue: impl FnOnce(Option<String>, u32),
+    back_on_queue: impl FnOnce(&PermissionRequest, u32),
 ) -> Result<(), String> {
     let Some((entry, remaining)) = state.pending_approvals.take(request_id).await else {
         return Err(format!(
@@ -509,9 +521,10 @@ async fn resolve_pending_approval(
                 "Could not save Always allow for `{}`: {error}",
                 entry.request.command
             );
-            let workspace_id = entry.workspace_id.clone();
-            if !state.pending_approvals.restore(entry).await {
-                left_queue(workspace_id, remaining);
+            let request = entry.request.clone();
+            match state.pending_approvals.restore(entry).await {
+                Some(pending) => back_on_queue(&request, pending),
+                None => left_queue(request.workspace_id, remaining),
             }
             return Err(format!("Could not save Always allow: {error}"));
         }
@@ -1056,6 +1069,7 @@ mod approval_routing_tests {
             &request.request_id,
             decision.clone(),
             |_, _| {},
+            |_, _| panic!("the request stays off the queue"),
         )
         .await
         .expect("deliver");
@@ -1105,18 +1119,25 @@ mod approval_routing_tests {
         let pending = &fixture.state.pending_approvals;
         let (mut rx, _) = pending.register(request.clone(), "run-1".to_string()).await;
         let mut left = Vec::new();
+        let mut back = Vec::new();
 
         let error = resolve_pending_approval(
             &fixture.state,
             &request.request_id,
             AskFirstDecision::AlwaysAllow,
             |workspace, remaining| left.push((workspace, remaining)),
+            |request, pending| back.push((request.request_id.clone(), pending)),
         )
         .await
         .expect_err("the save fails");
 
         assert!(error.contains("nobody"), "{error}");
         assert!(left.is_empty(), "the card stays open");
+        assert_eq!(
+            back,
+            [(request.request_id.clone(), 1)],
+            "a view that listed the queue during the save is told it is back"
+        );
         assert!(
             matches!(
                 rx.try_recv(),
@@ -1133,6 +1154,7 @@ mod approval_routing_tests {
             &request.request_id,
             AskFirstDecision::AllowOnce,
             |workspace, remaining| left.push((workspace, remaining)),
+            |_, _| panic!("the request stays off the queue"),
         )
         .await
         .expect("allow once");
@@ -1159,6 +1181,7 @@ mod approval_routing_tests {
             &request.request_id,
             AskFirstDecision::AlwaysAllow,
             |workspace, remaining| left.push((workspace, remaining)),
+            |_, _| panic!("nothing waits on the request"),
         )
         .await
         .expect_err("the save fails");
@@ -1210,9 +1233,15 @@ mod denial_reason_tests {
 
         // The submit command removes the request from the queue and hands the
         // decision to the waiting tool.
-        resolve_pending_approval(&fixture.state, &request.request_id, decision, |_, _| {})
-            .await
-            .expect("deliver");
+        resolve_pending_approval(
+            &fixture.state,
+            &request.request_id,
+            decision,
+            |_, _| {},
+            |_, _| panic!("the request stays off the queue"),
+        )
+        .await
+        .expect("deliver");
 
         // The tool turns the decision into the error the model reads.
         let PendingApprovalOutcome::Decision(AskFirstDecision::Deny { reason }) =
