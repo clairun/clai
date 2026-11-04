@@ -284,6 +284,12 @@ fn command_prefix(tokens: &[&str]) -> String {
         return interpreter_prefix(binary, &tokens[1..]);
     }
 
+    // A name bash expands (`$t`, `./$dir/x`) is only known at run time:
+    // no saved prefix can name the command it runs.
+    if binary.contains(['$', '`']) {
+        return String::new();
+    }
+
     // 3. Path-shaped binaries are returned as-is (no subcommand layer).
     if is_path_shaped(binary) {
         return binary.to_string();
