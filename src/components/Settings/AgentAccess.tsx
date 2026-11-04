@@ -1,11 +1,12 @@
 /**
- * What an agent may do on this machine: path grants, shell, web and the
- * session bus. The overview shows it as one summary line; the full editor
- * is a drill-in view with paths on the left and the shell on the right.
+ * What an agent may do on this machine: path grants, network, shell, web
+ * and the session bus. The overview shows it as one summary line; the full editor
+ * is a drill-in view with paths and network on the left and the shell on the right.
  */
 
 import React, { useId } from 'react';
-import type { FilesystemPathGrant, GrantOrigin, NetworkPolicy, ShellAccessMode } from '../../generated/bindings';
+import type { FilesystemPathGrant, GrantOrigin, NetworkMode, NetworkPolicy, SandboxStatus, ShellAccessMode } from '../../generated/bindings';
+import { useSandboxStatus } from '../../hooks/useSandboxStatus';
 import { PathGrantEditor, PrefixListEditor, Switch } from './ListEditors';
 import form from './SettingsForm.module.css';
 import styles from './AgentBehaviorForm.module.css';
@@ -38,6 +39,47 @@ const SHELL_MODES: { mode: ShellAccessMode; label: string; hint: string }[] = [
   },
 ];
 
+const NETWORK_MODES: { mode: NetworkMode; label: string; hint: string }[] = [
+  {
+    mode: 'off',
+    label: 'Off',
+    hint: 'No network for shell commands, web fetch or web search.',
+  },
+  {
+    mode: 'allowlist',
+    label: 'Allowlist',
+    hint: 'Only the allowed hosts that are not denied. Web search still reaches its provider.',
+  },
+  {
+    mode: 'host_network',
+    label: 'Host network (unfiltered)',
+    hint: 'Reaches any host, including services on this computer and your local network.',
+  },
+];
+
+/**
+ * A host entry as the backend matches it: a host name or IP, `*` only as a
+ * whole label. Returns the entry to store, or why the text is not one.
+ */
+export const parseHostEntry = (raw: string): string | { error: string } => {
+  const value = raw.trim().toLowerCase().replace(/\.$/, '');
+  if (!value) return { error: 'Enter a host name.' };
+  if (/\s/.test(value)) return { error: 'A host name has no spaces.' };
+  if (value.includes('://')) return { error: 'Enter the host only, without http:// or https://.' };
+  if (value.includes('/')) return { error: 'Enter the host only, without a path.' };
+  const unbracketed = value.replace(/^\[(.*)\]$/, '$1');
+  const isIpv6 = /^[0-9a-f:.]+$/.test(unbracketed) && (unbracketed.match(/:/g) ?? []).length >= 2;
+  if (isIpv6) return unbracketed;
+  if (value.includes(':')) return { error: 'Leave out the port: an entry matches every port.' };
+  if (value === '*') return { error: 'A lone * would allow every host; choose Host network instead.' };
+  const labels = value.split('.');
+  if (labels.some((label) => !label)) return { error: 'A host name has no empty labels.' };
+  if (labels.some((label) => label.includes('*') && label !== '*')) {
+    return { error: 'Use * only as a whole label, as in *.example.com.' };
+  }
+  return value;
+};
+
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 export const grantOrigin = (grant: FilesystemPathGrant): { text: string; title?: string } | null => {
@@ -57,9 +99,96 @@ export const grantOrigin = (grant: FilesystemPathGrant): { text: string; title?:
 export const accessSummary = (draft: AccessDraft): string[] => [
   `Shell: ${SHELL_MODES.find((m) => m.mode === draft.shellMode)?.label ?? draft.shellMode}`,
   draft.grants.length ? plural(draft.grants.length, 'path') : 'No paths',
+  ...(draft.networkAccess ? [networkSummary(draft.networkAccess)] : []),
   draft.web ? 'Web on' : 'Web off',
   draft.sessionBus ? 'Keyring on' : 'Keyring off',
 ];
+
+const networkSummary = (policy: NetworkPolicy): string => {
+  if (policy.mode === 'allowlist') return `Network: Allowlist (${plural(policy.allowDomains.length, 'host')})`;
+  return policy.mode === 'off' ? 'Network: Off' : 'Network: Host network';
+};
+
+/** The network mode picker and, in Allowlist, the two host lists. */
+const NetworkSection = ({ policy, status, onChange, disabled, headingId }: {
+  policy: NetworkPolicy;
+  status: SandboxStatus | null;
+  onChange: (policy: NetworkPolicy) => void;
+  disabled?: boolean;
+  headingId: string;
+}) => {
+  // Unknown until the backend answers; nothing is offered before that.
+  const available = !!status?.available;
+  const allowlistReason = status?.available && !status.allowlistAvailable
+    ? status.allowlistUnavailableReason ?? 'Not available here'
+    : null;
+  const hint = NETWORK_MODES.find((m) => m.mode === policy.mode)?.hint;
+
+  return (
+    <>
+      <h4 className={styles.subheading} id={headingId}>Network</h4>
+      <div className={form.segmented} role="group" aria-labelledby={headingId}>
+        {NETWORK_MODES.map(({ mode, label }) => (
+          <button
+            key={mode}
+            type="button"
+            className={form.segment}
+            aria-pressed={policy.mode === mode}
+            onClick={() => onChange({ ...policy, mode })}
+            disabled={disabled || !available || (mode === 'allowlist' && !!allowlistReason)}
+            title={mode === 'allowlist' ? allowlistReason ?? undefined : undefined}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      {status && !status.available ? (
+        <p className={form.hint}>Not available on this PC.</p>
+      ) : (
+        <p className={form.hint}>{hint}</p>
+      )}
+      {allowlistReason && (
+        policy.mode === 'allowlist' ? (
+          <p className={form.hintWarning}>
+            Allowlist: {allowlistReason}. Shell commands will not run until you choose Off or Host network.
+          </p>
+        ) : (
+          <p className={form.hint}>Allowlist: {allowlistReason}.</p>
+        )
+      )}
+      {available && policy.mode === 'allowlist' && (
+        <div className={styles.prefixColumns}>
+          <div className={styles.prefixList}>
+            <span className={form.label}>Allowed hosts</span>
+            <p className={form.hint}>
+              <code className={form.code}>*.example.com</code> matches its subdomains, not example.com itself.
+            </p>
+            <PrefixListEditor
+              items={policy.allowDomains}
+              onChange={(allowDomains) => onChange({ ...policy, allowDomains })}
+              disabled={disabled}
+              label="Allowed hosts"
+              placeholder="example.com"
+              parse={parseHostEntry}
+            />
+          </div>
+          <div className={styles.prefixList}>
+            <span className={form.label}>Denied hosts</span>
+            <p className={form.hint}>Checked first, so they win over an allowed entry.</p>
+            <PrefixListEditor
+              items={policy.denyDomains}
+              onChange={(denyDomains) => onChange({ ...policy, denyDomains })}
+              disabled={disabled}
+              label="Denied hosts"
+              placeholder="uploads.example.com"
+              parse={parseHostEntry}
+            />
+          </div>
+        </div>
+      )}
+    </>
+  );
+};
 
 export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, context }: {
   draft: AccessDraft;
@@ -70,6 +199,7 @@ export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, cont
   context: string;
 }) => {
   const headingId = useId();
+  const sandboxStatus = useSandboxStatus();
   const shellHint = SHELL_MODES.find((m) => m.mode === draft.shellMode)?.hint;
 
   return (
@@ -95,6 +225,15 @@ export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, cont
             disabled={disabled}
             label="Path grants"
           />
+          {draft.networkAccess && (
+            <NetworkSection
+              policy={draft.networkAccess}
+              status={sandboxStatus}
+              onChange={(networkAccess) => onChange({ networkAccess })}
+              disabled={disabled}
+              headingId={`${headingId}-network`}
+            />
+          )}
         </div>
 
         <div className={styles.accessColumn}>

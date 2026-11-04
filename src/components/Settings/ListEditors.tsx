@@ -1,6 +1,6 @@
 /**
- * Small editable lists used by several settings pages: path grants and
- * command prefixes. Each is a bounded list plus one add row; the list
+ * Small editable lists used by several settings pages: path grants,
+ * command prefixes and host names. Each is a bounded list plus one add row; the list
  * scrolls inside its panel if it ever outgrows it, the page never does.
  */
 
@@ -108,12 +108,16 @@ export function PathGrantEditor<T extends GrantLike>({
   );
 }
 
+// Rules match single-spaced command words, so `git  push` would never match.
+const singleSpaced = (raw: string): string => raw.trim().split(/\s+/).join(' ');
+
 export const PrefixListEditor = ({
   items,
   onChange,
   disabled,
   label,
   placeholder,
+  parse = singleSpaced,
 }: {
   items: string[];
   onChange: (next: string[]) => void;
@@ -121,13 +125,19 @@ export const PrefixListEditor = ({
   /** Accessible name of the list, e.g. "Ask-first command prefixes". */
   label: string;
   placeholder: string;
+  /** Turns what was typed into an entry, or says why it is not one. */
+  parse?: (raw: string) => string | { error: string };
 }) => {
   const [draft, setDraft] = useState('');
+  const [error, setError] = useState<string | null>(null);
 
   const add = () => {
-    // Rules match single-spaced command words, so `git  push` would never match.
-    const value = draft.trim().split(/\s+/).join(' ');
-    if (value && !items.includes(value)) onChange([...items, value]);
+    const parsed = parse(draft);
+    if (typeof parsed !== 'string') {
+      setError(parsed.error);
+      return;
+    }
+    if (parsed && !items.includes(parsed)) onChange([...items, parsed]);
     setDraft('');
   };
 
@@ -158,9 +168,10 @@ export const PrefixListEditor = ({
           type="text"
           className={`${styles.input} ${styles.mono}`}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => { setDraft(e.target.value); setError(null); }}
           placeholder={placeholder}
           aria-label={`New entry for ${label.toLowerCase()}`}
+          aria-invalid={error ? true : undefined}
           disabled={disabled}
           spellCheck={false}
           onKeyDown={(e) => {
@@ -174,6 +185,7 @@ export const PrefixListEditor = ({
           Add
         </button>
       </div>
+      {error && <p className={styles.hintWarning} role="alert">{error}</p>}
     </>
   );
 };

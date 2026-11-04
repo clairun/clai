@@ -8,12 +8,15 @@ const api = vi.hoisted(() => ({
   workspaceCreateAgent: vi.fn(),
   workspaceUpdateAgent: vi.fn(),
   workspaceDeleteAgent: vi.fn(),
+  getSandboxStatus: vi.fn(),
 }));
 vi.mock('../../api/client', () => api);
 
 import { AgentBehaviorForm, type AgentDetail, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
-import type { FilesystemPathGrant, NetworkPolicy, ProviderConnection } from '../../generated/bindings';
+import { parseHostEntry } from './AgentAccess';
+import { resetSandboxStatusForTests } from '../../hooks/useSandboxStatus';
+import type { FilesystemPathGrant, NetworkPolicy, ProviderConnection, SandboxStatus } from '../../generated/bindings';
 
 const connection = (id: string, name: string, extra: Partial<ProviderConnection> = {}): ProviderConnection =>
   ({ id, name, enabled: true, modelId: '', ...extra } as unknown as ProviderConnection);
@@ -37,6 +40,14 @@ const HOME_GRANT: FilesystemPathGrant = { path: '/home/u', access: 'read_only', 
 
 // A stored policy the form must save back unchanged.
 const NETWORK: NetworkPolicy = { mode: 'host_network', allowDomains: ['github.com', '*.example.org'], denyDomains: ['bad.example.org'] };
+
+const LINUX: SandboxStatus = { available: true, backend: 'bubblewrap', allowlistAvailable: true, allowlistUnavailableReason: null };
+const MACOS: SandboxStatus = {
+  available: true, backend: 'seatbelt', allowlistAvailable: false, allowlistUnavailableReason: 'Not available on macOS yet',
+};
+const NO_SANDBOX: SandboxStatus = {
+  available: false, backend: null, allowlistAvailable: false, allowlistUnavailableReason: 'Not available on this PC',
+};
 
 const REVIEWER: AgentDetail = {
   id: 'agent-1',
@@ -89,7 +100,7 @@ const sentUpdate = () => api.workspaceUpdateAgent.mock.calls.at(-1)![0] as {
     filesystem: { extraPaths: FilesystemPathGrant[] };
     shell: { mode: string; askFirstCommandPrefixes: string[] };
     web: { enabled: boolean };
-    sandbox: { sessionBus: string };
+    sandbox: { sessionBus: string; networkAccess: NetworkPolicy };
   };
 };
 
@@ -103,6 +114,8 @@ describe('AgentBehaviorForm', () => {
     api.workspaceCreateAgent.mockReset().mockResolvedValue({ id: 'agent-new' });
     api.workspaceUpdateAgent.mockReset().mockResolvedValue({});
     api.workspaceDeleteAgent.mockReset();
+    api.getSandboxStatus.mockReset().mockResolvedValue(LINUX);
+    resetSandboxStatusForTests();
   });
 
   it('loads an agent, tracks dirtiness both ways and saves the full normalized payload', async () => {
@@ -388,6 +401,7 @@ describe('AgentBehaviorForm', () => {
       await screen.findByDisplayValue('Reviewer');
       expect(screen.getByText('Shell: Ask first')).toBeInTheDocument();
       expect(screen.getByText('Web on')).toBeInTheDocument();
+      expect(screen.getByText('Network: Host network')).toBeInTheDocument();
 
       await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
       expect(screen.getByRole('heading', { name: 'Local access' })).toHaveFocus();
@@ -429,10 +443,114 @@ describe('AgentBehaviorForm', () => {
       await screen.findByDisplayValue('Reviewer');
       await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
 
-      await userEvent.click(screen.getByRole('button', { name: 'Off' }));
+      const shell = screen.getByRole('group', { name: 'Shell' });
+      await userEvent.click(within(shell).getByRole('button', { name: 'Off' }));
 
-      expect(screen.getByRole('button', { name: 'Off' })).toHaveAttribute('aria-pressed', 'true');
+      expect(within(shell).getByRole('button', { name: 'Off' })).toHaveAttribute('aria-pressed', 'true');
       expect(screen.queryByRole('list', { name: 'Ask-first command prefixes' })).toBeNull();
+    });
+  });
+
+  describe('network', () => {
+    const openAccess = async () => {
+      await screen.findByDisplayValue('Reviewer');
+      await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
+    };
+    const networkButton = (name: string | RegExp) =>
+      within(screen.getByRole('group', { name: 'Network' })).getByRole('button', { name });
+    const withPolicy = (networkAccess: NetworkPolicy): AgentDetail => ({
+      ...REVIEWER,
+      execution: { ...REVIEWER.execution, sandbox: { networkAccess, sessionBus: 'allow' } },
+    });
+
+    it('saves each mode and keeps the lists across modes', async () => {
+      const { ref } = renderForm({ agentId: 'agent-1' });
+      await openAccess();
+      await waitFor(() => expect(networkButton('Allowlist')).toBeEnabled());
+      expect(networkButton(/Host network \(unfiltered\)/)).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByText(/including services on this computer and your local network/)).toBeInTheDocument();
+
+      for (const [label, mode] of [['Off', 'off'], ['Allowlist', 'allowlist'], [/Host network/, 'host_network']] as const) {
+        await userEvent.click(networkButton(label));
+        expect(networkButton(label)).toHaveAttribute('aria-pressed', 'true');
+        await submit(ref);
+        expect(sentUpdate().execution.sandbox.networkAccess).toEqual({ ...NETWORK, mode });
+      }
+    });
+
+    it('edits the host lists in Allowlist and rejects what is not a host', async () => {
+      api.workspaceGetAgent.mockResolvedValue(withPolicy({ ...NETWORK, mode: 'allowlist' }));
+      const { ref } = renderForm({ agentId: 'agent-1' });
+      expect(await screen.findByText('Network: Allowlist (2 hosts)')).toBeInTheDocument();
+      await openAccess();
+
+      const input = await screen.findByRole('textbox', { name: 'New entry for allowed hosts' });
+      const add = within(input.parentElement!).getByRole('button', { name: 'Add' });
+      for (const [text, reason] of [
+        ['https://x.org', /without http/],
+        ['x.org/docs', /without a path/],
+        ['x.org:443', /port/],
+        ['x .org', /no spaces/],
+        ['a*.org', /whole label/],
+      ] as const) {
+        await userEvent.clear(input);
+        await userEvent.type(input, text);
+        await userEvent.click(add);
+        expect(screen.getByRole('alert')).toHaveTextContent(reason);
+      }
+      expect(screen.getByRole('list', { name: 'Allowed hosts' }).querySelectorAll('li')).toHaveLength(2);
+
+      await userEvent.clear(input);
+      await userEvent.type(input, 'Docs.Example.ORG.');
+      expect(screen.queryByRole('alert')).toBeNull();
+      await userEvent.click(add);
+      await userEvent.click(screen.getByRole('button', { name: 'Remove bad.example.org' }));
+
+      await submit(ref);
+      expect(sentUpdate().execution.sandbox.networkAccess).toEqual({
+        mode: 'allowlist',
+        allowDomains: ['github.com', '*.example.org', 'docs.example.org'],
+        denyDomains: [],
+      });
+    });
+
+    it('offers Allowlist only where the sandbox can enforce it, with the reason', async () => {
+      api.getSandboxStatus.mockResolvedValue(MACOS);
+      renderForm({ agentId: 'agent-1' });
+      await openAccess();
+      await waitFor(() => expect(networkButton('Off')).toBeEnabled());
+      expect(networkButton(/Host network/)).toBeEnabled();
+      expect(networkButton('Allowlist')).toBeDisabled();
+      expect(networkButton('Allowlist')).toHaveAttribute('title', 'Not available on macOS yet');
+      expect(screen.getByText('Allowlist: Not available on macOS yet.')).toBeInTheDocument();
+    });
+
+    it('warns that a stored Allowlist stops the shell where it cannot be enforced', async () => {
+      api.getSandboxStatus.mockResolvedValue(MACOS);
+      api.workspaceGetAgent.mockResolvedValue(withPolicy({ ...NETWORK, mode: 'allowlist' }));
+      renderForm({ agentId: 'agent-1' });
+      await openAccess();
+      expect(await screen.findByText(/Shell commands will not run until you choose Off or Host network/)).toBeInTheDocument();
+    });
+
+    it('disables the whole control without a sandbox', async () => {
+      api.getSandboxStatus.mockResolvedValue(NO_SANDBOX);
+      renderForm({ agentId: 'agent-1' });
+      await openAccess();
+      expect(await screen.findByText('Not available on this PC.')).toBeInTheDocument();
+      for (const name of ['Off', 'Allowlist', /Host network/]) expect(networkButton(name)).toBeDisabled();
+    });
+
+    it('parses host entries as the backend matches them', () => {
+      expect(parseHostEntry(' GitHub.COM. ')).toBe('github.com');
+      expect(parseHostEntry('*.com')).toBe('*.com');
+      expect(parseHostEntry('s3.*.amazonaws.com')).toBe('s3.*.amazonaws.com');
+      expect(parseHostEntry('[2001:DB8::1]')).toBe('2001:db8::1');
+      expect(parseHostEntry('10.0.0.5')).toBe('10.0.0.5');
+      expect(parseHostEntry('bücher.example')).toBe('bücher.example');
+      for (const bad of ['*', 'a..b', 'ab:443', '[::1]:443', 'ftp://x', '']) {
+        expect(parseHostEntry(bad)).toHaveProperty('error');
+      }
     });
   });
 
