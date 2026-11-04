@@ -1776,6 +1776,7 @@ mod tests {
             ("rm", "find . -exec rm {} +"),
             ("rm", "find . -name x -execdir rm -f {} \\;"),
             ("rm", "find . -ok /bin/rm {} ';'"),
+            ("git push", "find . -exec git -C r push \\;"),
             ("rm", "FOO=bar rm -rf /tmp/x"),
             ("rm", "/usr/bin/rm -rf x"),
             ("rm", "./rm x"),
@@ -1912,6 +1913,8 @@ mod tests {
             ("gh api -XDELETE repos/o/r", "gh api -X DELETE"),
             ("gh api --method DELETE repos/o/r", "gh api -X DELETE"),
             ("gh api --method=DELETE repos/o/r", "gh api -X DELETE"),
+            ("gh api -X=DELETE repos/o/r", "gh api -X DELETE"),
+            ("timeout 5 gh api --method DELETE x", "gh api -X DELETE"),
             (
                 "gh api repos/o/r/git/refs/heads/x -X DELETE",
                 "gh api -X DELETE",

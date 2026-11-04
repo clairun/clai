@@ -510,6 +510,7 @@ mod tests {
         }
         // Only cargo takes a `+toolchain` word.
         assert_eq!(deny_form("date +%s").as_deref(), Some("date +%s"));
+        assert_eq!(deny_form("git +x push").as_deref(), Some("git +x push"));
     }
 
     #[test]
@@ -523,6 +524,7 @@ mod tests {
             "gh api -XDELETE repos/o/r",
             "gh api --method DELETE repos/o/r",
             "gh api --method=DELETE repos/o/r",
+            "gh api -X=DELETE repos/o/r",
             "gh api repos/o/r -X DELETE",
             "gh api repos/o/r --method delete",
             "gh -R o/r api repos/o/r -X 'DELETE'",
