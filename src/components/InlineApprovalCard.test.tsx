@@ -1075,6 +1075,19 @@ const MIXED_SAVABILITY = {
   ],
 } as unknown as PermissionRequest;
 
+// A row whose text repeats: three commands, two distinct texts.
+const REPEATED_TEXT_IN_ROW = {
+  ...SHARED_PREFIX,
+  requestId: 'perm-repeated-text',
+  command: 'ls a && ls a && ls b && grep x f',
+  segments: [
+    { text: 'ls a', kind: 'simple', suggestedPrefix: 'ls' },
+    { text: 'ls a', kind: 'simple', suggestedPrefix: 'ls' },
+    { text: 'ls b', kind: 'simple', suggestedPrefix: 'ls' },
+    { text: 'grep x f', kind: 'simple', suggestedPrefix: 'grep' },
+  ],
+} as unknown as PermissionRequest;
+
 const submitted = (): unknown[] => {
   const call = mockInvoke.mock.calls.find(([cmd]) => cmd === 'submit_permission_decision');
   if (!call) throw new Error('no decision was submitted');
@@ -1253,5 +1266,28 @@ describe('ApprovalCard — one row per prefix', () => {
     await userEvent.click(denyOnce(0));
     expect(screen.getByText('Choose for every row to continue')).toBeInTheDocument();
     expect(screen.queryByText('Choose for every part to continue')).toBeNull();
+  });
+
+  it('counts the commands behind the rows in the spoken bulk label', () => {
+    render(<ApprovalCard req={MIXED_SAVABILITY} speaker={speaker} />);
+
+    // The label and its tooltip count the same three commands; a count of
+    // rows would read 1 of 2.
+    const bulk = screen.getByRole('button', { name: 'All \u00b7 2 of 3 saved' });
+    expect(bulk.getAttribute('title')).toBe(
+      'Allow all (always where possible). Saves the prefixes of 2 of the 3 parts this click decides and runs the command; the remaining part is allowed once only.'
+    );
+  });
+
+  it('counts every command the always-deny chip blocks, not its distinct texts', async () => {
+    render(<ApprovalCard req={REPEATED_TEXT_IN_ROW} />);
+
+    // With the prefix cleared the row is blocked text by text: two texts,
+    // three commands.
+    await userEvent.clear(screen.getByDisplayValue('ls'));
+    const deny = screen.getAllByRole('button', { name: 'Always deny (this agent)' })[0]!;
+    expect(deny.getAttribute('title')).toBe(
+      "Saved on this workspace's own agent. Blocks the 3 commands of this row, each by its own text."
+    );
   });
 });

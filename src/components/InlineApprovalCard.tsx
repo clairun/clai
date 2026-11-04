@@ -295,15 +295,15 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
     onceOnlyParts.length === 0
       ? `Allow ${bulkScope} (always)`
       : `Allow ${bulkScope} (always where possible)`;
-  const bulkShortLabel =
-    onceOnlyParts.length === 0
-      ? `${bulkLead} always`
-      : `${bulkLead} · ${savedParts.length} of ${pendingParts.length} saved`;
-  // The click decides whole rows, so the claim it makes counts the parts
+  // The click decides whole rows, so the claims it makes count the parts
   // behind the rows, not the rows: a row that stands for two commands
   // decides two.
   const partCount = (rows: BulkPart[]) =>
     rows.reduce((total, row) => total + row.group.indices.length, 0);
+  const bulkShortLabel =
+    onceOnlyParts.length === 0
+      ? `${bulkLead} always`
+      : `${bulkLead} · ${partCount(savedParts)} of ${partCount(pendingParts)} saved`;
   const onceOnlyCount = partCount(onceOnlyParts);
   // A row answers every command that shares its prefix, so the two
   // counts part company as soon as commands merge: five commands can need
@@ -520,6 +520,11 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                     .map((member) => member.text.trim())
                     .filter((name) => name.length > 0);
               const canSaveDenyRule = denyNames.length > 0;
+              // The chip counts the commands it blocks, not their distinct
+              // texts: a text that repeats is blocked once per command.
+              const deniedCommands = group.members
+                .filter((member) => member.text.trim().length > 0)
+                .reduce((total, member) => total + member.count, 0);
               // The decision this row will submit: an "always allow" with
               // an emptied prefix field saves nothing, so it is an
               // allow-once.
@@ -595,7 +600,7 @@ export const ApprovalCard = ({ req, speaker, onDecided, ref }: ApprovalCardProps
                         disabled={isSubmitting}
                         {...(denyNames.length === 1
                           ? alwaysChip('deny', denyNames[0]!)
-                          : manyDenyChip(denyNames.length))}
+                          : manyDenyChip(deniedCommands))}
                       />
                     )}
                     <button
