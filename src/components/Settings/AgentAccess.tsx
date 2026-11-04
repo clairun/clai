@@ -13,8 +13,6 @@ import styles from './AgentBehaviorForm.module.css';
 export interface AccessDraft {
   grants: FilesystemPathGrant[];
   shellMode: ShellAccessMode;
-  allowed: string[];
-  blocked: string[];
   askFirst: string[];
   web: boolean;
   sessionBus: boolean;
@@ -115,40 +113,16 @@ export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, cont
           </div>
           <p className={form.hint}>{shellHint}</p>
 
-          {draft.shellMode !== 'off' && (
+          {draft.shellMode === 'restricted' && (
             <div className={styles.prefixColumns}>
-              {draft.shellMode === 'restricted' && (
-                <div className={styles.prefixList}>
-                  <span className={form.label}>Ask first</span>
-                  <PrefixListEditor
-                    items={draft.askFirst}
-                    onChange={(askFirst) => onChange({ askFirst })}
-                    disabled={disabled}
-                    label="Ask-first command prefixes"
-                    placeholder="git push"
-                  />
-                </div>
-              )}
-              {draft.shellMode === 'restricted' && (
-                <div className={styles.prefixList}>
-                  <span className={form.label}>Allowed without asking</span>
-                  <PrefixListEditor
-                    items={draft.allowed}
-                    onChange={(allowed) => onChange({ allowed })}
-                    disabled={disabled}
-                    label="Allowed command prefixes"
-                    placeholder="git status"
-                  />
-                </div>
-              )}
               <div className={styles.prefixList}>
-                <span className={form.label}>Always blocked</span>
+                <span className={form.label}>Ask first</span>
                 <PrefixListEditor
-                  items={draft.blocked}
-                  onChange={(blocked) => onChange({ blocked })}
+                  items={draft.askFirst}
+                  onChange={(askFirst) => onChange({ askFirst })}
                   disabled={disabled}
-                  label="Blocked command prefixes"
-                  placeholder="rm -rf"
+                  label="Ask-first command prefixes"
+                  placeholder="git push"
                 />
               </div>
             </div>

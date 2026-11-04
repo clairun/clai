@@ -108,63 +108,24 @@
   color: var(--color-text-primary);
 }
 
-/* One row stands for every part that shares its prefix: the commands stack
-   so nothing the decision approves is hidden behind its twin. */
-.segmentTexts {
+.matchList {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  gap: 4px;
-  min-width: 0;
-}
-
-.segmentMember {
-  display: inline-flex;
-  align-items: center;
   gap: 6px;
-  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-/* How many parts of the command this line covers. */
-.memberCount {
+/* The ask-first rule a part matched. */
+.ruleChip {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
   font-size: 11px;
-  color: var(--color-text-secondary);
-}
-
-.opaqueTag {
-  font-size: 10px;
   background: var(--color-warning-lighter, #FFFBEB);
   color: var(--color-warning-dark, #B45309);
   padding: 1px 7px;
   border-radius: var(--radius-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  font-weight: 600;
   border: 1px solid var(--color-warning-light, #F59E0B);
-}
-
-.prefixField {
-  display: flex;
-  flex-direction: column;
-  font-size: 11px;
-  color: var(--color-text-secondary);
-  gap: 4px;
-}
-
-.prefixField input {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
-  font-size: 12.5px;
-  background: var(--color-bg-elevated);
-  color: var(--color-text-primary);
-  border: 1px solid var(--color-border-medium);
-  border-radius: var(--radius-xs);
-  padding: 6px 10px;
-}
-
-.prefixField input:focus {
-  outline: none;
-  border-color: var(--color-border-focus);
-  box-shadow: 0 0 0 3px var(--color-primary-alpha-15);
 }
 
 /* The denial: one reason for the whole request, and the confirm that
@@ -273,11 +234,6 @@
   background: var(--color-accent-alpha-08);
 }
 
-.btnDeny:hover:not(:disabled) {
-  border-color: var(--color-critical, #DC2626);
-  color: var(--color-critical, #DC2626);
-}
-
 .btnDenyOnce:hover:not(:disabled) {
   background: var(--color-critical-bg, rgba(220, 38, 38, 0.08));
   border-color: var(--color-critical-border, rgba(220, 38, 38, 0.30));
@@ -298,54 +254,12 @@
   font-size: 12px;
 }
 
-.cardFooter {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  row-gap: 8px;
-}
-
-/* Disclosure for the bulk "allow all" action: which parts it saves as
-   rules, which it only allows once, and what it keeps of the decisions
-   the user already made. It sits on its own row above the buttons so it
-   is read before the click, not hidden in a tooltip. */
-.bulkNote {
-  flex: 1 0 100%;
-  margin: 0;
-  font-size: 12px;
-  line-height: 1.45;
-  color: var(--color-text-secondary);
-}
-
-.bulkNotePart {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
-  font-size: 11.5px;
-  background: var(--color-bg-tertiary);
-  border: 1px solid var(--color-border-light);
-  padding: 1px 5px;
-  border-radius: var(--radius-xs);
-  word-break: break-all;
-  color: var(--color-text-primary);
-}
-
-/* Why a part has no "always" affordance: it has no prefix to save. */
+/* Where "Always allow" applies. */
 .segmentHint {
   margin: 0;
   font-size: 12px;
   line-height: 1.4;
   color: var(--color-text-secondary);
-}
-
-.btnDenyAll {
-  background: transparent;
-  border: 1px dashed var(--color-border-strong);
-  color: var(--color-text-secondary);
-}
-
-.btnDenyAll:hover:not(:disabled) {
-  color: var(--color-critical, #DC2626);
-  border-color: var(--color-critical, #DC2626);
-  background: var(--color-critical-bg, rgba(220, 38, 38, 0.04));
 }
 
 .collapseBtn {
@@ -423,10 +337,6 @@
   gap: 2px;
 }
 
-.spoken .segmentTexts {
-  gap: 2px;
-}
-
 /* Each part on one line (its tooltip has it whole). */
 .spoken .segmentText code {
   display: -webkit-box;
@@ -455,7 +365,7 @@
   align-items: flex-start;
 }
 
-/* The decisions stay on one row: an "always" chip's prefix gives way first. */
+/* The decisions stay on one row. */
 .spoken .segmentButtons {
   flex-wrap: nowrap;
   gap: 4px;
@@ -470,38 +380,6 @@
   font-size: 13px;
   line-height: 18px;
   white-space: nowrap;
-}
-
-.spoken .btn:has(code) {
-  display: inline-flex;
-  flex: 0 1 auto;
-  min-width: 0;
-}
-
-/* The prefix an "always" chip saves; whole in its tooltip. */
-.spoken .btn code {
-  display: inline-block;
-  min-width: 2ch;
-  max-width: 14ch;
-  margin-left: 0.25em;
-  padding: 0;
-  line-height: inherit;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  vertical-align: bottom;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
-}
-
-.spoken .cardFooter {
-  justify-content: flex-start;
-  gap: 4px;
-}
-
-/* The spoken card lays a part out as a row, so the hint needs its own
-   line instead of squeezing in next to the chips. */
-.spoken .segmentHint {
-  flex: 1 0 100%;
 }
 
 /* Long commands wrap anywhere and scroll inside the bubble once it is out of room. */

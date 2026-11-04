@@ -224,6 +224,10 @@ const TWO_WORD_PERMISSIVE: &[&str] = &[
 ///
 /// The segment must not be Opaque (this function is only meaningful for
 /// segments that can be allowlisted).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "allow-side matcher, deleted in the next commit")
+)]
 pub fn suggest_prefix(segment: &str) -> String {
     // 1–2. The command's words, without leading env assignments. Anything
     // else (`> file`, `for f in …`) has no prefix to save.

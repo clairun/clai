@@ -1079,8 +1079,7 @@ mod tests {
             run_context: Arc::default(),
             had_warnings: Arc::new(AtomicBool::new(false)),
             session_grants: Arc::new(Mutex::new(Vec::new())),
-            session_allowed_command_prefixes: Arc::new(Mutex::new(Vec::new())),
-            session_blocked_command_prefixes: Arc::new(Mutex::new(Vec::new())),
+            run_removed_ask_first: Arc::new(Mutex::new(Vec::new())),
         };
         let manager_context = context(manager.id.clone());
         let assignee = create_assignment(

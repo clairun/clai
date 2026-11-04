@@ -67,6 +67,10 @@ impl Segment {
         }
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "allow-side matcher, deleted in the next commit")
+    )]
     pub fn is_opaque(&self) -> bool {
         !matches!(self, Segment::Simple(_))
     }

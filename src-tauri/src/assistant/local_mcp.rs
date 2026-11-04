@@ -79,22 +79,9 @@ pub struct ToolBinding {
     /// host engine so a session grant accepted during a CLI-provider run is
     /// visible to the same run's subsequent tool calls.
     pub session_grants: Arc<Mutex<Vec<crate::config::FilesystemPathGrant>>>,
-    /// Run-scoped allowed command prefixes accepted via the bash approval
-    /// modal. Populated from both `AllowOnce` and `AllowAlways` decisions
-    /// so a single `Allow once` during a run prevents the user from being
-    /// re-prompted for the same (or descendant) command for the rest of
-    /// the run. `AllowAlways` is additionally persisted by the submit
-    /// command into the agent's durable `allowed_command_prefixes`.
-    pub session_allowed_command_prefixes: Arc<Mutex<Vec<crate::assistant::tools::RunCommandGrant>>>,
-    /// Run-scoped blocked command prefixes — mirror of the allow cache
-    /// for `DenyAlways` decisions. Without this, a `DenyAlways` would be
-    /// honored on the next session (durable persistence) but the current
-    /// run would still re-prompt the user for the same command if the
-    /// LLM retried, because the running `context.execution` snapshot
-    /// doesn't pick up persistence. `DenyOnce` is intentionally NOT
-    /// cached: that decision is one-shot by definition, and re-prompting
-    /// on retry lets the user reconsider.
-    pub session_blocked_command_prefixes: Arc<Mutex<Vec<String>>>,
+    /// Ask-first rules removed by "Always allow" during the run, shared by
+    /// every tool call the run makes through this binding.
+    pub run_removed_ask_first: Arc<Mutex<Vec<String>>>,
 }
 
 impl LocalMcpRuntime {
@@ -408,8 +395,7 @@ async fn execute_bound_tool(
         run_context: Arc::clone(&binding.run_context),
         had_warnings: binding.had_warnings.clone(),
         session_grants: binding.session_grants.clone(),
-        session_allowed_command_prefixes: binding.session_allowed_command_prefixes.clone(),
-        session_blocked_command_prefixes: binding.session_blocked_command_prefixes.clone(),
+        run_removed_ask_first: binding.run_removed_ask_first.clone(),
     };
 
     tokio::select! {
@@ -579,8 +565,7 @@ mod tests {
             cancel_token: CancellationToken::new(),
             had_warnings: Default::default(),
             session_grants: Arc::new(Mutex::new(Vec::new())),
-            session_allowed_command_prefixes: Arc::new(Mutex::new(Vec::new())),
-            session_blocked_command_prefixes: Arc::new(Mutex::new(Vec::new())),
+            run_removed_ask_first: Arc::new(Mutex::new(Vec::new())),
         }
     }
 

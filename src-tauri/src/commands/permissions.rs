@@ -1,10 +1,10 @@
-//! Interactive shell-permission approval flow.
+//! Ask-first approval flow.
 //!
-//! When the bash tool runs a command that's not in the agent's allowlist
-//! (Restricted mode), instead of silently denying, the backend:
+//! When a Restricted agent runs a command that matches a rule on its
+//! ask-first list, the bash tool, instead of running it:
 //!
-//! 1. Builds a [`PermissionRequest`] describing each pipeline segment that
-//!    needs approval (with a suggested allowlist prefix per segment).
+//! 1. Builds a [`PermissionRequest`] listing each row of the command that
+//!    matched, with the rule it matched.
 //! 2. Registers a [`oneshot::Sender`] in [`PendingApprovals`] keyed by a
 //!    fresh request id.
 //! 3. Emits [`PERMISSION_REQUEST_EVENT`] to the frontend and emits
@@ -12,16 +12,14 @@
 //!    the fleet card can render a badge.
 //! 4. `.await`s the oneshot until the user decides or the run is cancelled.
 //! 5. When the frontend invokes [`submit_permission_decision`], the
-//!    backend looks up the sender, writes any `AllowAlways`/`DenyAlways`
-//!    entries to the workspace config for the request's agent *before*
-//!    delivering the decisions, then sends the decisions through the
-//!    oneshot. The bash tool resumes and either runs (all allows) or
-//!    returns an error (any deny).
+//!    backend looks up the sender and, for "Always allow", removes the
+//!    matched rules from the agent's ask-first list *before* delivering the
+//!    decision through the oneshot. The bash tool resumes and either runs
+//!    the command or returns an error carrying the user's reason.
 //!
 //! Sequencing: persistence happens *before* the oneshot delivery so that a
-//! crash between user click and command execution still leaves the grant
-//! on disk. The next run sees the saved prefix and passes without
-//! prompting.
+//! crash between user click and command execution still leaves the removal
+//! on disk.
 
 #![allow(dead_code)] // wired into local::execute_bash_exec; some helpers also called from tests
 
@@ -57,24 +55,14 @@ pub enum PermissionScope {
     //             // populates workspace_id with the agent's own id).
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
+/// A row of a command that matched an ask-first rule.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
-pub enum SegmentKind {
-    /// A plain command segment whose prefix can be safely allowlisted.
-    Simple,
-    /// Substitutions / executor heads / redirects / control flow — must
-    /// always go through fresh approval; can't be persisted.
-    Opaque,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
-pub struct SegmentApproval {
+pub struct AskFirstRow {
     pub text: String,
-    pub kind: SegmentKind,
-    pub suggested_prefix: String,
+    /// The rule on the agent's ask-first list that the row matched.
+    pub rule: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ts_rs::TS)]
@@ -86,14 +74,14 @@ pub struct PermissionRequest {
     pub agent_id: Option<String>,
     pub agent_name: Option<String>,
     pub command: String,
-    pub segments: Vec<SegmentApproval>,
-    /// True when an "always" decision is saved on a shared agent definition
-    /// rather than in this workspace.
+    pub rows: Vec<AskFirstRow>,
+    /// True when "Always allow" edits a shared agent definition rather than
+    /// this workspace's Main.
     ///
-    /// A command allowlist entry skips this prompt entirely next time, so where
-    /// the decision lands has to be visible while the user is deciding — and
-    /// for a shared teammate it lands on the definition, in force wherever that
-    /// agent works, including workspaces that assign it later.
+    /// Removing a rule stops it asking wherever the list lives, so where that
+    /// is has to be visible while the user is deciding: for a shared teammate
+    /// it is the definition, in force wherever that agent works, including
+    /// workspaces that assign it later.
     #[serde(default)]
     pub persists_to_shared_agent: bool,
     /// The other workspaces that decision reaches today. Empty when the agent
@@ -104,8 +92,8 @@ pub struct PermissionRequest {
 }
 
 impl PermissionRequest {
-    /// Build the request an agent waits on, resolving where an "always"
-    /// decision would be saved.
+    /// Build the request an agent waits on, resolving where "Always allow"
+    /// would be saved.
     ///
     /// The destination is derived here rather than passed in, so no call site
     /// can ask for consent without stating its scope.
@@ -114,7 +102,7 @@ impl PermissionRequest {
         workspace_id: Option<String>,
         agent_id: Option<String>,
         command: String,
-        segments: Vec<SegmentApproval>,
+        rows: Vec<AskFirstRow>,
     ) -> Self {
         let reach = match (workspace_id.as_deref(), agent_id.as_deref()) {
             (Some(workspace), Some(agent)) => shared_allowance_reach(state, workspace, agent),
@@ -128,10 +116,21 @@ impl PermissionRequest {
             // resolves it from agent_id via existing workspace queries.
             agent_name: None,
             command,
-            segments,
+            rows,
             persists_to_shared_agent: reach.is_some(),
             also_affects_workspaces: reach.unwrap_or_default(),
         }
+    }
+
+    /// The distinct rules the request's rows matched, in order.
+    pub fn rules(&self) -> Vec<String> {
+        let mut rules: Vec<String> = Vec::new();
+        for row in &self.rows {
+            if !rules.contains(&row.rule) {
+                rules.push(row.rule.clone());
+            }
+        }
+        rules
     }
 }
 
@@ -180,36 +179,21 @@ pub struct AttentionUpdate {
     pub pending_count: u32,
 }
 
-#[derive(Debug, Clone, Deserialize, ts_rs::TS)]
+/// The user's answer to an ask-first request.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, ts_rs::TS)]
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
-pub enum SegmentDecision {
+pub enum AskFirstDecision {
+    /// Run this command only.
     AllowOnce,
-    AllowAlways {
-        scope: PermissionScope,
-        prefix: String,
-    },
-    DenyOnce {
+    /// Remove the matched rules from the agent's ask-first list, then run it.
+    AlwaysAllow,
+    /// Do not run it; the reason goes back to the agent in the tool error.
+    Deny {
         #[serde(default)]
         #[ts(optional)]
         reason: Option<String>,
     },
-    DenyAlways {
-        scope: PermissionScope,
-        prefix: String,
-        #[serde(default)]
-        #[ts(optional)]
-        reason: Option<String>,
-    },
-}
-
-impl SegmentDecision {
-    pub fn is_allow(&self) -> bool {
-        matches!(
-            self,
-            SegmentDecision::AllowOnce | SegmentDecision::AllowAlways { .. }
-        )
-    }
 }
 
 /// In-memory registry of in-flight approval requests. Each entry holds a
@@ -226,7 +210,7 @@ struct PendingInner {
 
 #[derive(Debug)]
 pub enum PendingApprovalOutcome {
-    Decision(Vec<SegmentDecision>),
+    Decision(AskFirstDecision),
     Superseded,
 }
 
@@ -262,7 +246,7 @@ impl PendingApprovals {
 
     /// Registers a new pending approval. The caller supplies the full
     /// [`PermissionRequest`] payload (including a freshly-generated
-    /// `request_id` and the segment list), which is also stored so that
+    /// `request_id` and the matched rows), which is also stored so that
     /// late-mounting frontend components can re-discover it via
     /// [`list_pending_permission_requests`]. Returns a receiver for
     /// the bash handler to `.await` and the new pending-count for the
@@ -454,18 +438,18 @@ pub async fn list_pending_permission_counts(
     Ok(state.pending_approvals.counts_snapshot().await)
 }
 
-/// Tauri command — invoked by the frontend modal when the user submits
-/// per-segment decisions. Persists any always-grant/always-deny entries
-/// to disk *before* delivering the decisions to the awaiting bash tool,
-/// so the grant survives a crash between click and command execution.
+/// Tauri command — invoked by the approval card when the user decides.
+/// "Always allow" removes the matched rules from the agent's ask-first list
+/// *before* the decision is delivered to the awaiting bash tool, so the
+/// removal survives a crash between click and command execution.
 #[tauri::command]
 pub async fn submit_permission_decision(
     state: State<'_, AppState>,
     app: tauri::AppHandle,
     request_id: String,
-    mut decisions: Vec<SegmentDecision>,
+    mut decision: AskFirstDecision,
 ) -> Result<(), String> {
-    normalize_denial_reasons(&mut decisions)?;
+    normalize_denial_reason(&mut decision)?;
     let Some((entry, remaining)) = state.pending_approvals.take(&request_id).await else {
         return Err(format!(
             "No pending approval with request_id `{}` (already resolved or cleared)",
@@ -475,93 +459,70 @@ pub async fn submit_permission_decision(
     // The request has left the queue, so say so even if persisting fails.
     emit_permission_resolved(&app, &request_id);
     emit_attention(&app, entry.workspace_id.clone(), remaining);
-    deliver_decisions(state.inner(), entry, decisions)
+    deliver_decision(state.inner(), entry, decision)
 }
 
-/// Validate the complete decision list before persisting any rule, then
-/// deliver it to the tool waiting on the approval.
-fn deliver_decisions(
+/// Save an "Always allow", then deliver the decision to the tool waiting on
+/// the approval.
+fn deliver_decision(
     state: &AppState,
     entry: PendingEntry,
-    decisions: Vec<SegmentDecision>,
+    decision: AskFirstDecision,
 ) -> Result<(), String> {
-    let expected = entry.request.segments.len();
-    let actual = decisions.len();
-    if actual == 0 || actual != expected {
-        let _ = entry.sender.send(PendingApprovalOutcome::Decision(vec![
-            SegmentDecision::DenyOnce { reason: None },
-        ]));
-        return Err(format!(
-            "Expected {expected} segment decisions, received {actual}"
-        ));
-    }
-    // Persist before delivery so an always-grant survives a crash. Missing
-    // identity leaves an always decision scoped to this approval only.
-    if let (Some(workspace_id), Some(agent_id)) = (
-        entry.workspace_id.as_deref(),
-        entry.request.agent_id.as_deref(),
-    ) {
-        persist_decisions_to_agent(state, workspace_id, agent_id, &decisions)?;
+    // Persist before delivery so the removal survives a crash. Missing
+    // identity leaves "Always allow" scoped to this run only.
+    if decision == AskFirstDecision::AlwaysAllow {
+        if let (Some(workspace_id), Some(agent_id)) = (
+            entry.workspace_id.as_deref(),
+            entry.request.agent_id.as_deref(),
+        ) {
+            persist_always_allow(state, workspace_id, agent_id, &entry.request.rules())?;
+        }
     }
     let _ = entry
         .sender
-        .send(PendingApprovalOutcome::Decision(decisions));
+        .send(PendingApprovalOutcome::Decision(decision));
     Ok(())
 }
 
-fn normalize_denial_reasons(decisions: &mut [SegmentDecision]) -> Result<(), String> {
-    for decision in decisions.iter_mut() {
-        let (SegmentDecision::DenyOnce { reason } | SegmentDecision::DenyAlways { reason, .. }) =
-            decision
-        else {
-            continue;
-        };
-        if let Some(value) = reason {
-            let trimmed = value.trim();
-            if trimmed.chars().count() > 500 {
-                return Err("Denial reason must be at most 500 characters".to_string());
-            }
-            *reason = (!trimmed.is_empty()).then(|| trimmed.to_string());
-        }
+fn normalize_denial_reason(decision: &mut AskFirstDecision) -> Result<(), String> {
+    let AskFirstDecision::Deny {
+        reason: Some(value),
+    } = decision
+    else {
+        return Ok(());
+    };
+    let trimmed = value.trim();
+    if trimmed.chars().count() > 500 {
+        return Err("Denial reason must be at most 500 characters".to_string());
     }
+    let reason = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    *decision = AskFirstDecision::Deny { reason };
     Ok(())
 }
 
-/// Writes always-allow / always-deny decisions into the workspace config's
-/// per-agent execution policy.
+/// Removes `rules` from the agent's ask-first list, where the agent's
+/// settings live.
 ///
 /// The read-modify-write runs inside [`AppState::update_workspace_config`]
 /// (which serializes writers behind a process-wide lock), so a concurrent
-/// config write — starring a workspace, re-anchoring a schedule — can no
-/// longer be clobbered by this save. A bare load→mutate→save here previously
-/// lost such updates and refreshed the workspace index from the stale
-/// snapshot.
-pub fn persist_decisions_to_agent(
+/// config write — starring a workspace, re-anchoring a schedule — cannot be
+/// clobbered by this save.
+pub fn persist_always_allow(
     state: &AppState,
     workspace_id: &str,
     agent_id: &str,
-    decisions: &[SegmentDecision],
+    rules: &[String],
 ) -> Result<(), String> {
-    // Fast path: nothing durable to write (Once-only decisions, or Always
-    // decisions with blank prefixes). Skip the lock + disk round-trip.
-    let has_persistent = decisions.iter().any(|decision| {
-        matches!(
-            decision,
-            SegmentDecision::AllowAlways { prefix, .. }
-            | SegmentDecision::DenyAlways { prefix, .. }
-                if !prefix.trim().is_empty()
-        )
-    });
-    if !has_persistent {
+    if rules.is_empty() {
         return Ok(());
     }
 
-    // A teammate's command allowances belong to its shared definition: the user
-    // is saying "this reviewer may run `cargo test`", not "…but only in this
-    // project", and re-approving the same command in every workspace is the
-    // annoyance the agent library exists to remove. Path grants go the other
-    // way (see `path_grants::persist_grant_to_agent`) because a path is about
-    // this machine and this project, not about the teammate.
+    // A teammate's ask-first list belongs to its shared definition: the user
+    // is saying "this reviewer may push", not "…but only in this project".
+    // Path grants go the other way (see `path_grants::persist_grant_to_agent`)
+    // because a path is about this machine and this project, not about the
+    // teammate.
     let root = state
         .workspace_root(workspace_id)
         .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
@@ -571,7 +532,7 @@ pub fn persist_decisions_to_agent(
             state,
             &assignment.agent_definition_id,
             |definition| {
-                if apply_decisions_to_shell_policy(&mut definition.behavior, decisions) {
+                if remove_ask_first_rules(&mut definition.behavior, rules) {
                     definition.revision += 1;
                     definition.behavior.updated_at = chrono::Utc::now().timestamp_millis();
                 }
@@ -579,7 +540,7 @@ pub fn persist_decisions_to_agent(
         );
     }
 
-    // The Main has no shared definition, so its decisions stay in the workspace.
+    // The Main has no shared definition, so its list stays in the workspace.
     state.update_workspace_config(workspace_id, |config| {
         let Some(agent) = config
             .main_agent
@@ -588,7 +549,7 @@ pub fn persist_decisions_to_agent(
         else {
             return Err(format!("Workspace agent not found: {}", agent_id));
         };
-        if apply_decisions_to_shell_policy(agent, decisions) {
+        if remove_ask_first_rules(agent, rules) {
             let now = chrono::Utc::now().timestamp_millis();
             agent.updated_at = now;
             config.updated_at = now;
@@ -598,62 +559,13 @@ pub fn persist_decisions_to_agent(
     Ok(())
 }
 
-/// Applies always-allow / always-deny decisions to an agent's shell command
-/// policy lists. Returns whether anything changed. Pure list surgery — no
-/// I/O, no timestamps — so it is unit-testable without an [`AppState`].
-fn apply_decisions_to_shell_policy(
-    agent: &mut workspace_config::WorkspaceAgent,
-    decisions: &[SegmentDecision],
-) -> bool {
-    let mut changed = false;
-
-    for decision in decisions {
-        match decision {
-            SegmentDecision::AllowAlways { prefix, .. } => {
-                let prefix = prefix.trim();
-                if prefix.is_empty() {
-                    continue;
-                }
-                if !agent
-                    .execution
-                    .shell
-                    .allowed_command_prefixes
-                    .iter()
-                    .any(|p| p == prefix)
-                {
-                    agent
-                        .execution
-                        .shell
-                        .allowed_command_prefixes
-                        .push(prefix.to_string());
-                    changed = true;
-                }
-            }
-            SegmentDecision::DenyAlways { prefix, .. } => {
-                let prefix = prefix.trim();
-                if prefix.is_empty() {
-                    continue;
-                }
-                if !agent
-                    .execution
-                    .shell
-                    .blocked_command_prefixes
-                    .iter()
-                    .any(|p| p == prefix)
-                {
-                    agent
-                        .execution
-                        .shell
-                        .blocked_command_prefixes
-                        .push(prefix.to_string());
-                    changed = true;
-                }
-            }
-            SegmentDecision::AllowOnce | SegmentDecision::DenyOnce { .. } => {}
-        }
-    }
-
-    changed
+/// Removes every entry of the agent's ask-first list that is one of `rules`.
+/// Returns whether anything changed.
+fn remove_ask_first_rules(agent: &mut workspace_config::WorkspaceAgent, rules: &[String]) -> bool {
+    let list = &mut agent.execution.shell.ask_first_command_prefixes;
+    let before = list.len();
+    list.retain(|entry| !rules.iter().any(|rule| rule.trim() == entry.trim()));
+    list.len() != before
 }
 
 /// Emits the per-workspace pending-count update so the fleet card UI can
@@ -686,210 +598,115 @@ mod tests {
         workspace_config::WorkspaceAgent::new_manager("agent-1".to_string(), 1_000)
     }
 
-    fn allow_always(prefix: &str) -> SegmentDecision {
-        SegmentDecision::AllowAlways {
-            scope: PermissionScope::Agent,
-            prefix: prefix.to_string(),
-        }
-    }
-
-    fn deny_always(prefix: &str) -> SegmentDecision {
-        SegmentDecision::DenyAlways {
-            scope: PermissionScope::Agent,
-            prefix: prefix.to_string(),
-            reason: None,
-        }
+    fn rules(rules: &[&str]) -> Vec<String> {
+        rules.iter().map(|rule| rule.to_string()).collect()
     }
 
     #[test]
-    fn allow_always_adds_prefix_without_rewriting_blocklist() {
+    fn always_allow_removes_every_matched_rule_and_only_those() {
         let mut agent = fake_agent();
-        agent
-            .execution
-            .shell
-            .blocked_command_prefixes
-            .push("cargo".to_string());
+        let before = agent.execution.shell.ask_first_command_prefixes.clone();
+        assert!(before.contains(&"git push".to_string()));
 
-        let changed = apply_decisions_to_shell_policy(&mut agent, &[allow_always("cargo")]);
+        assert!(remove_ask_first_rules(
+            &mut agent,
+            &rules(&["git push", "rm"])
+        ));
 
-        assert!(changed);
-        assert!(agent
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"cargo".to_string()));
-        assert!(agent
-            .execution
-            .shell
-            .blocked_command_prefixes
-            .contains(&"cargo".to_string()));
+        let after = &agent.execution.shell.ask_first_command_prefixes;
+        let expected: Vec<String> = before
+            .iter()
+            .filter(|rule| *rule != "git push" && *rule != "rm")
+            .cloned()
+            .collect();
+        assert_eq!(after, &expected);
+        // Removing them again changes nothing.
+        assert!(!remove_ask_first_rules(&mut agent, &rules(&["git push"])));
     }
 
     #[test]
-    fn deny_always_adds_to_blocklist_without_rewriting_allowlist() {
+    fn always_allow_matches_a_saved_rule_with_surrounding_spaces() {
         let mut agent = fake_agent();
-        agent
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .push("curl".to_string());
+        agent.execution.shell.ask_first_command_prefixes = rules(&[" git push ", "rm"]);
 
-        let changed = apply_decisions_to_shell_policy(&mut agent, &[deny_always("curl")]);
+        assert!(remove_ask_first_rules(&mut agent, &rules(&["git push"])));
 
-        assert!(changed);
-        assert!(agent
-            .execution
-            .shell
-            .blocked_command_prefixes
-            .contains(&"curl".to_string()));
-        assert!(agent
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"curl".to_string()));
+        assert_eq!(
+            agent.execution.shell.ask_first_command_prefixes,
+            rules(&["rm"])
+        );
     }
 
     #[test]
-    fn denial_reasons_are_trimmed_and_bounded() {
-        let mut decisions = vec![
-            SegmentDecision::DenyOnce {
-                reason: Some("  use offline data  ".into()),
+    fn denial_reason_is_trimmed_and_bounded() {
+        let mut decision = AskFirstDecision::Deny {
+            reason: Some("  use offline data  ".into()),
+        };
+        normalize_denial_reason(&mut decision).unwrap();
+        assert_eq!(
+            decision,
+            AskFirstDecision::Deny {
+                reason: Some("use offline data".into())
+            }
+        );
+
+        let mut blank = AskFirstDecision::Deny {
+            reason: Some("  ".into()),
+        };
+        normalize_denial_reason(&mut blank).unwrap();
+        assert_eq!(blank, AskFirstDecision::Deny { reason: None });
+
+        let mut at_limit = AskFirstDecision::Deny {
+            reason: Some("é".repeat(500)),
+        };
+        assert!(normalize_denial_reason(&mut at_limit).is_ok());
+        let mut too_long = AskFirstDecision::Deny {
+            reason: Some("x".repeat(501)),
+        };
+        assert!(normalize_denial_reason(&mut too_long).is_err());
+    }
+
+    #[test]
+    fn decisions_parse_from_the_wire() {
+        let parse = |json: &str| serde_json::from_str::<AskFirstDecision>(json).unwrap();
+        assert_eq!(
+            parse(r#"{"kind":"allowOnce"}"#),
+            AskFirstDecision::AllowOnce
+        );
+        assert_eq!(
+            parse(r#"{"kind":"alwaysAllow"}"#),
+            AskFirstDecision::AlwaysAllow
+        );
+        assert_eq!(
+            parse(r#"{"kind":"deny"}"#),
+            AskFirstDecision::Deny { reason: None }
+        );
+        assert_eq!(
+            parse(r#"{"kind":"deny","reason":"not now"}"#),
+            AskFirstDecision::Deny {
+                reason: Some("not now".into())
+            }
+        );
+    }
+
+    #[test]
+    fn request_rules_are_the_distinct_matched_rules() {
+        let mut request = fake_request(Some("ws-1"));
+        request.rows = vec![
+            AskFirstRow {
+                text: "git push origin a".into(),
+                rule: "git push".into(),
             },
-            SegmentDecision::DenyAlways {
-                scope: PermissionScope::Agent,
-                prefix: "curl".into(),
-                reason: Some("  ".into()),
+            AskFirstRow {
+                text: "rm -f x".into(),
+                rule: "rm".into(),
+            },
+            AskFirstRow {
+                text: "git push origin b".into(),
+                rule: "git push".into(),
             },
         ];
-        normalize_denial_reasons(&mut decisions).unwrap();
-        assert!(
-            matches!(&decisions[0], SegmentDecision::DenyOnce { reason: Some(reason) } if reason == "use offline data")
-        );
-        assert!(matches!(
-            &decisions[1],
-            SegmentDecision::DenyAlways { reason: None, .. }
-        ));
-        let mut too_long = vec![SegmentDecision::DenyOnce {
-            reason: Some("x".repeat(501)),
-        }];
-        assert!(normalize_denial_reasons(&mut too_long).is_err());
-    }
-
-    #[test]
-    fn denial_reasons_are_optional_in_existing_decisions() {
-        let once: SegmentDecision = serde_json::from_str(r#"{"kind":"denyOnce"}"#).unwrap();
-        assert!(matches!(once, SegmentDecision::DenyOnce { reason: None }));
-        let always: SegmentDecision =
-            serde_json::from_str(r#"{"kind":"denyAlways","scope":"agent","prefix":"curl"}"#)
-                .unwrap();
-        assert!(matches!(
-            always,
-            SegmentDecision::DenyAlways { reason: None, .. }
-        ));
-    }
-
-    #[test]
-    fn deny_always_with_reason_persists_only_the_prefix() {
-        // The reason belongs to the response that carries it, never to the
-        // agent config on disk. A denial with a reason and one without must
-        // leave the same bytes behind.
-        let reason = "Do not send data externally";
-        let mut with_reason = fake_agent();
-        assert!(apply_decisions_to_shell_policy(
-            &mut with_reason,
-            &[SegmentDecision::DenyAlways {
-                scope: PermissionScope::Agent,
-                prefix: "curl".to_string(),
-                reason: Some(reason.to_string()),
-            }]
-        ));
-        let mut without_reason = fake_agent();
-        assert!(apply_decisions_to_shell_policy(
-            &mut without_reason,
-            &[deny_always("curl")]
-        ));
-
-        assert!(with_reason
-            .execution
-            .shell
-            .blocked_command_prefixes
-            .contains(&"curl".to_string()));
-        let serialized = serde_json::to_string(&with_reason).unwrap();
-        assert!(
-            !serialized.contains(reason),
-            "reason leaked into config: {serialized}"
-        );
-        assert_eq!(
-            serde_json::to_value(&with_reason.execution.shell).unwrap(),
-            serde_json::to_value(&without_reason.execution.shell).unwrap()
-        );
-    }
-
-    #[test]
-    fn apply_decisions_is_idempotent_and_reports_no_change() {
-        let mut agent = fake_agent();
-        assert!(apply_decisions_to_shell_policy(
-            &mut agent,
-            &[allow_always("cargo")]
-        ));
-        // Applying the same decision again must not report a change or
-        // duplicate the prefix.
-        assert!(!apply_decisions_to_shell_policy(
-            &mut agent,
-            &[allow_always("cargo")]
-        ));
-        assert_eq!(
-            agent
-                .execution
-                .shell
-                .allowed_command_prefixes
-                .iter()
-                .filter(|p| *p == "cargo")
-                .count(),
-            1
-        );
-    }
-
-    #[test]
-    fn once_decisions_and_blank_prefixes_change_nothing() {
-        let mut agent = fake_agent();
-        let before = agent.execution.shell.clone();
-
-        let changed = apply_decisions_to_shell_policy(
-            &mut agent,
-            &[
-                SegmentDecision::AllowOnce,
-                SegmentDecision::DenyOnce { reason: None },
-                allow_always("   "),
-                deny_always(""),
-            ],
-        );
-
-        assert!(!changed);
-        assert_eq!(
-            agent.execution.shell.allowed_command_prefixes,
-            before.allowed_command_prefixes
-        );
-        assert_eq!(
-            agent.execution.shell.blocked_command_prefixes,
-            before.blocked_command_prefixes
-        );
-    }
-
-    #[test]
-    fn prefixes_are_trimmed_before_persisting() {
-        let mut agent = fake_agent();
-
-        assert!(apply_decisions_to_shell_policy(
-            &mut agent,
-            &[allow_always("  cargo check  ")]
-        ));
-
-        assert!(agent
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"cargo check".to_string()));
+        assert_eq!(request.rules(), rules(&["git push", "rm"]));
     }
 
     fn fake_request(workspace_id: Option<&str>) -> PermissionRequest {
@@ -901,31 +718,7 @@ mod tests {
             agent_id: None,
             agent_name: None,
             command: "cmd".to_string(),
-            segments: vec![],
-        }
-    }
-
-    #[tokio::test]
-    async fn mismatched_decision_count_denies_pending_command() {
-        let fixture = crate::commands::path_grants::approval_destination_tests::Fixture::new();
-        for (segment_count, count) in [(2, 0), (2, 1), (2, 3), (0, 0)] {
-            let pending = PendingApprovals::new();
-            let mut request = fake_request(Some("ws-1"));
-            request.segments = (0..segment_count)
-                .map(|_| SegmentApproval {
-                    text: "echo ok".to_string(),
-                    kind: SegmentKind::Simple,
-                    suggested_prefix: "echo".to_string(),
-                })
-                .collect();
-            let id = request.request_id.clone();
-            let (rx, _) = pending.register(request, "run-1".to_string()).await;
-            let (entry, _) = pending.take(&id).await.unwrap();
-            let decisions = (0..count).map(|_| SegmentDecision::AllowOnce).collect();
-            assert!(deliver_decisions(&fixture.state, entry, decisions).is_err());
-            assert!(
-                matches!(rx.await, Ok(PendingApprovalOutcome::Decision(d)) if d.iter().any(|d| !d.is_allow()))
-            );
+            rows: vec![],
         }
     }
 
@@ -1072,47 +865,33 @@ mod approval_routing_tests {
     use super::*;
     use crate::commands::path_grants::approval_destination_tests::*;
 
-    fn allow(prefix: &str) -> SegmentDecision {
-        SegmentDecision::AllowAlways {
-            scope: PermissionScope::Agent,
-            prefix: prefix.to_string(),
-        }
+    fn git_push() -> Vec<String> {
+        vec!["git push".to_string()]
+    }
+
+    fn asks_first(shell: &crate::config::types::ShellCapabilityConfig) -> bool {
+        shell
+            .ask_first_command_prefixes
+            .contains(&"git push".to_string())
     }
 
     #[test]
-    fn a_teammates_always_allow_is_saved_on_the_shared_definition() {
+    fn a_teammates_always_allow_edits_the_shared_definition() {
         let fixture = Fixture::new();
+        assert!(asks_first(&fixture.definition().behavior.execution.shell));
 
-        persist_decisions_to_agent(
-            &fixture.state,
-            WORKSPACE_ID,
-            ASSIGNMENT_ID,
-            &[allow("cargo test")],
-        )
-        .expect("persist");
+        persist_always_allow(&fixture.state, WORKSPACE_ID, ASSIGNMENT_ID, &git_push())
+            .expect("persist");
 
         let definition = fixture.definition();
-        assert!(definition
-            .behavior
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"cargo test".to_string()));
+        assert!(!asks_first(&definition.behavior.execution.shell));
         assert_eq!(
             definition.revision, 2,
             "the shared edit is a new revision, so a stale form cannot revert it"
         );
         assert!(
-            fixture
-                .config()
-                .main_agent
-                .expect("main")
-                .execution
-                .shell
-                .allowed_command_prefixes
-                .iter()
-                .all(|prefix| prefix != "cargo test"),
-            "the workspace Main does not inherit a teammate's allowance"
+            asks_first(&fixture.config().main_agent.expect("main").execution.shell),
+            "the workspace Main keeps its own list"
         );
     }
 
@@ -1120,37 +899,25 @@ mod approval_routing_tests {
     fn the_mains_always_allow_stays_in_its_workspace() {
         let fixture = Fixture::new();
 
-        persist_decisions_to_agent(
-            &fixture.state,
-            WORKSPACE_ID,
-            MAIN_ID,
-            &[allow("cargo test")],
-        )
-        .expect("persist");
+        persist_always_allow(&fixture.state, WORKSPACE_ID, MAIN_ID, &git_push()).expect("persist");
 
-        assert!(fixture
-            .config()
-            .main_agent
-            .expect("main")
-            .execution
-            .shell
-            .allowed_command_prefixes
-            .contains(&"cargo test".to_string()));
+        assert!(!asks_first(
+            &fixture.config().main_agent.expect("main").execution.shell
+        ));
         assert_eq!(
             fixture.definition().revision,
             1,
             "no shared definition was touched"
         );
         assert!(
-            fixture
-                .other_config()
-                .main_agent
-                .expect("other main")
-                .execution
-                .shell
-                .allowed_command_prefixes
-                .iter()
-                .all(|prefix| prefix != "cargo test"),
+            asks_first(
+                &fixture
+                    .other_config()
+                    .main_agent
+                    .expect("other main")
+                    .execution
+                    .shell
+            ),
             "another workspace's Main is a different agent"
         );
     }
@@ -1226,19 +993,60 @@ mod approval_routing_tests {
         assert!(request.also_affects_workspaces.is_empty());
     }
 
-    #[test]
-    fn once_only_decisions_persist_nothing() {
+    async fn decide(fixture: &Fixture, agent_id: &str, decision: AskFirstDecision) {
+        let request = PermissionRequest {
+            request_id: uuid::Uuid::new_v4().to_string(),
+            workspace_id: Some(WORKSPACE_ID.to_string()),
+            agent_id: Some(agent_id.to_string()),
+            agent_name: None,
+            command: "git push".to_string(),
+            rows: vec![AskFirstRow {
+                text: "git push".to_string(),
+                rule: "git push".to_string(),
+            }],
+            persists_to_shared_agent: false,
+            also_affects_workspaces: Vec::new(),
+        };
+        let pending = &fixture.state.pending_approvals;
+        let (rx, _) = pending.register(request.clone(), "run-1".to_string()).await;
+        let (entry, _) = pending.take(&request.request_id).await.expect("pending");
+        deliver_decision(&fixture.state, entry, decision.clone()).expect("deliver");
+        let Ok(PendingApprovalOutcome::Decision(received)) = rx.await else {
+            panic!("expected a decision");
+        };
+        assert_eq!(received, decision);
+    }
+
+    #[tokio::test]
+    async fn always_allow_is_saved_before_the_command_is_released() {
         let fixture = Fixture::new();
 
-        persist_decisions_to_agent(
-            &fixture.state,
-            WORKSPACE_ID,
+        decide(&fixture, ASSIGNMENT_ID, AskFirstDecision::AlwaysAllow).await;
+
+        assert!(!asks_first(&fixture.definition().behavior.execution.shell));
+    }
+
+    #[tokio::test]
+    async fn allow_once_and_deny_save_nothing() {
+        let fixture = Fixture::new();
+
+        decide(&fixture, ASSIGNMENT_ID, AskFirstDecision::AllowOnce).await;
+        decide(&fixture, MAIN_ID, AskFirstDecision::AllowOnce).await;
+        decide(
+            &fixture,
             ASSIGNMENT_ID,
-            &[SegmentDecision::AllowOnce],
+            AskFirstDecision::Deny {
+                reason: Some("no".into()),
+            },
         )
-        .expect("persist");
+        .await;
+        decide(&fixture, MAIN_ID, AskFirstDecision::Deny { reason: None }).await;
 
         assert_eq!(fixture.definition().revision, 1);
+        assert!(asks_first(&fixture.definition().behavior.execution.shell));
+        assert!(asks_first(
+            &fixture.config().main_agent.expect("main").execution.shell
+        ));
     }
 }
 
@@ -1254,21 +1062,21 @@ mod denial_reason_tests {
     async fn a_submitted_reason_reaches_the_tool_error_and_is_not_persisted() {
         let fixture = Fixture::new();
 
-        let segments = vec![SegmentApproval {
-            text: "curl x".to_string(),
-            kind: SegmentKind::Simple,
-            suggested_prefix: "curl".to_string(),
+        let rows = vec![AskFirstRow {
+            text: "git push origin main".to_string(),
+            rule: "git push".to_string(),
         }];
         let request = PermissionRequest {
             request_id: "req-1".to_string(),
             workspace_id: Some(WORKSPACE_ID.to_string()),
             agent_id: Some(MAIN_ID.to_string()),
             agent_name: None,
-            command: "curl x".to_string(),
-            segments: segments.clone(),
+            command: "git push origin main".to_string(),
+            rows: rows.clone(),
             persists_to_shared_agent: false,
             also_affects_workspaces: Vec::new(),
         };
+        let before = fixture.config();
         // The bash tool registers the request and waits on the oneshot.
         let (rx, _count) = fixture
             .state
@@ -1276,13 +1084,11 @@ mod denial_reason_tests {
             .register(request.clone(), "run-1".to_string())
             .await;
 
-        // The user denies always and gives a reason.
-        let mut decisions = vec![SegmentDecision::DenyAlways {
-            scope: PermissionScope::Agent,
-            prefix: "curl".to_string(),
-            reason: Some("no network upload".to_string()),
-        }];
-        normalize_denial_reasons(&mut decisions).expect("normalize reasons");
+        // The user denies and gives a reason.
+        let mut decision = AskFirstDecision::Deny {
+            reason: Some(" no network upload ".to_string()),
+        };
+        normalize_denial_reason(&mut decision).expect("normalize reason");
 
         // The submit command removes the request from the queue and hands the
         // decision to the waiting tool.
@@ -1292,25 +1098,28 @@ mod denial_reason_tests {
             .take(&request.request_id)
             .await
             .expect("pending approval");
-        deliver_decisions(&fixture.state, entry, decisions).expect("deliver");
+        deliver_decision(&fixture.state, entry, decision).expect("deliver");
 
         // The tool turns the decision into the error the model reads.
-        let PendingApprovalOutcome::Decision(received) = rx.await.expect("decision") else {
-            panic!("expected a decision");
+        let PendingApprovalOutcome::Decision(AskFirstDecision::Deny { reason }) =
+            rx.await.expect("decision")
+        else {
+            panic!("expected a denial");
         };
-        let error = crate::assistant::tools::local::denied_segments_message(&segments, &received);
-        assert!(error.contains("no network upload"), "{error}");
+        let error =
+            crate::assistant::tools::local::ask_first_denied_message(&rows, reason.as_deref());
+        assert_eq!(
+            error,
+            "User denied `git push origin main` (ask-first rule `git push`). \
+             Reason: no network upload."
+        );
 
-        // The agent config keeps the blocked prefix, but not the reason.
+        // The agent config is untouched, and the reason is not in it.
         let config = fixture.config();
-        assert!(config
-            .main_agent
-            .as_ref()
-            .expect("main")
-            .execution
-            .shell
-            .blocked_command_prefixes
-            .contains(&"curl".to_string()));
+        assert_eq!(
+            serde_json::to_value(&config.main_agent).unwrap(),
+            serde_json::to_value(&before.main_agent).unwrap()
+        );
         let serialized = serde_json::to_string(&config).expect("serialize config");
         assert!(!serialized.contains("no network upload"), "{serialized}");
     }

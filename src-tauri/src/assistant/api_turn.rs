@@ -345,8 +345,7 @@ async fn start_api_turn(
     // Run-scoped filesystem grants accepted via fs_request_grant stay visible
     // to subsequent tool calls through this shared context.
     let session_grants = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let session_allowed_command_prefixes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let session_blocked_command_prefixes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let run_removed_ask_first = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
 
     // === Tool execution loop ===
     // Build system prompt (prepended to every API call, not persisted).
@@ -361,8 +360,7 @@ async fn start_api_turn(
         run_context: Arc::clone(run_context),
         had_warnings: Default::default(),
         session_grants,
-        session_allowed_command_prefixes,
-        session_blocked_command_prefixes,
+        run_removed_ask_first,
     };
 
     // The run's conversation, read from the database once. Every row this run

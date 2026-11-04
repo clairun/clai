@@ -14,6 +14,8 @@ fn default_true() -> bool {
     true
 }
 
+/// The default blocklist from before the ask-first list replaced it. A config
+/// saved with neither list reads as if it had this one.
 fn default_restricted_shell_blocklist() -> Vec<String> {
     vec![
         "rm".to_string(),
@@ -69,68 +71,6 @@ fn ask_first_from_blocklist(blocked: &[String]) -> Vec<String> {
         }
     }
     rules
-}
-
-/// The subset of `standard_restricted_shell_allowlist` that creates or modifies
-/// a file. Used by `ShellCapabilityConfig::can_write_files`; see the note there
-/// about why an incomplete list is the safe direction. Nothing on the default
-/// blocklist belongs here — `dd` would be a false positive in exactly the
-/// direction that note promises to avoid.
-const FILE_WRITING_COMMANDS: &[&str] = &[
-    "mkdir", "cp", "mv", "touch", "tee", "printf", "sed", "ln", "truncate",
-];
-
-/// Built-in command prefixes for Restricted shell mode. These cover routine
-/// workspace inspection and edits, but are not a guarantee that every flag
-/// combination is non-mutating; the filesystem sandbox and blocklist still
-/// define the hard safety boundary.
-pub fn standard_restricted_shell_allowlist() -> Vec<String> {
-    vec![
-        "pwd".to_string(),
-        "cd".to_string(),
-        "ls".to_string(),
-        "rg".to_string(),
-        "grep".to_string(),
-        "find".to_string(),
-        "cat".to_string(),
-        "head".to_string(),
-        "tail".to_string(),
-        "sort".to_string(),
-        "cut".to_string(),
-        "tr".to_string(),
-        "diff".to_string(),
-        "wc".to_string(),
-        "file".to_string(),
-        "stat".to_string(),
-        "du".to_string(),
-        "df".to_string(),
-        // Generic filesystem work now goes through bash_exec. These commands
-        // cover normal workspace edits; the OS sandbox remains the filesystem
-        // boundary and the destructive-command blocklist still applies.
-        "mkdir".to_string(),
-        "cp".to_string(),
-        "mv".to_string(),
-        "touch".to_string(),
-        "ln".to_string(),
-        "tee".to_string(),
-        "sed".to_string(),
-        "printf".to_string(),
-        "echo".to_string(),
-        "date".to_string(),
-        "whoami".to_string(),
-        "uname".to_string(),
-        "which".to_string(),
-        "git status".to_string(),
-        "git diff".to_string(),
-        "git log".to_string(),
-        "git show".to_string(),
-        "git rev-parse".to_string(),
-        "git ls-files".to_string(),
-        "git grep".to_string(),
-        "git blame".to_string(),
-        "git branch --show-current".to_string(),
-        "git remote -v".to_string(),
-    ]
 }
 
 // =============================================================================
@@ -354,8 +294,6 @@ pub struct FilesystemCapabilityConfig {
 #[ts(export, export_to = "bindings.ts")]
 pub struct ShellCapabilityConfig {
     pub mode: ShellAccessMode,
-    pub allowed_command_prefixes: Vec<String>,
-    pub blocked_command_prefixes: Vec<String>,
     /// Commands a Restricted agent asks the user about before running.
     pub ask_first_command_prefixes: Vec<String>,
 }
@@ -364,22 +302,19 @@ impl Default for ShellCapabilityConfig {
     fn default() -> Self {
         Self {
             mode: ShellAccessMode::Off,
-            allowed_command_prefixes: Vec::new(),
-            blocked_command_prefixes: default_restricted_shell_blocklist(),
             ask_first_command_prefixes: default_ask_first_command_prefixes(),
         }
     }
 }
 
 /// [`ShellCapabilityConfig`] as stored. A config saved before the ask-first
-/// list existed has none, and gets one built from its blocklist.
+/// list existed has none, and gets one built from its blocklist; its
+/// `allowedCommandPrefixes` is ignored. Neither old list is written back.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredShellCapabilityConfig {
     #[serde(default)]
     mode: ShellAccessMode,
-    #[serde(default)]
-    allowed_command_prefixes: Vec<String>,
     #[serde(default = "default_restricted_shell_blocklist")]
     blocked_command_prefixes: Vec<String>,
     #[serde(default)]
@@ -394,51 +329,8 @@ impl<'de> Deserialize<'de> for ShellCapabilityConfig {
             .unwrap_or_else(|| ask_first_from_blocklist(&stored.blocked_command_prefixes));
         Ok(Self {
             mode: stored.mode,
-            allowed_command_prefixes: stored.allowed_command_prefixes,
-            blocked_command_prefixes: stored.blocked_command_prefixes,
             ask_first_command_prefixes,
         })
-    }
-}
-
-impl ShellCapabilityConfig {
-    /// Whether this agent can create or modify a file at all.
-    ///
-    /// Generic file work runs through `bash_exec`, so in `Restricted` mode the
-    /// write capability is the allowlist, not the mode: a reviewer allowed only
-    /// `cat`/`rg`/`git diff` can read everything and write nothing, and every
-    /// write it attempts stops on an approval prompt. Callers use this to avoid
-    /// instructing such an agent to produce files.
-    ///
-    /// Deliberately conservative: an allowlist that writes through some other
-    /// command (`python3 -c ...`) reads as read-only here. A false negative only
-    /// withholds guidance; it never grants access.
-    pub fn can_write_files(&self) -> bool {
-        match self.mode {
-            ShellAccessMode::Off => false,
-            ShellAccessMode::Full => true,
-            ShellAccessMode::Restricted => {
-                self.effective_allowed_command_prefixes()
-                    .iter()
-                    .any(|prefix| {
-                        prefix
-                            .split_whitespace()
-                            .next()
-                            .is_some_and(|head| FILE_WRITING_COMMANDS.contains(&head))
-                    })
-            }
-        }
-    }
-
-    pub fn effective_allowed_command_prefixes(&self) -> Vec<String> {
-        let mut allowed = Vec::new();
-        for prefix in &self.allowed_command_prefixes {
-            let prefix = prefix.trim();
-            if !prefix.is_empty() {
-                push_unique_prefix(&mut allowed, prefix.to_string());
-            }
-        }
-        allowed
     }
 }
 
@@ -857,50 +749,6 @@ mod tests {
         assert!(first_of(&["a"], &[]).is_none());
     }
 
-    fn restricted_with(prefixes: &[&str]) -> ShellCapabilityConfig {
-        ShellCapabilityConfig {
-            mode: ShellAccessMode::Restricted,
-            allowed_command_prefixes: prefixes.iter().map(|p| (*p).to_string()).collect(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn can_write_files_follows_the_allowlist_not_the_mode() {
-        // The shipped code-reviewer template's shape: a shell, no way to write.
-        assert!(!restricted_with(&["rg", "cat", "git diff", "gh pr view"]).can_write_files());
-        // Our own standard tier ships file commands.
-        assert!(ShellCapabilityConfig {
-            mode: ShellAccessMode::Restricted,
-            allowed_command_prefixes: standard_restricted_shell_allowlist(),
-            ..Default::default()
-        }
-        .can_write_files());
-        // A multi-word prefix still matches on its head command.
-        assert!(restricted_with(&["tee -a"]).can_write_files());
-        // Whitespace-only entries are dropped before the check.
-        assert!(!restricted_with(&["  "]).can_write_files());
-        // A command that merely contains a write command's name does not count.
-        assert!(!restricted_with(&["cpio", "sedate"]).can_write_files());
-    }
-
-    #[test]
-    fn can_write_files_is_decided_by_the_mode_outside_restricted() {
-        assert!(!ShellCapabilityConfig::default().can_write_files());
-        assert!(ShellCapabilityConfig {
-            mode: ShellAccessMode::Full,
-            ..Default::default()
-        }
-        .can_write_files());
-        // Full ignores the allowlist entirely, empty or not.
-        assert!(ShellCapabilityConfig {
-            mode: ShellAccessMode::Full,
-            allowed_command_prefixes: vec![],
-            ..Default::default()
-        }
-        .can_write_files());
-    }
-
     fn stored_shell(json: serde_json::Value) -> ShellCapabilityConfig {
         serde_json::from_value(json).expect("shell config")
     }
@@ -924,12 +772,26 @@ mod tests {
             "allowedCommandPrefixes": ["git status"],
             "blockedCommandPrefixes": ["sudo", " curl ", "git push", ""],
         }));
-        assert_eq!(shell.mode, ShellAccessMode::Restricted);
+        assert_eq!(
+            shell.mode,
+            ShellAccessMode::Restricted,
+            "Restricted stays Restricted"
+        );
         let mut expected: Vec<String> = NEW_ASK_FIRST_RULES.iter().map(|r| r.to_string()).collect();
         expected.extend(["sudo".to_string(), "curl".to_string()]);
         assert_eq!(
             shell.ask_first_command_prefixes, expected,
-            "the new rules, then the blocklist, trimmed and without duplicates;              the rm the user removed from the blocklist stays out"
+            "the new rules, then the blocklist, trimmed and without duplicates; \
+             the rm the user removed from the blocklist stays out"
+        );
+
+        assert_eq!(
+            serde_json::to_value(&shell).unwrap(),
+            serde_json::json!({
+                "mode": "restricted",
+                "askFirstCommandPrefixes": expected,
+            }),
+            "neither old list is written back"
         );
     }
 

@@ -665,7 +665,7 @@ mod tests {
             agent_id: None,
             agent_name: None,
             command: "cmd".to_string(),
-            segments: Vec::new(),
+            rows: Vec::new(),
         };
         let _waiting = state
             .pending_approvals

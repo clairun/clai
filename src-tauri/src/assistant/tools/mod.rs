@@ -67,15 +67,6 @@ pub fn strip_local_mcp_qualifier(name: &str) -> &str {
     name.strip_prefix(LOCAL_MCP_TOOL_PREFIX).unwrap_or(name)
 }
 
-/// A command that an approval earlier in the run allows.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RunCommandGrant {
-    /// The command and every command it prefixes.
-    Prefix(String),
-    /// This exact command text only.
-    Exact(String),
-}
-
 /// Context for tool execution within an assistant run.
 pub struct ToolExecutionContext {
     pub session_id: SessionId,
@@ -94,28 +85,10 @@ pub struct ToolExecutionContext {
     /// lands here so the running tool sees the grant immediately *and* gets
     /// persisted to the agent's DB row so the next session picks it up.
     pub session_grants: Arc<Mutex<Vec<FilesystemPathGrant>>>,
-    /// Run-scoped allowed command prefixes accepted via the bash approval
-    /// modal. Mirrors `session_grants` for commands: both `AllowOnce` and
-    /// `AllowAlways` populate this so the same command (or a descendant
-    /// of the chosen prefix) won't re-prompt the user for the rest of
-    /// the run. `AllowAlways` is additionally persisted to the agent's
-    /// durable `allowed_command_prefixes`; `AllowOnce` is run-scoped only
-    /// and vanishes when the run ends. Without this cache, every bash
-    /// invocation re-evaluated only the durable list (which mid-run
-    /// reflects neither the just-accepted `AllowOnce` nor the
-    /// just-accepted `AllowAlways`, since persistence updates the DB but
-    /// not the running execution snapshot) and re-prompted every time.
-    /// A row with no prefix to save is allowed as its exact text.
-    pub session_allowed_command_prefixes: Arc<Mutex<Vec<RunCommandGrant>>>,
-    /// Run-scoped blocked command prefixes — symmetric counterpart of
-    /// `session_allowed_command_prefixes` for `DenyAlways` decisions. A
-    /// `DenyAlways` mid-run otherwise persists to the agent's durable
-    /// `blocked_command_prefixes` but isn't visible to the running
-    /// `context.execution`, so the LLM's next retry of the same command
-    /// would re-prompt the user. `DenyOnce` is deliberately NOT cached:
-    /// it's a one-shot decision by design, and re-prompting on retry
-    /// lets the user reconsider.
-    pub session_blocked_command_prefixes: Arc<Mutex<Vec<String>>>,
+    /// Ask-first rules removed by "Always allow" during this run. The run
+    /// reads its settings from a snapshot taken at start, so without this a
+    /// rule the user just removed would keep asking until the next run.
+    pub run_removed_ask_first: Arc<Mutex<Vec<String>>>,
 }
 
 impl ToolExecutionContext {
@@ -150,49 +123,22 @@ impl ToolExecutionContext {
             .unwrap_or_default()
     }
 
-    /// Append a run-scoped allowed command. Idempotent so re-approving the
-    /// same command doesn't bloat the list.
-    pub fn add_session_allowed_command(&self, grant: RunCommandGrant) {
-        let (RunCommandGrant::Prefix(text) | RunCommandGrant::Exact(text)) = &grant;
-        if text.trim().is_empty() {
-            return;
-        }
-        if let Ok(mut grants) = self.session_allowed_command_prefixes.lock() {
-            if !grants.contains(&grant) {
-                grants.push(grant);
+    /// Record ask-first rules removed during this run. Idempotent.
+    pub fn add_run_removed_ask_first(&self, rules: &[String]) {
+        if let Ok(mut removed) = self.run_removed_ask_first.lock() {
+            for rule in rules {
+                if !removed.contains(rule) {
+                    removed.push(rule.clone());
+                }
             }
         }
     }
 
-    /// Snapshot of run-scoped allowed commands for merging with the
-    /// durable allowlist in policy evaluation.
-    pub fn session_allowed_command_prefixes_snapshot(&self) -> Vec<RunCommandGrant> {
-        self.session_allowed_command_prefixes
+    /// Snapshot of the ask-first rules removed during this run.
+    pub fn run_removed_ask_first_snapshot(&self) -> Vec<String> {
+        self.run_removed_ask_first
             .lock()
-            .map(|p| p.clone())
-            .unwrap_or_default()
-    }
-
-    /// Append a run-scoped blocked command prefix. Idempotent on string
-    /// equality. Mirrors [`Self::add_session_allowed_command`].
-    pub fn add_session_blocked_command_prefix(&self, prefix: String) {
-        let trimmed = prefix.trim();
-        if trimmed.is_empty() {
-            return;
-        }
-        if let Ok(mut prefixes) = self.session_blocked_command_prefixes.lock() {
-            if !prefixes.iter().any(|p| p == trimmed) {
-                prefixes.push(trimmed.to_string());
-            }
-        }
-    }
-
-    /// Snapshot of run-scoped blocked command prefixes for merging with
-    /// the durable blocklist in policy evaluation.
-    pub fn session_blocked_command_prefixes_snapshot(&self) -> Vec<String> {
-        self.session_blocked_command_prefixes
-            .lock()
-            .map(|p| p.clone())
+            .map(|rules| rules.clone())
             .unwrap_or_default()
     }
 }

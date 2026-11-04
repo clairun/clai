@@ -49,8 +49,6 @@ const REVIEWER: AgentDetail = {
     filesystem: { extraPaths: [HOME_GRANT] },
     shell: {
       mode: 'restricted',
-      allowedCommandPrefixes: ['git status'],
-      blockedCommandPrefixes: ['rm'],
       askFirstCommandPrefixes: ['git push'],
     },
     web: { enabled: true },
@@ -86,7 +84,7 @@ const sentUpdate = () => api.workspaceUpdateAgent.mock.calls.at(-1)![0] as {
   providerConnectionIds: string[];
   execution: {
     filesystem: { extraPaths: FilesystemPathGrant[] };
-    shell: { mode: string; allowedCommandPrefixes: string[]; blockedCommandPrefixes: string[] };
+    shell: { mode: string; askFirstCommandPrefixes: string[] };
     web: { enabled: boolean };
     sandbox: { sessionBus: string };
   };
@@ -133,8 +131,6 @@ describe('AgentBehaviorForm', () => {
         filesystem: { extraPaths: [HOME_GRANT] },
         shell: {
           mode: 'restricted',
-          allowedCommandPrefixes: ['git status'],
-          blockedCommandPrefixes: ['rm'],
           askFirstCommandPrefixes: ['git push'],
         },
         web: { enabled: true },
@@ -182,18 +178,18 @@ describe('AgentBehaviorForm', () => {
       providerConnectionIds: string[];
       execution: {
         filesystem: { extraPaths: unknown[] };
-        shell: { mode: string; blockedCommandPrefixes: string[]; askFirstCommandPrefixes: string[] };
+        shell: { mode: string; askFirstCommandPrefixes: string[] };
       };
     };
     expect(request.name).toBe('Scout');
     expect(request.providerConnectionIds).toEqual(['conn-b']);
     expect(request.execution.filesystem.extraPaths).toEqual([HOME_GRANT]);
     expect(request.execution.shell.mode).toBe('off');
-    expect(request.execution.shell.blockedCommandPrefixes).toEqual([
-      'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
-    ]);
     expect(request.execution.shell.askFirstCommandPrefixes).toHaveLength(24);
     expect(request.execution.shell.askFirstCommandPrefixes.slice(0, 2)).toEqual(['git push', 'gh pr merge']);
+    expect(request.execution.shell.askFirstCommandPrefixes.slice(14)).toEqual([
+      'rm', 'sudo', 'chmod', 'chown', 'dd', 'mkfs', 'mount', 'umount', 'shutdown', 'reboot',
+    ]);
     expect(api.workspaceUpdateAgent).not.toHaveBeenCalled();
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
   });
@@ -391,7 +387,6 @@ describe('AgentBehaviorForm', () => {
       expect(screen.getByRole('heading', { name: 'Local access' })).toHaveFocus();
       expect(screen.getByText('/home/u')).toBeInTheDocument();
       expect(screen.getByText('Preset')).toBeInTheDocument();
-      expect(screen.getByRole('list', { name: 'Allowed command prefixes' })).toBeInTheDocument();
       expect(screen.getByRole('list', { name: 'Ask-first command prefixes' })).toHaveTextContent('git push');
 
       await userEvent.click(screen.getByRole('switch', { name: 'Web access' }));
@@ -403,11 +398,8 @@ describe('AgentBehaviorForm', () => {
       await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Access for the new path' }), 'read_write');
       await userEvent.click(screen.getAllByRole('button', { name: 'Add' })[0]!);
       await userEvent.click(screen.getByRole('button', { name: 'Full' }));
-      // The blocklist applies under Full too, so it stays editable; the
-      // allowlist only means something under Restricted.
-      expect(screen.queryByRole('list', { name: 'Allowed command prefixes' })).toBeNull();
+      // Full reads no list, so none is shown.
       expect(screen.queryByRole('list', { name: 'Ask-first command prefixes' })).toBeNull();
-      expect(screen.getByRole('list', { name: 'Blocked command prefixes' })).toBeInTheDocument();
       await userEvent.click(screen.getByRole('switch', { name: 'Web access' }));
       await userEvent.click(screen.getByRole('switch', { name: 'Session D-Bus' }));
 
@@ -420,15 +412,13 @@ describe('AgentBehaviorForm', () => {
       expect(execution.filesystem.extraPaths).toEqual([HOME_GRANT, { path: '/srv/data', access: 'read_write', origin: null }]);
       expect(execution.shell).toEqual({
         mode: 'full',
-        allowedCommandPrefixes: ['git status'],
-        blockedCommandPrefixes: ['rm'],
         askFirstCommandPrefixes: ['git push'],
       });
       expect(execution.web.enabled).toBe(false);
       expect(execution.sandbox.sessionBus).toBe('deny');
     });
 
-    it('hides both prefix lists when the shell is off', async () => {
+    it('hides the ask-first list when the shell is off', async () => {
       renderForm({ agentId: 'agent-1' });
       await screen.findByDisplayValue('Reviewer');
       await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
@@ -436,8 +426,7 @@ describe('AgentBehaviorForm', () => {
       await userEvent.click(screen.getByRole('button', { name: 'Off' }));
 
       expect(screen.getByRole('button', { name: 'Off' })).toHaveAttribute('aria-pressed', 'true');
-      expect(screen.queryByRole('list', { name: 'Blocked command prefixes' })).toBeNull();
-      expect(screen.queryByRole('list', { name: 'Allowed command prefixes' })).toBeNull();
+      expect(screen.queryByRole('list', { name: 'Ask-first command prefixes' })).toBeNull();
     });
   });
 
