@@ -11,6 +11,7 @@ import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender
 import RequestingAgent from './Agents/RequestingAgent';
 import { chipText } from './requestChips';
 import { useDecisionSender } from './useDecisionSender';
+import { ResolvedRequestNotice } from './ResolvedRequestNotice';
 import { PendingRequestStack, type PendingRequestSource } from './PendingRequestStack';
 import styles from './InlinePathGrantCard.module.css';
 
@@ -100,7 +101,7 @@ interface PathGrantCardProps {
 /** One path-grant request and its decision. */
 export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathGrantCardProps) => {
   const [card, setCard] = useState<PathGrantCardState>({ path: req.requestedPath, access: req.requestedAccess });
-  const { send: sendDecision, isSubmitting, error } = useDecisionSender(
+  const { send: sendDecision, isSubmitting, error, resolved } = useDecisionSender(
     (decision: PathGrantDecision) => submitPathGrantDecision(req.requestId, decision),
     () => onDecided?.(req.requestId),
   );
@@ -260,34 +261,38 @@ export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathG
             </div>
           )}
 
-          <div className={styles.buttonRow}>
-            <button
-              type="button"
-              className={`${styles.btn} ${styles.btnAllowOnce}`}
-              onClick={() => sendDecision(allowOnceDecision(card.path.trim(), card.access))}
-              disabled={!canSubmit}
-              {...chipText(spoken, 'Allow once', 'Once', 'Grant for the rest of this run only. Vanishes when the run ends.')}
-            />
-            <button
-              type="button"
-              className={`${styles.btn} ${styles.btnAllowAlways}`}
-              onClick={() => sendDecision(allowAlwaysDecision(card.path.trim(), card.access))}
-              disabled={!canSubmit}
-              {...chipText(
-                spoken,
-                'Always allow (this agent)',
-                'Always',
-                "Add to this agent's permanent grant list. Survives across runs."
-              )}
-            />
-            <button
-              type="button"
-              className={`${styles.btn} ${styles.btnDeny}`}
-              onClick={() => sendDecision(denyDecision())}
-              disabled={isSubmitting}
-              {...chipText(spoken, 'Deny', 'Deny')}
-            />
-          </div>
+          {resolved ? (
+            <ResolvedRequestNotice onDismiss={onDecided && (() => onDecided(req.requestId))} />
+          ) : (
+            <div className={styles.buttonRow}>
+              <button
+                type="button"
+                className={`${styles.btn} ${styles.btnAllowOnce}`}
+                onClick={() => sendDecision(allowOnceDecision(card.path.trim(), card.access))}
+                disabled={!canSubmit}
+                {...chipText(spoken, 'Allow once', 'Once', 'Grant for the rest of this run only. Vanishes when the run ends.')}
+              />
+              <button
+                type="button"
+                className={`${styles.btn} ${styles.btnAllowAlways}`}
+                onClick={() => sendDecision(allowAlwaysDecision(card.path.trim(), card.access))}
+                disabled={!canSubmit}
+                {...chipText(
+                  spoken,
+                  'Always allow (this agent)',
+                  'Always',
+                  "Add to this agent's permanent grant list. Survives across runs."
+                )}
+              />
+              <button
+                type="button"
+                className={`${styles.btn} ${styles.btnDeny}`}
+                onClick={() => sendDecision(denyDecision())}
+                disabled={isSubmitting}
+                {...chipText(spoken, 'Deny', 'Deny')}
+              />
+            </div>
+          )}
 
           {error && !isSubmitting && <div className={styles.error}>{error}</div>}
         </div>

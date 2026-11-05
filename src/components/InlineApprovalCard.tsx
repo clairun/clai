@@ -12,6 +12,7 @@ import RequestingAgent from './Agents/RequestingAgent';
 import { chipText, listOf, quoted } from './requestChips';
 import { DenyReasonPanel, useDenial } from './DenyReasonPanel';
 import { useDecisionSender } from './useDecisionSender';
+import { ResolvedRequestNotice } from './ResolvedRequestNotice';
 import { PendingRequestStack, type PendingRequestSource } from './PendingRequestStack';
 import styles from './InlineApprovalCard.module.css';
 
@@ -92,7 +93,7 @@ interface ApprovalCardProps {
 
 /** One ask-first request and its decision. */
 export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided, ref }: ApprovalCardProps) => {
-  const { send, isSubmitting, error } = useDecisionSender(
+  const { send, isSubmitting, error, resolved } = useDecisionSender(
     (decision: AskFirstDecision) => submitPermissionDecision(req.requestId, decision),
     () => onDecided?.(req.requestId),
   );
@@ -183,31 +184,35 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
             <p className={styles.segmentHint}>
               <AlwaysAllowScope req={req} rules={rules} workspaceName={workspaceName} />
             </p>
-            <div className={styles.segmentButtons}>
-              <button
-                type="button"
-                className={`${styles.btn} ${styles.btnAllowOnce}`}
-                onClick={() => send({ kind: 'allowOnce' })}
-                disabled={isSubmitting}
-                {...chipText(spoken, 'Allow once', 'Once', 'Runs this command only; the next one asks again.')}
-              />
-              <button
-                type="button"
-                className={`${styles.btn} ${styles.btnAllow}`}
-                onClick={() => send({ kind: 'alwaysAllow' })}
-                disabled={isSubmitting}
-                {...chipText(spoken, `Always allow (${reach})`, 'Always')}
-              />
-              <button
-                type="button"
-                {...denial.denyButton}
-                className={`${styles.btn} ${styles.btnDenyOnce} ${denial.open ? styles.btnSelected : ''}`}
-                disabled={isSubmitting}
-                {...chipText(spoken, 'Deny', 'Deny')}
-              />
-            </div>
+            {resolved ? (
+              <ResolvedRequestNotice onDismiss={onDecided && (() => onDecided(req.requestId))} />
+            ) : (
+              <div className={styles.segmentButtons}>
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnAllowOnce}`}
+                  onClick={() => send({ kind: 'allowOnce' })}
+                  disabled={isSubmitting}
+                  {...chipText(spoken, 'Allow once', 'Once', 'Runs this command only; the next one asks again.')}
+                />
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnAllow}`}
+                  onClick={() => send({ kind: 'alwaysAllow' })}
+                  disabled={isSubmitting}
+                  {...chipText(spoken, `Always allow (${reach})`, 'Always')}
+                />
+                <button
+                  type="button"
+                  {...denial.denyButton}
+                  className={`${styles.btn} ${styles.btnDenyOnce} ${denial.open ? styles.btnSelected : ''}`}
+                  disabled={isSubmitting}
+                  {...chipText(spoken, 'Deny', 'Deny')}
+                />
+              </div>
+            )}
           </section>
-          {denial.open && (
+          {denial.open && !resolved && (
             <DenyReasonPanel
               id={denial.panelId}
               confirmLabel="Deny command"

@@ -140,6 +140,21 @@ describe('NetworkAccessCard', () => {
     expect(onDecided).toHaveBeenCalledWith('net-1');
   });
 
+  it('shows a request answered elsewhere as resolved, with no live decisions', async () => {
+    mockInvoke.mockRejectedValue('No pending network access request `net-1` (already resolved or cleared)');
+    const onDecided = vi.fn();
+    const user = userEvent.setup();
+    render(<NetworkAccessCard req={request()} onDecided={onDecided} />);
+    await user.click(screen.getByRole('button', { name: 'Deny' }));
+    await user.click(screen.getByRole('button', { name: 'Deny access' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Already answered in another view, or its run has ended.');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Allow|^Deny/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(onDecided).toHaveBeenCalledWith('net-1');
+  });
+
   it('speaks on the Fleet with short chips', () => {
     render(<NetworkAccessCard req={request()} speaker={(prompt: ReactNode) => <div>{prompt}</div>} />);
     expect(screen.queryByText('Network access requested')).not.toBeInTheDocument();

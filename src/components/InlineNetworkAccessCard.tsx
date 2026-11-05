@@ -15,6 +15,7 @@ import RequestingAgent from './Agents/RequestingAgent';
 import { chipText, listOf, quoted } from './requestChips';
 import { DenyReasonPanel, useDenial } from './DenyReasonPanel';
 import { useDecisionSender } from './useDecisionSender';
+import { ResolvedRequestNotice } from './ResolvedRequestNotice';
 import { PendingRequestStack, type PendingRequestSource } from './PendingRequestStack';
 import styles from './InlineApprovalCard.module.css';
 import grantStyles from './InlinePathGrantCard.module.css';
@@ -88,7 +89,7 @@ interface NetworkAccessCardProps {
 
 /** One network access request and its decision. */
 export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDecided, ref }: NetworkAccessCardProps) => {
-  const { send, isSubmitting, error } = useDecisionSender(
+  const { send, isSubmitting, error, resolved } = useDecisionSender(
     (decision: NetworkAccessDecision) => submitNetworkAccessDecision(req.requestId, decision),
     () => onDecided?.(req.requestId),
   );
@@ -157,44 +158,48 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
           <p className={styles.segmentHint}>
             <SaveScope req={req} workspaceName={workspaceName} />
           </p>
-          <div className={styles.segmentButtons}>
-            <button
-              type="button"
-              className={`${styles.btn} ${styles.btnAllowOnce}`}
-              onClick={() => send({ kind: 'allowRun' })}
-              disabled={isSubmitting}
-              {...chipText(spoken, 'Allow this run', 'This run', 'A later run asks again.')}
-            />
-            <button
-              type="button"
-              className={`${styles.btn} ${styles.btnAllow}`}
-              onClick={() => send({ kind: 'allowAlways', entry: req.host })}
-              disabled={isSubmitting}
-              {...chipText(spoken, `Always for ${agentName}`, 'Always', `Adds ${req.host} to the allowlist.`)}
-            />
-            {req.suggestedWildcard && (
+          {resolved ? (
+            <ResolvedRequestNotice onDismiss={onDecided && (() => onDecided(req.requestId))} />
+          ) : (
+            <div className={styles.segmentButtons}>
+              <button
+                type="button"
+                className={`${styles.btn} ${styles.btnAllowOnce}`}
+                onClick={() => send({ kind: 'allowRun' })}
+                disabled={isSubmitting}
+                {...chipText(spoken, 'Allow this run', 'This run', 'A later run asks again.')}
+              />
               <button
                 type="button"
                 className={`${styles.btn} ${styles.btnAllow}`}
-                onClick={() => send({ kind: 'allowAlways', entry: req.suggestedWildcard! })}
+                onClick={() => send({ kind: 'allowAlways', entry: req.host })}
                 disabled={isSubmitting}
-                {...chipText(
-                  spoken,
-                  `Allow ${req.suggestedWildcard}`,
-                  req.suggestedWildcard,
-                  `Adds ${req.suggestedWildcard} to the allowlist: every host under it.`,
-                )}
+                {...chipText(spoken, `Always for ${agentName}`, 'Always', `Adds ${req.host} to the allowlist.`)}
               />
-            )}
-            <button
-              type="button"
-              {...denial.denyButton}
-              className={`${styles.btn} ${styles.btnDenyOnce} ${denial.open ? styles.btnSelected : ''}`}
-              disabled={isSubmitting}
-              {...chipText(spoken, 'Deny', 'Deny')}
-            />
-          </div>
-          {denial.open && (
+              {req.suggestedWildcard && (
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnAllow}`}
+                  onClick={() => send({ kind: 'allowAlways', entry: req.suggestedWildcard! })}
+                  disabled={isSubmitting}
+                  {...chipText(
+                    spoken,
+                    `Allow ${req.suggestedWildcard}`,
+                    req.suggestedWildcard,
+                    `Adds ${req.suggestedWildcard} to the allowlist: every host under it.`,
+                  )}
+                />
+              )}
+              <button
+                type="button"
+                {...denial.denyButton}
+                className={`${styles.btn} ${styles.btnDenyOnce} ${denial.open ? styles.btnSelected : ''}`}
+                disabled={isSubmitting}
+                {...chipText(spoken, 'Deny', 'Deny')}
+              />
+            </div>
+          )}
+          {denial.open && !resolved && (
             <DenyReasonPanel
               id={denial.panelId}
               confirmLabel="Deny access"

@@ -44,6 +44,21 @@ describe('useDecisionSender', () => {
     expect(onDecided).toHaveBeenCalledTimes(1);
   });
 
+  it('takes a request that already left the queue as resolved, and sends nothing more', async () => {
+    const { submit, calls } = pendingSubmit();
+    const onDecided = vi.fn();
+    const { result } = renderHook(() => useDecisionSender(submit, onDecided));
+    act(() => void result.current.send('allowRun'));
+    await act(async () =>
+      calls[0]!.reject('No pending network access request `net-1` (already resolved or cleared)'),
+    );
+    expect(result.current.resolved).toBe(true);
+    expect(result.current.error).toBeNull();
+    expect(onDecided).not.toHaveBeenCalled();
+    act(() => void result.current.send('deny'));
+    expect(submit).toHaveBeenCalledTimes(1);
+  });
+
   it('reads the message of an Error, and names a failure that has none', async () => {
     const { submit, calls } = pendingSubmit();
     const { result } = renderHook(() => useDecisionSender(submit));
