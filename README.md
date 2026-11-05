@@ -187,8 +187,9 @@ npm install
 make dev            # run the desktop app in development
 ```
 
-`cargo run` and `tauri dev` build only the app. The Allowlist network mode
-also needs the sandbox helper next to it; build it once with
+`make dev` builds the sandbox helper before it starts the app. `cargo run` and
+`npm run tauri:dev` build only the app, and the Allowlist network mode also
+needs the helper next to it: build it with
 `cargo build --manifest-path src-tauri/Cargo.toml --bins`, or shell commands in
 Allowlist fail with "network helper not found".
 
