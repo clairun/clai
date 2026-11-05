@@ -57,16 +57,38 @@ fn prepare_endpoint(
         .create(&dir)
         .map_err(unavailable)?;
     let ssh_config = dir.join("ssh_config");
-    let content = ssh_config_text();
-    if std::fs::read_to_string(&ssh_config).ok() != Some(content.clone()) {
-        std::fs::write(&ssh_config, content).map_err(unavailable)?;
-    }
     let id = uuid::Uuid::new_v4().simple().to_string();
+    write_ssh_config(&ssh_config, &id).map_err(unavailable)?;
     Ok(ProxyEndpoint {
         socket: dir.join(format!("{}.sock", &id[..12])),
         helper,
         ssh_config,
     })
+}
+
+/// Writes a new file and renames it over `path`, so a symlink planted at
+/// `path` is replaced, never written through. Skipped when `path` is
+/// already a regular file with the text.
+fn write_ssh_config(path: &Path, id: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let content = ssh_config_text();
+    let current = std::fs::symlink_metadata(path).ok();
+    if current.is_some_and(|metadata| metadata.file_type().is_file())
+        && std::fs::read_to_string(path).ok().as_deref() == Some(content.as_str())
+    {
+        return Ok(());
+    }
+    let temporary = path.with_file_name(format!("ssh_config.{id}.tmp"));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .and_then(|mut file| file.write_all(content.as_bytes()))
+        .and_then(|()| std::fs::rename(&temporary, path));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    written
 }
 
 /// Bound at `/etc/ssh/ssh_config`: ssh, and git, scp and rsync over ssh,
@@ -186,6 +208,40 @@ mod tests {
             error.starts_with("Sandboxed shell is unavailable"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn a_symlink_at_the_ssh_config_is_replaced_not_written_through() {
+        let home = tempfile::tempdir().unwrap();
+        let workspace = home.path().join(".clai/workspaces/ws");
+        let dir = home.path().join(".clai/workspaces/.clai-net");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = home.path().join("victim");
+        std::fs::write(&victim, "keep me").unwrap();
+        std::os::unix::fs::symlink(&victim, dir.join("ssh_config")).unwrap();
+
+        let endpoint = prepare_endpoint(&workspace, home.path(), PathBuf::from("/h")).unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        let metadata = std::fs::symlink_metadata(&endpoint.ssh_config).unwrap();
+        assert!(metadata.file_type().is_file());
+        assert_eq!(
+            std::fs::read_to_string(&endpoint.ssh_config).unwrap(),
+            ssh_config_text()
+        );
+        let left: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["ssh_config"], "no temporary file is left behind");
+
+        // A link to a file with the same text is replaced as well.
+        std::fs::write(&victim, ssh_config_text()).unwrap();
+        std::fs::remove_file(&endpoint.ssh_config).unwrap();
+        std::os::unix::fs::symlink(&victim, &endpoint.ssh_config).unwrap();
+        prepare_endpoint(&workspace, home.path(), PathBuf::from("/h")).unwrap();
+        let metadata = std::fs::symlink_metadata(&endpoint.ssh_config).unwrap();
+        assert!(metadata.file_type().is_file());
     }
 
     #[test]
