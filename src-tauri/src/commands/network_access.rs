@@ -100,8 +100,8 @@ pub enum NetworkAccessDecision {
     /// Allow the host for the rest of this run.
     AllowRun,
     /// Add `entry` to the agent's allow list, and allow it in this run:
-    /// the host itself, or `*.` and a parent domain of it with at least two
-    /// labels.
+    /// the host itself, or `*.` and a parent domain of it that is not a
+    /// public suffix (`approved_entry` in the network matcher).
     AllowAlways { entry: String },
     /// The reason goes back to the agent in the tool error.
     Deny {
@@ -392,7 +392,7 @@ fn no_pending_request(request_id: &str) -> String {
     format!("No pending network access request `{request_id}` (already resolved or cleared)")
 }
 
-/// An “Always” entry must be the host or a narrow parent wildcard (stored
+/// An “Always” entry must be one [`approved_entry`] accepts (stored
 /// in the matcher's form); a denial reason is trimmed and bounded.
 fn validate_decision(
     request: &NetworkAccessRequest,

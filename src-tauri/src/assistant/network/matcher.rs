@@ -246,23 +246,22 @@ pub fn canonical_host(raw: &str) -> Option<String> {
 }
 
 /// The wider entry the network card offers for `host`: `*.` and the host
-/// without its first label, when at least two labels remain. Never for an
-/// IP address.
+/// without its first label, when [`approved_entry`] accepts it.
 pub fn parent_wildcard(host: &str) -> Option<String> {
     let Some(Host::Domain(domain)) = normalize(host) else {
         return None;
     };
     let (_, parent) = domain.split_once('.')?;
-    if parent.contains('*') || parent.split('.').count() < 2 {
-        return None;
-    }
-    let entry = format!("*.{parent}");
-    parse_entry(&entry).ok().map(|_| entry)
+    approved_entry(&domain, &format!("*.{parent}"))
+        .ok()
+        .map(|entry| entry.normalized())
 }
 
 /// The entry a user may add to the allow list when asked about `host`: the
-/// host itself, or `*.` and a suffix of it with at least two labels. An
-/// entry that would cover more is refused, and so is an IP wildcard.
+/// host itself, or `*.P` covering it where `P` is a registrable domain or a
+/// name under one (by the public suffix list), so a wildcard never spans a
+/// public suffix such as `*.com`, `*.co.uk` or `*.github.io`. IP addresses
+/// have no wildcard. The settings form is not held to this rule.
 pub fn approved_entry(host: &str, entry: &str) -> Result<HostEntry, String> {
     let host_value = normalize(host)
         .filter(|host| !has_wildcard(host))
@@ -276,13 +275,14 @@ pub fn approved_entry(host: &str, entry: &str) -> Result<HostEntry, String> {
         Host::Domain(domain) => domain.strip_prefix("*."),
         Host::Ip(_) => None,
     };
-    let narrow_wildcard =
-        parent.is_some_and(|parent| !parent.contains('*') && parent.split('.').count() >= 2);
+    let narrow_wildcard = parent
+        .is_some_and(|parent| !parent.contains('*') && psl::domain(parent.as_bytes()).is_some());
     if narrow_wildcard && approved.matches(&host_value) {
         return Ok(approved);
     }
     Err(format!(
-        "`{entry}` is neither `{host}` nor `*.` and a parent domain of it with at least two labels"
+        "`{entry}` is neither `{host}` nor `*.` and a parent domain of it that is not a \
+         public suffix"
     ))
 }
 
@@ -638,12 +638,21 @@ mod tests {
     }
 
     #[test]
-    fn the_card_offers_the_parent_domain_with_at_least_two_labels() {
+    fn the_card_offers_the_parent_domain_unless_it_is_a_public_suffix() {
         for (host, offer) in [
             ("mirror.example.org", Some("*.example.org")),
             ("a.b.example.org", Some("*.b.example.org")),
             ("Mirror.Example.ORG.", Some("*.example.org")),
             ("www.bücher.example", Some("*.xn--bcher-kva.example")),
+            ("api.stripe.com", Some("*.stripe.com")),
+            ("www.bbc.co.uk", Some("*.bbc.co.uk")),
+            ("a.alice.github.io", Some("*.alice.github.io")),
+            ("bbc.co.uk", None),
+            ("alice.github.io", None),
+            ("app.herokuapp.com", None),
+            // On the list's private section, as GitHub registered it.
+            ("raw.githubusercontent.com", None),
+            ("bucket.s3.amazonaws.com", None),
             ("example.org", None),
             ("org", None),
             ("10.0.0.5", None),
@@ -655,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn an_approved_entry_is_the_host_or_a_narrow_parent_wildcard() {
+    fn an_approved_entry_is_the_host_or_a_parent_wildcard_below_a_public_suffix() {
         let host = "mirror.example.org";
         for (entry, normalized) in [
             ("mirror.example.org", "mirror.example.org"),
@@ -680,6 +689,15 @@ mod tests {
             assert!(approved_entry(host, entry).is_err(), "{entry}");
         }
         assert!(approved_entry("a.b.example.org", "*.example.org").is_ok());
+        assert!(approved_entry("www.bbc.co.uk", "*.bbc.co.uk").is_ok());
+        for (host, entry) in [
+            ("www.bbc.co.uk", "*.co.uk"),
+            ("alice.github.io", "*.github.io"),
+            ("app.herokuapp.com", "*.herokuapp.com"),
+            ("example.com", "*.com"),
+        ] {
+            assert!(approved_entry(host, entry).is_err(), "{entry}");
+        }
         assert!(approved_entry("10.0.0.5", "10.0.0.5").is_ok());
         assert!(approved_entry("10.0.0.5", "10.0.0.*").is_err());
         assert!(approved_entry("10.0.0.5", "10.0.0.6").is_err());
