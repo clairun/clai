@@ -29,10 +29,18 @@ pub struct EffectiveFilesystemPolicy {
     /// The state under a writable root. The shell may only read it, so an
     /// agent cannot rewrite its own policy, its history or the agent
     /// definitions every workspace shares.
+    #[cfg_attr(
+        not(any(test, target_os = "linux", target_os = "macos")),
+        expect(dead_code, reason = "only the Linux and macOS sandboxes read it")
+    )]
     pub read_only_state: Vec<PathBuf>,
     /// Each writable root that holds read-only state and the directories
     /// between them. Renaming one would carry the state away and free its path
     /// to be recreated, so they must not move.
+    #[cfg_attr(
+        not(any(test, target_os = "linux", target_os = "macos")),
+        expect(dead_code, reason = "only the Linux and macOS sandboxes read it")
+    )]
     pub pinned: Vec<PathBuf>,
     /// The agent's memory, writable inside its read-only `.clai`.
     pub memory: Option<PathBuf>,
@@ -851,6 +859,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn clai_state_is_protected_where_symlinks_lead_and_without_a_home_mask() {
         use SandboxPathAccess::ReadWrite;
