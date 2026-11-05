@@ -389,23 +389,31 @@ pub struct NetworkPolicy {
 impl NetworkPolicy {
     /// Rewrites every entry in the form the matcher compares (lower case,
     /// punycode, IPv6 without brackets), so the stored list is what is
-    /// matched, or refuses, naming it, an entry the matcher could never
-    /// match. Every save of an agent's settings calls this; an invalid entry
-    /// already stored (a hand edit) is handled when the lists are matched
-    /// (see [`HostLists::new`]).
+    /// matched. Every save of an agent's settings calls this.
+    ///
+    /// In Allowlist, where the lists are read, an entry the matcher could
+    /// never match refuses the save, naming it. In Off and Host network such
+    /// an entry (only a hand edit stores one) is kept as it is, so it never
+    /// blocks leaving Allowlist; back in Allowlist the save names it, and a
+    /// run handles it when the lists are matched (see [`HostLists::new`]).
     ///
     /// [`HostLists::new`]: crate::assistant::network::matcher::HostLists::new
     pub fn canonicalize(&mut self) -> Result<(), String> {
+        let strict = self.mode == NetworkMode::Allowlist;
         for (list, entries) in [
             ("Allowed hosts", &mut self.allow_domains),
             ("Denied hosts", &mut self.deny_domains),
         ] {
             for entry in entries.iter_mut() {
-                *entry = parse_entry(entry)
-                    .map_err(|reason| {
-                        format!("{list}: `{entry}` is not a valid host entry: {reason}.")
-                    })?
-                    .normalized();
+                match parse_entry(entry) {
+                    Ok(parsed) => *entry = parsed.normalized(),
+                    Err(reason) if strict => {
+                        return Err(format!(
+                            "{list}: `{entry}` is not a valid host entry: {reason}."
+                        ))
+                    }
+                    Err(_) => {}
+                }
             }
         }
         Ok(())
@@ -1343,6 +1351,28 @@ mod tests {
         // Stored as is: a hand-edited config still loads.
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(sandbox_json(json), config);
+    }
+
+    #[test]
+    fn outside_allowlist_an_invalid_entry_is_kept_and_the_rest_canonicalized() {
+        for mode in [NetworkMode::Off, NetworkMode::HostNetwork] {
+            let mut policy = NetworkPolicy {
+                mode,
+                allow_domains: ["GitHub.com", "*.*"].map(String::from).to_vec(),
+                deny_domains: ["x/y", "Bücher.example"].map(String::from).to_vec(),
+            };
+            assert_eq!(policy.canonicalize(), Ok(()), "{mode:?}");
+            assert_eq!(policy.allow_domains, ["github.com", "*.*"], "{mode:?}");
+            assert_eq!(
+                policy.deny_domains,
+                ["x/y", "xn--bcher-kva.example"],
+                "{mode:?}"
+            );
+
+            policy.mode = NetworkMode::Allowlist;
+            let error = policy.canonicalize().unwrap_err();
+            assert!(error.starts_with("Allowed hosts: `*.*`"), "{error}");
+        }
     }
 
     #[test]

@@ -542,18 +542,26 @@ mod tests {
     }
 
     #[test]
-    fn saving_an_invalid_host_entry_is_refused_naming_it() {
+    fn saving_an_invalid_host_entry_in_allowlist_is_refused_naming_it() {
         let mut config = AppConfig::default();
         let mut request = save_request("Reviewer");
-        request
+        let network = &mut request.execution.sandbox.network_access;
+        network.mode = crate::config::NetworkMode::Allowlist;
+        network.allow_domains.push("git@github.com".to_string());
+        let error = upsert_definition(&mut config, &request, 100).expect_err("refused");
+        assert!(error.contains("`git@github.com`"), "{error}");
+        assert!(config.agent_definitions.is_empty());
+
+        // Leaving Allowlist is never blocked by a hand-edited entry.
+        request.execution.sandbox.network_access.mode = crate::config::NetworkMode::HostNetwork;
+        upsert_definition(&mut config, &request, 100).expect("saved in Host network");
+        assert!(config.agent_definitions[0]
+            .behavior
             .execution
             .sandbox
             .network_access
             .allow_domains
-            .push("git@github.com".to_string());
-        let error = upsert_definition(&mut config, &request, 100).expect_err("refused");
-        assert!(error.contains("`git@github.com`"), "{error}");
-        assert!(config.agent_definitions.is_empty());
+            .contains(&"git@github.com".to_string()));
     }
 
     #[test]

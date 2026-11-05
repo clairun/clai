@@ -610,6 +610,7 @@ mod stored_agent_tests {
             provider_connection_ids: Vec::new(),
             execution: {
                 let mut execution = ExecutionCapabilityConfig::default();
+                execution.sandbox.network_access.mode = crate::config::NetworkMode::Allowlist;
                 execution.sandbox.network_access.allow_domains = vec![allow.to_string()];
                 execution
             },
@@ -631,23 +632,39 @@ mod stored_agent_tests {
     }
 
     #[test]
-    fn saving_the_main_with_an_invalid_host_entry_is_refused_naming_it() {
+    fn saving_the_main_with_an_invalid_host_entry_in_allowlist_is_refused_naming_it() {
+        use crate::config::NetworkMode;
         let fixture = Fixture::new();
-        let mut request = update_request(&fixture);
-        request
-            .execution
-            .sandbox
-            .network_access
-            .deny_domains
-            .push("*.0.0.5".to_string());
-        let error = update_main_agent(&fixture.state, request).expect_err("refused");
+        let invalid = |mode| {
+            let mut request = update_request(&fixture);
+            let network = &mut request.execution.sandbox.network_access;
+            network.mode = mode;
+            network.deny_domains.push("*.0.0.5".to_string());
+            request
+        };
+        let error = update_main_agent(&fixture.state, invalid(NetworkMode::Allowlist))
+            .expect_err("refused");
         assert!(
             matches!(&error, WorkspaceAgentUpdateError::Failed { message } if message.contains("Denied hosts: `*.0.0.5`")),
             "{error:?}"
         );
         assert_ne!(fixture.config().main_agent.unwrap().description, "edited");
 
+        // Switching to Host network saves, and keeps the entry for the user
+        // to fix when they come back to Allowlist.
+        update_main_agent(&fixture.state, invalid(NetworkMode::HostNetwork))
+            .expect("saved in Host network");
+        let main = fixture.config().main_agent.unwrap();
+        assert_eq!(main.description, "edited");
+        assert!(main
+            .execution
+            .sandbox
+            .network_access
+            .deny_domains
+            .contains(&"*.0.0.5".to_string()));
+
         let mut request = update_request(&fixture);
+        request.execution.sandbox.network_access.mode = NetworkMode::Allowlist;
         request.execution.sandbox.network_access.deny_domains = vec!["Bücher.example".to_string()];
         update_main_agent(&fixture.state, request).expect("valid save");
         let main = fixture.config().main_agent.unwrap();
