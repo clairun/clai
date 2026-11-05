@@ -326,7 +326,7 @@ pub(crate) fn build_system_prompt(
     prompt.push_str("\n## Local Execution Capabilities\n");
     if shell_enabled {
         prompt.push_str(&format!(
-            "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
+            "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace. Its `.clai/` directory is CLAI's own state (settings, conversation history): write there only under `.clai/memory/`; on Linux and macOS the shell can only read the rest.\n",
         ));
     } else {
         prompt.push_str(&format!(

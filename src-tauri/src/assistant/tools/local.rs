@@ -812,6 +812,14 @@ async fn execute_fs_request_grant(
     // This keeps repeated requests cheap and avoids modal spam when the LLM
     // forgets it already has the grant.
     let filesystem = filesystem_policy(context)?;
+    if matches!(params.access, FilesystemPathAccess::ReadWrite)
+        && filesystem.is_read_only_state(&canonical)
+    {
+        return Err(format!(
+            "{canonical_str} is CLAI's own state, which the shell may only read; \
+             only `.clai/memory/` is writable"
+        ));
+    }
     if filesystem.covers(&canonical, params.access) {
         return Ok(serde_json::json!({
             "granted": true,
