@@ -66,6 +66,13 @@ flagged, and selecting a card slides in a live chat preview.
   teammate in every workspace that uses it, for a workspace's main agent
   in that workspace only. Add a rule back in the agent's settings to be
   asked again.
+- **Network modes** — Each agent has one of three, in its Access settings:
+  *Off* (no network for shell commands or the web tools), *Allowlist* (only
+  the hosts on the agent's allowed list, about 100 package registries and
+  code hosts by default, never those on its denied list), and *Host network
+  (unfiltered)*, which reaches any host, including services on your
+  computer and your local network. In Allowlist an agent that needs another
+  host asks for it, and you allow it for the run, always, or deny it.
 - **A shared agent library** — Teammates are defined once in Settings →
   *Agents* and added to the workspaces that need them. Editing one reaches every
   workspace using it; each workspace still owns its own main agent, history and
@@ -81,14 +88,21 @@ flagged, and selecting a card slides in a live chat preview.
   "warnings" state and surfaces in the Fleet, instead of failing silently.
 
 > **Local execution sandboxing is platform-specific.** On Linux, shell commands
-> run through bubblewrap. On macOS, they run through Seatbelt via
-> `sandbox-exec`. **On Windows there is no sandbox backend**: shell execution is
+> run through bubblewrap; in Allowlist each command gets its own network
+> namespace whose only way out is CLAI's network proxy, through the small
+> `clai-sandbox-helper` binary installed next to `clai`. Tools that ignore
+> `HTTP(S)_PROXY`, and DNS lookups, fail there; choose Host network for
+> them. On macOS, they run through Seatbelt via
+> `sandbox-exec`, with Off or Host network only: Allowlist is not available on
+> macOS yet. **On Windows there is no sandbox backend**: shell execution is
 > labeled as a host shell, and while CLAI still validates the command's working
 > directory against the filesystem grants, nothing stops the command itself from
 > reaching outside them. Windows also ships no POSIX shell, so `bash_exec`
 > looks for Git Bash, then MSYS2, then `bash` on `PATH`, and fails with an
 > "install Git for Windows" notice when it finds none. The allow/block lists
-> are enforced by CLAI before a command spawns, on every platform.
+> are enforced by CLAI before a command spawns, on every platform. The network
+> setting is not available on Windows: shell commands use the host network,
+> and the web tools follow the stored mode.
 
 ## Install
 
@@ -172,6 +186,11 @@ cd clai
 npm install
 make dev            # run the desktop app in development
 ```
+
+`cargo run` and `tauri dev` build only the app. The Allowlist network mode
+also needs the sandbox helper next to it; build it once with
+`cargo build --manifest-path src-tauri/Cargo.toml --bins`, or shell commands in
+Allowlist fail with "network helper not found".
 
 Before pushing:
 
