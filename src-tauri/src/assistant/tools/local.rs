@@ -125,16 +125,18 @@ async fn execute_bash_exec(
     ) {
         return Err("Shell access is disabled for this agent".to_string());
     }
-    if let Some(error) = unenforceable_network_error(
-        &context.run_context.execution.sandbox.network_access,
-        &crate::assistant::sandbox::status(),
-    ) {
-        return Err(error);
-    }
 
     let filesystem = filesystem_policy(context)?;
     let cwd = filesystem.authorize_cwd(params.cwd.as_deref().unwrap_or("."))?;
     let workspace_root = ensure_workspace_root(context)?;
+    // Before any ask-first card: a profile the sandbox cannot enforce fails
+    // here, so the user is never asked about a command that cannot run.
+    let profile = sandbox_profile(
+        context,
+        workspace_root,
+        filesystem,
+        &crate::assistant::sandbox::status(),
+    )?;
 
     if params.command.trim().is_empty() {
         return Err("Shell command cannot be empty".to_string());
@@ -176,7 +178,7 @@ async fn execute_bash_exec(
         cwd,
         timeout_ms,
         max_output_chars: output_limit,
-        profile: sandbox_profile(context, workspace_root, filesystem),
+        profile,
     })
     .await
     .inspect_err(|error| {
@@ -264,13 +266,12 @@ fn sandbox_profile(
     context: &ToolExecutionContext,
     workspace_root: PathBuf,
     filesystem: EffectiveFilesystemPolicy,
-) -> SandboxProfile {
-    let network = match context.run_context.execution.sandbox.network_access.mode {
-        NetworkMode::Off => SandboxNetworkMode::Disabled,
-        // Shell commands keep the host network in Allowlist until the sandbox
-        // routes them through the network proxy.
-        NetworkMode::Allowlist | NetworkMode::HostNetwork => SandboxNetworkMode::Host,
-    };
+    sandbox: &crate::assistant::sandbox::SandboxStatus,
+) -> Result<SandboxProfile, String> {
+    let network = sandbox_network(
+        context.run_context.execution.sandbox.network_access.mode,
+        sandbox,
+    )?;
 
     let session_bus = match context.run_context.execution.sandbox.session_bus {
         SandboxSessionBusConfig::Deny => SandboxSessionBusMode::Deny,
@@ -283,32 +284,40 @@ fn sandbox_profile(
         .home
         .as_deref()
         .unwrap_or(&filesystem.workspace_root);
-    SandboxProfile {
+    Ok(SandboxProfile {
         env: SandboxEnv::filtered_from_current(env_home, session_bus),
         filesystem,
         network,
         session_bus,
         scratch_tmp,
-    }
+    })
 }
 
-/// A stored Allowlist where the sandbox cannot enforce it (macOS for now, a
-/// hand-edited or copied config) must not run with the host network instead.
-fn unenforceable_network_error(
-    network: &NetworkPolicy,
+/// The shell's network for a mode. A stored Allowlist where the sandbox
+/// cannot enforce it (macOS for now, a hand-edited or copied config) is an
+/// error, never the host network.
+fn sandbox_network(
+    mode: NetworkMode,
     sandbox: &crate::assistant::sandbox::SandboxStatus,
-) -> Option<String> {
-    (network.mode == NetworkMode::Allowlist && sandbox.available && !sandbox.allowlist_available)
-        .then(|| {
-            format!(
-                "Allowlist network mode is not available here ({}); choose Off or Host network \
-                 in the agent's Access settings.",
-                sandbox
-                    .allowlist_unavailable_reason
-                    .as_deref()
-                    .unwrap_or("unsupported by this sandbox")
-            )
-        })
+) -> Result<SandboxNetworkMode, String> {
+    match mode {
+        NetworkMode::Off => Ok(SandboxNetworkMode::Disabled),
+        NetworkMode::HostNetwork => Ok(SandboxNetworkMode::Host),
+        // Shell commands keep the host network in Allowlist until the sandbox
+        // routes them through the network proxy. Without a sandbox nothing is
+        // enforced in any mode (D17), so nothing is refused either.
+        NetworkMode::Allowlist if sandbox.allowlist_available || !sandbox.available => {
+            Ok(SandboxNetworkMode::Host)
+        }
+        NetworkMode::Allowlist => Err(format!(
+            "Allowlist network mode: {}. Choose Off or Host network in the agent's Access \
+             settings.",
+            sandbox
+                .allowlist_unavailable_reason
+                .as_deref()
+                .unwrap_or("not available with this sandbox")
+        )),
+    }
 }
 
 /// The tool error for a denied ask-first request: what was denied, the rule
@@ -1811,41 +1820,44 @@ mod tests {
     }
 
     #[test]
-    fn a_stored_allowlist_fails_closed_where_the_sandbox_cannot_enforce_it() {
+    fn network_modes_map_onto_the_sandbox_network_per_platform() {
         use crate::assistant::sandbox::{status_for, SandboxBackend};
-        let macos = status_for(Some(SandboxBackend::Seatbelt));
-        let error = unenforceable_network_error(&network(NetworkMode::Allowlist), &macos).unwrap();
-        assert!(error.contains("Not available on macOS yet"), "{error}");
-        assert!(error.contains("choose Off or Host network"), "{error}");
-        assert_eq!(
-            unenforceable_network_error(&network(NetworkMode::HostNetwork), &macos),
-            None
-        );
-        assert_eq!(
-            unenforceable_network_error(&network(NetworkMode::Off), &macos),
-            None
-        );
-
+        use NetworkMode::{Allowlist, HostNetwork, Off};
+        use SandboxNetworkMode::{Disabled, Host};
         let linux = status_for(Some(SandboxBackend::Bubblewrap));
-        assert_eq!(
-            unenforceable_network_error(&network(NetworkMode::Allowlist), &linux),
-            None
-        );
+        let macos = status_for(Some(SandboxBackend::Seatbelt));
         // Without a sandbox nothing is enforced, so nothing is refused (D17).
+        let none = status_for(None);
+        for (status, mode, expected) in [
+            (&linux, Off, Ok(Disabled)),
+            (&linux, Allowlist, Ok(Host)),
+            (&linux, HostNetwork, Ok(Host)),
+            (&macos, Off, Ok(Disabled)),
+            (&macos, Allowlist, Err(())),
+            (&macos, HostNetwork, Ok(Host)),
+            (&none, Off, Ok(Disabled)),
+            (&none, Allowlist, Ok(Host)),
+            (&none, HostNetwork, Ok(Host)),
+        ] {
+            assert_eq!(
+                sandbox_network(mode, status).map_err(|_| ()),
+                expected,
+                "{:?} {mode:?}",
+                status.backend
+            );
+        }
         assert_eq!(
-            unenforceable_network_error(&network(NetworkMode::Allowlist), &status_for(None)),
-            None
+            sandbox_network(Allowlist, &macos).unwrap_err(),
+            "Allowlist network mode: Not available on macOS yet. Choose Off or Host network \
+             in the agent's Access settings."
         );
     }
 
     #[test]
-    fn network_modes_map_onto_the_sandbox_network() {
+    fn the_shell_profile_takes_its_network_from_the_mode() {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
         let workspace = tempdir().unwrap();
-        for (mode, expected) in [
-            (NetworkMode::Off, SandboxNetworkMode::Disabled),
-            (NetworkMode::Allowlist, SandboxNetworkMode::Host),
-            (NetworkMode::HostNetwork, SandboxNetworkMode::Host),
-        ] {
+        let profile = |mode, status| {
             let mut context = context_with_grants(workspace.path(), Vec::new());
             let mut execution = context.run_context.execution.clone();
             execution.sandbox.network_access = network(mode);
@@ -1854,9 +1866,15 @@ mod tests {
                 ..(*context.run_context).clone()
             });
             let filesystem = filesystem_policy(&context).unwrap();
-            let profile = sandbox_profile(&context, workspace.path().to_path_buf(), filesystem);
-            assert_eq!(profile.network, expected, "{mode:?}");
-        }
+            sandbox_profile(&context, workspace.path().to_path_buf(), filesystem, status)
+        };
+        let linux = status_for(Some(SandboxBackend::Bubblewrap));
+        assert_eq!(
+            profile(NetworkMode::Off, &linux).unwrap().network,
+            SandboxNetworkMode::Disabled
+        );
+        let macos = status_for(Some(SandboxBackend::Seatbelt));
+        assert!(profile(NetworkMode::Allowlist, &macos).is_err());
     }
 
     // ------------------------------------------------------------------
