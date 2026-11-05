@@ -828,7 +828,8 @@ mod tests {
                 .position(|w| w[0] == flag && w[1] == path && w[2] == path)
                 .unwrap_or_else(|| panic!("expected {flag} {path}; got {rendered:?}"))
         };
-        assert!(bind("--bind-try", &home) < bind("--ro-bind", &app.join("config.json")));
+        assert!(bind("--bind-try", &home) < bind("--ro-bind", &app));
+        assert!(bind("--ro-bind", &app) < bind("--bind", &workspace));
         assert!(bind("--bind", &workspace) < bind("--ro-bind", &state));
         assert!(bind("--ro-bind", &state) < bind("--bind-try", &state.join("memory")));
     }
@@ -2336,6 +2337,182 @@ else:
             assert_eq!(std::fs::read_to_string(config).unwrap(), "{}");
         }
         assert!(workspace.join(".clai").is_dir());
+    }
+
+    /// Runs `script` in `workspace` with `grants`, the app directory at `app`.
+    /// `None` when bubblewrap is unavailable and the test may skip.
+    async fn run_with_clai_home(
+        workspace: &Path,
+        home: &Path,
+        app: &Path,
+        grants: &[SandboxPathGrant],
+        script: &str,
+    ) -> Option<SandboxCommandOutput> {
+        let mut command = SandboxCommand {
+            argv: vec![os("/bin/sh"), os("-c"), os(script)],
+            cwd: workspace.to_path_buf(),
+            timeout_ms: 10_000,
+            max_output_chars: 2_000,
+            profile: SandboxProfile::for_test(
+                workspace.to_path_buf(),
+                vec![],
+                SandboxNetworkMode::Disabled,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    home,
+                    SandboxSessionBusMode::Deny,
+                ),
+                None,
+            ),
+        };
+        command.profile.filesystem =
+            super::super::filesystem::EffectiveFilesystemPolicy::compile_in(
+                workspace,
+                grants,
+                Some(home),
+                Some(app),
+            )
+            .unwrap();
+        match run(command).await {
+            Ok(output) => Some(output),
+            Err(e) if e.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&e);
+                None
+            }
+            Err(e) => panic!("sandbox command failed unexpectedly: {e}"),
+        }
+    }
+
+    const WRITE_PROBE: &str =
+        "w() { if (echo pwned > \"$1\") 2>/dev/null; then echo \"wrote $1\"; \
+                               else echo \"refused $1\"; fi; }; ";
+
+    /// A read-write grant on home: the app directory cannot be renamed away,
+    /// gains no new entries, stays read-only while the app saves its config
+    /// by renaming a new file over it, and state reached through a symlink in
+    /// it is read-only where it leads.
+    #[tokio::test]
+    async fn clai_home_holds_under_a_home_grant_through_renames_new_entries_and_saves() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let app = home.join(".clai");
+        let workspace = app.join("workspaces").join("ws");
+        let linked = home.join("dotcache");
+        std::fs::create_dir_all(workspace.join(".clai/memory")).unwrap();
+        std::fs::create_dir_all(&linked).unwrap();
+        std::os::unix::fs::symlink(&linked, app.join("cache")).unwrap();
+        let config = app.join("config.json");
+        std::fs::write(&config, "{}").unwrap();
+        let script = format!(
+            "{WRITE_PROBE} mv {app} {app}-moved 2>/dev/null && echo moved; \
+             mkdir {app}/skills 2>/dev/null && echo created; touch started; sleep 1; \
+             w {app}/config.json; w {linked}/x; w notes",
+            app = app.display(),
+            linked = linked.display(),
+        );
+        // The app saves its config as it does in `ConfigManager::save`, while
+        // the command runs.
+        let started = workspace.join("started");
+        let saver = {
+            let config = config.clone();
+            std::thread::spawn(move || {
+                for _ in 0..100 {
+                    if started.exists() {
+                        let saved = config.with_extension("json.tmp");
+                        std::fs::write(&saved, "{\"saved\":1}").unwrap();
+                        std::fs::rename(&saved, &config).unwrap();
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            })
+        };
+        let grants = [SandboxPathGrant {
+            host_path: home.clone(),
+            access: SandboxPathAccess::ReadWrite,
+        }];
+        let Some(output) = run_with_clai_home(&workspace, &home, &app, &grants, &script).await
+        else {
+            return;
+        };
+        saver.join().unwrap();
+        let expected = format!(
+            "refused {}\nrefused {}\nwrote notes",
+            config.display(),
+            linked.join("x").display()
+        );
+        assert_eq!(output.stdout.trim(), expected, "stderr: {}", output.stderr);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "{\"saved\":1}");
+        assert!(!app.join("skills").exists());
+        assert!(!home.join(".clai-moved").exists());
+        assert!(!linked.join("x").exists());
+    }
+
+    /// A read-write grant on the workspace directory: a sibling workspace can
+    /// be written but not renamed away, its `.clai` stays read-only, and no
+    /// new workspace can be planted next to it.
+    #[tokio::test]
+    async fn sibling_state_holds_under_a_workspace_directory_grant() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let app = home.join(".clai");
+        let container = app.join("workspaces");
+        let workspace = container.join("ws");
+        let sibling = container.join("other");
+        std::fs::create_dir_all(workspace.join(".clai/memory")).unwrap();
+        std::fs::create_dir_all(sibling.join(".clai")).unwrap();
+        let config = sibling.join(".clai/config.json");
+        std::fs::write(&config, "{}").unwrap();
+        let script = format!(
+            "{WRITE_PROBE} mv {sibling} {sibling}-moved 2>/dev/null && echo moved; \
+             mkdir {container}/planted 2>/dev/null && echo planted; \
+             w {sibling}/notes; w {config}",
+            sibling = sibling.display(),
+            container = container.display(),
+            config = config.display(),
+        );
+        let grants = [SandboxPathGrant {
+            host_path: container.clone(),
+            access: SandboxPathAccess::ReadWrite,
+        }];
+        let Some(output) = run_with_clai_home(&workspace, &home, &app, &grants, &script).await
+        else {
+            return;
+        };
+        let expected = format!(
+            "wrote {}\nrefused {}",
+            sibling.join("notes").display(),
+            config.display()
+        );
+        assert_eq!(output.stdout.trim(), expected, "stderr: {}", output.stderr);
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "{}");
+        assert!(!container.join("planted").exists());
+        assert!(!container.join("other-moved").exists());
+    }
+
+    /// A symlinked `.clai/memory` must not stop the command from starting;
+    /// writes through it land where it points, with the access there.
+    #[tokio::test]
+    async fn a_symlinked_memory_still_launches() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let app = home.join(".clai");
+        let workspace = app.join("workspaces").join("ws");
+        std::fs::create_dir_all(workspace.join(".clai")).unwrap();
+        std::fs::create_dir_all(workspace.join("notes")).unwrap();
+        std::os::unix::fs::symlink("../notes", workspace.join(".clai/memory")).unwrap();
+        let script = format!("{WRITE_PROBE} w .clai/config.json; w .clai/memory/x");
+        let Some(output) = run_with_clai_home(&workspace, &home, &app, &[], &script).await else {
+            return;
+        };
+        assert_eq!(
+            output.stdout.trim(),
+            "refused .clai/config.json\nwrote .clai/memory/x",
+            "stderr: {}",
+            output.stderr
+        );
+        assert!(workspace.join("notes/x").exists());
     }
 
     /// Isolation regression. Scratch lives at `<container>/.scratch/<id>`,

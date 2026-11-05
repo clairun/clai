@@ -817,7 +817,7 @@ async fn execute_fs_request_grant(
     {
         return Err(format!(
             "{canonical_str} is CLAI's own state, which the shell may only read; \
-             only `.clai/memory/` is writable"
+             agents write only under their own `.clai/memory/`"
         ));
     }
     if filesystem.covers(&canonical, params.access) {

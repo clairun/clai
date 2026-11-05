@@ -21,10 +21,19 @@ pub struct EffectiveFilesystemPolicy {
     pub path_grants: Vec<SandboxPathGrant>,
     pub mask: Option<PathBuf>,
     pub home: Option<PathBuf>,
-    /// CLAI's state under a writable root: the workspaces' `.clai` and the
-    /// app's own config, skills and caches. The shell may only read it, so an
-    /// agent cannot rewrite its own policy or history.
+    /// CLAI's own state, reachable by the shell or not: the app directory
+    /// (`~/.clai`), where its symlinks lead, and the workspace's `.clai`.
+    /// Other workspaces' `.clai` are recognised by their place in a workspace
+    /// directory; see [`Self::is_read_only_state`].
+    state: Vec<PathBuf>,
+    /// The state under a writable root. The shell may only read it, so an
+    /// agent cannot rewrite its own policy, its history or the agent
+    /// definitions every workspace shares.
     pub read_only_state: Vec<PathBuf>,
+    /// Each writable root that holds read-only state and the directories
+    /// between them. Renaming one would carry the state away and free its path
+    /// to be recreated, so they must not move.
+    pub pinned: Vec<PathBuf>,
     /// The agent's memory, writable inside its read-only `.clai`.
     pub memory: Option<PathBuf>,
 }
@@ -79,11 +88,27 @@ impl EffectiveFilesystemPolicy {
                 path_grants.push(resolved);
             }
         }
-        let (read_only_state, memory) =
-            protected_state(&workspace_root, &path_grants, mask.as_deref(), clai_home);
-        // A grant inside that state must not make it writable again.
+        let own_state = target(workspace_root.join(STATE_DIR));
+        let state: Vec<PathBuf> = clai_home
+            .filter(|path| path.is_absolute())
+            .and_then(|path| resolve(path).ok())
+            .into_iter()
+            .flat_map(|app| {
+                let links: Vec<PathBuf> = entries(&app)
+                    .filter(|entry| entry.is_symlink())
+                    .filter_map(target)
+                    .collect();
+                std::iter::once(app).chain(links)
+            })
+            .chain(own_state.clone())
+            .collect();
+        let memory = own_state
+            .map(|state| state.join(MEMORY_DIR))
+            .filter(|memory| fs::symlink_metadata(memory).is_ok_and(|m| m.is_dir()));
+        let containers = containers(&workspace_root, mask.as_deref());
+        // A grant inside the state must not make it writable again.
         for grant in &mut path_grants {
-            if in_read_only_state(&read_only_state, memory.as_deref(), &grant.host_path) {
+            if is_state(&grant.host_path, &state, &containers, memory.as_deref()) {
                 grant.access = SandboxPathAccess::ReadOnly;
             }
         }
@@ -100,12 +125,16 @@ impl EffectiveFilesystemPolicy {
                     .iter()
                     .any(|w| authorizes(w, &g.host_path, mask.as_deref()))
         });
+        let (read_only_state, pinned) = protect(&state, &writes, &containers, mask.as_deref());
+        let memory = memory.filter(|memory| read_only_state.iter().any(|s| memory.starts_with(s)));
         Ok(Self {
             workspace_root,
             path_grants,
             mask,
             home,
+            state,
             read_only_state,
+            pinned,
             memory,
         })
     }
@@ -130,9 +159,14 @@ impl EffectiveFilesystemPolicy {
         Self::compile(workspace, &grants, home)
     }
 
-    /// Whether `path` is CLAI state the shell may only read.
+    /// Whether writing `path` would change CLAI's own state: the app directory
+    /// outside its workspace directories, or any workspace's `.clai` but the
+    /// agent's memory, whether it exists yet or not. Grants do not matter, so
+    /// a write grant there is lowered to read-only or refused up front even
+    /// while the agent cannot reach the path at all.
     pub fn is_read_only_state(&self, path: &Path) -> bool {
-        in_read_only_state(&self.read_only_state, self.memory.as_deref(), path)
+        let containers = containers(&self.workspace_root, self.mask.as_deref());
+        is_state(path, &self.state, &containers, self.memory.as_deref())
     }
 
     /// Query an absolute, resolved path (the form returned by grant requests).
@@ -163,12 +197,14 @@ impl EffectiveFilesystemPolicy {
         }
     }
 
-    /// Mounts are explicit, with masks first at equal depth and writable binds last.
-    /// Deeper mounts win, so the agent's memory is writable again inside its
-    /// read-only `.clai`; no writable bind lies inside CLAI's state otherwise.
     /// The ordered operations a mount-based backend applies. Only the Linux
     /// bwrap backend lowers these; macOS reads the resolved fields directly
     /// and Windows runs commands unsandboxed.
+    ///
+    /// Mounts are explicit and deeper mounts win: masks come first at equal
+    /// depth, then read-only and writable binds, and read-only state last. So
+    /// the workspace stays writable inside a read-only `~/.clai`, and the
+    /// agent's memory inside its read-only `.clai`.
     #[cfg(any(target_os = "linux", test))]
     pub fn operations(&self) -> Vec<FilesystemOperation<'_>> {
         let mut ops = vec![FilesystemOperation::Expose {
@@ -193,6 +229,21 @@ impl EffectiveFilesystemPolicy {
                 .iter()
                 .map(|path| FilesystemOperation::Protect(path)),
         );
+        // A mount point cannot be renamed: bind each pinned directory that is
+        // not bound yet to itself.
+        ops.extend(
+            self.pinned
+                .iter()
+                .filter(|path| {
+                    **path != self.workspace_root
+                        && !self.path_grants.iter().any(|g| g.host_path == **path)
+                })
+                .map(|path| FilesystemOperation::Expose {
+                    path,
+                    access: SandboxPathAccess::ReadWrite,
+                    required: false,
+                }),
+        );
         if let Some(memory) = &self.memory {
             ops.push(FilesystemOperation::Expose {
                 path: memory,
@@ -202,7 +253,7 @@ impl EffectiveFilesystemPolicy {
         }
         ops.sort_by_key(|op| match op {
             FilesystemOperation::Mask(path) => (path.components().count(), 0),
-            FilesystemOperation::Protect(path) => (path.components().count(), 1),
+            FilesystemOperation::Protect(path) => (path.components().count(), 3),
             FilesystemOperation::Expose { path, access, .. } => (
                 path.components().count(),
                 if *access == SandboxPathAccess::ReadWrite {
@@ -297,52 +348,101 @@ pub(crate) fn grant_masked_for_candidate(
     mask.is_some_and(|m| candidate.starts_with(m) && m.starts_with(root) && m != root)
 }
 
-/// CLAI's state that the workspace or a read-write grant covers, sorted, and
-/// the agent's memory when its own `.clai` is among it. Only what exists now
-/// counts: bubblewrap cannot bind a missing path, and the app creates the
-/// workspace's `.clai/memory` before each command. Symlinks are skipped, as a
-/// bind would land on their target.
-fn protected_state(
-    workspace_root: &Path,
-    grants: &[SandboxPathGrant],
-    mask: Option<&Path>,
-    clai_home: Option<&Path>,
-) -> (Vec<PathBuf>, Option<PathBuf>) {
-    let write_grants = || {
-        grants
+/// The directories that hold workspaces: the workspace's parent and the
+/// masked container, usually the same one.
+fn containers(workspace_root: &Path, mask: Option<&Path>) -> Vec<PathBuf> {
+    workspace_root
+        .parent()
+        .into_iter()
+        .chain(mask)
+        .map(Path::to_path_buf)
+        .collect()
+}
+
+/// See [`EffectiveFilesystemPolicy::is_read_only_state`].
+fn is_state(path: &Path, state: &[PathBuf], containers: &[PathBuf], memory: Option<&Path>) -> bool {
+    if memory.is_some_and(|memory| path.starts_with(memory)) {
+        return false;
+    }
+    let state_dir = Some(Component::Normal(std::ffi::OsStr::new(STATE_DIR)));
+    if containers.iter().any(|container| {
+        path.strip_prefix(container)
+            .is_ok_and(|rest| rest.components().nth(1) == state_dir)
+    }) {
+        return true;
+    }
+    // The deepest match wins: the workspaces inside the app directory hold
+    // the user's files.
+    let depth = |roots: &[PathBuf]| {
+        roots
             .iter()
-            .filter(|g| g.access == SandboxPathAccess::ReadWrite)
+            .filter(|root| path.starts_with(root))
+            .map(|root| root.components().count())
+            .max()
     };
-    let own = workspace_root.join(STATE_DIR);
-    let mut candidates = vec![own.clone()];
-    if write_grants().next().is_some() {
-        // Other workspaces' state, through a grant on them or their container.
-        for container in workspace_root.parent().into_iter().chain(mask) {
-            candidates.extend(entries(container).map(|workspace| workspace.join(STATE_DIR)));
+    depth(state) > depth(containers)
+}
+
+/// The state a writable root covers, sorted, and what must not move: each
+/// such root and the directories below it on the way to the state, up to the
+/// first read-only one. A directory bind is used rather than one per entry,
+/// so entries created later, and files the app replaces by renaming, stay
+/// covered.
+///
+/// Other workspaces' `.clai` are looked up only when a write grant exists,
+/// which spares the common case a directory scan. A write grant on the
+/// masked workspace directory itself makes that directory read-only too, so
+/// no workspace can be planted in it; its workspaces stay writable, as each is
+/// pinned on the way to its `.clai`.
+fn protect(
+    state: &[PathBuf],
+    writes: &[PathBuf],
+    containers: &[PathBuf],
+    mask: Option<&Path>,
+) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut candidates = state.to_vec();
+    if writes.len() > 1 {
+        for container in containers {
+            candidates.extend(
+                entries(container)
+                    .filter_map(target)
+                    .filter_map(|workspace| target(workspace.join(STATE_DIR))),
+            );
         }
-        // The app's config, skills and caches, but not the directories that
-        // hold workspaces.
-        if let Some(app) = clai_home
-            .filter(|path| path.is_absolute())
-            .and_then(|path| resolve(path).ok())
-        {
-            candidates.extend(entries(&app).filter(|entry| {
-                !workspace_root.starts_with(entry) && !mask.is_some_and(|m| m.starts_with(entry))
-            }));
+        if let Some(mask) = mask.filter(|mask| writes.iter().any(|root| root == mask)) {
+            candidates.push(mask.to_path_buf());
         }
     }
-    let mut state: Vec<PathBuf> = candidates
+    let mut protected: Vec<PathBuf> = candidates
         .into_iter()
-        .filter(|path| {
-            fs::symlink_metadata(path).is_ok_and(|m| !m.file_type().is_symlink())
-                && (authorizes(workspace_root, path, mask)
-                    || write_grants().any(|g| authorizes(&g.host_path, path, mask)))
-        })
+        .filter(|path| writes.iter().any(|root| authorizes(root, path, mask)))
         .collect();
-    state.sort();
-    state.dedup();
-    let memory = state.contains(&own).then(|| own.join(MEMORY_DIR));
-    (state, memory)
+    protected.sort();
+    protected.dedup();
+    let mut pinned = Vec::new();
+    for path in &protected {
+        for root in writes
+            .iter()
+            .filter(|root| *root != path && authorizes(root, path, mask))
+        {
+            let mut between: Vec<&Path> = path
+                .ancestors()
+                .skip(1)
+                .take_while(|dir| *dir != root.as_path())
+                .collect();
+            between.reverse();
+            pinned.push(root.clone());
+            pinned.extend(
+                between
+                    .into_iter()
+                    .take_while(|dir| !protected.iter().any(|p| p == dir))
+                    .map(Path::to_path_buf),
+            );
+        }
+    }
+    pinned.sort();
+    pinned.dedup();
+    (protected, pinned)
 }
 
 fn entries(dir: &Path) -> impl Iterator<Item = PathBuf> {
@@ -350,12 +450,17 @@ fn entries(dir: &Path) -> impl Iterator<Item = PathBuf> {
         .into_iter()
         .flatten()
         .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|t| !t.is_symlink()))
         .map(|entry| entry.path())
 }
 
-fn in_read_only_state(state: &[PathBuf], memory: Option<&Path>, path: &Path) -> bool {
-    state.iter().any(|p| path.starts_with(p)) && !memory.is_some_and(|m| path.starts_with(m))
+/// Where writes to `path` land: `path`, or its target when it is a symlink.
+/// `None` when it is missing or dangling.
+fn target(path: PathBuf) -> Option<PathBuf> {
+    if fs::symlink_metadata(&path).ok()?.file_type().is_symlink() {
+        resolve(&path).ok()
+    } else {
+        Some(path)
+    }
 }
 
 /// Resolve `path` through symlinks so a requested shell working directory is
@@ -557,64 +662,159 @@ mod tests {
             FilesystemOperation::Expose { path: a, access: ReadOnly, required: false },
             FilesystemOperation::Mask(b),
             FilesystemOperation::Expose { path: c, access: ReadWrite, required: false },
+            FilesystemOperation::Protect(e),
             FilesystemOperation::Expose { path: d, access: ReadWrite, required: true },
-        ] if *a == home && *b == container && *c == container && *d == workspace));
+        ] if *a == home && *b == container && *c == container && *e == container && *d == workspace));
+    }
+
+    /// `<base>/home/.clai/workspaces/{own,other}`, each with its `.clai`, and
+    /// the app's config and skills.
+    struct ClaiLayout {
+        _temp: tempfile::TempDir,
+        base: PathBuf,
+        home: PathBuf,
+        app: PathBuf,
+        container: PathBuf,
+        workspace: PathBuf,
+        sibling: PathBuf,
+        state: PathBuf,
+    }
+
+    impl ClaiLayout {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let base = temp.path().canonicalize().unwrap();
+            let home = base.join("home");
+            let app = home.join(".clai");
+            let container = app.join("workspaces");
+            let workspace = container.join("own");
+            let sibling = container.join("other");
+            let state = workspace.join(".clai");
+            for dir in [
+                state.join("memory"),
+                sibling.join(".clai"),
+                app.join("skills"),
+            ] {
+                fs::create_dir_all(dir).unwrap();
+            }
+            fs::write(app.join("config.json"), "{}").unwrap();
+            Self {
+                _temp: temp,
+                base,
+                home,
+                app,
+                container,
+                workspace,
+                sibling,
+                state,
+            }
+        }
+
+        fn compile(&self, grants: &[SandboxPathGrant]) -> EffectiveFilesystemPolicy {
+            EffectiveFilesystemPolicy::compile_in(
+                &self.workspace,
+                grants,
+                Some(&self.home),
+                Some(&self.app),
+            )
+            .unwrap()
+        }
+    }
+
+    #[test]
+    fn clai_state_refuses_write_grants_whether_the_shell_reaches_it_or_not() {
+        let layout = ClaiLayout::new();
+        let ClaiLayout {
+            home,
+            app,
+            container,
+            workspace,
+            sibling,
+            state,
+            ..
+        } = &layout;
+        // Read grants leave only the workspace's own state to protect, but
+        // every piece of state is refused write grants, existing or not.
+        let policy = layout.compile(&[grant(home, SandboxPathAccess::ReadOnly)]);
+        assert_eq!(policy.read_only_state, vec![state.clone()]);
+        assert_eq!(policy.pinned, vec![workspace.clone()]);
+        assert_eq!(policy.memory, Some(state.join("memory")));
+        for path in [
+            state.join("config.json"),
+            app.join("config.json"),
+            app.join("skills/new/SKILL.md"),
+            app.join("new"),
+            sibling.join(".clai/config.json"),
+            container.join("planted/.clai"),
+        ] {
+            assert!(policy.is_read_only_state(&path), "{path:?}");
+        }
+        for path in [
+            state.join("memory/notes.md"),
+            workspace.join("notes.md"),
+            sibling.join("notes.md"),
+            container.clone(),
+            home.join("notes.md"),
+        ] {
+            assert!(!policy.is_read_only_state(&path), "{path:?}");
+        }
     }
 
     #[test]
     fn clai_state_is_read_only_under_every_write_root_except_memory() {
-        use SandboxPathAccess::{ReadOnly, ReadWrite};
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().canonicalize().unwrap();
-        let app = home.join(".clai");
-        let container = app.join("workspaces");
-        let workspace = container.join("own");
-        let sibling = container.join("other");
-        let state = workspace.join(".clai");
-        for dir in [
-            state.join("memory"),
-            sibling.join(".clai"),
-            app.join("skills"),
-        ] {
-            fs::create_dir_all(dir).unwrap();
-        }
-        fs::write(app.join("config.json"), "{}").unwrap();
-        let compile = |grants: &[SandboxPathGrant]| {
-            EffectiveFilesystemPolicy::compile_in(&workspace, grants, Some(&home), Some(&app))
-                .unwrap()
-        };
+        use SandboxPathAccess::ReadWrite;
+        let layout = ClaiLayout::new();
+        let ClaiLayout {
+            base,
+            home,
+            app,
+            container,
+            workspace,
+            sibling,
+            state,
+            ..
+        } = &layout;
+        let compile = |grants: &[SandboxPathGrant]| layout.compile(grants);
 
-        // Read grants leave only the workspace's own state to protect.
-        let policy = compile(&[grant(&home, ReadOnly)]);
-        assert_eq!(policy.read_only_state, vec![state.clone()]);
-        assert_eq!(policy.memory, Some(state.join("memory")));
-        assert!(policy.is_read_only_state(&state.join("config.json")));
-        assert!(!policy.is_read_only_state(&state.join("memory/notes.md")));
-        assert!(!policy.is_read_only_state(&workspace.join("notes.md")));
+        // A write grant on home makes the whole app directory read-only, not
+        // its entries one by one; the masked siblings stay out of reach.
+        let policy = compile(&[grant(home, ReadWrite)]);
+        assert_eq!(policy.read_only_state, vec![app.clone(), state.clone()]);
+        assert_eq!(policy.pinned, vec![home.clone(), workspace.clone()]);
 
-        // A write grant on home adds the app's files, but neither the masked
-        // sibling nor the directory that holds the workspaces.
-        let policy = compile(&[grant(&home, ReadWrite)]);
+        // A write grant above home pins home itself.
+        let policy = compile(&[grant(base, ReadWrite)]);
         assert_eq!(
-            policy.read_only_state,
-            vec![app.join("config.json"), app.join("skills"), state.clone()]
+            policy.pinned,
+            vec![base.clone(), home.clone(), workspace.clone()]
         );
 
-        // Write grants on a sibling or on a file inside some state never make
-        // state writable, and each read-only bind follows its write root.
+        // A write grant on the workspace directory makes it read-only too and
+        // pins every workspace in it, and grants inside some state never make
+        // it writable. Each read-only bind follows its write root.
         let policy = compile(&[
-            grant(&home, ReadWrite),
-            grant(&sibling, ReadWrite),
+            grant(home, ReadWrite),
+            grant(container, ReadWrite),
+            grant(sibling, ReadWrite),
             grant(&state.join("config.json"), ReadWrite),
             grant(&app.join("config.json"), ReadWrite),
         ]);
         assert_eq!(
             policy.read_only_state,
             vec![
-                app.join("config.json"),
-                app.join("skills"),
+                app.clone(),
+                container.clone(),
                 sibling.join(".clai"),
                 state.clone(),
+            ]
+        );
+        assert_eq!(
+            policy.pinned,
+            vec![
+                home.clone(),
+                container.clone(),
+                sibling.clone(),
+                workspace.clone()
             ]
         );
         let operations = policy.operations();
@@ -632,10 +832,13 @@ mod tests {
                 })
                 .unwrap()
         };
-        assert!(write(&home) < protect(&app.join("config.json")));
-        assert!(write(&sibling) < protect(&sibling.join(".clai")));
-        assert!(write(&workspace) < protect(&state));
-        assert!(protect(&state) < write(&state.join("memory")));
+        assert!(write(home) < protect(app));
+        assert!(protect(app) < write(container));
+        assert!(write(container) < protect(container));
+        assert!(protect(container) < write(sibling));
+        assert!(write(sibling) < protect(&sibling.join(".clai")));
+        assert!(write(workspace) < protect(state));
+        assert!(protect(state) < write(&state.join("memory")));
         for op in &operations {
             if let FilesystemOperation::Expose {
                 path,
@@ -646,6 +849,60 @@ mod tests {
                 assert!(!policy.is_read_only_state(path), "{path:?} bound writable");
             }
         }
+    }
+
+    #[test]
+    fn clai_state_is_protected_where_symlinks_lead_and_without_a_home_mask() {
+        use SandboxPathAccess::ReadWrite;
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let app = home.join(".clai");
+        let container = app.join("workspaces");
+        let workspace = container.join("own");
+        let sibling = container.join("other");
+        let state = workspace.join(".clai");
+        let skills = home.join("dotfiles/skills");
+        let notes = home.join("notes");
+        for dir in [&state, &sibling.join(".clai"), &skills, &notes] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        std::os::unix::fs::symlink(&skills, app.join("skills")).unwrap();
+        std::os::unix::fs::symlink(&notes, state.join("memory")).unwrap();
+
+        // A symlinked entry is protected where it leads; a symlinked memory is
+        // not bound again, and writes through it land wherever it points.
+        let policy = EffectiveFilesystemPolicy::compile_in(
+            &workspace,
+            &[grant(&home, ReadWrite)],
+            Some(&home),
+            Some(&app),
+        )
+        .unwrap();
+        assert_eq!(
+            policy.read_only_state,
+            vec![app.clone(), state.clone(), skills.clone()]
+        );
+        assert!(policy.is_read_only_state(&skills.join("x/SKILL.md")));
+        assert_eq!(policy.memory, None);
+
+        // Without a mask (home unknown, or the app directory outside home) the
+        // workspace directory is not hidden: it stays read-only under the app
+        // directory, and nothing inside that is pinned writable.
+        let policy = EffectiveFilesystemPolicy::compile_in(
+            &workspace,
+            &[grant(&home, ReadWrite)],
+            None,
+            Some(&app),
+        )
+        .unwrap();
+        assert_eq!(
+            policy.read_only_state,
+            vec![app.clone(), sibling.join(".clai"), state.clone(), skills]
+        );
+        assert_eq!(
+            policy.pinned,
+            vec![home.clone(), workspace.clone(), home.join("dotfiles")]
+        );
     }
 
     #[test]

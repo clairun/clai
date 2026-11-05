@@ -314,41 +314,62 @@ fn append_workspace_mask(profile: &mut String, command: &SandboxCommand) -> Resu
             write.push(path_literal(path)?);
         }
     }
-    append_subpath_rule(profile, "allow file-read*", &read);
-    append_subpath_rule(profile, "allow file-write*", &write);
+    append_path_rule(profile, "allow file-read*", "subpath", &read);
+    append_path_rule(profile, "allow file-write*", "subpath", &write);
     Ok(())
 }
 
 /// CLAI's own state stays read-only inside the allowed roots (see
-/// `EffectiveFilesystemPolicy::read_only_state`). Its write deny comes after
-/// every write allow, since the last matching rule wins; then the agent's
-/// memory and an ephemeral temp dir in `.clai/tmp` are writable again.
+/// `EffectiveFilesystemPolicy::read_only_state`). The last matching rule wins,
+/// so these rules follow every other allow and go by depth, as the Linux
+/// mounts do: the state is denied, what is writable inside it (the workspace
+/// in `~/.clai`, its scratch, the agent's memory, an ephemeral temp dir in
+/// `.clai/tmp`) is allowed again, and state inside that is denied again.
+/// Then the pinned directories themselves are denied: a rename is checked
+/// against its own paths, not the subtree it moves, so none of them may move.
 fn append_read_only_state(
     profile: &mut String,
     command: &SandboxCommand,
     private_tmp: &Path,
 ) -> Result<(), String> {
     let filesystem = &command.profile.filesystem;
-    let denied = filesystem
-        .read_only_state
+    let state = &filesystem.read_only_state;
+    let tmp = canonicalize_existing(private_tmp).ok();
+    let writable = std::iter::once(&filesystem.workspace_root)
+        .chain(
+            filesystem
+                .path_grants
+                .iter()
+                .filter(|grant| grant.access == SandboxPathAccess::ReadWrite)
+                .map(|grant| &grant.host_path),
+        )
+        .chain(&filesystem.pinned)
+        .chain(&filesystem.memory)
+        .chain(&tmp)
+        .filter(|path| state.iter().any(|s| path != &s && path.starts_with(s)))
+        .map(|path| (path, "allow"));
+    let mut rules: Vec<_> = state
+        .iter()
+        .map(|path| (path, "deny"))
+        .chain(writable)
+        .collect();
+    // At equal depth the deny comes last, so it wins.
+    rules.sort_by_key(|(path, rule)| (path.components().count(), *rule));
+    rules.dedup();
+    for (path, rule) in rules {
+        let rule = format!("{rule} file-write*");
+        append_path_rule(profile, &rule, "subpath", &[path_literal(path)?]);
+    }
+    let pinned = filesystem
+        .pinned
         .iter()
         .map(|path| path_literal(path))
         .collect::<Result<Vec<_>, _>>()?;
-    append_subpath_rule(profile, "deny file-write*", &denied);
-    let mut allowed = Vec::new();
-    if let Some(memory) = &filesystem.memory {
-        allowed.push(path_literal(memory)?);
-    }
-    if let Ok(tmp) = canonicalize_existing(private_tmp) {
-        if filesystem.is_read_only_state(&tmp) {
-            allowed.push(path_literal(&tmp)?);
-        }
-    }
-    append_subpath_rule(profile, "allow file-write*", &allowed);
+    append_path_rule(profile, "deny file-write*", "literal", &pinned);
     Ok(())
 }
 
-fn append_subpath_rule(profile: &mut String, rule: &str, paths: &[String]) {
+fn append_path_rule(profile: &mut String, rule: &str, filter: &str, paths: &[String]) {
     if paths.is_empty() {
         return;
     }
@@ -356,7 +377,9 @@ fn append_subpath_rule(profile: &mut String, rule: &str, paths: &[String]) {
     profile.push_str(rule);
     profile.push('\n');
     for path in paths {
-        profile.push_str("  (subpath \"");
+        profile.push_str("  (");
+        profile.push_str(filter);
+        profile.push_str(" \"");
         profile.push_str(path);
         profile.push_str("\")\n");
     }
@@ -729,7 +752,7 @@ mod tests {
     }
 
     #[test]
-    fn profile_denies_writes_to_clai_state_after_every_allow_then_allows_memory() {
+    fn profile_denies_writes_to_clai_state_by_depth_and_pins_its_directories() {
         let temp = tempfile::tempdir().unwrap();
         let home = fs::canonicalize(temp.path()).unwrap();
         let app = home.join(".clai");
@@ -737,7 +760,6 @@ mod tests {
         let state = workspace.join(".clai");
         fs::create_dir_all(state.join("memory")).unwrap();
         fs::create_dir_all(state.join("tmp")).unwrap();
-        fs::write(app.join("config.json"), "{}").unwrap();
         // The ephemeral temp fallback lives in `.clai/tmp`.
         let private_tmp = tempfile::tempdir_in(state.join("tmp")).unwrap();
 
@@ -755,34 +777,74 @@ mod tests {
             .unwrap();
         let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
 
-        let subpath = |path: &Path| {
-            format!(
-                "(subpath \"{}\")",
+        let rule = |rule: &str, filter: &str, path: &Path| {
+            let rule = format!(
+                "({rule} file-write*\n  ({filter} \"{}\")\n)",
                 escape_sbpl_string(&path.display().to_string())
-            )
+            );
+            profile
+                .rfind(&rule)
+                .unwrap_or_else(|| panic!("expected {rule}; profile:\n{profile}"))
         };
-        let deny = profile
-            .find("(deny file-write*\n")
-            .unwrap_or_else(|| panic!("state should be denied; profile:\n{profile}"));
-        let allow = profile.rfind("(allow file-write*").unwrap();
-        assert_eq!(
-            profile[deny..].matches("(allow file-write*").count(),
-            1,
-            "the deny must follow every other write allow; profile:\n{profile}"
-        );
-        let denied = &profile[deny..allow];
-        assert!(denied.contains(&subpath(&state)), "{profile}");
-        assert!(
-            denied.contains(&subpath(&app.join("config.json"))),
-            "{profile}"
-        );
-        let allowed = &profile[allow..];
-        assert!(
-            allowed.contains(&subpath(&state.join("memory"))),
-            "{profile}"
-        );
-        assert!(allowed.contains(&subpath(private_tmp.path())), "{profile}");
-        assert!(!allowed.contains(&subpath(&state)), "{profile}");
+        let app_denied = rule("deny", "subpath", &app);
+        assert!(rule("deny", "subpath", &state) > rule("allow", "subpath", &workspace));
+        assert!(rule("allow", "subpath", &workspace) > app_denied);
+        let state_denied = rule("deny", "subpath", &state);
+        assert!(rule("allow", "subpath", &state.join("memory")) > state_denied);
+        assert!(rule("allow", "subpath", private_tmp.path()) > state_denied);
+        // From the first state deny on, only paths inside the app directory
+        // are allowed again, and never the workspace state itself.
+        assert_eq!(profile.find("(deny file-write*\n"), Some(app_denied));
+        let opener = "(allow file-write*\n  (subpath \"";
+        for (at, _) in profile[app_denied..].match_indices(opener) {
+            let rest = &profile[app_denied + at + opener.len()..];
+            let path = &rest[..rest.find('"').unwrap()];
+            assert!(
+                Path::new(path).starts_with(&app),
+                "{path}; profile:\n{profile}"
+            );
+        }
+        assert!(!profile[state_denied..].contains(&format!(
+            "(allow file-write*\n  (subpath \"{}\")",
+            escape_sbpl_string(&state.display().to_string())
+        )));
+        // The roots that hold the state cannot be renamed, last of all.
+        let pinned = profile
+            .rfind("(deny file-write*\n  (literal ")
+            .unwrap_or_else(|| panic!("pinned directories should be denied; profile:\n{profile}"));
+        assert!(pinned > state_denied);
+        for path in [&home, &workspace] {
+            assert!(profile[pinned..].contains(&format!(
+                "(literal \"{}\")",
+                escape_sbpl_string(&path.display().to_string())
+            )));
+        }
+
+        // A write grant on the workspace directory as well: inside the app
+        // directory it is allowed, then denied at the same depth, so no
+        // workspace can be planted in it.
+        let container = app.join("workspaces");
+        command.profile.filesystem =
+            super::super::filesystem::EffectiveFilesystemPolicy::compile_in(
+                &workspace,
+                &[home.clone(), container.clone()].map(|host_path| SandboxPathGrant {
+                    host_path,
+                    access: SandboxPathAccess::ReadWrite,
+                }),
+                Some(&home),
+                Some(&app),
+            )
+            .unwrap();
+        let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
+        let rule = |rule: &str| {
+            profile
+                .rfind(&format!(
+                    "({rule} file-write*\n  (subpath \"{}\")\n)",
+                    escape_sbpl_string(&container.display().to_string())
+                ))
+                .unwrap_or_else(|| panic!("expected {rule} on {container:?}; profile:\n{profile}"))
+        };
+        assert!(rule("allow") < rule("deny"));
     }
 
     #[test]
