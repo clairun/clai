@@ -45,6 +45,14 @@ pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, St
     let mut child_command = Command::new(program);
     child_command.args(launch_args);
     prepare_stdio(&mut child_command);
+    // SAFETY: the hook runs in the forked child and makes only
+    // async-signal-safe system calls.
+    unsafe {
+        child_command.pre_exec(|| {
+            mark_inherited_fds_cloexec();
+            Ok(())
+        });
+    }
 
     let child = child_command.spawn().map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -72,6 +80,46 @@ pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, St
     }
 
     Ok(output)
+}
+
+/// Sets close-on-exec on every descriptor above stdio. bwrap hands the
+/// command every descriptor it inherits, and this process holds some without
+/// the flag (the desktop session that started it leaves /proc and cgroup
+/// files open), so a leaked socket or directory would be a way out of the
+/// sandbox. Close-on-exec rather than close: the standard library reports a
+/// failed exec through a descriptor of its own that must stay open until then.
+fn mark_inherited_fds_cloexec() {
+    // SAFETY: close_range(2) only changes descriptor flags (Linux 5.11+).
+    let marked = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3_u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if marked == 0 {
+        return;
+    }
+    let mut limit = libc::rlimit {
+        rlim_cur: 0,
+        rlim_max: 0,
+    };
+    // SAFETY: getrlimit writes into the struct it is given.
+    let highest = if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } == 0 {
+        limit.rlim_cur.min(1 << 20) as libc::c_int
+    } else {
+        1024
+    };
+    for fd in 3..highest {
+        // SAFETY: fcntl on a descriptor that may not exist only fails.
+        unsafe {
+            let flags = libc::fcntl(fd, libc::F_GETFD);
+            if flags >= 0 && flags & libc::FD_CLOEXEC == 0 {
+                libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC);
+            }
+        }
+    }
 }
 
 // Bwrap's own diagnostics — emitted only when bwrap itself fails before it can
@@ -2384,6 +2432,26 @@ else:
             "{}"
         );
         assert!(!workspace.join(".claude/settings.json").exists());
+    }
+
+    /// The command sees only stdin, stdout and stderr, even when this process
+    /// holds a descriptor without close-on-exec.
+    #[tokio::test]
+    async fn the_command_inherits_only_stdio() {
+        let workspace = tempfile::tempdir().unwrap();
+        let file = std::fs::File::open(workspace.path()).unwrap();
+        // SAFETY: dup returns a new descriptor without close-on-exec.
+        let leaked = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&file)) };
+        assert!(leaked > 2);
+        let command = tmp_e2e_command(workspace.path(), None, "ls /proc/$$/fd; :");
+        let output = run_or_skip(command).await;
+        // SAFETY: closes the descriptor dup returned above.
+        unsafe { libc::close(leaked) };
+        let Some(output) = output else {
+            return;
+        };
+        let fds: Vec<&str> = output.stdout.split_whitespace().collect();
+        assert_eq!(fds, ["0", "1", "2"], "{output:?}");
     }
 
     /// Runs `script` in `workspace` with `grants`, the app directory at `app`.
