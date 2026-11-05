@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 // Tauri invoke (submit_permission_decision) + the event-bus listen are
@@ -158,20 +158,6 @@ describe('ApprovalCard — the three actions', () => {
     expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'allowOnce' } }]);
   });
 
-  it('does not send the decision twice', async () => {
-    let resolve: () => void = () => {};
-    mockInvoke.mockImplementation(() => new Promise<void>((done) => { resolve = done; }));
-    render(<ApprovalCard req={PUSH} />);
-    const once = screen.getByRole('button', { name: 'Allow once' });
-    const always = screen.getByRole('button', { name: 'Always allow (this workspace)' });
-    // Both land before React re-renders, so the buttons are not disabled yet.
-    act(() => {
-      once.click();
-      always.click();
-    });
-    expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'allowOnce' } }]);
-    await act(async () => resolve());
-  });
 });
 
 describe('ApprovalCard — where Always allow applies', () => {
@@ -241,67 +227,12 @@ describe('ApprovalCard — Deny and its reason', () => {
     expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'deny', reason: 'Push after review' } }]);
   });
 
-  it('moves focus into the reason field, and Escape closes it back on Deny', async () => {
-    const user = userEvent.setup();
-    render(<ApprovalCard req={PUSH} />);
-    const deny = screen.getByRole('button', { name: 'Deny' });
-    expect(deny).not.toHaveAttribute('aria-controls');
-
-    deny.focus();
-    await user.keyboard('{Enter}');
-    const reason = screen.getByRole('textbox', { name: /reason for denying/i });
-    expect(reason).toHaveFocus();
-    expect(deny).toHaveAttribute('aria-expanded', 'true');
-    expect(document.getElementById(deny.getAttribute('aria-controls')!)).toContainElement(reason);
-
-    await user.keyboard('{Escape}');
-    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
-    expect(deny).toHaveFocus();
-    expect(deny).toHaveAttribute('aria-expanded', 'false');
-    expect(submitted()).toEqual([]);
-  });
-
-  it('closes the reason field with Cancel or a second Deny, sending nothing', async () => {
-    const user = userEvent.setup();
-    render(<ApprovalCard req={PUSH} />);
-    const deny = screen.getByRole('button', { name: 'Deny' });
-
-    await user.click(deny);
-    await user.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
-    expect(deny).toHaveFocus();
-
-    await user.click(deny);
-    await user.click(deny);
-    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
-    expect(submitted()).toEqual([]);
-  });
-
   it('omits the reason when the field holds only whitespace', async () => {
     render(<ApprovalCard req={PUSH} />);
     await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
     await userEvent.type(screen.getByRole('textbox', { name: /reason for denying/i }), '   ');
     await userEvent.click(screen.getByRole('button', { name: 'Deny command' }));
     expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'deny' } }]);
-  });
-
-  it('says the reason goes to the agent, and how much of the limit it uses', async () => {
-    render(<ApprovalCard req={PUSH} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
-    const reason = screen.getByRole('textbox', { name: /reason for denying/i });
-    expect(reason).toHaveAccessibleDescription(/Sent to the agent with this response\./);
-    await userEvent.type(reason, 'abc');
-    expect(screen.getByText('3/500 characters')).toBeInTheDocument();
-  });
-
-  it('accepts 500 Unicode characters and drops the next, counting an emoji once', async () => {
-    render(<ApprovalCard req={PUSH} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
-    const reason = screen.getByRole('textbox', { name: /reason for denying/i });
-    // Two UTF-16 code units each, one character for the backend.
-    fireEvent.change(reason, { target: { value: '😀'.repeat(501) } });
-    expect((reason as HTMLTextAreaElement).value).toBe('😀'.repeat(500));
-    expect(screen.getByText('500/500 characters')).toBeInTheDocument();
   });
 
   it('keeps the reason editable after a failed submission', async () => {

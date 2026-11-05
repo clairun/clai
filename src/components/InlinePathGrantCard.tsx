@@ -11,6 +11,7 @@ import type {
 import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender';
 import RequestingAgent from './Agents/RequestingAgent';
 import { chipText } from './requestChips';
+import { useDecisionSender } from './useDecisionSender';
 import styles from './InlinePathGrantCard.module.css';
 
 const PATH_GRANT_REQUEST_EVENT = 'path-grants://request';
@@ -101,25 +102,15 @@ interface PathGrantCardProps {
 /** One path-grant request and its decision. */
 export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathGrantCardProps) => {
   const [card, setCard] = useState<PathGrantCardState>({ path: req.requestedPath, access: req.requestedAccess });
-  const [isSubmitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { send: sendDecision, isSubmitting, error } = useDecisionSender(
+    (decision: PathGrantDecision) => submitPathGrantDecision(req.requestId, decision),
+    () => onDecided?.(req.requestId),
+  );
   // Collapse: squish the card to a one-line summary so a tall (or stacked)
   // request can't swallow the conversation. Default expanded.
   const [isCollapsed, setCollapsed] = useState(false);
   const spoken = Boolean(speaker);
 
-  const sendDecision = async (decision: PathGrantDecision) => {
-    setSubmitting(true);
-    setError(null);
-    try {
-      await submitPathGrantDecision(req.requestId, decision);
-      onDecided?.(req.requestId);
-    } catch (e) {
-      setError(typeof e === 'string' ? e : e instanceof Error ? e.message : 'Failed to submit decision');
-    } finally {
-      setSubmitting(false);
-    }
-  };
 
   // Validation: edited path must be the original or a descendant
   // (component-wise prefix). Edited access must be no stronger

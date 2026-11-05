@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
+import { Fragment, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import {
   listPendingNetworkAccessRequests,
@@ -13,7 +13,9 @@ import type {
 } from '../generated/bindings';
 import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender';
 import RequestingAgent from './Agents/RequestingAgent';
-import { chipText } from './requestChips';
+import { chipText, listOf, quoted } from './requestChips';
+import { DenyReasonPanel, useDenial } from './DenyReasonPanel';
+import { useDecisionSender } from './useDecisionSender';
 import styles from './InlineApprovalCard.module.css';
 import grantStyles from './InlinePathGrantCard.module.css';
 
@@ -22,20 +24,6 @@ const NETWORK_ACCESS_REQUEST_EVENT = 'network-access://request';
 // cancelled or ended run, or the agent asked again. Drop the card.
 const NETWORK_ACCESS_RESOLVED_EVENT = 'network-access://resolved';
 
-// The backend accepts at most 500 characters.
-const MAX_REASON_LENGTH = 500;
-const limitReason = (value: string) => Array.from(value).slice(0, MAX_REASON_LENGTH).join('');
-
-const quoted = (name: string) => `“${name}”`;
-
-/** "a", "a and b", "a, b and c". */
-const listOf = (items: ReactNode[]) =>
-  items.map((item, i) => (
-    <Fragment key={i}>
-      {i === 0 ? '' : i === items.length - 1 ? ' and ' : ', '}
-      {item}
-    </Fragment>
-  ));
 
 const hostWithPort = (req: NetworkAccessRequest) => (req.port ? `${req.host}:${req.port}` : req.host);
 
@@ -102,53 +90,14 @@ interface NetworkAccessCardProps {
 
 /** One network access request and its decision. */
 export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDecided, ref }: NetworkAccessCardProps) => {
-  const [isSubmitting, setSubmitting] = useState(false);
-  // Latched once the decision is sent, so it cannot be sent twice.
-  const sent = useRef(false);
-  const [error, setError] = useState<string | null>(null);
-  const [denying, setDenying] = useState(false);
-  const [reason, setReason] = useState('');
+  const { send, isSubmitting, error } = useDecisionSender(
+    (decision: NetworkAccessDecision) => submitNetworkAccessDecision(req.requestId, decision),
+    () => onDecided?.(req.requestId),
+  );
+  const denial = useDenial();
   const [isCollapsed, setCollapsed] = useState(false);
-  const reasonId = useId();
-  const reasonHintId = `${reasonId}-hint`;
-  const reasonCountId = `${reasonId}-count`;
-  const denialId = `${reasonId}-denial`;
-  const denyRef = useRef<HTMLButtonElement>(null);
-  const reasonRef = useRef<HTMLTextAreaElement>(null);
-  const reasonLength = Array.from(reason).length;
   const spoken = Boolean(speaker);
   const agentName = requester?.name ?? 'this agent';
-
-  const send = async (decision: NetworkAccessDecision) => {
-    if (sent.current) return;
-    sent.current = true;
-    setSubmitting(true);
-    setError(null);
-    try {
-      await submitNetworkAccessDecision(req.requestId, decision);
-      onDecided?.(req.requestId);
-    } catch (e) {
-      // A refused or failed decision leaves the request pending: answer again.
-      sent.current = false;
-      setError(typeof e === 'string' ? e : e instanceof Error ? e.message : 'Failed to submit decision');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  useEffect(() => {
-    if (denying) reasonRef.current?.focus();
-  }, [denying]);
-
-  const closeDenial = () => {
-    setDenying(false);
-    denyRef.current?.focus();
-  };
-
-  const confirmDenial = () => {
-    const why = reason.trim();
-    send(why ? { kind: 'deny', reason: why } : { kind: 'deny' });
-  };
 
   return (
     <article
@@ -240,61 +189,20 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
             )}
             <button
               type="button"
-              ref={denyRef}
-              className={`${styles.btn} ${styles.btnDenyOnce} ${denying ? styles.btnSelected : ''}`}
-              onClick={() => (denying ? closeDenial() : setDenying(true))}
+              {...denial.denyButton}
+              className={`${styles.btn} ${styles.btnDenyOnce} ${denial.open ? styles.btnSelected : ''}`}
               disabled={isSubmitting}
-              aria-expanded={denying}
-              aria-controls={denying ? denialId : undefined}
               {...chipText(spoken, 'Deny', 'Deny')}
             />
           </div>
-          {denying && (
-            <div
-              id={denialId}
-              className={styles.denialArea}
-              onKeyDown={(e) => {
-                if (e.key === 'Escape' && !isSubmitting) {
-                  e.stopPropagation();
-                  closeDenial();
-                }
-              }}
-            >
-              <div className={styles.reasonField}>
-                <label htmlFor={reasonId}>Reason for denying (optional)</label>
-                <textarea
-                  ref={reasonRef}
-                  id={reasonId}
-                  value={reason}
-                  onChange={(e) => setReason(limitReason(e.target.value))}
-                  rows={2}
-                  disabled={isSubmitting}
-                  placeholder="Tell the agent why"
-                  aria-describedby={`${reasonHintId} ${reasonCountId}`}
-                />
-                <div className={styles.reasonMeta}>
-                  <span className={styles.mutedHint} id={reasonHintId}>
-                    Sent to the agent with this response.
-                  </span>
-                  <span className={styles.mutedHint} id={reasonCountId}>
-                    {reasonLength}/{MAX_REASON_LENGTH} characters
-                  </span>
-                </div>
-              </div>
-              <div className={styles.denialActions}>
-                <button
-                  type="button"
-                  className={`${styles.btn} ${styles.btnConfirmDeny}`}
-                  onClick={confirmDenial}
-                  disabled={isSubmitting}
-                >
-                  {isSubmitting ? 'Submitting…' : 'Deny access'}
-                </button>
-                <button type="button" className={styles.btn} onClick={closeDenial} disabled={isSubmitting}>
-                  Cancel
-                </button>
-              </div>
-            </div>
+          {denial.open && (
+            <DenyReasonPanel
+              id={denial.panelId}
+              confirmLabel="Deny access"
+              submitting={isSubmitting}
+              onConfirm={(reason) => send(reason ? { kind: 'deny', reason } : { kind: 'deny' })}
+              onClose={denial.close}
+            />
           )}
           {error && !isSubmitting && (
             <div className={styles.error} role="alert">
