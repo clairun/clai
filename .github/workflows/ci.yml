@@ -35,7 +35,15 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev bubblewrap
+
+      # Ubuntu lets only AppArmor-profiled programs create unprivileged user
+      # namespaces, which bwrap needs; the sandbox tests below require it.
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Install npm dependencies
         run: npm ci
@@ -74,6 +82,10 @@ jobs:
 
       - name: Rust tests
         working-directory: src-tauri
+        # The tests that run real bwrap skip where it cannot run; here a
+        # skip fails the job instead.
+        env:
+          CLAI_REQUIRE_BWRAP: 1
         run: cargo test
 
       - name: Build Tauri app (debug, no bundle)

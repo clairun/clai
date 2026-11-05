@@ -2514,7 +2514,10 @@ mod tests {
             .unwrap()
             .join("clai-sandbox-helper");
         if !helper.is_file() {
-            eprintln!("skipped: {} is not built", helper.display());
+            crate::assistant::sandbox::skip_without_bwrap(&format!(
+                "{} is not built",
+                helper.display()
+            ));
             return;
         }
         let files = tempdir().unwrap();
@@ -2548,7 +2551,10 @@ mod tests {
         let network = std::sync::Arc::new(run_network(&["github.com"], &[]));
         let (output, refused) = match run_with_network(command(refuse, 20_000), &network).await {
             (Ok(output), refused) => (output, refused),
-            (Err(error), _) if error.contains("Sandboxed shell is unavailable") => return,
+            (Err(error), _) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
             (Err(error), _) => panic!("{error}"),
         };
         assert_eq!(output.exit_code, Some(255), "{output:?}");

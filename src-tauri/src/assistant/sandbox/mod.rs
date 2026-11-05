@@ -106,6 +106,18 @@ pub(crate) fn session_scratch(workspace_root: &std::path::Path) -> Option<std::p
 #[cfg(any(target_os = "macos", all(test, target_family = "unix")))]
 pub use profile::SandboxPathGrant;
 
+/// A test that needs a working bwrap (and the helper `cargo test` builds)
+/// calls this where they are missing. It skips, unless `CLAI_REQUIRE_BWRAP`
+/// is set, as in CI, where a silent skip would hide the test.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn skip_without_bwrap(reason: &str) {
+    assert!(
+        std::env::var_os("CLAI_REQUIRE_BWRAP").is_none(),
+        "CLAI_REQUIRE_BWRAP is set, but this test cannot run: {reason}"
+    );
+    eprintln!("skipped: {reason}");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

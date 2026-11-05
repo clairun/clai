@@ -1280,7 +1280,10 @@ mod tests {
         if helper.is_file() {
             Some(helper)
         } else {
-            eprintln!("skipped: {} is not built", helper.display());
+            crate::assistant::sandbox::skip_without_bwrap(&format!(
+                "{} is not built",
+                helper.display()
+            ));
             None
         }
     }
@@ -1314,7 +1317,10 @@ mod tests {
     async fn run_or_skip(command: SandboxCommand) -> Option<SandboxCommandOutput> {
         match run(command).await {
             Ok(output) => Some(output),
-            Err(error) if error.contains("Sandboxed shell is unavailable") => None,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                None
+            }
             Err(error) => panic!("sandbox command failed unexpectedly: {error}"),
         }
     }
@@ -1617,7 +1623,10 @@ else:
 
         let output = match run(command).await {
             Ok(output) => output,
-            Err(error) if error.contains("Sandboxed shell is unavailable") => return,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
             Err(error) => panic!("sandbox command failed unexpectedly: {error}"),
         };
 
@@ -1840,7 +1849,10 @@ else:
 
         let output = match run(command).await {
             Ok(output) => output,
-            Err(error) if error.contains("Sandboxed shell is unavailable") => return,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
             Err(error) => panic!("sandbox command failed unexpectedly: {error}"),
         };
 
@@ -1892,7 +1904,10 @@ else:
 
         let output = match run(command).await {
             Ok(output) => output,
-            Err(error) if error.contains("Sandboxed shell is unavailable") => return,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
             Err(error) => panic!("sandbox command failed unexpectedly: {error}"),
         };
 
@@ -2130,7 +2145,10 @@ else:
         );
         match run(write).await {
             Ok(output) => assert!(output.success, "stderr: {}", output.stderr),
-            Err(error) if error.contains("Sandboxed shell is unavailable") => return,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
             Err(error) => panic!("sandbox command failed unexpectedly: {error}"),
         }
 
@@ -2160,7 +2178,10 @@ else:
         let write = tmp_e2e_command(workspace.path(), None, "echo persisted > /tmp/canary");
         match run(write).await {
             Ok(output) => assert!(output.success, "stderr: {}", output.stderr),
-            Err(error) if error.contains("Sandboxed shell is unavailable") => return,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
             Err(error) => panic!("sandbox command failed unexpectedly: {error}"),
         }
 
@@ -2240,7 +2261,10 @@ else:
 
         let output = match run(command).await {
             Ok(o) => o,
-            Err(e) if e.contains("Sandboxed shell is unavailable") => return,
+            Err(e) if e.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&e);
+                return;
+            }
             Err(e) => panic!("sandbox command failed unexpectedly: {e}"),
         };
         assert!(
@@ -2295,7 +2319,10 @@ else:
 
         let output = match run(command).await {
             Ok(o) => o,
-            Err(e) if e.contains("Sandboxed shell is unavailable") => return,
+            Err(e) if e.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&e);
+                return;
+            }
             Err(e) => panic!("sandbox command failed unexpectedly: {e}"),
         };
         assert!(output.success, "stderr: {}", output.stderr);
@@ -2463,7 +2490,7 @@ else:
         let output = match run(command).await {
             Ok(output) => output,
             Err(error) if error.contains("Sandboxed shell is unavailable") => {
-                eprintln!("contract probe unavailable: {error}");
+                crate::assistant::sandbox::skip_without_bwrap(&error);
                 return;
             }
             Err(error) => {
