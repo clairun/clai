@@ -27,6 +27,7 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
 use crate::assistant::network::matcher::{approved_entry, parent_wildcard, parse_entry};
 use crate::assistant::network::run_state::HostLogEntry;
+use crate::assistant::workspace_agents::workspace_agent_display_names;
 use crate::commands::permissions::{normalize_reason, shared_allowance_reach, AttentionUpdate};
 use crate::config::{workspace_config, NetworkPolicy};
 use crate::AppState;
@@ -72,15 +73,18 @@ impl NetworkAccessRequest {
         reason: String,
         run_hosts: Vec<HostLogEntry>,
     ) -> Self {
-        let reach = match (workspace_id.as_deref(), agent_id.as_deref()) {
-            (Some(workspace), Some(agent)) => shared_allowance_reach(state, workspace, agent),
-            _ => None,
+        let (agent_name, reach) = match (workspace_id.as_deref(), agent_id.as_deref()) {
+            (Some(workspace), Some(agent)) => (
+                workspace_agent_display_names(state, workspace).remove(agent),
+                shared_allowance_reach(state, workspace, agent),
+            ),
+            _ => (None, None),
         };
         Self {
             request_id: uuid::Uuid::new_v4().to_string(),
             workspace_id,
             agent_id,
-            agent_name: None,
+            agent_name,
             suggested_wildcard: parent_wildcard(&host),
             host,
             port,
@@ -172,10 +176,6 @@ impl PendingInner {
 }
 
 impl PendingNetworkRequests {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
     /// Returns the receiver the tool waits on and the workspace's pending
     /// count.
     pub async fn register(
@@ -363,17 +363,17 @@ async fn resolve_network_request(
     let Some((entry, remaining)) = pending.take(request_id).await else {
         return Err(no_pending_request(request_id));
     };
-    // Without a workspace or agent, “Always” covers this run only.
-    if let (
-        NetworkAccessDecision::AllowAlways { entry: allowed },
-        Some(workspace_id),
-        Some(agent_id),
-    ) = (
-        &decision,
-        entry.workspace_id.as_deref(),
-        entry.request.agent_id.as_deref(),
-    ) {
-        if let Err(error) = persist_network_allow(state, workspace_id, agent_id, allowed) {
+    if let NetworkAccessDecision::AllowAlways { entry: allowed } = &decision {
+        let saved = match (
+            entry.workspace_id.as_deref(),
+            entry.request.agent_id.as_deref(),
+        ) {
+            (Some(workspace_id), Some(agent_id)) => {
+                persist_network_allow(state, workspace_id, agent_id, allowed)
+            }
+            _ => Err("no agent to save it on; allow it for this run instead".to_string()),
+        };
+        if let Err(error) = saved {
             tracing::warn!("Could not save `{allowed}` on the allow list: {error}");
             let request = entry.request.clone();
             match pending.restore(entry).await {
@@ -531,7 +531,7 @@ mod tests {
 
     #[tokio::test]
     async fn register_take_and_counts() {
-        let pending = PendingNetworkRequests::new();
+        let pending = PendingNetworkRequests::default();
         let first = request(Some("ws"), None, "a.example.org");
         let second = request(Some("ws"), None, "b.example.org");
         let other = request(Some("other"), None, "c.example.org");
@@ -554,7 +554,7 @@ mod tests {
 
     #[tokio::test]
     async fn take_superseded_matches_the_run_and_the_host_only() {
-        let pending = PendingNetworkRequests::new();
+        let pending = PendingNetworkRequests::default();
         let stale = request(Some("ws"), None, "a.example.org");
         let other_host = request(Some("ws"), None, "b.example.org");
         let (stale_rx, _) = pending.register(stale.clone(), "run-1".into()).await;
@@ -577,7 +577,7 @@ mod tests {
 
     #[tokio::test]
     async fn purge_cancels_the_run_before_dropping_the_request() {
-        let pending = PendingNetworkRequests::new();
+        let pending = PendingNetworkRequests::default();
         let (mut rx, _) = pending
             .register(request(Some("ws-1"), None, "a.example.org"), "run-1".into())
             .await;
@@ -846,6 +846,36 @@ mod tests {
         ));
     }
 
+    /// Nothing would be saved, so “Always” is refused rather than reported
+    /// as saved; the request stays answerable.
+    #[tokio::test]
+    async fn an_always_without_an_agent_is_refused_and_stays_pending() {
+        let fixture = Fixture::new();
+        let request = request(Some(WORKSPACE_ID), None, "mirror.example.org");
+        let pending = &fixture.state.pending_network_requests;
+        let (mut rx, _) = pending.register(request.clone(), "run-1".into()).await;
+        let mut back = Vec::new();
+
+        let error = resolve_network_request(
+            &fixture.state,
+            &request.request_id,
+            NetworkAccessDecision::AllowAlways {
+                entry: "mirror.example.org".to_string(),
+            },
+            |_, _| panic!("the request stays on the queue"),
+            |request, count| back.push((request.request_id.clone(), count)),
+        )
+        .await
+        .expect_err("nothing to save on");
+
+        assert!(error.contains("no agent"), "{error}");
+        assert_eq!(back, [(request.request_id.clone(), 1)]);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(oneshot::error::TryRecvError::Empty)
+        ));
+    }
+
     #[tokio::test]
     async fn a_denial_reason_reaches_the_tool_error_and_is_not_saved() {
         let fixture = Fixture::new();
@@ -893,6 +923,7 @@ mod tests {
             )
         };
         let teammate = ask(ASSIGNMENT_ID, "mirror.example.org");
+        assert_eq!(teammate.agent_name.as_deref(), Some("Reviewer"));
         assert!(teammate.persists_to_shared_agent);
         assert_eq!(teammate.also_affects_workspaces.len(), 1);
         assert_eq!(
@@ -901,6 +932,7 @@ mod tests {
         );
 
         let main = ask(MAIN_ID, "example.org");
+        assert!(main.agent_name.is_some_and(|name| !name.is_empty()));
         assert!(!main.persists_to_shared_agent);
         assert!(main.also_affects_workspaces.is_empty());
         assert_eq!(main.suggested_wildcard, None);
