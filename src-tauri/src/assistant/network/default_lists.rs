@@ -4,7 +4,9 @@
 //! created or migrated after it.
 
 /// Developer hosts allowed by default: code hosting, package registries,
-/// model providers, cloud APIs and documentation.
+/// model providers, cloud APIs and documentation. No whole-provider
+/// wildcard such as `*.amazonaws.com`: those cover storage and API gateways
+/// anyone can create, so other cloud hosts are approved one by one.
 pub const DEFAULT_ALLOW_DOMAINS: &[&str] = &[
     // Code hosting
     "github.com",
@@ -101,8 +103,6 @@ pub const DEFAULT_ALLOW_DOMAINS: &[&str] = &[
     "ollama.com",
     "*.ollama.com",
     // Cloud APIs
-    "*.amazonaws.com",
-    "*.googleapis.com",
     "management.azure.com",
     "login.microsoftonline.com",
     "graph.microsoft.com",
@@ -125,8 +125,9 @@ pub const DEFAULT_ALLOW_DOMAINS: &[&str] = &[
     "man7.org",
 ];
 
-/// Object storage inside the broad cloud entries above, which accepts
-/// presigned or anonymous uploads. Checked before the allow list.
+/// Cloud hosts that accept uploads or serve anyone's endpoint, refused even
+/// when a user adds a broad entry such as `*.amazonaws.com` to the allow
+/// list. Checked before the allow list.
 pub const DEFAULT_DENY_DOMAINS: &[&str] = &[
     // S3, global and per bucket
     "s3.amazonaws.com",
@@ -134,6 +135,15 @@ pub const DEFAULT_DENY_DOMAINS: &[&str] = &[
     // S3, regional: s3.<region>.amazonaws.com and <bucket>.s3.<region>.amazonaws.com
     "s3.*.amazonaws.com",
     "*.s3.*.amazonaws.com",
+    // S3, dual-stack and Transfer Acceleration
+    "s3.dualstack.*.amazonaws.com",
+    "*.s3.dualstack.*.amazonaws.com",
+    "s3-accelerate.amazonaws.com",
+    "*.s3-accelerate.amazonaws.com",
+    "s3-accelerate.dualstack.amazonaws.com",
+    "*.s3-accelerate.dualstack.amazonaws.com",
+    // API Gateway: any account's API, so any receiver
+    "*.execute-api.*.amazonaws.com",
     // Google Cloud Storage
     "storage.googleapis.com",
     "*.storage.googleapis.com",

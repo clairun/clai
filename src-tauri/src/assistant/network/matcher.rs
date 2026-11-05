@@ -134,7 +134,15 @@ mod tests {
             ("raw.githubusercontent.com", Allowed),
             ("crates.io", Allowed),
             ("index.crates.io", Allowed),
-            ("ec2.us-east-1.amazonaws.com", Allowed),
+            ("generativelanguage.googleapis.com", Allowed),
+            // No whole-provider wildcard: other cloud hosts are asked for.
+            ("ec2.us-east-1.amazonaws.com", Unlisted),
+            (
+                "abc123.execute-api.us-east-1.amazonaws.com",
+                denied("*.execute-api.*.amazonaws.com"),
+            ),
+            ("www.googleapis.com", Unlisted),
+            ("s3-us-west-2.amazonaws.com", Unlisted),
             ("s3.amazonaws.com", denied("s3.amazonaws.com")),
             ("bucket.s3.amazonaws.com", denied("*.s3.amazonaws.com")),
             ("s3.us-east-1.amazonaws.com", denied("s3.*.amazonaws.com")),
@@ -154,6 +162,51 @@ mod tests {
         ] {
             assert_eq!(with_defaults(host), expected, "{host}");
         }
+    }
+
+    /// A user who adds a whole provider still cannot reach its storage.
+    #[test]
+    fn the_default_deny_list_covers_s3_and_gcs_under_a_broad_allow_entry() {
+        let allow = ["*.amazonaws.com", "*.googleapis.com"];
+        for (host, entry) in [
+            ("s3.amazonaws.com", "s3.amazonaws.com"),
+            ("bucket.s3.amazonaws.com", "*.s3.amazonaws.com"),
+            ("s3.us-east-1.amazonaws.com", "s3.*.amazonaws.com"),
+            ("bucket.s3.us-east-1.amazonaws.com", "*.s3.*.amazonaws.com"),
+            (
+                "s3.dualstack.us-east-1.amazonaws.com",
+                "s3.dualstack.*.amazonaws.com",
+            ),
+            (
+                "bucket.s3.dualstack.us-east-1.amazonaws.com",
+                "*.s3.dualstack.*.amazonaws.com",
+            ),
+            ("s3-accelerate.amazonaws.com", "s3-accelerate.amazonaws.com"),
+            (
+                "bucket.s3-accelerate.amazonaws.com",
+                "*.s3-accelerate.amazonaws.com",
+            ),
+            (
+                "bucket.s3-accelerate.dualstack.amazonaws.com",
+                "*.s3-accelerate.dualstack.amazonaws.com",
+            ),
+            (
+                "abc123.execute-api.us-east-1.amazonaws.com",
+                "*.execute-api.*.amazonaws.com",
+            ),
+            ("storage.googleapis.com", "storage.googleapis.com"),
+            ("bucket.storage.googleapis.com", "*.storage.googleapis.com"),
+        ] {
+            assert_eq!(
+                decide(&allow, DEFAULT_DENY_DOMAINS, host),
+                denied(entry),
+                "{host}"
+            );
+        }
+        assert_eq!(
+            decide(&allow, DEFAULT_DENY_DOMAINS, "ec2.us-east-1.amazonaws.com"),
+            Allowed
+        );
     }
 
     #[test]
