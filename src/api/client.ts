@@ -12,8 +12,10 @@ import type {
   StartMcpOAuthLoginRequest,
   WorkspaceAgentCreateRequest,
   WorkspaceAgentDetail,
+  WorkspaceAgentUpdateError,
   WorkspaceAgentUpdateRequest,
 } from '../generated/bindings';
+import { StaleAgentError } from './errors';
 
 /**
  * CLAI backend API client.
@@ -212,7 +214,9 @@ export const workspaceUpdateAgent = async (
   try {
     return await invoke('workspace_update_agent', { request });
   } catch (error) {
-    return handleApiError(error, 'Failed to update workspace agent');
+    const failure = error as Partial<WorkspaceAgentUpdateError> | null;
+    if (failure?.kind === 'stale') throw new StaleAgentError(failure.message ?? '');
+    return handleApiError(failure?.message ?? error, 'Failed to update workspace agent');
   }
 };
 

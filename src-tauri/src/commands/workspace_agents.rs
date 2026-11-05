@@ -57,7 +57,36 @@ pub struct WorkspaceAgentUpdateRequest {
     pub provider_connection_ids: Vec<String>,
     pub execution: ExecutionCapabilityConfig,
     pub enabled: bool,
+    /// The agent's `updatedAt` when the form loaded it. The save is refused
+    /// if anything wrote the agent since, so it cannot silently revert that
+    /// write.
+    #[ts(type = "number")]
+    pub expected_updated_at: i64,
 }
+
+/// Why saving the Main failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub enum WorkspaceAgentUpdateError {
+    /// Something wrote the agent after the form loaded it: reload, do not
+    /// retry.
+    Stale {
+        message: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+impl From<String> for WorkspaceAgentUpdateError {
+    fn from(message: String) -> Self {
+        Self::Failed { message }
+    }
+}
+
+const STALE_AGENT: &str =
+    "This agent changed after you opened it. Reload to see the change, then save again.";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -209,20 +238,21 @@ pub async fn workspace_create_agent(
 pub async fn workspace_update_agent(
     request: WorkspaceAgentUpdateRequest,
     state: State<'_, AppState>,
-) -> Result<WorkspaceAgentDetail, String> {
+) -> Result<WorkspaceAgentDetail, WorkspaceAgentUpdateError> {
     update_main_agent(state.inner(), request)
 }
 
 fn update_main_agent(
     state: &AppState,
     request: WorkspaceAgentUpdateRequest,
-) -> Result<WorkspaceAgentDetail, String> {
+) -> Result<WorkspaceAgentDetail, WorkspaceAgentUpdateError> {
     request.execution.sandbox.network_access.validate()?;
     let app_config = app_config(state)?;
     let now = now_millis();
     let agent_id = request.agent_id.clone();
     let workspace_id = request.workspace_id.clone();
-    let ((), config) = state.update_workspace_config(&workspace_id, |config| {
+    let mut stale = false;
+    let updated = state.update_workspace_config(&workspace_id, |config| {
         if config.assignment(&request.agent_id).is_some() {
             return Err(
                 "This agent's behavior is shared. Edit it in the agent library, or change its local context and access in the workspace's Team settings."
@@ -236,6 +266,10 @@ fn update_main_agent(
         else {
             return Err(format!("Workspace agent not found: {}", request.agent_id));
         };
+        if agent.updated_at != request.expected_updated_at {
+            stale = true;
+            return Err(STALE_AGENT.to_string());
+        }
 
         agent.name = request.name;
         agent.description = request.description;
@@ -253,6 +287,13 @@ fn update_main_agent(
         agent.updated_at = now;
         config.updated_at = now;
         Ok(())
+    });
+    let ((), config) = updated.map_err(|message| {
+        if stale {
+            WorkspaceAgentUpdateError::Stale { message }
+        } else {
+            WorkspaceAgentUpdateError::Failed { message }
+        }
     })?;
 
     let saved = config
@@ -429,7 +470,53 @@ mod stored_agent_tests {
             provider_connection_ids: Vec::new(),
             execution: main.execution.clone(),
             enabled: true,
+            expected_updated_at: main.updated_at,
         }
+    }
+
+    #[test]
+    fn a_save_from_a_form_opened_before_an_always_approval_is_refused() {
+        let fixture = Fixture::new();
+        let opened = update_request(&fixture);
+        assert!(fixture
+            .config()
+            .main_agent
+            .unwrap()
+            .execution
+            .shell
+            .ask_first_command_prefixes
+            .contains(&"git push".to_string()));
+
+        // "Always" on an ask-first card, saved while the form is open.
+        crate::commands::permissions::persist_always_allow(
+            &fixture.state,
+            WORKSPACE_ID,
+            MAIN_ID,
+            &["git push".to_string()],
+        )
+        .expect("approval saved");
+
+        let error = update_main_agent(&fixture.state, opened).expect_err("stale");
+        assert!(
+            matches!(&error, WorkspaceAgentUpdateError::Stale { message } if message.contains("Reload")),
+            "{error:?}"
+        );
+        let stored = fixture.config().main_agent.unwrap();
+        assert_ne!(stored.description, "edited");
+        assert!(!stored
+            .execution
+            .shell
+            .ask_first_command_prefixes
+            .contains(&"git push".to_string()));
+
+        // Reloaded, the same edit saves and keeps the approval.
+        let saved = update_main_agent(&fixture.state, update_request(&fixture)).expect("fresh");
+        assert_eq!(saved.description, "edited");
+        assert!(!saved
+            .execution
+            .shell
+            .ask_first_command_prefixes
+            .contains(&"git push".to_string()));
     }
 
     #[test]
@@ -443,7 +530,10 @@ mod stored_agent_tests {
             .deny_domains
             .push("*.0.0.5".to_string());
         let error = update_main_agent(&fixture.state, request).expect_err("refused");
-        assert!(error.contains("Denied hosts: `*.0.0.5`"), "{error}");
+        assert!(
+            matches!(&error, WorkspaceAgentUpdateError::Failed { message } if message.contains("Denied hosts: `*.0.0.5`")),
+            "{error:?}"
+        );
         assert_ne!(fixture.config().main_agent.unwrap().description, "edited");
 
         update_main_agent(&fixture.state, update_request(&fixture)).expect("valid save");

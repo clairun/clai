@@ -16,6 +16,7 @@ import { AgentBehaviorForm, type AgentDetail, type AgentFormDeps } from './Agent
 import type { SectionHandle } from './sectionHandle';
 import { parseHostEntry } from './AgentAccess';
 import { resetSandboxStatusForTests } from '../../hooks/useSandboxStatus';
+import { StaleAgentError } from '../../api/errors';
 import type { FilesystemPathGrant, NetworkPolicy, ProviderConnection, SandboxStatus } from '../../generated/bindings';
 
 const connection = (id: string, name: string, extra: Partial<ProviderConnection> = {}): ProviderConnection =>
@@ -67,6 +68,7 @@ const REVIEWER: AgentDetail = {
     },
     web: { enabled: true },
   },
+  updatedAt: 5,
 };
 
 const renderForm = (props: Partial<React.ComponentProps<typeof AgentBehaviorForm>> = {}) => {
@@ -152,6 +154,7 @@ describe('AgentBehaviorForm', () => {
         web: { enabled: true },
       },
       enabled: true,
+      expectedUpdatedAt: 5,
     });
     // The saved values are the new baseline, without the host re-rendering.
     expect(onDirtyChange).toHaveBeenLastCalledWith(false);
@@ -652,6 +655,46 @@ describe('AgentBehaviorForm', () => {
 
     expect(await submit(ref)).toEqual({ ok: false, error: 'agent name already taken' });
     expect(screen.getByRole('alert')).toHaveTextContent('agent name already taken');
+  });
+
+  it('bases each save on the agent it last loaded or saved', async () => {
+    api.workspaceUpdateAgent.mockResolvedValue({ ...REVIEWER, updatedAt: 7 });
+    const { ref } = renderForm({ agentId: 'agent-1' });
+    await screen.findByDisplayValue('Reviewer');
+
+    await submit(ref);
+    expect(api.workspaceUpdateAgent).toHaveBeenLastCalledWith(expect.objectContaining({ expectedUpdatedAt: 5 }));
+    await submit(ref);
+    expect(api.workspaceUpdateAgent).toHaveBeenLastCalledWith(expect.objectContaining({ expectedUpdatedAt: 7 }));
+  });
+
+  it('refuses to overwrite a newer agent and offers to reload it', async () => {
+    api.workspaceUpdateAgent.mockRejectedValueOnce(
+      new StaleAgentError('This agent changed after you opened it. Reload to see the change, then save again.'),
+    );
+    const { ref } = renderForm({ agentId: 'agent-1' });
+    await userEvent.type(await screen.findByLabelText('Instructions'), ' and tests');
+
+    expect(await submit(ref)).toMatchObject({ ok: false });
+    expect(screen.getByRole('alert')).toHaveTextContent('This agent changed after you opened it');
+
+    // An approval saved meanwhile is what the reload brings in.
+    api.workspaceGetAgent.mockResolvedValue({
+      ...REVIEWER,
+      execution: { ...REVIEWER.execution, shell: { mode: 'restricted', askFirstCommandPrefixes: [] } },
+      updatedAt: 9,
+    });
+    await userEvent.click(screen.getByRole('button', { name: /Reload/ }));
+    expect(await screen.findByDisplayValue('Reviews diffs')).toBeInTheDocument();
+    expect(api.workspaceGetAgent).toHaveBeenCalledTimes(2);
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    await submit(ref);
+    expect(api.workspaceUpdateAgent).toHaveBeenLastCalledWith(expect.objectContaining({
+      expectedUpdatedAt: 9,
+      description: 'Reviews diffs',
+      execution: expect.objectContaining({ shell: { mode: 'restricted', askFirstCommandPrefixes: [] } }),
+    }));
   });
 
   it('shows the load failure instead of a form the edit flow cannot save', async () => {

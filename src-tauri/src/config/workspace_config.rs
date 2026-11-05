@@ -419,6 +419,9 @@ pub struct WorkspaceAgent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<AgentAvatarRef>,
     pub created_at: i64,
+    /// Set by every write. The Main's settings form saves only against the
+    /// value it loaded, so a writer that skipped it (an approval saved while
+    /// the form is open) would be silently overwritten.
     pub updated_at: i64,
 }
 

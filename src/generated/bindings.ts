@@ -677,7 +677,18 @@ avatar?: AgentAvatarRef | null, createdAt: bigint, updatedAt: bigint, };
 
 export type WorkspaceAgentSummary = { id: string, displayName: string, isDefault: boolean, description?: string | null, };
 
-export type WorkspaceAgentUpdateRequest = { workspaceId: string, agentId: string, name: string, description: string, selectedSkillIds: Array<string>, selectedMcpServerIds: Array<string>, providerConnectionIds: Array<string>, execution: ExecutionCapabilityConfig, enabled: boolean, };
+/**
+ * Why saving the Main failed.
+ */
+export type WorkspaceAgentUpdateError = { "kind": "stale", message: string, } | { "kind": "failed", message: string, };
+
+export type WorkspaceAgentUpdateRequest = { workspaceId: string, agentId: string, name: string, description: string, selectedSkillIds: Array<string>, selectedMcpServerIds: Array<string>, providerConnectionIds: Array<string>, execution: ExecutionCapabilityConfig, enabled: boolean, 
+/**
+ * The agent's `updatedAt` when the form loaded it. The save is refused
+ * if anything wrote the agent since, so it cannot silently revert that
+ * write.
+ */
+expectedUpdatedAt: number, };
 
 export type WorkspaceDetails = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, 
 /**

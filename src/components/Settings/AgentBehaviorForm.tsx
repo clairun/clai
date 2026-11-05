@@ -19,6 +19,7 @@ import {
   workspaceGetAgent,
   workspaceUpdateAgent,
 } from '../../api/client';
+import { StaleAgentError } from '../../api/errors';
 import type {
   ExecutionCapabilityConfig,
   ExecutionSandboxConfig,
@@ -68,6 +69,8 @@ export interface AgentDetail {
   selectedMcpServerIds?: string[];
   providerConnectionIds?: string[];
   execution?: Partial<ExecutionCapabilityConfig>;
+  /** Saving the Main sends it back, so a write since the load is not reverted. */
+  updatedAt?: number | bigint;
 }
 
 export interface AgentFormDeps {
@@ -198,6 +201,9 @@ export const AgentBehaviorForm = ({
   const isCreate = !agentId;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // The last save was refused because the agent changed since it loaded.
+  const [stale, setStale] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
   const [deleting, setDeleting] = useState(false);
   const busy = saving || deleting;
 
@@ -217,6 +223,8 @@ export const AgentBehaviorForm = ({
   // The overview control that opened the current view; focus returns to it.
   const opener = useRef<string | null>(null);
   const lastFetchedId = useRef<string | null>(null);
+  // The stored agent's `updatedAt` this form's values are based on.
+  const loadedAt = useRef(0);
   const ids = useId();
 
   useEffect(() => {
@@ -241,7 +249,13 @@ export const AgentBehaviorForm = ({
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [workspaceId, agentId, initialAgent]);
+  }, [workspaceId, agentId, initialAgent, reloadKey]);
+
+  const reload = useCallback(() => {
+    lastFetchedId.current = null;
+    setStale(false);
+    setReloadKey((key) => key + 1);
+  }, []);
 
   // A create waits for the backend defaults (or their failure) before it
   // shows anything, so the default grants are on screen from the start.
@@ -254,6 +268,7 @@ export const AgentBehaviorForm = ({
 
   useEffect(() => {
     if (!agent) return;
+    loadedAt.current = Number(agent.updatedAt ?? 0);
     const next = draftFrom(agent);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- the draft and its baseline are rebuilt together whenever the source agent changes.
     setDraft(next);
@@ -330,7 +345,7 @@ export const AgentBehaviorForm = ({
           // The host moves to the new agent's own page.
           return { ok: true, createdId: created.id };
         } else {
-          await workspaceUpdateAgent({
+          const saved = await workspaceUpdateAgent({
             workspaceId,
             agentId: agent?.id || '',
             ...payload,
@@ -338,13 +353,16 @@ export const AgentBehaviorForm = ({
             // below is the form's own serialisation, so this never dirties it.
             name: isManager ? (agent?.name || 'Manager') : payload.name,
             enabled: isManager ? true : draft.enabled,
+            expectedUpdatedAt: loadedAt.current,
           });
+          if (saved?.updatedAt !== undefined) loadedAt.current = Number(saved.updatedAt);
         }
         setBaseline(serialize(draft));
         setError(null);
         return { ok: true };
       } catch (err) {
         const message = errText(err, 'Failed to save agent.');
+        setStale(err instanceof StaleAgentError);
         setError(message);
         return { ok: false, error: message };
       }
@@ -392,7 +410,19 @@ export const AgentBehaviorForm = ({
   }
 
   const context = isManager ? 'Main' : (draft.name.trim() || 'Agent');
-  const errorBanner = error && <p className={form.errorBanner} role="alert">{error}</p>;
+  const errorBanner = error && (
+    <p className={form.errorBanner} role="alert">
+      {error}
+      {stale && (
+        <>
+          {' '}
+          <button type="button" className={form.linkButton} onClick={reload} disabled={busy}>
+            Reload, discarding the edits made here
+          </button>
+        </>
+      )}
+    </p>
+  );
 
   if (view.kind === 'source') {
     const group = groups.find((g) => g.key === view.key);
