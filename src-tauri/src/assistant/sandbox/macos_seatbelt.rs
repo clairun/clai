@@ -325,8 +325,9 @@ fn append_workspace_mask(profile: &mut String, command: &SandboxCommand) -> Resu
 /// mounts do: the state is denied, what is writable inside it (the workspace
 /// in `~/.clai`, its scratch, the agent's memory, an ephemeral temp dir in
 /// `.clai/tmp`) is allowed again, and state inside that is denied again.
-/// Then the pinned directories themselves are denied: a rename is checked
-/// against its own paths, not the subtree it moves, so none of them may move.
+/// Then the pinned directories themselves may not be unlinked, which is what
+/// renaming one checks: a rename is checked against its own paths, not the
+/// subtree it moves. Their mode, times and entries stay writable.
 fn append_read_only_state(
     profile: &mut String,
     command: &SandboxCommand,
@@ -365,7 +366,7 @@ fn append_read_only_state(
         .iter()
         .map(|path| path_literal(path))
         .collect::<Result<Vec<_>, _>>()?;
-    append_path_rule(profile, "deny file-write*", "literal", &pinned);
+    append_path_rule(profile, "deny file-write-unlink", "literal", &pinned);
     Ok(())
 }
 
@@ -810,7 +811,7 @@ mod tests {
         )));
         // The roots that hold the state cannot be renamed, last of all.
         let pinned = profile
-            .rfind("(deny file-write*\n  (literal ")
+            .rfind("(deny file-write-unlink\n  (literal ")
             .unwrap_or_else(|| panic!("pinned directories should be denied; profile:\n{profile}"));
         assert!(pinned > state_denied);
         for path in [&home, &workspace] {
@@ -822,8 +823,11 @@ mod tests {
 
         // A write grant on the workspace directory as well: inside the app
         // directory it is allowed, then denied at the same depth, so no
-        // workspace can be planted in it.
+        // workspace can be planted in it. Another workspace in it is allowed
+        // again, and its `.clai` denied again.
         let container = app.join("workspaces");
+        let sibling = container.join("other");
+        fs::create_dir_all(sibling.join(".clai")).unwrap();
         command.profile.filesystem =
             super::super::filesystem::EffectiveFilesystemPolicy::compile_in(
                 &workspace,
@@ -836,15 +840,17 @@ mod tests {
             )
             .unwrap();
         let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
-        let rule = |rule: &str| {
+        let rule = |rule: &str, path: &Path| {
             profile
                 .rfind(&format!(
                     "({rule} file-write*\n  (subpath \"{}\")\n)",
-                    escape_sbpl_string(&container.display().to_string())
+                    escape_sbpl_string(&path.display().to_string())
                 ))
-                .unwrap_or_else(|| panic!("expected {rule} on {container:?}; profile:\n{profile}"))
+                .unwrap_or_else(|| panic!("expected {rule} on {path:?}; profile:\n{profile}"))
         };
-        assert!(rule("allow") < rule("deny"));
+        assert!(rule("allow", &container) < rule("deny", &container));
+        assert!(rule("deny", &container) < rule("allow", &sibling));
+        assert!(rule("allow", &sibling) < rule("deny", &sibling.join(".clai")));
     }
 
     #[test]
