@@ -82,23 +82,24 @@ pub fn parse_request(head: &str) -> Result<Request, &'static str> {
     let port = url.port_or_known_default().ok_or("the URL has no port")?;
     let origin_form = &url[url::Position::BeforePath..url::Position::AfterQuery];
 
-    let mut rewritten = format!("{method} {origin_form} {version}\r\n");
-    let mut has_host = false;
+    // The origin sees the host the proxy decided on (RFC 9112 '3.2.2), never
+    // the client's own `Host` lines.
+    let mut rewritten = format!(
+        "{method} {origin_form} {version}\r\nHost: {}\r\n",
+        &url[url::Position::BeforeHost..url::Position::BeforePath]
+    );
     for line in lines.filter(|line| !line.is_empty()) {
         let name = line.split(':').next().unwrap_or_default().trim();
         let name = name.to_ascii_lowercase();
-        if name.starts_with("proxy-") || name == "connection" || name == "keep-alive" {
+        if name.starts_with("proxy-")
+            || name == "connection"
+            || name == "keep-alive"
+            || name == "host"
+        {
             continue;
         }
-        has_host |= name == "host";
         rewritten.push_str(line);
         rewritten.push_str("\r\n");
-    }
-    if !has_host {
-        rewritten.push_str(&format!(
-            "Host: {}\r\n",
-            &url[url::Position::BeforeHost..url::Position::BeforePath]
-        ));
     }
     rewritten.push_str("Connection: close\r\n\r\n");
     Ok(Request::Forward {
@@ -158,9 +159,9 @@ mod tests {
     #[test]
     fn absolute_form_is_forwarded_in_origin_form_without_proxy_headers() {
         let request = parse_request(
-            "GET http://example.org:8080/a/b?q=1 HTTP/1.1\r\nHost: example.org:8080\r\n\
+            "GET http://example.org:8080/a/b?q=1 HTTP/1.1\r\nHost: other.example\r\n\
              Proxy-Authorization: Basic eDp5\r\nProxy-Connection: keep-alive\r\n\
-             Connection: keep-alive\r\nAccept: */*\r\n\r\n",
+             Connection: keep-alive\r\nAccept: */*\r\nhost: second.example\r\n\r\n",
         )
         .unwrap();
         let Request::Forward { host, port, head } = request else {
