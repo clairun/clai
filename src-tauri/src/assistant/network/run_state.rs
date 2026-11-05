@@ -41,7 +41,7 @@ impl RunNetwork {
             for ignored in lists.ignored() {
                 if ignored.denied {
                     tracing::error!(
-                        "Network deny entry `{}` is ignored and refuses nothing ({}); fix it in the agent's Access settings",
+                        "Network deny entry `{}` is invalid ({}), so every host is refused; fix it in the agent's Access settings",
                         ignored.entry,
                         ignored.reason
                     );
@@ -200,6 +200,25 @@ mod tests {
             log.last().unwrap().0,
             format!("h{MAX_HOST_LOG_ENTRIES}.example")
         );
+    }
+
+    #[test]
+    fn an_invalid_deny_entry_refuses_every_host_this_run() {
+        let network = RunNetwork::new(&policy(
+            NetworkMode::Allowlist,
+            &["github.com"],
+            &["github.com:443"],
+        ));
+        network.allow(crate::assistant::network::matcher::parse_entry("example.org").unwrap());
+        for host in ["github.com", "example.org"] {
+            assert!(
+                matches!(
+                    network.decide(host),
+                    HostDecision::InvalidDenyEntry { ref entry, .. } if entry == "github.com:443"
+                ),
+                "{host}"
+            );
+        }
     }
 
     #[test]

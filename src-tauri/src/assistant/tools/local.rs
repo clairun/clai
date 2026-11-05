@@ -995,6 +995,9 @@ fn check_web_host(gate: WebGate<'_>, host: &str, port: Option<u16>) -> Result<()
     match decision {
         HostDecision::Allowed => Ok(()),
         HostDecision::Denied { entry } => Err(denied_host_message(host, &entry)),
+        HostDecision::InvalidDenyEntry { entry, reason } => {
+            Err(invalid_deny_entry_message(&entry, reason))
+        }
         HostDecision::Unlisted => Err(unlisted_host_message(
             host,
             crate::assistant::sandbox::status().allowlist_available,
@@ -1006,6 +1009,13 @@ fn denied_host_message(host: &str, entry: &str) -> String {
     format!(
         "`{host}` is on this agent's network deny list (entry `{entry}`). The user can change \
          the list in the agent's Access settings."
+    )
+}
+
+fn invalid_deny_entry_message(entry: &str, reason: &str) -> String {
+    format!(
+        "This agent's network deny list has an invalid entry `{entry}` ({reason}), so every \
+         host is refused until the user fixes or removes it in the agent's Access settings."
     )
 }
 
@@ -1094,6 +1104,9 @@ fn requested_host(
     match network.decide(&host) {
         HostDecision::Allowed => Ok(None),
         HostDecision::Denied { entry } => Err(denied_host_message(&host, &entry)),
+        HostDecision::InvalidDenyEntry { entry, reason } => {
+            Err(invalid_deny_entry_message(&entry, reason))
+        }
         HostDecision::Unlisted => Ok(Some(host)),
     }
 }
@@ -2118,6 +2131,22 @@ mod tests {
             "",
         ] {
             assert!(ask(raw).is_err(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_deny_entry_refuses_web_hosts_and_requests_naming_it() {
+        let execution = allowlist_execution(&["github.com"], &["github.com:443"]);
+        let network = RunNetwork::new(&execution.sandbox.network_access);
+        let errors = [
+            check_web_host(WebGate::Allowlist(&network), "github.com", Some(443)).unwrap_err(),
+            requested_host(&execution, true, &network, "example.org").unwrap_err(),
+        ];
+        for error in errors {
+            assert!(
+                error.contains("`github.com:443`") && error.contains("Access settings"),
+                "{error}"
+            );
         }
     }
 

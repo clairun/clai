@@ -21,6 +21,12 @@ pub enum HostDecision {
     },
     /// Neither list covers the host, or it is not a valid host name.
     Unlisted,
+    /// The deny list holds an entry that does not parse (only a hand edit
+    /// stores one), so every host is refused until the user fixes it.
+    InvalidDenyEntry {
+        entry: String,
+        reason: &'static str,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -171,13 +177,14 @@ pub struct HostLists {
 pub struct IgnoredEntry {
     pub entry: String,
     pub reason: &'static str,
-    /// On the deny list, where skipping it refuses nothing.
+    /// On the deny list: while it is there, every host is refused.
     pub denied: bool,
 }
 
 impl HostLists {
-    /// Skips invalid entries, reported by [`Self::ignored`]: an allow entry
-    /// then allows nothing, which fails closed; a deny entry refuses nothing.
+    /// Skips invalid entries, reported by [`Self::ignored`]. Both fail
+    /// closed: an invalid allow entry allows nothing, and an invalid deny
+    /// entry makes [`Self::decide`] refuse every host.
     pub fn new<S: AsRef<str>>(allow: &[S], deny: &[S]) -> Self {
         let mut ignored = Vec::new();
         let mut parse = |entries: &[S], denied: bool| {
@@ -221,6 +228,12 @@ impl HostLists {
     }
 
     pub fn decide(&self, host: &str) -> HostDecision {
+        if let Some(invalid) = self.ignored.iter().find(|ignored| ignored.denied) {
+            return HostDecision::InvalidDenyEntry {
+                entry: invalid.entry.clone(),
+                reason: invalid.reason,
+            };
+        }
         let Some(host) = normalize(host).filter(|host| !has_wildcard(host)) else {
             return HostDecision::Unlisted;
         };
@@ -616,11 +629,22 @@ mod tests {
         ] {
             assert_eq!(decide(&[entry], &[], "github.com"), Unlisted, "{entry:?}");
         }
-        // An invalid deny entry refuses nothing; the run reports it.
-        assert_eq!(
-            decide(&["github.com"], &["github.com:443"], "github.com"),
-            Allowed
-        );
+    }
+
+    #[test]
+    fn an_invalid_deny_entry_refuses_every_host() {
+        let invalid = HostDecision::InvalidDenyEntry {
+            entry: "github.com:443".to_string(),
+            reason: "leave out the port: an entry matches every port",
+        };
+        for host in ["github.com", "example.org", "10.0.0.5"] {
+            assert_eq!(
+                decide(&["github.com", "*.org"], &["github.com:443"], host),
+                invalid,
+                "{host}"
+            );
+        }
+        assert_eq!(decide(&["x/y"], &[], "github.com"), Unlisted);
     }
 
     #[test]
