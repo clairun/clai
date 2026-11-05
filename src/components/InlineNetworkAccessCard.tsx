@@ -14,7 +14,7 @@ import type {
 import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender';
 import RequestingAgent from './Agents/RequestingAgent';
 import { chipText, listOf, quoted } from './requestChips';
-import { DenyReasonPanel, useDenial } from './DenyReasonPanel';
+import { DenyReasonField, useDenyReason } from './DenyReasonField';
 import { useDecisionSender } from './useDecisionSender';
 import { ResolvedRequestNotice } from './ResolvedRequestNotice';
 import { PendingRequestStack, type PendingRequestSource } from './PendingRequestStack';
@@ -99,9 +99,11 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
     (decision: NetworkAccessDecision) => submitNetworkAccessDecision(req.requestId, decision),
     () => onDecided?.(req.requestId),
   );
-  const denial = useDenial();
+  // As on the ask-first card: one-click Deny, with the reason field on the full card only.
+  const denyReason = useDenyReason();
   const [isCollapsed, setCollapsed] = useState(false);
   const spoken = Boolean(speaker);
+  const reasonShown = !spoken && !resolved;
   const agentName = requester?.name ?? 'this agent';
   // Names read in Unicode; the entries sent stay in the ASCII form the
   // backend compares, and the full card shows that form too, so a look-alike
@@ -172,6 +174,7 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
           <p className={styles.segmentHint}>
             <SaveScope req={req} workspaceName={workspaceName} />
           </p>
+          {reasonShown && <DenyReasonField {...denyReason.field} disabled={isSubmitting} />}
           {resolved ? (
             <ResolvedRequestNotice onDismiss={onDecided && (() => onDecided(req.requestId))} />
           ) : (
@@ -208,21 +211,13 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
               )}
               <button
                 type="button"
-                {...denial.denyButton}
-                className={`${styles.btn} ${styles.btnDenyOnce} ${denial.open ? styles.btnSelected : ''}`}
+                className={`${styles.btn} ${styles.btnDenyOnce}`}
+                onClick={() => send(denyReason.decision())}
                 disabled={isSubmitting}
+                aria-describedby={reasonShown ? denyReason.labelId : undefined}
                 {...chipText(spoken, 'Deny', 'Deny')}
               />
             </div>
-          )}
-          {denial.open && !resolved && (
-            <DenyReasonPanel
-              id={denial.panelId}
-              confirmLabel="Deny access"
-              submitting={isSubmitting}
-              onConfirm={(reason) => send(reason ? { kind: 'deny', reason } : { kind: 'deny' })}
-              onClose={denial.close}
-            />
           )}
           {error && !isSubmitting && (
             <div className={styles.error} role="alert">

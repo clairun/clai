@@ -135,6 +135,8 @@ describe('NetworkAccessCard', () => {
       ['Allow *.example.org', { kind: 'allowAlways', entry: '*.example.org' }],
     ] as const) {
       const { unmount } = render(<NetworkAccessCard req={request()} requester={requester} />);
+      // A reason is for a denial only; the allows never carry it.
+      await user.type(screen.getByLabelText('Reason for denying (optional)'), 'typed anyway');
       await user.click(screen.getByRole('button', { name: label }));
       expect(submitted().at(-1)).toEqual({ requestId: 'net-1', decision });
       unmount();
@@ -147,20 +149,27 @@ describe('NetworkAccessCard', () => {
     expect(screen.getByText(/adds/)).toHaveTextContent(/Always. adds example\.org to this agent.s allowed hosts in this workspace only\./);
   });
 
-  it('denies with the reason the user typed, or none', async () => {
+  it('shows the reason field from the start, without taking focus', () => {
+    render(<NetworkAccessCard req={request()} />);
+    const reason = screen.getByLabelText('Reason for denying (optional)');
+    expect(reason).toBeVisible();
+    expect(reason).not.toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Deny' })).toHaveAccessibleDescription('Reason for denying (optional)');
+  });
+
+  it('denies in one click with the reason the user typed, trimmed, or none', async () => {
     mockInvoke.mockResolvedValue(undefined);
     const user = userEvent.setup();
     const { unmount } = render(<NetworkAccessCard req={request()} />);
-    await user.click(screen.getByRole('button', { name: 'Deny' }));
     await user.type(screen.getByLabelText('Reason for denying (optional)'), '  use the internal mirror ');
-    await user.click(screen.getByRole('button', { name: 'Deny access' }));
-    expect(submitted().at(-1)).toEqual({ requestId: 'net-1', decision: { kind: 'deny', reason: 'use the internal mirror' } });
+    await user.click(screen.getByRole('button', { name: 'Deny' }));
+    expect(submitted()).toEqual([{ requestId: 'net-1', decision: { kind: 'deny', reason: 'use the internal mirror' } }]);
     unmount();
 
     render(<NetworkAccessCard req={request()} />);
     await user.click(screen.getByRole('button', { name: 'Deny' }));
-    await user.click(screen.getByRole('button', { name: 'Deny access' }));
     expect(submitted().at(-1)).toEqual({ requestId: 'net-1', decision: { kind: 'deny' } });
+    expect(submitted()).toHaveLength(2);
   });
 
   it('says where Always saves', () => {
@@ -208,7 +217,6 @@ describe('NetworkAccessCard', () => {
     const user = userEvent.setup();
     render(<NetworkAccessCard req={request()} onDecided={onDecided} />);
     await user.click(screen.getByRole('button', { name: 'Deny' }));
-    await user.click(screen.getByRole('button', { name: 'Deny access' }));
     expect(await screen.findByRole('status')).toHaveTextContent('Already answered in another view, or its run has ended.');
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /^Allow|^Deny/ })).not.toBeInTheDocument();
@@ -217,13 +225,17 @@ describe('NetworkAccessCard', () => {
     expect(onDecided).toHaveBeenCalledWith('net-1');
   });
 
-  it('speaks on the Fleet with short chips', () => {
+  it('speaks on the Fleet with short chips, and denies there in one click with no reason field', async () => {
+    mockInvoke.mockResolvedValue(undefined);
     render(<NetworkAccessCard req={request()} speaker={(prompt: ReactNode) => <div>{prompt}</div>} />);
     expect(screen.queryByText('Network access requested')).not.toBeInTheDocument();
     expect(screen.getByText('mirror.example.org:443')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'This run' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Always' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: '*.example.org' })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
+    expect(submitted()).toEqual([{ requestId: 'net-1', decision: { kind: 'deny' } }]);
   });
 });
 

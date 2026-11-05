@@ -34,6 +34,9 @@ const approval = {
   rows: [{ text: 'git push', rule: 'git push' }],
 } as unknown as PermissionRequest;
 
+const submittedPermissions = () =>
+  mockInvoke.mock.calls.filter(([cmd]) => cmd === 'submit_permission_decision').map(([, args]) => args);
+
 beforeEach(() => {
   mockInvoke.mockReset();
   mockInvoke.mockResolvedValue(undefined);
@@ -84,13 +87,10 @@ describe('FleetRequestPanel', () => {
     expect(within(section).getByLabelText('Command').tagName).toBe('PRE');
     expect(within(section).getByLabelText('Command')).toHaveTextContent('cd /srv/app && git push');
     expect(within(section).queryByText('Permission requested')).not.toBeInTheDocument();
-    // The chip only opens the denial: the decision waits for the confirm.
+    // The Fleet card has no room for a reason: its Deny chip answers in one click, with none.
+    expect(within(section).queryByRole('textbox')).not.toBeInTheDocument();
     await userEvent.click(within(section).getByRole('button', { name: 'Deny' }));
-    expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
-    expect(within(section).getAllByRole('textbox', { name: /reason for denying/i })).toHaveLength(1);
-    await userEvent.click(within(section).getByRole('button', { name: 'Deny command' }));
-    // No reason typed, so none is sent.
-    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', { requestId: 'perm-1', decision: { kind: 'deny' } });
+    expect(submittedPermissions()).toEqual([{ requestId: 'perm-1', decision: { kind: 'deny' } }]);
   });
 
   it('answers a network request with the network card, naming the workspace', async () => {
@@ -149,18 +149,4 @@ describe('FleetRequestPanel', () => {
     );
   });
 
-  it('sends one reason for the whole command when the Fleet user types one', async () => {
-    const request = { kind: 'approval', request: { ...approval, agentId: 'wa-c' }, text: approval.command } as unknown as FleetRequest;
-    const card = { ...emptyCard('ws-1'), agents: [{ id: 'wa-c', name: 'Committer', seed: 'def-c' }], requests: { 'approval:perm-1': { ...request, at: 1 } } };
-    render(<FleetRequestPanel scene={requestScene(card, { runs: {}, tasks: {} })!} faces={castFor({}, null)} loud={false} now={10} />);
-    const section = screen.getByRole('region', { name: 'Committer needs you' });
-    await userEvent.click(within(section).getByRole('button', { name: 'Deny' }));
-    await userEvent.type(within(section).getByRole('textbox', { name: /reason for denying/i }), 'Wrong target');
-    await userEvent.click(within(section).getByRole('button', { name: 'Deny command' }));
-
-    expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
-      requestId: 'perm-1',
-      decision: { kind: 'deny', reason: 'Wrong target' },
-    });
-  });
 });

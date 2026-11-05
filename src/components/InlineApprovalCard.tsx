@@ -10,7 +10,7 @@ import type {
 import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender';
 import RequestingAgent from './Agents/RequestingAgent';
 import { chipText, listOf, quoted } from './requestChips';
-import { DenyReasonPanel, useDenial } from './DenyReasonPanel';
+import { DenyReasonField, useDenyReason } from './DenyReasonField';
 import { useDecisionSender } from './useDecisionSender';
 import { ResolvedRequestNotice } from './ResolvedRequestNotice';
 import { PendingRequestStack, type PendingRequestSource } from './PendingRequestStack';
@@ -97,12 +97,14 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
     (decision: AskFirstDecision) => submitPermissionDecision(req.requestId, decision),
     () => onDecided?.(req.requestId),
   );
-  // Deny opens the reason field; the denial is sent from its confirm.
-  const denial = useDenial();
+  // Deny answers in one click, with whatever reason is typed. The Fleet's
+  // card has no room for the field, so its Deny sends none.
+  const denyReason = useDenyReason();
   // Collapse: squish the card to a one-line summary so a tall (or stacked)
   // request can't swallow the conversation. Default expanded.
   const [isCollapsed, setCollapsed] = useState(false);
   const spoken = Boolean(speaker);
+  const reasonShown = !spoken && !resolved;
 
   const rules = [...new Set(req.rows.map((row) => row.rule))];
   const parts = partsOf(req.rows);
@@ -184,6 +186,7 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
             <p className={styles.segmentHint}>
               <AlwaysAllowScope req={req} rules={rules} workspaceName={workspaceName} />
             </p>
+            {reasonShown && <DenyReasonField {...denyReason.field} disabled={isSubmitting} />}
             {resolved ? (
               <ResolvedRequestNotice onDismiss={onDecided && (() => onDecided(req.requestId))} />
             ) : (
@@ -204,23 +207,15 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
                 />
                 <button
                   type="button"
-                  {...denial.denyButton}
-                  className={`${styles.btn} ${styles.btnDenyOnce} ${denial.open ? styles.btnSelected : ''}`}
+                  className={`${styles.btn} ${styles.btnDenyOnce}`}
+                  onClick={() => send(denyReason.decision())}
                   disabled={isSubmitting}
+                  aria-describedby={reasonShown ? denyReason.labelId : undefined}
                   {...chipText(spoken, 'Deny', 'Deny')}
                 />
               </div>
             )}
           </section>
-          {denial.open && !resolved && (
-            <DenyReasonPanel
-              id={denial.panelId}
-              confirmLabel="Deny command"
-              submitting={isSubmitting}
-              onConfirm={(reason) => send(reason ? { kind: 'deny', reason } : { kind: 'deny' })}
-              onClose={denial.close}
-            />
-          )}
           {error && !isSubmitting && <div className={styles.error} role="alert">{error}</div>}
         </div>
       )}
