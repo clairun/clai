@@ -166,6 +166,17 @@ describe('toPreviewText', () => {
     expect(toPreviewText('bash_exec', { stdout: '', stderr: '' }, null)).toBe('(no output)');
   });
 
+  it('names the hosts the network allowlist refused', () => {
+    const result = {
+      stdout: '',
+      stderr: 'curl: (56) CONNECT tunnel failed, response 403',
+      network: { refused: ['example.org:443', '[2001:db8::1]:22'], hint: '…' },
+    };
+    expect(toPreviewText('bash_exec', result, null)).toBe(
+      'curl: (56) CONNECT tunnel failed, response 403\nNetwork allowlist refused: example.org:443, [2001:db8::1]:22',
+    );
+  });
+
   it('returns file content verbatim', () => {
     expect(toPreviewText('fs_read', { content: 'line1\nline2' }, null)).toBe('line1\nline2');
   });

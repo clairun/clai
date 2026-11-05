@@ -335,7 +335,14 @@ export const toPreviewText = (
   if (name === 'bash_exec' && obj) {
     const stdout = typeof obj.stdout === 'string' ? obj.stdout : '';
     const stderr = typeof obj.stderr === 'string' ? obj.stderr : '';
-    const combined = [stdout.trimEnd(), stderr.trimEnd()].filter(Boolean).join('\n');
+    const network = asPayloadObject(obj.network);
+    const refused = Array.isArray(network?.refused)
+      ? network.refused.filter((target): target is string => typeof target === 'string')
+      : [];
+    const refusedLine = refused.length
+      ? `Network allowlist refused: ${refused.join(', ')}`
+      : '';
+    const combined = [stdout.trimEnd(), stderr.trimEnd(), refusedLine].filter(Boolean).join('\n');
     return combined || '(no output)';
   }
 

@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use tokio::process::Command;
 
 use super::filesystem::normalize_path;
+use super::helper::{BOX_HELPER, BOX_PROXY_PORT, BOX_SOCKET};
 use super::runner::{prepare_stdio, run_spawned_child};
 use super::{
     SandboxCommand, SandboxCommandOutput, SandboxNetworkMode, SandboxPathAccess,
@@ -114,7 +115,9 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
 
     match command.profile.network {
         SandboxNetworkMode::Host => args.push(os("--share-net")),
-        SandboxNetworkMode::Disabled => args.push(os("--unshare-net")),
+        SandboxNetworkMode::Disabled | SandboxNetworkMode::Proxied(_) => {
+            args.push(os("--unshare-net"));
+        }
     }
 
     args.extend([
@@ -178,6 +181,9 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
     }
 
     append_tmp_env(&mut args, command);
+    // After the grants, so no grant can cover the proxy's files, and after
+    // the profile env, which drops the host's own proxy variables.
+    append_proxy_binds_and_env(&mut args, &command.profile.network);
 
     // Emitted AFTER the profile env loop: inside Flatpak this overrides the
     // passed-through DBUS_SESSION_BUS_ADDRESS (which names the proxy socket we
@@ -188,9 +194,62 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
     args.push(os("--chdir"));
     args.push(command.cwd.as_os_str().to_os_string());
     args.push(os("--"));
+    if let SandboxNetworkMode::Proxied(_) = command.profile.network {
+        args.extend([
+            os(BOX_HELPER),
+            os("bridge"),
+            os("--socket"),
+            os(BOX_SOCKET),
+            os("--http"),
+            os(BOX_PROXY_PORT.to_string()),
+            os("--"),
+        ]);
+    }
     args.extend(command.argv.iter().cloned());
 
     Ok(args)
+}
+
+/// Allowlist: the proxy socket, the helper and the ssh configuration, and
+/// the variables that send HTTP(S) clients to the helper's port. In-box
+/// loopback bypasses the proxy, which would refuse it, so an agent's own
+/// test server on `localhost` still works.
+fn append_proxy_binds_and_env(args: &mut Vec<OsString>, network: &SandboxNetworkMode) {
+    let SandboxNetworkMode::Proxied(endpoint) = network else {
+        return;
+    };
+    args.extend([
+        os("--dir"),
+        os("/run/clai"),
+        os("--bind"),
+        os(&endpoint.socket),
+        os(BOX_SOCKET),
+        os("--ro-bind"),
+        os(&endpoint.helper),
+        os(BOX_HELPER),
+        os("--ro-bind"),
+        os(&endpoint.ssh_config),
+        os("/etc/ssh/ssh_config"),
+    ]);
+    let proxy = format!("http://127.0.0.1:{BOX_PROXY_PORT}");
+    let java = format!(
+        "-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort={BOX_PROXY_PORT} \
+         -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort={BOX_PROXY_PORT} \
+         -Dhttp.nonProxyHosts=localhost|127.0.0.1"
+    );
+    let no_proxy = "localhost,127.0.0.1,::1";
+    for (key, value) in [
+        ("HTTP_PROXY", proxy.as_str()),
+        ("HTTPS_PROXY", &proxy),
+        ("http_proxy", &proxy),
+        ("https_proxy", &proxy),
+        ("NO_PROXY", no_proxy),
+        ("no_proxy", no_proxy),
+        ("NODE_USE_ENV_PROXY", "1"),
+        ("JAVA_TOOL_OPTIONS", &java),
+    ] {
+        args.extend([os("--setenv"), os(key), os(value)]);
+    }
 }
 
 /// Mount the sandbox's `/tmp`.
@@ -366,6 +425,17 @@ fn append_session_bus_bind(args: &mut Vec<OsString>, command: &SandboxCommand, i
         return;
     }
     let bus_path = resolve_session_bus_socket(in_flatpak);
+    if bus_path.is_none()
+        && !matches!(command.profile.network, SandboxNetworkMode::Host)
+        && std::env::var("DBUS_SESSION_BUS_ADDRESS")
+            .is_ok_and(|addr| addr.contains("unix:abstract="))
+    {
+        tracing::warn!(
+            "Sandbox session_bus is Allow, but the host session bus is an abstract socket, \
+             which only a sandbox on the host network can reach; with network Off or \
+             Allowlist, libsecret-using tools will fail."
+        );
+    }
     let Some(bus_path) = bus_path else {
         tracing::warn!(
             "Sandbox session_bus is Allow but no path-based D-Bus session bus socket \
@@ -1109,6 +1179,360 @@ mod tests {
 
         assert!(rendered.contains(&"--unshare-net".to_string()));
         assert!(!rendered.contains(&"--share-net".to_string()));
+    }
+
+    fn proxied(dir: &Path) -> SandboxNetworkMode {
+        SandboxNetworkMode::Proxied(crate::assistant::sandbox::ProxyEndpoint {
+            socket: dir.join("net.sock"),
+            helper: dir.join("clai-sandbox-helper"),
+            ssh_config: dir.join("ssh_config"),
+        })
+    }
+
+    #[test]
+    fn only_allowlist_binds_the_proxy_and_wraps_the_command() {
+        let dir = PathBuf::from("/c/.clai-net");
+        for network in [
+            SandboxNetworkMode::Disabled,
+            SandboxNetworkMode::Host,
+            proxied(&dir),
+        ] {
+            let mut command = sample_command();
+            command.profile.network = network.clone();
+            let args = rendered(&bwrap_args(&command).unwrap());
+            let is_proxied = matches!(network, SandboxNetworkMode::Proxied(_));
+            assert_eq!(
+                args.contains(&"--share-net".to_string()),
+                network == SandboxNetworkMode::Host,
+                "{network:?}"
+            );
+            assert_eq!(
+                args.contains(&"--unshare-net".to_string()),
+                network != SandboxNetworkMode::Host,
+                "{network:?}"
+            );
+            let has = |needle: &[&str]| args.windows(needle.len()).any(|window| window == needle);
+            let binds: [&[&str]; 3] = [
+                &["--bind", "/c/.clai-net/net.sock", "/run/clai/net.sock"],
+                &[
+                    "--ro-bind",
+                    "/c/.clai-net/clai-sandbox-helper",
+                    "/run/clai/helper",
+                ],
+                &[
+                    "--ro-bind",
+                    "/c/.clai-net/ssh_config",
+                    "/etc/ssh/ssh_config",
+                ],
+            ];
+            let env: [&[&str]; 8] = [
+                &["--setenv", "HTTP_PROXY", "http://127.0.0.1:3128"],
+                &["--setenv", "HTTPS_PROXY", "http://127.0.0.1:3128"],
+                &["--setenv", "http_proxy", "http://127.0.0.1:3128"],
+                &["--setenv", "https_proxy", "http://127.0.0.1:3128"],
+                &["--setenv", "NO_PROXY", "localhost,127.0.0.1,::1"],
+                &["--setenv", "no_proxy", "localhost,127.0.0.1,::1"],
+                &["--setenv", "NODE_USE_ENV_PROXY", "1"],
+                &[
+                    "--setenv",
+                    "JAVA_TOOL_OPTIONS",
+                    "-Dhttp.proxyHost=127.0.0.1 -Dhttp.proxyPort=3128 \
+                     -Dhttps.proxyHost=127.0.0.1 -Dhttps.proxyPort=3128 \
+                     -Dhttp.nonProxyHosts=localhost|127.0.0.1",
+                ],
+            ];
+            for needle in binds.iter().chain(env.iter()) {
+                assert_eq!(has(needle), is_proxied, "{network:?} {needle:?}");
+            }
+            let wrapped = [
+                "--",
+                "/run/clai/helper",
+                "bridge",
+                "--socket",
+                "/run/clai/net.sock",
+                "--http",
+                "3128",
+                "--",
+                "/bin/sh",
+                "-lc",
+                "pwd",
+            ];
+            assert_eq!(
+                args.ends_with(&wrapped.map(String::from)),
+                is_proxied,
+                "{network:?}"
+            );
+            if is_proxied {
+                let position = |needle: &str| args.iter().rposition(|arg| arg == needle).unwrap();
+                assert!(
+                    position("/etc/ssh/ssh_config") > position("/etc/ssh"),
+                    "the ssh_config bind lands on the /etc/ssh tmpfs"
+                );
+            }
+        }
+    }
+
+    /// The helper `cargo test` builds next to the test binary; `cargo test
+    /// --lib` alone does not build it.
+    fn built_helper() -> Option<PathBuf> {
+        let exe = std::env::current_exe().ok()?;
+        let helper = exe.parent()?.parent()?.join("clai-sandbox-helper");
+        if helper.is_file() {
+            Some(helper)
+        } else {
+            eprintln!("skipped: {} is not built", helper.display());
+            None
+        }
+    }
+
+    fn network_command(
+        workspace: &Path,
+        network: SandboxNetworkMode,
+        script: &str,
+    ) -> SandboxCommand {
+        SandboxCommand {
+            argv: vec![os("/bin/sh"), os("-c"), os(script)],
+            cwd: workspace.to_path_buf(),
+            timeout_ms: 20_000,
+            max_output_chars: 10_000,
+            profile: SandboxProfile::for_test(
+                workspace.to_path_buf(),
+                vec![],
+                network,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace,
+                    SandboxSessionBusMode::Deny,
+                ),
+                None,
+            ),
+        }
+    }
+
+    /// `None` when this host cannot run bwrap.
+    async fn run_or_skip(command: SandboxCommand) -> Option<SandboxCommandOutput> {
+        match run(command).await {
+            Ok(output) => Some(output),
+            Err(error) if error.contains("Sandboxed shell is unavailable") => None,
+            Err(error) => panic!("sandbox command failed unexpectedly: {error}"),
+        }
+    }
+
+    /// Sends every host the proxy allows to one loopback echo server.
+    struct Echo(std::net::SocketAddr);
+
+    #[async_trait::async_trait]
+    impl crate::assistant::network::connect::Connector for Echo {
+        async fn connect(
+            &self,
+            _host: &str,
+            _port: u16,
+        ) -> Result<tokio::net::TcpStream, crate::assistant::network::connect::ConnectError>
+        {
+            tokio::net::TcpStream::connect(self.0)
+                .await
+                .map_err(|error| {
+                    crate::assistant::network::connect::ConnectError::Failed(error.to_string())
+                })
+        }
+    }
+
+    async fn echo_server() -> std::net::SocketAddr {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let mut buffer = [0_u8; 64];
+                    let read = stream.read(&mut buffer).await.unwrap_or(0);
+                    let _ = stream.write_all(&buffer[..read]).await;
+                });
+            }
+        });
+        addr
+    }
+
+    /// An Allowlist command with a running proxy session that allows
+    /// `allowed.test` and sends it to an echo server.
+    struct Allowlisted {
+        network: SandboxNetworkMode,
+        session: crate::assistant::network::proxy::ProxySession,
+        _files: tempfile::TempDir,
+    }
+
+    async fn allowlisted() -> Option<Allowlisted> {
+        let helper = built_helper()?;
+        let files = tempfile::tempdir().unwrap();
+        let endpoint = crate::assistant::sandbox::ProxyEndpoint {
+            socket: files.path().join("net.sock"),
+            helper,
+            ssh_config: files.path().join("ssh_config"),
+        };
+        std::fs::write(
+            &endpoint.ssh_config,
+            crate::assistant::sandbox::helper::ssh_config_text(),
+        )
+        .unwrap();
+        let run_network =
+            crate::assistant::network::run_state::RunNetwork::new(&crate::config::NetworkPolicy {
+                mode: crate::config::NetworkMode::Allowlist,
+                allow_domains: vec!["allowed.test".to_string()],
+                deny_domains: Vec::new(),
+            });
+        let session = crate::assistant::network::proxy::ProxySession::start(
+            &endpoint.socket,
+            std::sync::Arc::new(run_network),
+            std::sync::Arc::new(Echo(echo_server().await)),
+        )
+        .unwrap();
+        Some(Allowlisted {
+            network: SandboxNetworkMode::Proxied(endpoint),
+            session,
+            _files: files,
+        })
+    }
+
+    #[tokio::test]
+    async fn allowlist_reaches_only_listed_hosts_through_the_proxy() {
+        let Some(box_network) = allowlisted().await else {
+            return;
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let script = "printf ping | /run/clai/helper connect --proxy 127.0.0.1:3128 allowed.test 443; echo; \
+                      /run/clai/helper connect --proxy 127.0.0.1:3128 example.invalid 443 </dev/null; \
+                      echo \"refused=$?\"; grep ProxyCommand /etc/ssh/ssh_config; \
+                      echo \"$HTTPS_PROXY $NO_PROXY\"; getent hosts github.com || echo no-dns";
+        let command = network_command(workspace.path(), box_network.network.clone(), script);
+        let Some(output) = run_or_skip(command).await else {
+            return;
+        };
+        assert!(output.stdout.starts_with("ping\n"), "{output:?}");
+        assert!(output.stdout.contains("refused=255"), "{output:?}");
+        assert!(
+            output
+                .stdout
+                .contains("ProxyCommand /run/clai/helper connect"),
+            "{output:?}"
+        );
+        assert!(
+            output
+                .stdout
+                .contains("http://127.0.0.1:3128 localhost,127.0.0.1,::1"),
+            "{output:?}"
+        );
+        assert!(output.stdout.contains("no-dns"), "{output:?}");
+        assert!(output.stderr.contains("403 Forbidden"), "{output:?}");
+        assert_eq!(box_network.session.refused(), ["example.invalid:443"]);
+    }
+
+    /// `NO_PROXY` keeps an agent's own test server reachable: the proxy
+    /// would refuse `localhost`.
+    #[tokio::test]
+    async fn allowlist_lets_in_box_localhost_bypass_the_proxy() {
+        let Some(box_network) = allowlisted().await else {
+            return;
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        let script = "python3 -m http.server 8765 --bind 127.0.0.1 >/dev/null 2>&1 & \
+            python3 -c \"
+import time, urllib.request
+for _ in range(100):
+    try:
+        print(urllib.request.urlopen('http://localhost:8765/', timeout=2).status)
+        break
+    except Exception as error:
+        last = error
+        time.sleep(0.05)
+else:
+    print('failed', last)
+\"; kill %1";
+        let command = network_command(workspace.path(), box_network.network.clone(), script);
+        let Some(output) = run_or_skip(command).await else {
+            return;
+        };
+        assert_eq!(output.stdout.trim(), "200", "{output:?}");
+        assert!(box_network.session.refused().is_empty());
+    }
+
+    #[tokio::test]
+    async fn off_has_only_loopback_and_host_network_keeps_the_host_loopback() {
+        let workspace = tempfile::tempdir().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let script = format!(
+            "grep -c : /proc/net/dev; grep -q \"^ *lo:\" /proc/net/dev && echo lo; \
+             python3 -c \"import socket; socket.create_connection(('127.0.0.1', {port}), 2); print('reached')\" 2>/dev/null || echo unreachable"
+        );
+        let Some(off) = run_or_skip(network_command(
+            workspace.path(),
+            SandboxNetworkMode::Disabled,
+            &script,
+        ))
+        .await
+        else {
+            return;
+        };
+        assert!(off.stdout.starts_with("1\nlo\n"), "{off:?}");
+        assert!(off.stdout.contains("unreachable"), "{off:?}");
+
+        let host = run_or_skip(network_command(
+            workspace.path(),
+            SandboxNetworkMode::Host,
+            &script,
+        ))
+        .await
+        .unwrap();
+        assert!(host.stdout.contains("reached"), "{host:?}");
+    }
+
+    /// The runner's timeout kills bwrap; the helper and the command die with
+    /// its namespace.
+    #[tokio::test]
+    async fn a_timed_out_allowlist_command_leaves_no_helper_behind() {
+        let Some(box_network) = allowlisted().await else {
+            return;
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        if run_or_skip(network_command(
+            workspace.path(),
+            SandboxNetworkMode::Disabled,
+            "true",
+        ))
+        .await
+        .is_none()
+        {
+            return;
+        }
+        let marker = format!("clai-timeout-{}", uuid::Uuid::new_v4().simple());
+        let mut command = network_command(
+            workspace.path(),
+            box_network.network.clone(),
+            &format!("sleep 60; echo {marker}"),
+        );
+        command.timeout_ms = 1_000;
+        let error = run(command).await.unwrap_err();
+        assert!(error.contains("timed out"), "{error}");
+        let survivors = || {
+            std::fs::read_dir("/proc")
+                .unwrap()
+                .flatten()
+                .filter(|entry| {
+                    std::fs::read(entry.path().join("cmdline"))
+                        .is_ok_and(|cmdline| String::from_utf8_lossy(&cmdline).contains(&marker))
+                })
+                .count()
+        };
+        let mut left = survivors();
+        for _ in 0..50 {
+            if left == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            left = survivors();
+        }
+        assert_eq!(left, 0, "processes outlived the timed-out command");
     }
 
     #[test]

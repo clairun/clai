@@ -52,10 +52,24 @@ pub enum SandboxPathAccess {
     ReadWrite,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetworkMode {
     Disabled,
     Host,
+    /// Allowlist (Linux): an own network namespace whose only way out is
+    /// CLAI's network proxy.
+    Proxied(ProxyEndpoint),
+}
+
+/// Host files the sandbox binds for [`SandboxNetworkMode::Proxied`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyEndpoint {
+    /// Where the command's network proxy session listens.
+    pub socket: PathBuf,
+    /// The sandbox helper binary, as the host's bwrap sees it.
+    pub helper: PathBuf,
+    /// The OpenSSH client configuration that sends ssh through the proxy.
+    pub ssh_config: PathBuf,
 }
 
 /// Whether the sandboxed process can reach the host's session D-Bus.

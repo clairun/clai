@@ -16,8 +16,8 @@ use crate::assistant::network::addr::{
 use crate::assistant::network::matcher::{canonical_host, parse_entry, HostDecision};
 use crate::assistant::network::run_state::RunNetwork;
 use crate::assistant::sandbox::{
-    run_command, SandboxCommand, SandboxEnv, SandboxNetworkMode, SandboxProfile,
-    SandboxSessionBusMode,
+    run_command, ProxyEndpoint, SandboxCommand, SandboxCommandOutput, SandboxEnv,
+    SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode,
 };
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
@@ -159,7 +159,12 @@ async fn execute_bash_exec(
         workspace_root,
         filesystem,
         &crate::assistant::sandbox::status(),
-    )?;
+    )
+    .inspect_err(|error| {
+        if error.starts_with("Sandboxed shell is unavailable") {
+            context.note_warning();
+        }
+    })?;
 
     if params.command.trim().is_empty() {
         return Err("Shell command cannot be empty".to_string());
@@ -196,13 +201,16 @@ async fn execute_bash_exec(
         }
     };
 
-    let output = run_command(SandboxCommand {
-        argv,
-        cwd,
-        timeout_ms,
-        max_output_chars: output_limit,
-        profile,
-    })
+    let (output, refused) = run_with_network(
+        SandboxCommand {
+            argv,
+            cwd,
+            timeout_ms,
+            max_output_chars: output_limit,
+            profile,
+        },
+        &context.run_network,
+    )
     .await
     .inspect_err(|error| {
         // Surface sandbox-availability failures (bwrap missing, kernel
@@ -216,13 +224,64 @@ async fn execute_bash_exec(
     })
     .map_err(|error| augment_timeout_error(error, timeout_ms, explicit_timeout))?;
 
-    Ok(serde_json::json!({
+    Ok(bash_exec_result(&output, &refused))
+}
+
+/// Runs the command, in Allowlist behind a network proxy session of its
+/// own. Returns the `host:port` targets the proxy refused.
+#[cfg(target_os = "linux")]
+async fn run_with_network(
+    command: SandboxCommand,
+    run_network: &std::sync::Arc<RunNetwork>,
+) -> Result<(SandboxCommandOutput, Vec<String>), String> {
+    use crate::assistant::network::{connect::HostConnector, proxy::ProxySession};
+    let session = match &command.profile.network {
+        SandboxNetworkMode::Proxied(endpoint) => Some(
+            ProxySession::start(
+                &endpoint.socket,
+                std::sync::Arc::clone(run_network),
+                std::sync::Arc::new(HostConnector),
+            )
+            .map_err(|error| {
+                format!("Sandboxed shell is unavailable: the network proxy did not start: {error}")
+            })?,
+        ),
+        _ => None,
+    };
+    let output = run_command(command).await?;
+    Ok((
+        output,
+        session.map(|session| session.refused()).unwrap_or_default(),
+    ))
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn run_with_network(
+    command: SandboxCommand,
+    _run_network: &std::sync::Arc<RunNetwork>,
+) -> Result<(SandboxCommandOutput, Vec<String>), String> {
+    Ok((run_command(command).await?, Vec::new()))
+}
+
+/// Many clients hide the proxy's 403 body (curl prints only “CONNECT tunnel
+/// failed, response 403”), so the result itself names the refused hosts.
+fn bash_exec_result(output: &SandboxCommandOutput, refused: &[String]) -> serde_json::Value {
+    let mut result = serde_json::json!({
         "cwd": agent_path_string(&output.cwd),
         "exitCode": output.exit_code,
         "success": output.success,
         "stdout": output.stdout,
         "stderr": output.stderr
-    }))
+    });
+    if !refused.is_empty() {
+        result["network"] = serde_json::json!({
+            "refused": refused,
+            "hint": "CLAI's network proxy refused these hosts: they are not on this agent's \
+                     network allowlist, or are on its deny list. Call `net_request_access` \
+                     for a host the task needs; do not look for a way around the proxy.",
+        });
+    }
+    result
 }
 
 /// Turn a bare sandbox timeout into an actionable error the model can recover
@@ -294,6 +353,7 @@ fn sandbox_profile(
     let network = sandbox_network(
         context.run_context.execution.sandbox.network_access.mode,
         sandbox,
+        || proxy_endpoint(&workspace_root),
     )?;
 
     let session_bus = match context.run_context.execution.sandbox.session_bus {
@@ -317,18 +377,20 @@ fn sandbox_profile(
 }
 
 /// The shell's network for a mode. A stored Allowlist where the sandbox
-/// cannot enforce it (macOS for now, a hand-edited or copied config) is an
-/// error, never the host network.
+/// cannot enforce it (macOS for now, a hand-edited or copied config), or
+/// whose helper or files are missing here, is an error, never the host
+/// network.
 fn sandbox_network(
     mode: NetworkMode,
     sandbox: &crate::assistant::sandbox::SandboxStatus,
+    proxy_endpoint: impl FnOnce() -> Result<ProxyEndpoint, String>,
 ) -> Result<SandboxNetworkMode, String> {
     match mode {
         NetworkMode::Off => Ok(SandboxNetworkMode::Disabled),
         NetworkMode::HostNetwork => Ok(SandboxNetworkMode::Host),
-        // Shell commands keep the host network in Allowlist until the sandbox
-        // routes them through the network proxy.
-        NetworkMode::Allowlist if sandbox.allowlist_available => Ok(SandboxNetworkMode::Host),
+        NetworkMode::Allowlist if sandbox.allowlist_available => {
+            proxy_endpoint().map(SandboxNetworkMode::Proxied)
+        }
         NetworkMode::Allowlist => Err(format!(
             "Allowlist network mode: {}. Choose Off or Host network in the agent's Access \
              settings.",
@@ -338,6 +400,18 @@ fn sandbox_network(
                 .unwrap_or("not available with this sandbox")
         )),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn proxy_endpoint(workspace_root: &Path) -> Result<ProxyEndpoint, String> {
+    crate::assistant::sandbox::helper::endpoint(workspace_root)
+}
+
+/// Only the Linux sandbox offers Allowlist; `sandbox_network` never asks
+/// for an endpoint elsewhere.
+#[cfg(not(target_os = "linux"))]
+fn proxy_endpoint(_workspace_root: &Path) -> Result<ProxyEndpoint, String> {
+    Err("Sandboxed shell is unavailable: Allowlist needs the Linux sandbox".to_string())
 }
 
 /// The tool error for a denied ask-first request: what was denied, the rule
@@ -2338,17 +2412,25 @@ mod tests {
         }
     }
 
+    fn test_endpoint() -> ProxyEndpoint {
+        ProxyEndpoint {
+            socket: PathBuf::from("/c/.clai-net/0123456789ab.sock"),
+            helper: PathBuf::from("/opt/clai/clai-sandbox-helper"),
+            ssh_config: PathBuf::from("/c/.clai-net/ssh_config"),
+        }
+    }
+
     #[test]
     fn network_modes_map_onto_the_sandbox_network_per_platform() {
         use crate::assistant::sandbox::{status_for, SandboxBackend};
         use NetworkMode::{Allowlist, HostNetwork, Off};
-        use SandboxNetworkMode::{Disabled, Host};
+        use SandboxNetworkMode::{Disabled, Host, Proxied};
         let linux = status_for(Some(SandboxBackend::Bubblewrap));
         let macos = status_for(Some(SandboxBackend::Seatbelt));
         let none = status_for(None);
         for (status, mode, expected) in [
             (&linux, Off, Ok(Disabled)),
-            (&linux, Allowlist, Ok(Host)),
+            (&linux, Allowlist, Ok(Proxied(test_endpoint()))),
             (&linux, HostNetwork, Ok(Host)),
             (&macos, Off, Ok(Disabled)),
             (&macos, Allowlist, Err(())),
@@ -2357,18 +2439,116 @@ mod tests {
             (&none, Allowlist, Err(())),
             (&none, HostNetwork, Ok(Host)),
         ] {
+            let asked = std::cell::Cell::new(false);
+            let endpoint = || {
+                asked.set(true);
+                Ok(test_endpoint())
+            };
             assert_eq!(
-                sandbox_network(mode, status).map_err(|_| ()),
+                sandbox_network(mode, status, endpoint).map_err(|_| ()),
                 expected,
                 "{:?} {mode:?}",
                 status.backend
             );
+            assert_eq!(
+                asked.get(),
+                matches!(expected, Ok(Proxied(_))),
+                "only an enforceable Allowlist prepares the proxy files"
+            );
         }
         assert_eq!(
-            sandbox_network(Allowlist, &macos).unwrap_err(),
+            sandbox_network(Allowlist, &macos, || Ok(test_endpoint())).unwrap_err(),
             "Allowlist network mode: Not available on macOS yet. Choose Off or Host network \
              in the agent's Access settings."
         );
+        let missing = || Err("Sandboxed shell is unavailable: network helper not found".into());
+        assert_eq!(
+            sandbox_network(Allowlist, &linux, missing),
+            Err("Sandboxed shell is unavailable: network helper not found".to_string()),
+            "a missing helper fails closed, never the host network"
+        );
+    }
+
+    /// The proxy session lives for the command and its refusals reach the
+    /// result. Needs bwrap and the helper `cargo test` builds.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_allowlist_command_runs_behind_its_own_proxy_session() {
+        let exe = std::env::current_exe().unwrap();
+        let helper = exe
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("clai-sandbox-helper");
+        if !helper.is_file() {
+            eprintln!("skipped: {} is not built", helper.display());
+            return;
+        }
+        let files = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let endpoint = ProxyEndpoint {
+            socket: files.path().join("net.sock"),
+            helper,
+            ssh_config: files.path().join("ssh_config"),
+        };
+        std::fs::write(&endpoint.ssh_config, "").unwrap();
+        let socket = endpoint.socket.clone();
+        let command = SandboxCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "/run/clai/helper connect --proxy 127.0.0.1:3128 example.org 443 </dev/null".into(),
+            ],
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms: 20_000,
+            max_output_chars: 10_000,
+            profile: SandboxProfile::for_test(
+                workspace.path().to_path_buf(),
+                Vec::new(),
+                SandboxNetworkMode::Proxied(endpoint),
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace.path(),
+                    SandboxSessionBusMode::Deny,
+                ),
+                None,
+            ),
+        };
+        let network = std::sync::Arc::new(run_network(&["github.com"], &[]));
+        let (output, refused) = match run_with_network(command, &network).await {
+            Ok(result) => result,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => return,
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(output.exit_code, Some(255), "{output:?}");
+        assert_eq!(refused, ["example.org:443"]);
+        assert_eq!(
+            logged(&network),
+            [("example.org".to_string(), Some(443), false)]
+        );
+        assert!(!socket.exists(), "the session ended with the command");
+    }
+
+    #[test]
+    fn a_result_names_the_hosts_the_proxy_refused() {
+        let output = SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(7),
+            success: false,
+            stdout: String::new(),
+            stderr: "curl: (56) CONNECT tunnel failed, response 403".to_string(),
+        };
+        assert!(bash_exec_result(&output, &[]).get("network").is_none());
+        let result = bash_exec_result(&output, &["example.org:443".to_string()]);
+        assert_eq!(
+            result["network"]["refused"],
+            serde_json::json!(["example.org:443"])
+        );
+        let hint = result["network"]["hint"].as_str().unwrap();
+        assert!(hint.contains("net_request_access"), "{hint}");
+        assert_eq!(result["exitCode"], 7);
     }
 
     #[test]
@@ -2391,6 +2571,11 @@ mod tests {
             profile(NetworkMode::Off, &linux).unwrap().network,
             SandboxNetworkMode::Disabled
         );
+        // The test binary has no helper beside it, as an install without one.
+        #[cfg(target_os = "linux")]
+        assert!(profile(NetworkMode::Allowlist, &linux)
+            .unwrap_err()
+            .starts_with("Sandboxed shell is unavailable: network helper not found"));
         let macos = status_for(Some(SandboxBackend::Seatbelt));
         assert!(profile(NetworkMode::Allowlist, &macos).is_err());
     }

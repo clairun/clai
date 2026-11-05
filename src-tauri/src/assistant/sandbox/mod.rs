@@ -2,7 +2,6 @@
 
 pub mod filesystem;
 #[cfg(target_os = "linux")]
-#[allow(dead_code, reason = "bash_exec locates the helper in a later commit")]
 pub mod helper;
 pub mod profile;
 pub mod runner;
@@ -20,7 +19,8 @@ mod macos_seatbelt;
 mod unsupported;
 
 pub use profile::{
-    SandboxEnv, SandboxNetworkMode, SandboxPathAccess, SandboxProfile, SandboxSessionBusMode,
+    ProxyEndpoint, SandboxEnv, SandboxNetworkMode, SandboxPathAccess, SandboxProfile,
+    SandboxSessionBusMode,
 };
 pub use runner::{run_command, SandboxCommand, SandboxCommandOutput};
 

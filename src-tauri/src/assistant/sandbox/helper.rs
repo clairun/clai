@@ -1,13 +1,84 @@
-//! Where the sandbox helper (`src/bin/clai-sandbox-helper.rs`) is.
+//! The sandbox helper (`src/bin/clai-sandbox-helper.rs`) and the files an
+//! Allowlist command binds next to it.
 //!
-//! It is installed next to the CLAI binary (deb, rpm, a development build).
-//! Under Flatpak bwrap runs on the host, which sees the app's files under
-//! the installation's `app-path`, not under `/app`.
+//! The helper is installed next to the CLAI binary (deb, rpm, a development
+//! build). Under Flatpak bwrap runs on the host, which sees the app's files
+//! under the installation's `app-path`, not under `/app`.
 
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
+
+use super::ProxyEndpoint;
 
 const HELPER_NAME: &str = "clai-sandbox-helper";
 const FLATPAK_INFO: &str = "/.flatpak-info";
+
+/// Where the helper, the proxy socket and the helper's proxy port are
+/// inside the sandbox.
+pub(crate) const BOX_HELPER: &str = "/run/clai/helper";
+pub(crate) const BOX_SOCKET: &str = "/run/clai/net.sock";
+pub(crate) const BOX_PROXY_PORT: u16 = 3128;
+
+/// Beside the workspace roots, inside the container every sandbox masks, so
+/// no other command's sandbox can see, or connect to, a socket here.
+const NETWORK_DIR: &str = ".clai-net";
+
+/// The files one Allowlist command binds: a socket path of its own for its
+/// proxy session, the helper, and the shared ssh configuration.
+pub fn endpoint(workspace_root: &Path) -> Result<ProxyEndpoint, String> {
+    let helper = locate()?;
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| workspace_root.to_path_buf());
+    prepare_endpoint(workspace_root, &home, helper)
+}
+
+fn prepare_endpoint(
+    workspace_root: &Path,
+    home: &Path,
+    helper: PathBuf,
+) -> Result<ProxyEndpoint, String> {
+    let container =
+        super::profile::workspace_mask(workspace_root, Some(home)).ok_or_else(|| {
+            "Sandboxed shell is unavailable: the Allowlist network mode needs the workspace inside \
+         the home directory; choose Off or Host network in the agent's Access settings."
+                .to_string()
+        })?;
+    let dir = container.join(NETWORK_DIR);
+    let unavailable = |error: std::io::Error| {
+        format!(
+            "Sandboxed shell is unavailable: cannot prepare {}: {error}",
+            dir.display()
+        )
+    };
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(unavailable)?;
+    let ssh_config = dir.join("ssh_config");
+    let content = ssh_config_text();
+    if std::fs::read_to_string(&ssh_config).ok() != Some(content.clone()) {
+        std::fs::write(&ssh_config, content).map_err(unavailable)?;
+    }
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    Ok(ProxyEndpoint {
+        socket: dir.join(format!("{}.sock", &id[..12])),
+        helper,
+        ssh_config,
+    })
+}
+
+/// Bound at `/etc/ssh/ssh_config`: ssh, and git, scp and rsync over ssh,
+/// reach hosts through the proxy. `~/.ssh/config` is read first, so a
+/// `ProxyCommand` or `ProxyJump` there takes precedence.
+pub(crate) fn ssh_config_text() -> String {
+    format!(
+        "# Written by CLAI. In the Allowlist network mode ssh reaches hosts through\n\
+         # CLAI's network proxy.\n\
+         Host *\n    ProxyCommand {BOX_HELPER} connect --proxy 127.0.0.1:{BOX_PROXY_PORT} %h %p\n"
+    )
+}
 
 /// The helper as the sandbox's bwrap sees it, once this process has found
 /// it runnable. Allowlist cannot run without it, so the error fails the
@@ -83,6 +154,45 @@ mod tests {
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(is_runnable(&helper));
         assert!(!is_runnable(dir.path()), "a directory");
+    }
+
+    #[test]
+    fn an_endpoint_lives_in_the_masked_container() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let workspace = home.path().join(".clai/workspaces/ws");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let helper = PathBuf::from("/opt/clai/clai-sandbox-helper");
+
+        let first = prepare_endpoint(&workspace, home.path(), helper.clone()).unwrap();
+        let second = prepare_endpoint(&workspace, home.path(), helper.clone()).unwrap();
+        let dir = home.path().join(".clai/workspaces/.clai-net");
+        assert_eq!(first.socket.parent(), Some(dir.as_path()));
+        assert_ne!(first.socket, second.socket, "one socket per command");
+        assert_eq!(first.helper, helper);
+        assert_eq!(first.ssh_config, dir.join("ssh_config"));
+        assert_eq!(
+            std::fs::read_to_string(&first.ssh_config).unwrap(),
+            ssh_config_text()
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+
+        let outside = tempfile::tempdir().unwrap();
+        let error = prepare_endpoint(outside.path(), home.path(), helper).unwrap_err();
+        assert!(
+            error.starts_with("Sandboxed shell is unavailable"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn ssh_goes_through_the_helper_and_the_proxy_port() {
+        assert!(ssh_config_text().contains(
+            "Host *\n    ProxyCommand /run/clai/helper connect --proxy 127.0.0.1:3128 %h %p\n"
+        ));
     }
 
     #[test]

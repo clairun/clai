@@ -243,7 +243,7 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
          (allow signal (target same-sandbox))\n\
          (allow sysctl-read)\n",
     );
-    append_mach_lookup_rule(&mut profile, command.profile.network);
+    append_mach_lookup_rule(&mut profile, &command.profile.network);
     if matches!(command.profile.network, SandboxNetworkMode::Host) {
         profile.push_str("(allow network*)\n");
         profile.push_str(HOST_NETWORK_SYSTEM_SOCKET);
@@ -353,7 +353,7 @@ const HOST_NETWORK_MACH_SERVICES: [&str; 7] = [
 const HOST_NETWORK_SYSTEM_SOCKET: &str =
     "(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))";
 
-fn append_mach_lookup_rule(profile: &mut String, network: SandboxNetworkMode) {
+fn append_mach_lookup_rule(profile: &mut String, network: &SandboxNetworkMode) {
     profile.push_str("(allow mach-lookup\n");
     profile.push_str("  (global-name \"com.apple.cfprefsd.agent\")\n");
     profile.push_str("  (global-name \"com.apple.cfprefsd.daemon\")\n");
@@ -725,7 +725,7 @@ mod tests {
             let workspace = tempfile::tempdir().unwrap();
             let private_tmp = tempfile::tempdir_in(workspace.path()).unwrap();
             let mut command = sample_command(workspace.path());
-            command.profile.network = network;
+            command.profile.network = network.clone();
 
             let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
 
