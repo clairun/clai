@@ -709,7 +709,9 @@ describe('AgentBehaviorForm', () => {
     await screen.findByDisplayValue('Reviewer');
 
     expect(await submit(ref)).toEqual({ ok: false, error: 'agent name already taken' });
-    expect(screen.getByRole('alert')).toHaveTextContent('agent name already taken');
+    // Only the failure: no hint to discard or reload.
+    expect(screen.getByRole('alert')).toHaveTextContent(/^agent name already taken$/);
+    expect(screen.queryByRole('button', { name: /Reload|Discard/ })).toBeNull();
   });
 
   it('bases each save on the agent it last loaded or saved', async () => {
@@ -723,33 +725,18 @@ describe('AgentBehaviorForm', () => {
     expect(api.workspaceUpdateAgent).toHaveBeenLastCalledWith(expect.objectContaining({ expectedUpdatedAt: 7 }));
   });
 
-  it('refuses to overwrite a newer agent and offers to reload it', async () => {
-    api.workspaceUpdateAgent.mockRejectedValueOnce(
-      new StaleAgentError('This agent changed after you opened it. Reload to see the change, then save again.'),
-    );
-    const { ref } = renderForm({ agentId: 'agent-1' });
+  // Recovering is the host's Discard, which mounts the form afresh (see
+  // WorkspaceSettingsModal.stale.test.tsx).
+  it('keeps the edits when a save is refused as stale, and says why', async () => {
+    const stale = 'This agent was changed elsewhere after you opened it. Use Discard to load the latest settings.';
+    api.workspaceUpdateAgent.mockRejectedValueOnce(new StaleAgentError(stale));
+    const { ref, onDirtyChange } = renderForm({ agentId: 'agent-1' });
     await userEvent.type(await screen.findByLabelText('Instructions'), ' and tests');
 
-    expect(await submit(ref)).toMatchObject({ ok: false });
-    expect(screen.getByRole('alert')).toHaveTextContent('This agent changed after you opened it');
-
-    // An approval saved meanwhile is what the reload brings in.
-    api.workspaceGetAgent.mockResolvedValue({
-      ...REVIEWER,
-      execution: { ...REVIEWER.execution, shell: { mode: 'restricted', askFirstCommandPrefixes: [] } },
-      updatedAt: 9,
-    });
-    await userEvent.click(screen.getByRole('button', { name: /Reload/ }));
-    expect(await screen.findByDisplayValue('Reviews diffs')).toBeInTheDocument();
-    expect(api.workspaceGetAgent).toHaveBeenCalledTimes(2);
-    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
-
-    await submit(ref);
-    expect(api.workspaceUpdateAgent).toHaveBeenLastCalledWith(expect.objectContaining({
-      expectedUpdatedAt: 9,
-      description: 'Reviews diffs',
-      execution: expect.objectContaining({ shell: { mode: 'restricted', askFirstCommandPrefixes: [] } }),
-    }));
+    expect(await submit(ref)).toEqual({ ok: false, error: stale });
+    expect(screen.getByRole('alert')).toHaveTextContent(stale);
+    expect(screen.getByLabelText('Instructions')).toHaveValue('Reviews diffs and tests');
+    expect(onDirtyChange).toHaveBeenLastCalledWith(true);
   });
 
   it('shows the load failure instead of a form the edit flow cannot save', async () => {

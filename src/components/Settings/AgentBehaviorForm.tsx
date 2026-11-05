@@ -19,7 +19,7 @@ import {
   workspaceGetAgent,
   workspaceUpdateAgent,
 } from '../../api/client';
-import { StaleAgentError } from '../../api/errors';
+
 import type {
   ExecutionCapabilityConfig,
   ExecutionSandboxConfig,
@@ -208,9 +208,6 @@ export const AgentBehaviorForm = ({
   const isCreate = !agentId;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // The last save was refused because the agent changed since it loaded.
-  const [stale, setStale] = useState(false);
-  const [reloadKey, setReloadKey] = useState(0);
   const [deleting, setDeleting] = useState(false);
   const busy = saving || deleting;
 
@@ -257,13 +254,7 @@ export const AgentBehaviorForm = ({
         if (!cancelled) setLoading(false);
       });
     return () => { cancelled = true; };
-  }, [workspaceId, agentId, initialAgent, reloadKey]);
-
-  const reload = useCallback(() => {
-    lastFetchedId.current = null;
-    setStale(false);
-    setReloadKey((key) => key + 1);
-  }, []);
+  }, [workspaceId, agentId, initialAgent]);
 
   // A create waits for the backend defaults (or their failure) before it
   // shows anything, so the default grants are on screen from the start.
@@ -370,7 +361,6 @@ export const AgentBehaviorForm = ({
         return { ok: true };
       } catch (err) {
         const message = errText(err, 'Failed to save agent.');
-        setStale(err instanceof StaleAgentError);
         setError(message);
         return { ok: false, error: message };
       }
@@ -418,19 +408,7 @@ export const AgentBehaviorForm = ({
   }
 
   const context = isManager ? 'Main' : (draft.name.trim() || 'Agent');
-  const errorBanner = error && (
-    <p className={form.errorBanner} role="alert">
-      {error}
-      {stale && (
-        <>
-          {' '}
-          <button type="button" className={form.linkButton} onClick={reload} disabled={busy}>
-            Reload, discarding the edits made here
-          </button>
-        </>
-      )}
-    </p>
-  );
+  const errorBanner = error && <p className={form.errorBanner} role="alert">{error}</p>;
 
   if (view.kind === 'source') {
     const group = groups.find((g) => g.key === view.key);

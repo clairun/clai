@@ -69,8 +69,8 @@ pub struct WorkspaceAgentUpdateRequest {
 #[serde(tag = "kind", rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub enum WorkspaceAgentUpdateError {
-    /// Something wrote the agent after the form loaded it: reload, do not
-    /// retry.
+    /// Something wrote the agent after the form loaded it: discard the edits
+    /// and load it again, do not retry.
     Stale {
         message: String,
     },
@@ -85,8 +85,8 @@ impl From<String> for WorkspaceAgentUpdateError {
     }
 }
 
-const STALE_AGENT: &str =
-    "This agent changed after you opened it. Reload to see the change, then save again.";
+const STALE_AGENT: &str = "This agent was changed elsewhere after you opened it. Use Discard \
+     to load the latest settings; your unsaved edits here will be lost.";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -505,7 +505,7 @@ mod stored_agent_tests {
 
         let error = update_main_agent(&fixture.state, opened).expect_err("stale");
         assert!(
-            matches!(&error, WorkspaceAgentUpdateError::Stale { message } if message.contains("Reload")),
+            matches!(&error, WorkspaceAgentUpdateError::Stale { message } if message.contains("Use Discard")),
             "{error:?}"
         );
         let stored = fixture.config().main_agent.unwrap();
