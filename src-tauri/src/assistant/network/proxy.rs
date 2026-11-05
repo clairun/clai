@@ -524,6 +524,20 @@ mod tests {
         assert!(full.contains("too many connections"), "{full}");
         assert!(running.session.refused().is_empty());
 
+        // A client that sends nothing while the proxy is full must not stall
+        // the accept loop for the connections behind it.
+        let _silent = UnixStream::connect(&running.session.socket).await.unwrap();
+        let behind = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            exchange(&running, unlisted, b""),
+        )
+        .await
+        .expect("a silent client stalled the accept loop");
+        assert!(
+            behind.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "{behind}"
+        );
+
         drop(tunnels.pop());
         let freed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
