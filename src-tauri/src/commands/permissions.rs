@@ -602,7 +602,7 @@ pub fn persist_always_allow(
         };
         if remove_ask_first_rules(agent, rules) {
             let now = chrono::Utc::now().timestamp_millis();
-            agent.updated_at = now;
+            agent.touch(now);
             config.updated_at = now;
         }
         Ok(())

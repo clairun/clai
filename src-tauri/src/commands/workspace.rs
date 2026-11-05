@@ -2569,7 +2569,7 @@ fn update_main_mcp_selection(
             }))
             .collect();
         let now = chrono::Utc::now().timestamp_millis();
-        main.updated_at = now;
+        main.touch(now);
         config.updated_at = now;
         Ok(())
     })?;
@@ -2598,7 +2598,7 @@ fn set_main_provider(
             .ok_or_else(|| NO_MAIN_AGENT.to_string())?;
         main.provider_connection_ids = vec![provider_connection_id];
         let now = chrono::Utc::now().timestamp_millis();
-        main.updated_at = now;
+        main.touch(now);
         config.updated_at = now;
         Ok(())
     })?;

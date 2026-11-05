@@ -96,7 +96,7 @@ fn drop_skills_with_prefix(
         .collect();
     agent.selected_skills =
         crate::config::workspace_config::skill_ids_to_refs(app_config, &filtered);
-    agent.updated_at = now;
+    agent.touch(now);
     true
 }
 

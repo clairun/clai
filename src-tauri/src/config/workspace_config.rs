@@ -419,9 +419,10 @@ pub struct WorkspaceAgent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<AgentAvatarRef>,
     pub created_at: i64,
-    /// Set by every write. The Main's settings form saves only against the
-    /// value it loaded, so a writer that skipped it (an approval saved while
-    /// the form is open) would be silently overwritten.
+    /// Set by every write, through [`WorkspaceAgent::touch`]. The Main's
+    /// settings form saves only against the value it loaded, so a writer that
+    /// skipped it (an approval saved while the form is open) would be
+    /// silently overwritten.
     pub updated_at: i64,
 }
 
@@ -515,7 +516,7 @@ impl WorkspaceConfig {
         };
         if let Some(main) = self.main_agent.as_mut() {
             main.provider_connection_ids = vec![first.id.clone()];
-            main.updated_at = now;
+            main.touch(now);
         }
         self.updated_at = now;
     }
@@ -566,6 +567,13 @@ impl WorkspaceAgent {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Records a write at `now`. The value always grows, within one
+    /// millisecond or across a clock step back too, so a save against the
+    /// value a form loaded never misses a write made since.
+    pub fn touch(&mut self, now: i64) {
+        self.updated_at = now.max(self.updated_at + 1);
     }
 }
 
@@ -968,6 +976,20 @@ mod attach_provider_tests {
 
         let manager = config.main_agent.as_ref().expect("main agent");
         assert_eq!(manager.provider_connection_ids, vec!["b".to_string()]);
+    }
+
+    #[test]
+    fn touch_moves_updated_at_forward_within_one_millisecond_too() {
+        let mut agent = WorkspaceAgent::new_manager("mgr".to_string(), 5);
+        agent.touch(5);
+        let first = agent.updated_at;
+        agent.touch(5);
+        assert!(agent.updated_at > first, "same millisecond");
+        let second = agent.updated_at;
+        agent.touch(1);
+        assert!(agent.updated_at > second, "clock stepped back");
+        agent.touch(100);
+        assert_eq!(agent.updated_at, 100);
     }
 
     #[test]

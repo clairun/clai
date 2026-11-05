@@ -284,7 +284,7 @@ fn update_main_agent(
         agent.provider_connection_ids = request.provider_connection_ids;
         agent.execution = request.execution;
         agent.enabled = request.enabled;
-        agent.updated_at = now;
+        agent.touch(now);
         config.updated_at = now;
         Ok(())
     });
@@ -368,7 +368,7 @@ pub async fn workspace_set_agent_enabled(
             return Err(format!("Workspace agent not found: {}", agent_id));
         };
         agent.enabled = request.enabled;
-        agent.updated_at = now;
+        agent.touch(now);
         config.updated_at = now;
         Ok(())
     })?;
@@ -517,6 +517,31 @@ mod stored_agent_tests {
             .shell
             .ask_first_command_prefixes
             .contains(&"git push".to_string()));
+    }
+
+    #[test]
+    fn a_write_in_the_same_millisecond_as_a_save_makes_that_save_stale() {
+        let fixture = Fixture::new();
+        let saved = update_main_agent(&fixture.state, update_request(&fixture)).expect("save");
+        fixture
+            .state
+            .update_workspace_config(WORKSPACE_ID, |config| {
+                let main = config.main_agent.as_mut().expect("main");
+                main.description = "written elsewhere".to_string();
+                main.touch(saved.updated_at);
+                Ok(())
+            })
+            .expect("other write");
+
+        let mut from_the_form = update_request(&fixture);
+        from_the_form.expected_updated_at = saved.updated_at;
+        let error = update_main_agent(&fixture.state, from_the_form).expect_err("stale");
+        assert!(
+            matches!(error, WorkspaceAgentUpdateError::Stale { .. }),
+            "{error:?}"
+        );
+        let stored = fixture.config().main_agent.expect("main");
+        assert_eq!(stored.description, "written elsewhere");
     }
 
     #[test]
