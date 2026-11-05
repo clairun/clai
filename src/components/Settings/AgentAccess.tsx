@@ -57,9 +57,41 @@ const NETWORK_MODES: { mode: NetworkMode; label: string; hint: string }[] = [
   },
 ];
 
+const INVALID_CHARACTERS = 'Use only letters, digits, hyphens and dots.';
+
+/** The address in the form URLs print it, or null if it is not IPv6. */
+const canonicalIpv6 = (text: string): string | null => {
+  if (!/^[0-9a-f:.]+$/.test(text)) return null;
+  try {
+    return new URL(`http://[${text}]/`).hostname.slice(1, -1);
+  } catch {
+    return null;
+  }
+};
+
+// A last label that makes URL parsers read the name as IPv4.
+const endsInANumber = (label: string) => /^(\d+|0x[0-9a-f]*)$/.test(label);
+
+const isIpv4 = (value: string) => {
+  const parts = value.split('.');
+  return parts.length === 4 && parts.every((part) => /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255);
+};
+
+/** The labels after IDNA (punycode), or null if URLs refuse the name. */
+const asciiLabels = (labels: string[]): string[] | null => {
+  try {
+    return new URL(`http://${labels.map((label) => (label === '*' ? 'x' : label)).join('.')}/`).hostname.split('.');
+  } catch {
+    return null;
+  }
+};
+
 /**
- * A host entry as the backend matches it: a host name or IP, `*` only as a
- * whole label. Returns the entry to store, or why the text is not one.
+ * A host entry as the backend accepts it: a host name or IP, `*` only as a
+ * whole label. Saving enforces the backend rule (`parse_entry`,
+ * src-tauri/src/assistant/network/matcher.rs); this mirrors it for instant
+ * feedback, and both test the same cases. Returns the entry to store, or why
+ * the text is not one.
  */
 export const parseHostEntry = (raw: string): string | { error: string } => {
   const value = raw.trim().toLowerCase().replace(/\.$/, '');
@@ -67,16 +99,30 @@ export const parseHostEntry = (raw: string): string | { error: string } => {
   if (/\s/.test(value)) return { error: 'A host name has no spaces.' };
   if (value.includes('://')) return { error: 'Enter the host only, without http:// or https://.' };
   if (value.includes('/')) return { error: 'Enter the host only, without a path.' };
-  const unbracketed = value.replace(/^\[(.*)\]$/, '$1');
-  const isIpv6 = /^[0-9a-f:.]+$/.test(unbracketed) && (unbracketed.match(/:/g) ?? []).length >= 2;
-  if (isIpv6) return unbracketed;
-  if (value.includes(':')) return { error: 'Leave out the port: an entry matches every port.' };
-  if (value === '*') return { error: 'A lone * would allow every host; choose Host network instead.' };
+  if (value.includes('@')) return { error: 'Enter the host only, without a user name.' };
+  const bracketed = /^\[(.*)\]$/.exec(value)?.[1];
+  const unbracketed = bracketed ?? value;
+  if (unbracketed.includes(':')) {
+    const address = canonicalIpv6(unbracketed);
+    if (address) return address;
+    return { error: bracketed === undefined ? 'Leave out the port: an entry matches every port.' : 'Not a valid IPv6 address.' };
+  }
+  // `asciiLabels` builds a URL, where these would end the host.
+  if (/[%?#\\]/.test(value)) return { error: INVALID_CHARACTERS };
   const labels = value.split('.');
   if (labels.some((label) => !label)) return { error: 'A host name has no empty labels.' };
+  if (endsInANumber(labels.at(-1) ?? '')) {
+    if (value.includes('*')) return { error: 'A wildcard cannot cover IP addresses.' };
+    return isIpv4(value) ? value : { error: 'Not a valid IPv4 address; write it as four numbers, such as 10.0.0.5.' };
+  }
   if (labels.some((label) => label.includes('*') && label !== '*')) {
     return { error: 'Use * only as a whole label, as in *.example.com.' };
   }
+  if (labels.every((label) => label === '*')) {
+    return { error: 'It would allow every host; choose Host network instead.' };
+  }
+  const ascii = asciiLabels(labels);
+  if (!ascii || !ascii.every((label) => /^[a-z0-9_-]+$/.test(label))) return { error: INVALID_CHARACTERS };
   return value;
 };
 

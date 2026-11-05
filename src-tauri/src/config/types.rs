@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::assistant::network::default_lists::{DEFAULT_ALLOW_DOMAINS, DEFAULT_DENY_DOMAINS};
+use crate::assistant::network::matcher::parse_entry;
 use crate::assistant::types::ProviderConnection;
 use crate::paths;
 
@@ -383,6 +384,27 @@ pub struct NetworkPolicy {
     /// Checked before the allow list.
     #[serde(default = "default_deny_domains")]
     pub deny_domains: Vec<String>,
+}
+
+impl NetworkPolicy {
+    /// Refuses, naming it, an entry the matcher could never match. Every save
+    /// of an agent calls this; an invalid entry already stored (a hand edit)
+    /// is skipped when the lists are matched (see [`HostLists::new`]).
+    ///
+    /// [`HostLists::new`]: crate::assistant::network::matcher::HostLists::new
+    pub fn validate(&self) -> Result<(), String> {
+        for (list, entries) in [
+            ("Allowed hosts", &self.allow_domains),
+            ("Denied hosts", &self.deny_domains),
+        ] {
+            for entry in entries {
+                parse_entry(entry).map_err(|reason| {
+                    format!("{list}: `{entry}` is not a valid host entry: {reason}.")
+                })?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn default_allow_domains() -> Vec<String> {
@@ -1291,6 +1313,30 @@ mod tests {
             assert_eq!(json["sessionBus"], "allow");
             assert_eq!(sandbox_json(json), config, "{mode:?} round-trips");
         }
+    }
+
+    #[test]
+    fn validation_names_the_first_invalid_entry_and_its_list() {
+        let mut config = policy(NetworkMode::Allowlist);
+        assert_eq!(config.network_access.validate(), Ok(()));
+
+        config
+            .network_access
+            .deny_domains
+            .push("S3.amazonaws.com:443".to_string());
+        let error = config.network_access.validate().unwrap_err();
+        assert!(
+            error.starts_with("Denied hosts: `S3.amazonaws.com:443` is not a valid host entry"),
+            "{error}"
+        );
+
+        config.network_access.allow_domains.push("*.*".to_string());
+        let error = config.network_access.validate().unwrap_err();
+        assert!(error.starts_with("Allowed hosts: `*.*`"), "{error}");
+
+        // Stored as is: a hand-edited config still loads.
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(sandbox_json(json), config);
     }
 
     /// `ExecutionSandboxConfig` as the build before `networkAccess` reads it.

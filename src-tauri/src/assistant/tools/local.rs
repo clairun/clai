@@ -13,7 +13,7 @@ use crate::assistant::network::addr::{
     is_blocked_web_fetch_hostname, reject_private_web_fetch_addrs, reject_private_web_fetch_ip,
     strip_ipv6_url_brackets,
 };
-use crate::assistant::network::matcher::{host_decision, HostDecision};
+use crate::assistant::network::matcher::{HostDecision, HostLists};
 use crate::assistant::sandbox::{
     run_command, SandboxCommand, SandboxEnv, SandboxNetworkMode, SandboxProfile,
     SandboxSessionBusMode,
@@ -930,43 +930,46 @@ fn matches_prefix_literal(p: &str, command: &str) -> bool {
 // =============================================================================
 
 /// Which hosts the web tools may reach for one agent.
-#[derive(Debug, Clone, Copy)]
-enum WebGate<'a> {
+#[derive(Debug)]
+enum WebGate {
     /// No sandbox on this PC, so no network control at all.
     Unchecked,
     /// Host network: any public host.
     AnyHost,
     /// Allowlist: only the hosts this policy allows, on every redirect hop.
-    Allowlist(&'a NetworkPolicy),
+    Allowlist(HostLists),
 }
 
-fn web_gate(context: &ToolExecutionContext) -> Result<WebGate<'_>, String> {
+fn web_gate(context: &ToolExecutionContext) -> Result<WebGate, String> {
     web_access(
         &context.run_context.execution.sandbox.network_access,
         &crate::assistant::sandbox::status(),
     )
 }
 
-fn web_access<'a>(
-    network: &'a NetworkPolicy,
+fn web_access(
+    network: &NetworkPolicy,
     sandbox: &crate::assistant::sandbox::SandboxStatus,
-) -> Result<WebGate<'a>, String> {
+) -> Result<WebGate, String> {
     if !sandbox.available {
         return Ok(WebGate::Unchecked);
     }
     match network.mode {
         NetworkMode::Off => Err("Network access is off for this agent".to_string()),
-        NetworkMode::Allowlist => Ok(WebGate::Allowlist(network)),
+        NetworkMode::Allowlist => Ok(WebGate::Allowlist(HostLists::new(
+            &network.allow_domains,
+            &network.deny_domains,
+        ))),
         NetworkMode::HostNetwork => Ok(WebGate::AnyHost),
     }
 }
 
 /// `host` as the URL carries it: lower case, punycode, IPv6 in brackets.
-fn check_web_host(gate: WebGate<'_>, host: &str) -> Result<(), String> {
-    let WebGate::Allowlist(network) = gate else {
+fn check_web_host(gate: &WebGate, host: &str) -> Result<(), String> {
+    let WebGate::Allowlist(lists) = gate else {
         return Ok(());
     };
-    match host_decision(&network.allow_domains, &network.deny_domains, host) {
+    match lists.decide(host) {
         HostDecision::Allowed => Ok(()),
         HostDecision::Denied { entry } => Err(format!(
             "`{host}` is on this agent's network deny list (entry `{entry}`). The user can \
@@ -990,7 +993,7 @@ fn provider_redirect_allowed(url: &reqwest::Url) -> bool {
             .is_some_and(|host| host == "duckduckgo.com" || host.ends_with(".duckduckgo.com"))
 }
 
-fn web_search_redirect_policy(gate: WebGate<'_>) -> reqwest::redirect::Policy {
+fn web_search_redirect_policy(gate: &WebGate) -> reqwest::redirect::Policy {
     if matches!(gate, WebGate::Unchecked) {
         return reqwest::redirect::Policy::limited(MAX_WEB_SEARCH_REDIRECTS);
     }
@@ -1007,7 +1010,7 @@ fn web_search_redirect_policy(gate: WebGate<'_>) -> reqwest::redirect::Policy {
 }
 
 async fn execute_web_search(
-    gate: WebGate<'_>,
+    gate: WebGate,
     params: WebSearchParams,
 ) -> Result<serde_json::Value, String> {
     let max_results = params
@@ -1017,7 +1020,7 @@ async fn execute_web_search(
 
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(WEB_SEARCH_TIMEOUT_MS))
-        .redirect(web_search_redirect_policy(gate))
+        .redirect(web_search_redirect_policy(&gate))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
 
@@ -1145,7 +1148,7 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 async fn execute_web_fetch(
-    gate: WebGate<'_>,
+    gate: WebGate,
     params: WebFetchParams,
 ) -> Result<serde_json::Value, String> {
     let content_limit = params
@@ -1158,7 +1161,7 @@ async fn execute_web_fetch(
         .min(MAX_WEB_FETCH_TIMEOUT_MS);
 
     let url = parse_web_fetch_url(params.url.trim())?;
-    let response = fetch_public_url(url, timeout_ms, gate).await?;
+    let response = fetch_public_url(url, timeout_ms, &gate).await?;
     let final_url = response.url().clone();
 
     let status = response.status().as_u16();
@@ -1227,7 +1230,7 @@ fn validate_web_fetch_scheme(url: &reqwest::Url) -> Result<(), String> {
 async fn fetch_public_url(
     mut url: reqwest::Url,
     timeout_ms: u64,
-    gate: WebGate<'_>,
+    gate: &WebGate,
 ) -> Result<reqwest::Response, String> {
     // A redirect must never downgrade the transport: if the original request
     // was https, refuse to follow a redirect to plain http (a MITM/attacker
@@ -1296,7 +1299,7 @@ fn is_followable_redirect(status: reqwest::StatusCode) -> bool {
 /// Runs on every redirect hop.
 async fn resolve_public_web_fetch_target(
     url: &reqwest::Url,
-    gate: WebGate<'_>,
+    gate: &WebGate,
 ) -> Result<Option<(String, Vec<SocketAddr>)>, String> {
     validate_web_fetch_scheme(url)?;
     let host = url
@@ -1654,7 +1657,7 @@ mod tests {
     async fn web_fetch_rejects_private_ipv6_literals() {
         let url = parse_web_fetch_url("http://[::1]/admin").unwrap();
 
-        let err = resolve_public_web_fetch_target(&url, WebGate::Unchecked)
+        let err = resolve_public_web_fetch_target(&url, &WebGate::Unchecked)
             .await
             .unwrap_err();
         assert!(err.contains("private/local"));
@@ -1665,7 +1668,7 @@ mod tests {
         let start = parse_web_fetch_url("https://example.com/start").unwrap();
         let redirected = start.join("http://127.0.0.1/admin").unwrap();
 
-        let err = resolve_public_web_fetch_target(&redirected, WebGate::Unchecked)
+        let err = resolve_public_web_fetch_target(&redirected, &WebGate::Unchecked)
             .await
             .unwrap_err();
         assert!(err.contains("private/local"));
@@ -1681,6 +1684,10 @@ mod tests {
             allow_domains: allow.iter().map(|entry| entry.to_string()).collect(),
             deny_domains: deny.iter().map(|entry| entry.to_string()).collect(),
         }
+    }
+
+    fn allowlist_gate(policy: &NetworkPolicy) -> WebGate {
+        WebGate::Allowlist(HostLists::new(&policy.allow_domains, &policy.deny_domains))
     }
 
     #[test]
@@ -1718,7 +1725,7 @@ mod tests {
     async fn web_fetch_refuses_an_unlisted_host_naming_it_and_the_way_out() {
         let policy = allowlist(&["github.com"], &[]);
         let url = parse_web_fetch_url("https://example.org/page").unwrap();
-        let err = resolve_public_web_fetch_target(&url, WebGate::Allowlist(&policy))
+        let err = resolve_public_web_fetch_target(&url, &allowlist_gate(&policy))
             .await
             .unwrap_err();
         assert!(
@@ -1732,7 +1739,7 @@ mod tests {
     async fn web_fetch_refuses_a_denied_host_naming_the_entry() {
         let policy = allowlist(&["*.amazonaws.com"], &["*.s3.amazonaws.com"]);
         let url = parse_web_fetch_url("https://bucket.s3.amazonaws.com/x").unwrap();
-        let err = resolve_public_web_fetch_target(&url, WebGate::Allowlist(&policy))
+        let err = resolve_public_web_fetch_target(&url, &allowlist_gate(&policy))
             .await
             .unwrap_err();
         assert!(err.contains("`*.s3.amazonaws.com`"), "{err}");
@@ -1743,7 +1750,7 @@ mod tests {
         let policy = allowlist(&["github.com"], &[]);
         let start = parse_web_fetch_url("https://github.com/start").unwrap();
         let redirected = start.join("https://example.org/landing").unwrap();
-        let err = resolve_public_web_fetch_target(&redirected, WebGate::Allowlist(&policy))
+        let err = resolve_public_web_fetch_target(&redirected, &allowlist_gate(&policy))
             .await
             .unwrap_err();
         assert!(err.contains("`example.org`"), "{err}");
@@ -1755,11 +1762,11 @@ mod tests {
         for (gate, raw) in [
             (WebGate::AnyHost, "http://127.0.0.1/admin"),
             (WebGate::AnyHost, "http://[::1]/"),
-            (WebGate::Allowlist(&listed), "http://10.0.0.5/"),
-            (WebGate::Allowlist(&listed), "http://localhost:8080/"),
+            (allowlist_gate(&listed), "http://10.0.0.5/"),
+            (allowlist_gate(&listed), "http://localhost:8080/"),
         ] {
             let url = parse_web_fetch_url(raw).unwrap();
-            let err = resolve_public_web_fetch_target(&url, gate)
+            let err = resolve_public_web_fetch_target(&url, &gate)
                 .await
                 .unwrap_err();
             assert!(err.contains("private/local"), "{raw}: {err}");
@@ -1769,11 +1776,11 @@ mod tests {
     #[test]
     fn only_the_allowlist_gate_checks_hosts() {
         let policy = allowlist(&["github.com"], &[]);
-        assert!(check_web_host(WebGate::Allowlist(&policy), "github.com").is_ok());
-        assert!(check_web_host(WebGate::Allowlist(&policy), "example.org").is_err());
-        assert!(check_web_host(WebGate::Allowlist(&policy), "[2606:4700::1111]").is_err());
-        assert!(check_web_host(WebGate::AnyHost, "example.org").is_ok());
-        assert!(check_web_host(WebGate::Unchecked, "example.org").is_ok());
+        assert!(check_web_host(&allowlist_gate(&policy), "github.com").is_ok());
+        assert!(check_web_host(&allowlist_gate(&policy), "example.org").is_err());
+        assert!(check_web_host(&allowlist_gate(&policy), "[2606:4700::1111]").is_err());
+        assert!(check_web_host(&WebGate::AnyHost, "example.org").is_ok());
+        assert!(check_web_host(&WebGate::Unchecked, "example.org").is_ok());
     }
 
     #[test]

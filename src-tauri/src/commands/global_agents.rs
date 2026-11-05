@@ -187,6 +187,7 @@ fn upsert_definition(
     if previous.map(|definition| definition.revision) != request.expected_revision {
         return Err("This agent changed somewhere else. Reload it before saving.".to_string());
     }
+    request.execution.sandbox.network_access.validate()?;
 
     if matches!(&request.avatar, Some(avatar) if avatar.seed.trim().is_empty()) {
         return Err("The agent's face needs a seed.".to_string());
@@ -536,6 +537,21 @@ mod tests {
         };
         let error = upsert_definition(&mut config, &request, 100).expect_err("blank seed");
         assert!(error.contains("seed"), "{error}");
+        assert!(config.agent_definitions.is_empty());
+    }
+
+    #[test]
+    fn saving_an_invalid_host_entry_is_refused_naming_it() {
+        let mut config = AppConfig::default();
+        let mut request = save_request("Reviewer");
+        request
+            .execution
+            .sandbox
+            .network_access
+            .allow_domains
+            .push("git@github.com".to_string());
+        let error = upsert_definition(&mut config, &request, 100).expect_err("refused");
+        assert!(error.contains("`git@github.com`"), "{error}");
         assert!(config.agent_definitions.is_empty());
     }
 

@@ -161,6 +161,7 @@ pub async fn workspace_create_agent(
     // `workspace_agent_default_execution` so the user can see and remove it
     // before saving. Trust the request's execution verbatim — if the user
     // cleared all path grants on purpose, we honor that.
+    request.execution.sandbox.network_access.validate()?;
     let execution = request.execution;
 
     let now = now_millis();
@@ -209,7 +210,15 @@ pub async fn workspace_update_agent(
     request: WorkspaceAgentUpdateRequest,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceAgentDetail, String> {
-    let app_config = app_config(state.inner())?;
+    update_main_agent(state.inner(), request)
+}
+
+fn update_main_agent(
+    state: &AppState,
+    request: WorkspaceAgentUpdateRequest,
+) -> Result<WorkspaceAgentDetail, String> {
+    request.execution.sandbox.network_access.validate()?;
+    let app_config = app_config(state)?;
     let now = now_millis();
     let agent_id = request.agent_id.clone();
     let workspace_id = request.workspace_id.clone();
@@ -406,6 +415,39 @@ mod stored_agent_tests {
         assert_eq!(detail.id, ASSIGNMENT_ID, "addressed by the local identity");
         assert_eq!(detail.name, "Reviewer", "behavior comes from the library");
         assert!(!detail.is_default);
+    }
+
+    fn update_request(fixture: &Fixture) -> WorkspaceAgentUpdateRequest {
+        let main = fixture.config().main_agent.expect("main");
+        WorkspaceAgentUpdateRequest {
+            workspace_id: WORKSPACE_ID.to_string(),
+            agent_id: main.id.clone(),
+            name: main.name.clone(),
+            description: "edited".to_string(),
+            selected_skill_ids: Vec::new(),
+            selected_mcp_server_ids: Vec::new(),
+            provider_connection_ids: Vec::new(),
+            execution: main.execution.clone(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn saving_the_main_with_an_invalid_host_entry_is_refused_naming_it() {
+        let fixture = Fixture::new();
+        let mut request = update_request(&fixture);
+        request
+            .execution
+            .sandbox
+            .network_access
+            .deny_domains
+            .push("*.0.0.5".to_string());
+        let error = update_main_agent(&fixture.state, request).expect_err("refused");
+        assert!(error.contains("Denied hosts: `*.0.0.5`"), "{error}");
+        assert_ne!(fixture.config().main_agent.unwrap().description, "edited");
+
+        update_main_agent(&fixture.state, update_request(&fixture)).expect("valid save");
+        assert_eq!(fixture.config().main_agent.unwrap().description, "edited");
     }
 
     #[test]

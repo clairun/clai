@@ -541,15 +541,31 @@ describe('AgentBehaviorForm', () => {
       for (const name of ['Off', 'Allowlist', /Host network/]) expect(networkButton(name)).toBeDisabled();
     });
 
+    // The same cases as `entries_are_parsed_by_one_rule` in network/matcher.rs.
     it('parses host entries as the backend matches them', () => {
-      expect(parseHostEntry(' GitHub.COM. ')).toBe('github.com');
-      expect(parseHostEntry('*.com')).toBe('*.com');
-      expect(parseHostEntry('s3.*.amazonaws.com')).toBe('s3.*.amazonaws.com');
-      expect(parseHostEntry('[2001:DB8::1]')).toBe('2001:db8::1');
-      expect(parseHostEntry('10.0.0.5')).toBe('10.0.0.5');
-      expect(parseHostEntry('bücher.example')).toBe('bücher.example');
-      for (const bad of ['*', 'a..b', 'ab:443', '[::1]:443', 'ftp://x', '']) {
-        expect(parseHostEntry(bad)).toHaveProperty('error');
+      const accepted: [string, string][] = [
+        ['github.com', 'github.com'],
+        [' GitHub.COM. ', 'github.com'],
+        ['*.github.com', '*.github.com'],
+        ['s3.*.amazonaws.com', 's3.*.amazonaws.com'],
+        ['*.com', '*.com'],
+        ['_dmarc.example.com', '_dmarc.example.com'],
+        ['bücher.example', 'bücher.example'],
+        ['10.0.0.5', '10.0.0.5'],
+        ['[2001:db8::1]', '2001:db8::1'],
+        ['2001:0db8:0:0::1', '2001:db8::1'],
+      ];
+      for (const [raw, entry] of accepted) {
+        expect(parseHostEntry(raw), raw).toBe(entry);
+      }
+      for (const bad of [
+        '', '*', '*.*', '*.*.*',
+        'github.com:443', 'ab:443', 'abc:def:1', '[foo]', '[::1]:443',
+        'git@github.com', 'github.com?x', 'github.com#x', 'a|b.com', 'a^b.com', 'a!b.com', '%2a.github.com',
+        '999.1.1.1', 'example.123', 'example.0x1', '2130706433', '010.0.0.5', '*.0.0.5',
+        'https://github.com', 'github.com/x', 'git hub.com', 'a..com', 'gi*thub.com',
+      ]) {
+        expect(parseHostEntry(bad), bad).toHaveProperty('error');
       }
     });
   });
