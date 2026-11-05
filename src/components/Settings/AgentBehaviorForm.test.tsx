@@ -559,14 +559,14 @@ describe('AgentBehaviorForm', () => {
       api.getSandboxStatus.mockReturnValueOnce(new Promise(() => {}));
       const first = renderForm({ agentId: 'agent-1' });
       await openAccess();
-      expect(screen.getByText('Checking what this PC supports…')).toBeInTheDocument();
+      expect(screen.getByRole('status')).toHaveTextContent('Checking what this PC supports…');
       first.unmount();
       resetSandboxStatusForTests();
 
       api.getSandboxStatus.mockRejectedValue(new Error('ipc down'));
       renderForm({ agentId: 'agent-1' });
       await openAccess();
-      expect(await screen.findByText(/Could not check what this PC supports/)).toBeInTheDocument();
+      expect(await screen.findByRole('status')).toHaveTextContent(/Could not check what this PC supports/);
       expect(networkButton('Off')).toBeDisabled();
 
       api.getSandboxStatus.mockResolvedValue(LINUX);

@@ -182,13 +182,13 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
   let statusHint: React.ReactNode;
   if (failed) {
     statusHint = (
-      <p className={form.hintWarning} id={hintId}>
+      <p className={form.hintWarning} id={hintId} role="status">
         Could not check what this PC supports.{' '}
         <button type="button" className={form.linkButton} onClick={retry}>Retry</button>
       </p>
     );
   } else if (!status) {
-    statusHint = <p className={form.hint} id={hintId}>Checking what this PC supports…</p>;
+    statusHint = <p className={form.hint} id={hintId} role="status">Checking what this PC supports…</p>;
   } else if (!status.available) {
     statusHint = (
       <p className={form.hint} id={hintId}>
