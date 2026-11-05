@@ -100,17 +100,25 @@ pub async fn execute_local_tool(
                 .map_err(|e| format!("Invalid fs_request_grant params: {}", e))?;
             execute_fs_request_grant(deps, context, params).await
         }
-        "web_search" => {
-            let params: WebSearchParams = serde_json::from_value(params)
-                .map_err(|e| format!("Invalid web_search params: {}", e))?;
-            execute_web_search(web_gate(context)?, params).await
-        }
-        "web_fetch" => {
-            let params: WebFetchParams = serde_json::from_value(params)
-                .map_err(|e| format!("Invalid web_fetch params: {}", e))?;
-            execute_web_fetch(web_gate(context)?, params).await
-        }
+        "web_search" | "web_fetch" => execute_web_tool(context, tool_name, params).await,
         _ => Err(format!("Unknown local tool: {}", tool_name)),
+    }
+}
+
+async fn execute_web_tool(
+    context: &ToolExecutionContext,
+    tool_name: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let gate = web_gate(context)?;
+    if tool_name == "web_search" {
+        let params: WebSearchParams = serde_json::from_value(params)
+            .map_err(|e| format!("Invalid web_search params: {}", e))?;
+        execute_web_search(gate, params).await
+    } else {
+        let params: WebFetchParams = serde_json::from_value(params)
+            .map_err(|e| format!("Invalid web_fetch params: {}", e))?;
+        execute_web_fetch(gate, params).await
     }
 }
 
@@ -1006,16 +1014,30 @@ fn web_search_redirect_policy(gate: &WebGate) -> reqwest::redirect::Policy {
     if matches!(gate, WebGate::Unchecked) {
         return reqwest::redirect::Policy::limited(MAX_WEB_SEARCH_REDIRECTS);
     }
-    reqwest::redirect::Policy::custom(|attempt| {
+    redirect_policy_within(provider_redirect_allowed)
+}
+
+/// Follows at most [`MAX_WEB_SEARCH_REDIRECTS`] redirects, each to a URL
+/// `allowed` accepts. The counting rule is reqwest's `Policy::limited`.
+fn redirect_policy_within(allowed: fn(&reqwest::Url) -> bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
         if attempt.previous().len() > MAX_WEB_SEARCH_REDIRECTS {
             attempt.error("too many redirects")
-        } else if provider_redirect_allowed(attempt.url()) {
+        } else if allowed(attempt.url()) {
             attempt.follow()
         } else {
             let message = format!("redirect to `{}` leaves the search provider", attempt.url());
             attempt.error(message)
         }
     })
+}
+
+fn web_search_client(gate: &WebGate) -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_millis(WEB_SEARCH_TIMEOUT_MS))
+        .redirect(web_search_redirect_policy(gate))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))
 }
 
 async fn execute_web_search(
@@ -1027,13 +1049,7 @@ async fn execute_web_search(
         .unwrap_or(DEFAULT_WEB_SEARCH_MAX_RESULTS)
         .min(MAX_WEB_SEARCH_MAX_RESULTS);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(WEB_SEARCH_TIMEOUT_MS))
-        .redirect(web_search_redirect_policy(&gate))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
-    let response = client
+    let response = web_search_client(&gate)?
         .get("https://html.duckduckgo.com/html/")
         .query(&[("q", &params.query)])
         .header("User-Agent", "CLAI/1.0")
@@ -1790,6 +1806,102 @@ mod tests {
         assert!(check_web_host(&allowlist_gate(&policy), "[2606:4700::1111]").is_err());
         assert!(check_web_host(&WebGate::AnyHost, "example.org").is_ok());
         assert!(check_web_host(&WebGate::Unchecked, "example.org").is_ok());
+    }
+
+    #[tokio::test]
+    async fn web_tools_refuse_before_any_request_when_network_is_off() {
+        // Without a sandbox there is no network control (D17).
+        if !crate::assistant::sandbox::status().available {
+            return;
+        }
+        let workspace = tempdir().unwrap();
+        let mut context = context_with_grants(workspace.path(), Vec::new());
+        let mut execution = context.run_context.execution.clone();
+        execution.sandbox.network_access = network(NetworkMode::Off);
+        context.run_context = std::sync::Arc::new(RunContext {
+            execution,
+            ..(*context.run_context).clone()
+        });
+        for (tool, params) in [
+            ("web_search", serde_json::json!({ "query": "rust" })),
+            // Private, so even a missing gate fails fast without a request.
+            (
+                "web_fetch",
+                serde_json::json!({ "url": "http://192.168.1.1/" }),
+            ),
+        ] {
+            assert_eq!(
+                execute_web_tool(&context, tool, params).await.unwrap_err(),
+                "Network access is off for this agent",
+                "{tool}"
+            );
+        }
+    }
+
+    /// A server on 127.0.0.1 that answers every request with a redirect to
+    /// itself, and counts the requests.
+    async fn redirecting_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {base}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut head = [0u8; 4096];
+                    let _ = socket.read(&mut head).await;
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (base, hits)
+    }
+
+    #[tokio::test]
+    async fn web_search_refuses_a_redirect_off_the_provider_in_every_checked_mode() {
+        use std::sync::atomic::Ordering;
+        for gate in [WebGate::AnyHost, allowlist_gate(&allowlist(&[], &[]))] {
+            let (base, hits) = redirecting_server().await;
+            let error = web_search_client(&gate)
+                .unwrap()
+                .get(format!("{base}/start"))
+                .send()
+                .await
+                .unwrap_err();
+            assert!(
+                format!("{error:?}").contains("leaves the search provider"),
+                "{gate:?}: {error:?}"
+            );
+            assert_eq!(hits.load(Ordering::SeqCst), 1, "{gate:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_provider_redirect_policy_follows_at_most_three_hops() {
+        use std::sync::atomic::Ordering;
+        let (base, hits) = redirecting_server().await;
+        let error = reqwest::Client::builder()
+            .redirect(redirect_policy_within(|_| true))
+            .build()
+            .unwrap()
+            .get(format!("{base}/start"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("too many redirects"),
+            "{error:?}"
+        );
+        // The first request and three redirects, as `Policy::limited(3)`.
+        assert_eq!(hits.load(Ordering::SeqCst), 1 + MAX_WEB_SEARCH_REDIRECTS);
     }
 
     #[test]
