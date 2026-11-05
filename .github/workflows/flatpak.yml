@@ -165,6 +165,9 @@ jobs:
           mkdir -p flatpak-build/files/share/licenses/run.clai.CLAI
 
           cp usr/bin/clai flatpak-build/files/bin/
+          # The network helper runs inside the shell sandbox, on the host
+          # (bwrap is started there), from the app's files.
+          cp usr/bin/clai-sandbox-helper flatpak-build/files/bin/
           cp flatpak/run.clai.CLAI.desktop flatpak-build/files/share/applications/
           cp src-tauri/icons/128x128.png flatpak-build/files/share/icons/hicolor/128x128/apps/run.clai.CLAI.png
           cp public/icon.svg flatpak-build/files/share/icons/hicolor/scalable/apps/run.clai.CLAI.svg

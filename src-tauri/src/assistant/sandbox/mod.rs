@@ -1,6 +1,9 @@
 //! OS-backed local execution sandboxing.
 
 pub mod filesystem;
+#[cfg(target_os = "linux")]
+#[allow(dead_code, reason = "bash_exec locates the helper in a later commit")]
+pub mod helper;
 pub mod profile;
 pub mod runner;
 // Only the sandboxed backends consume scratch space; compiling it on a

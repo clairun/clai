@@ -8,7 +8,10 @@ pub mod addr;
 #[cfg(target_os = "linux")]
 #[cfg_attr(
     not(test),
-    allow(dead_code, reason = "bash_exec starts proxy sessions in a later commit")
+    allow(
+        dead_code,
+        reason = "bash_exec starts proxy sessions in a later commit"
+    )
 )]
 pub mod connect;
 pub mod default_lists;
@@ -18,7 +21,10 @@ pub mod matcher;
 #[cfg(target_os = "linux")]
 #[cfg_attr(
     not(test),
-    allow(dead_code, reason = "bash_exec starts proxy sessions in a later commit")
+    allow(
+        dead_code,
+        reason = "bash_exec starts proxy sessions in a later commit"
+    )
 )]
 pub mod proxy;
 pub mod run_state;

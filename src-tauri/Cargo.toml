@@ -4,6 +4,9 @@ version = "26.11.1"
 description = "Desktop multi-agent orchestration app with MCP-native tools"
 authors = ["juacker"]
 edition = "2021"
+# src/bin/clai-sandbox-helper.rs is a second binary; `cargo run` and
+# `tauri dev` start the app.
+default-run = "clai"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
