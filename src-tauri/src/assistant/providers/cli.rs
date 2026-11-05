@@ -18,6 +18,16 @@ pub const CLAUDE_CODE_PROVIDER_ID: &str = "claude-code";
 pub const CODEX_PROVIDER_ID: &str = "codex";
 pub const OPENCODE_PROVIDER_ID: &str = "opencode";
 
+/// The CLIs run on the host with the workspace as their working directory,
+/// which the sandboxed shell can write. These keep them from loading project
+/// configuration from it (hooks, env, helper commands, plugins): Claude Code
+/// reads only the user settings, OpenCode only its global configuration.
+/// Codex reads a project `.codex` only for trusted projects; that directory is
+/// read-only to the shell (`sandbox::filesystem::CLI_PROJECT_CONFIG`).
+pub(crate) const CLAUDE_SETTING_SOURCES_ARGS: [&str; 2] = ["--setting-sources", "user"];
+pub(crate) const OPENCODE_NO_PROJECT_CONFIG_ENV: (&str, &str) =
+    ("OPENCODE_DISABLE_PROJECT_CONFIG", "true");
+
 const CLI_SUMMARY_TIMEOUT: Duration = Duration::from_secs(180);
 
 pub fn provider_descriptors() -> Vec<ProviderDescriptor> {
@@ -208,7 +218,8 @@ async fn run_claude_summary(
         .arg("--permission-mode")
         .arg("bypassPermissions")
         .arg("--no-session-persistence")
-        .arg("--disable-slash-commands");
+        .arg("--disable-slash-commands")
+        .args(CLAUDE_SETTING_SOURCES_ARGS);
     if !system_prompt.trim().is_empty() {
         command.arg("--system-prompt").arg(system_prompt);
     }
@@ -271,6 +282,7 @@ async fn run_opencode_summary(
             ("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS", "true"),
             ("OPENCODE_DISABLE_DEFAULT_PLUGINS", "true"),
             ("OPENCODE_DISABLE_LSP_DOWNLOAD", "true"),
+            OPENCODE_NO_PROJECT_CONFIG_ENV,
         ],
         working_dir,
     );

@@ -2339,6 +2339,53 @@ else:
         assert!(workspace.join(".clai").is_dir());
     }
 
+    /// E1: a command cannot plant project configuration for the provider
+    /// CLIs, which run on the host in the workspace, nor move it aside.
+    #[tokio::test]
+    async fn cli_project_config_is_read_only_inside_the_sandbox() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let app = home.join(".clai");
+        let workspace = app.join("workspaces").join("ws");
+        std::fs::create_dir_all(workspace.join(".clai/memory")).unwrap();
+        super::super::filesystem::ensure_cli_project_config_dirs(&workspace);
+        std::fs::write(workspace.join(".mcp.json"), "{}").unwrap();
+        let script = "w() { if (echo pwned > \"$1\") 2>/dev/null; then echo \"wrote $1\"; \
+                      else echo \"refused $1\"; fi; }; \
+                      w .claude/settings.json; w .codex/config.toml; w .opencode/plugin.ts; \
+                      w .mcp.json; w notes; \
+                      mv .claude .claude-moved 2>/dev/null && echo moved; \
+                      rmdir .codex 2>/dev/null && echo removed";
+        let mut command = tmp_e2e_command(&workspace, None, script);
+        command.profile.filesystem =
+            super::super::filesystem::EffectiveFilesystemPolicy::compile_in(
+                &workspace,
+                &[],
+                Some(&home),
+                Some(&app),
+            )
+            .unwrap();
+        let Some(output) = run_or_skip(command).await else {
+            return;
+        };
+        assert_eq!(
+            output.stdout.lines().collect::<Vec<_>>(),
+            [
+                "refused .claude/settings.json",
+                "refused .codex/config.toml",
+                "refused .opencode/plugin.ts",
+                "refused .mcp.json",
+                "wrote notes",
+            ],
+            "{output:?}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".mcp.json")).unwrap(),
+            "{}"
+        );
+        assert!(!workspace.join(".claude/settings.json").exists());
+    }
+
     /// Runs `script` in `workspace` with `grants`, the app directory at `app`.
     /// `None` when bubblewrap is unavailable and the test may skip.
     async fn run_with_clai_home(

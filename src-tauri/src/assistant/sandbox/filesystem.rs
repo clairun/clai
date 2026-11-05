@@ -14,6 +14,24 @@ const STATE_DIR: &str = ".clai";
 /// The part of [`STATE_DIR`] agents write: their memory, which the app
 /// creates before each command.
 const MEMORY_DIR: &str = "memory";
+/// Project configuration the provider CLIs (Claude Code, Codex, OpenCode)
+/// read from their working directory, the workspace root. They run outside
+/// the sandbox, so the shell may only read these, like [`STATE_DIR`]:
+/// otherwise a command could plant a hook that the next CLI run executes on
+/// the host.
+pub(crate) const CLI_PROJECT_CONFIG: &[&str] = &[
+    ".claude",
+    ".mcp.json",
+    ".codex",
+    "opencode.json",
+    "opencode.jsonc",
+    ".opencode",
+];
+/// The directories of [`CLI_PROJECT_CONFIG`]. A mount can only cover a path
+/// that exists, so they are created before each command; the files cannot be
+/// created empty without breaking the CLIs, which are told to ignore them
+/// instead.
+const CLI_PROJECT_CONFIG_DIRS: &[&str] = &[".claude", ".codex", ".opencode"];
 
 #[derive(Debug, Clone)]
 pub struct EffectiveFilesystemPolicy {
@@ -108,7 +126,7 @@ impl EffectiveFilesystemPolicy {
                     .collect();
                 std::iter::once(app).chain(links)
             })
-            .chain(own_state.clone())
+            .chain(state_entries(&workspace_root))
             .collect();
         let memory = own_state
             .map(|state| state.join(MEMORY_DIR))
@@ -372,10 +390,12 @@ fn is_state(path: &Path, state: &[PathBuf], containers: &[PathBuf], memory: Opti
     if memory.is_some_and(|memory| path.starts_with(memory)) {
         return false;
     }
-    let state_dir = Some(Component::Normal(std::ffi::OsStr::new(STATE_DIR)));
     if containers.iter().any(|container| {
-        path.strip_prefix(container)
-            .is_ok_and(|rest| rest.components().nth(1) == state_dir)
+        path.strip_prefix(container).is_ok_and(|rest| {
+            rest.components()
+                .nth(1)
+                .is_some_and(|name| is_state_entry(name.as_os_str()))
+        })
     }) {
         return true;
     }
@@ -414,7 +434,7 @@ fn protect(
             candidates.extend(
                 entries(container)
                     .filter_map(target)
-                    .filter_map(|workspace| target(workspace.join(STATE_DIR))),
+                    .flat_map(|workspace| state_entries(&workspace)),
             );
         }
         if let Some(mask) = mask.filter(|mask| writes.iter().any(|root| root == mask)) {
@@ -451,6 +471,34 @@ fn protect(
     pinned.sort();
     pinned.dedup();
     (protected, pinned)
+}
+
+/// Whether a workspace entry is read-only to the shell: CLAI state or CLI
+/// project configuration.
+fn is_state_entry(name: &std::ffi::OsStr) -> bool {
+    name == STATE_DIR || CLI_PROJECT_CONFIG.iter().any(|entry| name == *entry)
+}
+
+/// The existing read-only entries of `workspace`, where writes to them land.
+fn state_entries(workspace: &Path) -> Vec<PathBuf> {
+    std::iter::once(STATE_DIR)
+        .chain(CLI_PROJECT_CONFIG.iter().copied())
+        .filter_map(|name| target(workspace.join(name)))
+        .collect()
+}
+
+/// Creates the missing [`CLI_PROJECT_CONFIG_DIRS`] of the workspace, so the
+/// sandbox binds them read-only and a command cannot create them.
+pub(crate) fn ensure_cli_project_config_dirs(workspace_root: &Path) {
+    for name in CLI_PROJECT_CONFIG_DIRS {
+        let dir = workspace_root.join(name);
+        if fs::symlink_metadata(&dir).is_ok() {
+            continue;
+        }
+        if let Err(error) = fs::create_dir(&dir) {
+            tracing::warn!(path = %dir.display(), %error, "Could not create a CLI project configuration directory; the shell can create it");
+        }
+    }
 }
 
 fn entries(dir: &Path) -> impl Iterator<Item = PathBuf> {
@@ -726,6 +774,68 @@ mod tests {
                 Some(&self.app),
             )
             .unwrap()
+        }
+    }
+
+    /// E1: the provider CLIs run on the host in the workspace and load project
+    /// configuration from it, so the shell may only read that configuration,
+    /// in its own workspace and in another one a write grant reaches.
+    #[test]
+    fn cli_project_config_is_read_only_state() {
+        let layout = ClaiLayout::new();
+        let ClaiLayout {
+            workspace,
+            sibling,
+            state,
+            ..
+        } = &layout;
+        ensure_cli_project_config_dirs(workspace);
+        fs::write(workspace.join(".mcp.json"), "{}").unwrap();
+        fs::create_dir(sibling.join(".codex")).unwrap();
+        for dir in [".claude", ".codex", ".opencode"] {
+            assert!(workspace.join(dir).is_dir(), "{dir}");
+        }
+        assert!(!workspace.join("opencode.json").exists());
+
+        let policy = layout.compile(&[]);
+        let mut expected = vec![
+            state.clone(),
+            workspace.join(".claude"),
+            workspace.join(".codex"),
+            workspace.join(".mcp.json"),
+            workspace.join(".opencode"),
+        ];
+        expected.sort();
+        assert_eq!(policy.read_only_state, expected);
+        for name in CLI_PROJECT_CONFIG {
+            assert!(policy.is_read_only_state(&workspace.join(name)), "{name}");
+            assert!(
+                policy.is_read_only_state(&workspace.join(name).join("x")),
+                "{name}"
+            );
+        }
+        assert!(!policy.is_read_only_state(&workspace.join("notes")));
+        assert!(!policy.is_read_only_state(&workspace.join("src/.claude.bak")));
+
+        let granted = layout.compile(&[grant(sibling, SandboxPathAccess::ReadWrite)]);
+        assert!(granted.read_only_state.contains(&sibling.join(".codex")));
+        assert!(granted.is_read_only_state(&sibling.join(".claude/settings.json")));
+    }
+
+    #[test]
+    fn missing_cli_config_dirs_are_created_and_existing_entries_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace = temp.path();
+        fs::write(workspace.join(".claude"), "a file").unwrap();
+        ensure_cli_project_config_dirs(workspace);
+        assert_eq!(
+            fs::read_to_string(workspace.join(".claude")).unwrap(),
+            "a file"
+        );
+        assert!(workspace.join(".codex").is_dir());
+        assert!(workspace.join(".opencode").is_dir());
+        for file in [".mcp.json", "opencode.json", "opencode.jsonc"] {
+            assert!(!workspace.join(file).exists(), "{file}");
         }
     }
 

@@ -372,6 +372,7 @@ fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, Stri
             e
         )
     })?;
+    crate::assistant::sandbox::filesystem::ensure_cli_project_config_dirs(&workspace_root);
 
     Ok(workspace_root)
 }
@@ -816,7 +817,8 @@ async fn execute_fs_request_grant(
         && filesystem.is_read_only_state(&canonical)
     {
         return Err(format!(
-            "{canonical_str} is CLAI's own state, which the shell may only read; \
+            "{canonical_str} is CLAI's own state or a provider CLI's project \
+             configuration, which the shell may only read; \
              agents write only under their own `.clai/memory/`"
         ));
     }
