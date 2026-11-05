@@ -49,6 +49,16 @@
       "entry": "2001:0db8:0:0::1",
       "stored": "2001:db8::1",
       "matched": "2001:db8::1"
+    },
+    {
+      "entry": "github。com",
+      "stored": "github.com",
+      "matched": "github.com"
+    },
+    {
+      "entry": "*。com",
+      "stored": "*.com",
+      "matched": "*.com"
     }
   ],
   "rejected": [
@@ -70,6 +80,8 @@
     "%2a.github.com",
     "%41bc.com",
     "a\\b.com",
+    "10。0。0。5",
+    "１.２.３.４",
     "999.1.1.1",
     "example.123",
     "example.0x1",

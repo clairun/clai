@@ -80,14 +80,17 @@ const isIpv4 = (value: string) => {
   return parts.length === 4 && parts.every((part) => /^(0|[1-9]\d{0,2})$/.test(part) && Number(part) <= 255);
 };
 
-/** The labels after IDNA (punycode), or null if URLs refuse the name. */
-const asciiLabels = (labels: string[]): string[] | null => {
+/** The name as URLs read it after IDNA (punycode, `。` as a dot), or null if they refuse it. */
+const idnaHost = (value: string): string | null => {
   try {
-    return new URL(`http://${labels.map((label) => (label === '*' ? 'x' : label)).join('.')}/`).hostname.split('.');
+    return new URL(`http://${value}/`).hostname;
   } catch {
     return null;
   }
 };
+
+// The characters IDNA reads as a dot.
+const IDNA_DOTS = /[\u3002\uff0e\uff61]/g;
 
 /**
  * A host entry as the backend accepts it: a host name or IP, `*` only as a
@@ -110,7 +113,7 @@ export const parseHostEntry = (raw: string): string | { error: string } => {
     if (address) return address;
     return { error: bracketed === undefined ? 'Leave out the port: an entry matches every port.' : 'Not a valid IPv6 address.' };
   }
-  // `asciiLabels` builds a URL, where these would end the host.
+  // `idnaHost` builds a URL, where these would end the host.
   if (/[%?#\\]/.test(value)) return { error: INVALID_CHARACTERS };
   const labels = value.split('.');
   if (labels.some((label) => !label)) return { error: 'A host name has no empty labels.' };
@@ -118,15 +121,21 @@ export const parseHostEntry = (raw: string): string | { error: string } => {
     if (value.includes('*')) return { error: 'A wildcard cannot cover IP addresses.' };
     return isIpv4(value) ? value : { error: 'Not a valid IPv4 address; write it as four numbers, such as 10.0.0.5.' };
   }
-  if (labels.some((label) => label.includes('*') && label !== '*')) {
+  // The rest checks the name after IDNA, as the backend does: `*。com` is
+  // *.com, and `１.２.３.４` is an IP address written in other digits.
+  const host = idnaHost(value);
+  const ascii = host?.split('.') ?? [];
+  if (!host || endsInANumber(ascii.at(-1) ?? '')) return { error: INVALID_CHARACTERS };
+  if (ascii.some((label) => !label)) return { error: 'A host name has no empty labels.' };
+  if (ascii.some((label) => label.includes('*') && label !== '*')) {
     return { error: 'Use * only as a whole label, as in *.example.com.' };
   }
-  if (labels.every((label) => label === '*')) {
+  if (ascii.every((label) => label === '*')) {
     return { error: 'It would allow every host; choose Host network instead.' };
   }
-  const ascii = asciiLabels(labels);
-  if (!ascii || !ascii.every((label) => /^[a-z0-9_-]+$/.test(label))) return { error: INVALID_CHARACTERS };
-  return value;
+  if (!ascii.every((label) => label === '*' || /^[a-z0-9_-]+$/.test(label))) return { error: INVALID_CHARACTERS };
+  // Stored with plain dots, so `github。com` is found as a duplicate of github.com.
+  return value.replace(IDNA_DOTS, '.');
 };
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
