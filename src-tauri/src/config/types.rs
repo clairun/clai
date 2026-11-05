@@ -387,20 +387,25 @@ pub struct NetworkPolicy {
 }
 
 impl NetworkPolicy {
-    /// Refuses, naming it, an entry the matcher could never match. Every save
-    /// of an agent calls this; an invalid entry already stored (a hand edit)
-    /// is skipped when the lists are matched (see [`HostLists::new`]).
+    /// Rewrites every entry in the form the matcher compares (lower case,
+    /// punycode, IPv6 without brackets), so the stored list is what is
+    /// matched, or refuses, naming it, an entry the matcher could never
+    /// match. Every save of an agent's settings calls this; an invalid entry
+    /// already stored (a hand edit) is handled when the lists are matched
+    /// (see [`HostLists::new`]).
     ///
     /// [`HostLists::new`]: crate::assistant::network::matcher::HostLists::new
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn canonicalize(&mut self) -> Result<(), String> {
         for (list, entries) in [
-            ("Allowed hosts", &self.allow_domains),
-            ("Denied hosts", &self.deny_domains),
+            ("Allowed hosts", &mut self.allow_domains),
+            ("Denied hosts", &mut self.deny_domains),
         ] {
-            for entry in entries {
-                parse_entry(entry).map_err(|reason| {
-                    format!("{list}: `{entry}` is not a valid host entry: {reason}.")
-                })?;
+            for entry in entries.iter_mut() {
+                *entry = parse_entry(entry)
+                    .map_err(|reason| {
+                        format!("{list}: `{entry}` is not a valid host entry: {reason}.")
+                    })?
+                    .normalized();
             }
         }
         Ok(())
@@ -1319,25 +1324,48 @@ mod tests {
     #[test]
     fn validation_names_the_first_invalid_entry_and_its_list() {
         let mut config = policy(NetworkMode::Allowlist);
-        assert_eq!(config.network_access.validate(), Ok(()));
+        assert_eq!(config.network_access.canonicalize(), Ok(()));
 
         config
             .network_access
             .deny_domains
             .push("S3.amazonaws.com:443".to_string());
-        let error = config.network_access.validate().unwrap_err();
+        let error = config.network_access.canonicalize().unwrap_err();
         assert!(
             error.starts_with("Denied hosts: `S3.amazonaws.com:443` is not a valid host entry"),
             "{error}"
         );
 
         config.network_access.allow_domains.push("*.*".to_string());
-        let error = config.network_access.validate().unwrap_err();
+        let error = config.network_access.canonicalize().unwrap_err();
         assert!(error.starts_with("Allowed hosts: `*.*`"), "{error}");
 
         // Stored as is: a hand-edited config still loads.
         let json = serde_json::to_value(&config).unwrap();
         assert_eq!(sandbox_json(json), config);
+    }
+
+    #[test]
+    fn entries_are_saved_in_the_form_the_matcher_compares() {
+        let mut policy = NetworkPolicy {
+            mode: NetworkMode::Allowlist,
+            allow_domains: ["Bücher.Example.", "*.BÜCHER.example", "GitHub.com"]
+                .map(String::from)
+                .to_vec(),
+            deny_domains: ["[2001:DB8::1]", "s3.*.AmazonAWS.com"]
+                .map(String::from)
+                .to_vec(),
+        };
+        policy.canonicalize().expect("valid");
+        assert_eq!(
+            policy.allow_domains,
+            [
+                "xn--bcher-kva.example",
+                "*.xn--bcher-kva.example",
+                "github.com"
+            ]
+        );
+        assert_eq!(policy.deny_domains, ["2001:db8::1", "s3.*.amazonaws.com"]);
     }
 
     /// `ExecutionSandboxConfig` as the build before `networkAccess` reads it.

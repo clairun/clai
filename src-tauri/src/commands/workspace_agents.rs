@@ -197,8 +197,8 @@ fn create_main_agent(
     // `workspace_agent_default_execution` so the user can see and remove it
     // before saving. Trust the request's execution verbatim — if the user
     // cleared all path grants on purpose, we honor that.
-    request.execution.sandbox.network_access.validate()?;
-    let execution = request.execution;
+    let mut execution = request.execution;
+    execution.sandbox.network_access.canonicalize()?;
 
     let now = now_millis();
     let agent = WorkspaceAgent {
@@ -251,9 +251,9 @@ pub async fn workspace_update_agent(
 
 fn update_main_agent(
     state: &AppState,
-    request: WorkspaceAgentUpdateRequest,
+    mut request: WorkspaceAgentUpdateRequest,
 ) -> Result<WorkspaceAgentDetail, WorkspaceAgentUpdateError> {
-    request.execution.sandbox.network_access.validate()?;
+    request.execution.sandbox.network_access.canonicalize()?;
     let app_config = app_config(state)?;
     let now = now_millis();
     let agent_id = request.agent_id.clone();
@@ -622,8 +622,12 @@ mod stored_agent_tests {
         assert!(error.contains("`git@github.com`"), "{error}");
         assert!(fixture.config().main_agent.is_none());
 
-        create_main_agent(&fixture.state, request("github.com")).expect("valid create");
-        assert!(fixture.config().main_agent.is_some());
+        create_main_agent(&fixture.state, request("Bücher.example")).expect("valid create");
+        let main = fixture.config().main_agent.expect("created");
+        assert_eq!(
+            main.execution.sandbox.network_access.allow_domains,
+            ["xn--bcher-kva.example"]
+        );
     }
 
     #[test]
@@ -643,8 +647,15 @@ mod stored_agent_tests {
         );
         assert_ne!(fixture.config().main_agent.unwrap().description, "edited");
 
-        update_main_agent(&fixture.state, update_request(&fixture)).expect("valid save");
-        assert_eq!(fixture.config().main_agent.unwrap().description, "edited");
+        let mut request = update_request(&fixture);
+        request.execution.sandbox.network_access.deny_domains = vec!["Bücher.example".to_string()];
+        update_main_agent(&fixture.state, request).expect("valid save");
+        let main = fixture.config().main_agent.unwrap();
+        assert_eq!(main.description, "edited");
+        assert_eq!(
+            main.execution.sandbox.network_access.deny_domains,
+            ["xn--bcher-kva.example"]
+        );
     }
 
     #[test]

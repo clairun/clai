@@ -425,6 +425,9 @@ pub fn persist_network_allow(
     agent_id: &str,
     entry: &str,
 ) -> Result<(), String> {
+    let entry = &parse_entry(entry)
+        .map_err(|reason| format!("`{entry}` is not a valid host entry: {reason}"))?
+        .normalized();
     let root = state
         .workspace_root(workspace_id)
         .ok_or_else(|| format!("Workspace not found: {workspace_id}"))?;
@@ -461,14 +464,14 @@ pub fn persist_network_allow(
     Ok(())
 }
 
-/// Appends `entry` unless an entry for the same host is already listed.
+/// Appends `entry`, in the matcher's form, unless an entry for the same host
+/// is already listed (in any form, such as Unicode from an older save).
 /// Returns whether the list changed.
 fn add_allow_entry(policy: &mut NetworkPolicy, entry: &str) -> bool {
-    let wanted = parse_entry(entry).map(|entry| entry.normalized());
     let listed = policy
         .allow_domains
         .iter()
-        .any(|existing| parse_entry(existing).map(|existing| existing.normalized()) == wanted);
+        .any(|existing| parse_entry(existing).is_ok_and(|existing| existing.normalized() == entry));
     if !listed {
         policy.allow_domains.push(entry.to_string());
     }
@@ -723,6 +726,26 @@ mod tests {
             1
         );
         assert_eq!(fixture.definition().revision, 2);
+    }
+
+    #[test]
+    fn always_saves_punycode_and_finds_a_unicode_entry_already_listed() {
+        let fixture = Fixture::new();
+        persist_network_allow(&fixture.state, WORKSPACE_ID, MAIN_ID, "Bücher.example")
+            .expect("persist");
+        assert!(main_allow_list(&fixture).contains(&"xn--bcher-kva.example".to_string()));
+
+        fixture
+            .state
+            .update_workspace_config(WORKSPACE_ID, |config| {
+                let main = config.main_agent.as_mut().expect("main");
+                main.execution.sandbox.network_access.allow_domains = vec!["über.example".into()];
+                Ok(())
+            })
+            .expect("an older Unicode save");
+        persist_network_allow(&fixture.state, WORKSPACE_ID, MAIN_ID, "xn--ber-goa.example")
+            .expect("persist");
+        assert_eq!(main_allow_list(&fixture), ["über.example"]);
     }
 
     #[tokio::test]

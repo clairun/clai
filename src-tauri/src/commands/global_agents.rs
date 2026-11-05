@@ -187,7 +187,8 @@ fn upsert_definition(
     if previous.map(|definition| definition.revision) != request.expected_revision {
         return Err("This agent changed somewhere else. Reload it before saving.".to_string());
     }
-    request.execution.sandbox.network_access.validate()?;
+    let mut execution = request.execution.clone();
+    execution.sandbox.network_access.canonicalize()?;
 
     if matches!(&request.avatar, Some(avatar) if avatar.seed.trim().is_empty()) {
         return Err("The agent's face needs a seed.".to_string());
@@ -223,7 +224,7 @@ fn upsert_definition(
                 &request.selected_mcp_server_ids,
             ),
             provider_connection_ids: request.provider_connection_ids.clone(),
-            execution: request.execution.clone(),
+            execution,
             avatar,
             created_at: previous.map_or(now, |definition| definition.behavior.created_at),
             updated_at: now,
@@ -553,6 +554,23 @@ mod tests {
         let error = upsert_definition(&mut config, &request, 100).expect_err("refused");
         assert!(error.contains("`git@github.com`"), "{error}");
         assert!(config.agent_definitions.is_empty());
+    }
+
+    #[test]
+    fn a_saved_definition_stores_host_entries_in_punycode() {
+        let mut config = AppConfig::default();
+        let mut request = save_request("Reviewer");
+        request.execution.sandbox.network_access.allow_domains = vec!["Bücher.example".to_string()];
+        upsert_definition(&mut config, &request, 100).expect("save");
+        assert_eq!(
+            config.agent_definitions[0]
+                .behavior
+                .execution
+                .sandbox
+                .network_access
+                .allow_domains,
+            ["xn--bcher-kva.example"]
+        );
     }
 
     #[test]
