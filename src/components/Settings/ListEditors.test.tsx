@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PathGrantEditor, PrefixListEditor } from './ListEditors';
@@ -39,6 +39,8 @@ describe('PathGrantEditor', () => {
 });
 
 describe('PrefixListEditor', () => {
+  afterEach(() => { vi.restoreAllMocks(); });
+
   it('adds a trimmed prefix once and removes it again', async () => {
     const onChange = vi.fn();
     const { rerender } = render(<PrefixListEditor items={[]} onChange={onChange} label="Blocked" placeholder="rm" />);
@@ -83,8 +85,7 @@ describe('PrefixListEditor', () => {
   });
 
   it('scrolls a new entry into view', async () => {
-    const scrollIntoView = vi.fn();
-    Element.prototype.scrollIntoView = scrollIntoView;
+    const scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView');
     const items = ['a', 'b', 'c'];
     const onChange = vi.fn();
     const { rerender } = render(<PrefixListEditor items={items} onChange={onChange} label="Hosts" placeholder="x" />);
