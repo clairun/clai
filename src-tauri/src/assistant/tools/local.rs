@@ -2061,6 +2061,8 @@ mod tests {
         );
     }
 
+    /// `net_request_access` is offered only where Allowlist is enforceable for
+    /// shell commands, so elsewhere the way out is the settings alone.
     #[tokio::test]
     async fn web_fetch_refuses_an_unlisted_host_naming_it_and_the_way_out() {
         let network = run_network(&["github.com"], &[]);
@@ -2072,7 +2074,12 @@ mod tests {
             err.contains("`example.org` is not in this agent's allowed hosts"),
             "{err}"
         );
-        assert!(err.contains("net_request_access"), "{err}");
+        assert_eq!(
+            err.contains("net_request_access"),
+            crate::assistant::sandbox::status().allowlist_available,
+            "{err}"
+        );
+        assert!(err.contains("Local access settings"), "{err}");
         assert_eq!(
             logged(&network),
             [("example.org".to_string(), Some(443), false)]
