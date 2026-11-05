@@ -1152,55 +1152,35 @@ pub(crate) fn network_denied_message(host: &str, reason: Option<&str>) -> String
     }
 }
 
-/// Network-request analogue of [`AbandonedPathGrantGuard`]: clears the
-/// pending request, drops its card, and cancels the run when the wait is
-/// abandoned without a decision.
-struct AbandonedNetworkRequestGuard {
-    app: tauri::AppHandle,
+/// Network-request analogue of [`AbandonedPathGrantGuard`]: when the wait
+/// ends without a decision (the run is cancelled, or a CLI transport drop
+/// orphaned it), it runs `clear` once, which takes the request off the
+/// queue and drops its card, and cancels the run. `clear` is a closure so
+/// the guard is tested without an app.
+struct AbandonedNetworkRequestGuard<C: FnOnce()> {
     cancel_token: tokio_util::sync::CancellationToken,
-    request_id: String,
-    workspace_id: Option<String>,
-    armed: bool,
+    clear: Option<C>,
 }
 
-impl AbandonedNetworkRequestGuard {
+impl<C: FnOnce()> AbandonedNetworkRequestGuard<C> {
     fn disarm(&mut self) {
-        self.armed = false;
+        self.clear = None;
     }
 
     async fn expire_and_stop<T>(&mut self) -> T {
-        use crate::commands::network_access::{emit_attention, emit_network_access_resolved};
-        use tauri::Manager;
-
-        let state = self.app.state::<crate::AppState>();
-        if let Some((_, remaining)) = state.pending_network_requests.take(&self.request_id).await {
-            emit_network_access_resolved(&self.app, &self.request_id);
-            emit_attention(&self.app, self.workspace_id.clone(), remaining);
+        if let Some(clear) = self.clear.take() {
+            clear();
         }
-        self.armed = false;
         super::cancel_run_and_park(&self.cancel_token).await
     }
 }
 
-impl Drop for AbandonedNetworkRequestGuard {
+impl<C: FnOnce()> Drop for AbandonedNetworkRequestGuard<C> {
     fn drop(&mut self) {
-        use crate::commands::network_access::{emit_attention, emit_network_access_resolved};
-        use tauri::Manager;
-
-        if !self.armed {
-            return;
+        if let Some(clear) = self.clear.take() {
+            self.cancel_token.cancel();
+            clear();
         }
-        self.cancel_token.cancel();
-        let app = self.app.clone();
-        let request_id = std::mem::take(&mut self.request_id);
-        let workspace_id = self.workspace_id.take();
-        tauri::async_runtime::spawn(async move {
-            let state = app.state::<crate::AppState>();
-            if let Some((_, remaining)) = state.pending_network_requests.take(&request_id).await {
-                emit_network_access_resolved(&app, &request_id);
-                emit_attention(&app, workspace_id, remaining);
-            }
-        });
     }
 }
 
@@ -1240,12 +1220,20 @@ async fn await_network_access_decision(
     }
     emit_attention(&deps.app, workspace_id.clone(), count);
 
+    let app = deps.app.clone();
+    let request_id = request.request_id;
     let mut abandon_guard = AbandonedNetworkRequestGuard {
-        app: deps.app.clone(),
         cancel_token: context.cancel_token.clone(),
-        request_id: request.request_id,
-        workspace_id,
-        armed: true,
+        clear: Some(move || {
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<crate::AppState>();
+                if let Some((_, remaining)) = state.pending_network_requests.take(&request_id).await
+                {
+                    emit_network_access_resolved(&app, &request_id);
+                    emit_attention(&app, workspace_id, remaining);
+                }
+            });
+        }),
     };
 
     match rx.await {
@@ -2214,6 +2202,56 @@ mod tests {
             context.run_network.decide("other.example.com"),
             HostDecision::Unlisted
         );
+    }
+
+    fn network_guard(
+        token: &tokio_util::sync::CancellationToken,
+        cleared: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> AbandonedNetworkRequestGuard<impl FnOnce()> {
+        let cleared = cleared.clone();
+        AbandonedNetworkRequestGuard {
+            cancel_token: token.clone(),
+            clear: Some(move || {
+                cleared.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        }
+    }
+
+    #[test]
+    fn an_abandoned_network_wait_clears_its_request_and_cancels_the_run() {
+        use std::sync::atomic::Ordering;
+        let cleared = std::sync::Arc::default();
+
+        let token = tokio_util::sync::CancellationToken::new();
+        drop(network_guard(&token, &cleared));
+        assert!(token.is_cancelled());
+        assert_eq!(cleared.load(Ordering::SeqCst), 1);
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut decided = network_guard(&token, &cleared);
+        decided.disarm();
+        drop(decided);
+        assert!(!token.is_cancelled(), "a decided wait leaves the run alone");
+        assert_eq!(cleared.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_wait_whose_sender_is_gone_clears_once_and_parks_the_cancelled_run() {
+        use std::sync::atomic::Ordering;
+        let cleared = std::sync::Arc::default();
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut guard = network_guard(&token, &cleared);
+
+        let parked = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            guard.expire_and_stop::<()>(),
+        )
+        .await;
+        assert!(parked.is_err(), "the tool returns no result");
+        assert!(token.is_cancelled());
+        assert_eq!(cleared.load(Ordering::SeqCst), 1);
+        drop(guard);
+        assert_eq!(cleared.load(Ordering::SeqCst), 1, "cleared once");
     }
 
     #[test]

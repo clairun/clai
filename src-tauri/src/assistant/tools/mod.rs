@@ -95,6 +95,13 @@ pub struct ToolExecutionContext {
     pub run_network: Arc<RunNetwork>,
 }
 
+/// The run's warning flag as it starts: already set when the agent's
+/// network lists hold an entry that was skipped (see
+/// [`RunNetwork::has_ignored_entries`]), so that run ends with warnings.
+pub fn run_warnings(run_network: &RunNetwork) -> Arc<AtomicBool> {
+    Arc::new(AtomicBool::new(run_network.has_ignored_entries()))
+}
+
 impl ToolExecutionContext {
     pub fn note_warning(&self) {
         self.had_warnings.store(true, Ordering::Relaxed);
@@ -150,6 +157,21 @@ impl ToolExecutionContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_run_with_a_skipped_host_entry_starts_with_a_warning() {
+        use crate::config::{NetworkMode, NetworkPolicy};
+        let run = |allow: &str| {
+            run_warnings(&RunNetwork::new(&NetworkPolicy {
+                mode: NetworkMode::Allowlist,
+                allow_domains: vec![allow.to_string()],
+                deny_domains: Vec::new(),
+            }))
+            .load(Ordering::Relaxed)
+        };
+        assert!(run("github.com:443"));
+        assert!(!run("github.com"));
+    }
 
     #[test]
     fn cli_mcp_client_timeout_is_a_large_idle_backstop() {

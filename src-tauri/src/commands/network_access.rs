@@ -581,17 +581,19 @@ mod tests {
         let (mut rx, _) = pending
             .register(request(Some("ws-1"), None, "a.example.org"), "run-1".into())
             .await;
+        let mut cancelled = Vec::new();
 
         let run_ids = pending
             .purge_workspace_canceling_runs("ws-1", |run_id| {
-                assert_eq!(run_id, "run-1");
                 assert!(matches!(
                     rx.try_recv(),
                     Err(oneshot::error::TryRecvError::Empty)
                 ));
+                cancelled.push(run_id.to_string());
             })
             .await;
 
+        assert_eq!(cancelled, ["run-1"], "the run is cancelled");
         assert_eq!(run_ids, ["run-1".to_string()]);
         assert!(rx.await.is_err(), "the sender is dropped after the cancel");
         assert!(pending.counts_snapshot().await.is_empty());
@@ -874,6 +876,33 @@ mod tests {
             rx.try_recv(),
             Err(oneshot::error::TryRecvError::Empty)
         ));
+    }
+
+    /// A save that fails after the tool stopped waiting leaves the queue
+    /// instead of showing a card nobody waits on.
+    #[tokio::test]
+    async fn a_failed_save_whose_tool_is_gone_does_not_requeue() {
+        let fixture = Fixture::new();
+        let request = request(Some(WORKSPACE_ID), Some("nobody"), "mirror.example.org");
+        let pending = &fixture.state.pending_network_requests;
+        let (rx, _) = pending.register(request.clone(), "run-1".into()).await;
+        drop(rx);
+        let mut left = Vec::new();
+
+        resolve_network_request(
+            &fixture.state,
+            &request.request_id,
+            NetworkAccessDecision::AllowAlways {
+                entry: "mirror.example.org".to_string(),
+            },
+            |workspace, remaining| left.push((workspace, remaining)),
+            |_, _| panic!("no card for a tool that stopped waiting"),
+        )
+        .await
+        .expect_err("the save fails");
+
+        assert_eq!(left, [(Some(WORKSPACE_ID.to_string()), 0)]);
+        assert!(pending.list_for_workspace(WORKSPACE_ID).await.is_empty());
     }
 
     #[tokio::test]

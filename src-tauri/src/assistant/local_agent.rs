@@ -7,7 +7,7 @@ use crate::assistant::{
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 const STDERR_TAIL_LINES: usize = 20;
@@ -372,7 +372,7 @@ pub async fn run_session_turn(
     let run_network = Arc::new(RunNetwork::new(
         &run_context.execution.sandbox.network_access,
     ));
-    let had_warnings = Arc::new(AtomicBool::new(run_network.has_ignored_entries()));
+    let had_warnings = crate::assistant::tools::run_warnings(&run_network);
     let session_grants = Arc::new(Mutex::new(Vec::new()));
     let run_removed_ask_first = Arc::new(Mutex::new(Vec::new()));
     // `binding_guard` removes the bearer token from the MCP runtime on

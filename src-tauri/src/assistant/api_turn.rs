@@ -362,7 +362,7 @@ async fn start_api_turn(
         tool_call_id: None,
         cancel_token: input.cancel_token.clone(),
         run_context: Arc::clone(run_context),
-        had_warnings: Arc::new(run_network.has_ignored_entries().into()),
+        had_warnings: tools::run_warnings(&run_network),
         session_grants,
         run_removed_ask_first,
         run_network,
