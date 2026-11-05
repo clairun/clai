@@ -566,6 +566,17 @@ describe('AgentBehaviorForm', () => {
       expect(await screen.findByText(/Shell commands will not run until you choose Off or Host network/)).toBeInTheDocument();
     });
 
+    it('does not call a stored Allowlist web tools only where it stops the shell', async () => {
+      api.getSandboxStatus.mockResolvedValue(NO_SANDBOX);
+      api.workspaceGetAgent.mockResolvedValue(withPolicy({ ...NETWORK, mode: 'allowlist' }));
+      renderForm({ agentId: 'agent-1' });
+      expect(await screen.findByText('Network: Allowlist (2 hosts)')).toBeInTheDocument();
+      await openAccess();
+      const reason = 'Allowlist: Not available on this PC. Shell commands will not run until you choose Off or Host network.';
+      await waitFor(() => expect(screen.getByRole('group', { name: 'Network' })).toHaveAccessibleDescription(reason));
+      expect(screen.queryByText(/shell commands are not restricted/)).toBeNull();
+    });
+
     it('says the mode covers only the web tools without a sandbox', async () => {
       api.getSandboxStatus.mockResolvedValue(NO_SANDBOX);
       renderForm({ agentId: 'agent-1' });

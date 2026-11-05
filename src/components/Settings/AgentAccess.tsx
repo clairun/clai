@@ -167,7 +167,9 @@ const networkSummary = (policy: NetworkPolicy | null, sandbox: SandboxStatus | n
   const mode = policy.mode === 'allowlist'
     ? `Allowlist (${plural(policy.allowDomains.length, 'host')})`
     : policy.mode === 'off' ? 'Off' : 'Host network';
-  return sandbox && !sandbox.available ? `Network: ${mode} (${WEB_TOOLS_ONLY})` : `Network: ${mode}`;
+  // A stored Allowlist stops the shell there too, so it is not web tools only.
+  const webToolsOnly = sandbox && !sandbox.available && policy.mode !== 'allowlist';
+  return webToolsOnly ? `Network: ${mode} (${WEB_TOOLS_ONLY})` : `Network: ${mode}`;
 };
 
 /** The network mode picker and, in Allowlist, the two host lists. */
@@ -198,6 +200,9 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
     );
   } else if (!status) {
     statusHint = <p className={form.hint} id={hintId} role="status">Checking what this PC supports…</p>;
+  } else if (!status.available && policy.mode === 'allowlist') {
+    // The Allowlist reason below says what happens to the shell.
+    statusHint = null;
   } else if (!status.available) {
     statusHint = (
       <p className={form.hint} id={hintId}>
@@ -213,7 +218,12 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
   return (
     <>
       <h4 className={styles.subheading} id={headingId}>Network</h4>
-      <div className={form.segmented} role="group" aria-labelledby={headingId} aria-describedby={hintId}>
+      <div
+        className={form.segmented}
+        role="group"
+        aria-labelledby={headingId}
+        aria-describedby={statusHint ? hintId : reasonId}
+      >
         {NETWORK_MODES.map(({ mode, label }) => {
           const unavailable = mode === 'allowlist' && !!allowlistReason;
           return (
