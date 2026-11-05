@@ -75,6 +75,31 @@ describe('NetworkAccessCard', () => {
     expect(within(runLine).getByRole('img', { name: 'refused' })).toBeInTheDocument();
   });
 
+  it('reads an IDN host in Unicode, shows its ASCII form, and sends the ASCII form', async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    const req = request({
+      host: 'mirror.xn--bcher-kva.example',
+      suggestedWildcard: '*.xn--bcher-kva.example',
+      runHosts: [{ host: 'xn--mnchen-3ya.de', port: 443, allowed: true }],
+    });
+    render(<NetworkAccessCard req={req} requester={requester} />);
+    expect(screen.getByText('mirror.bücher.example:443').tagName).toBe('CODE');
+    expect(screen.getByText('mirror.xn--bcher-kva.example')).toBeInTheDocument();
+    expect(screen.getByText(/^This run:/)).toHaveTextContent('This run: münchen.de ✓');
+    expect(screen.getByText(/add their entry/)).toHaveTextContent(/^“Always” and “Allow \*\.bücher\.example” add their entry/);
+    expect(screen.getByRole('button', { name: 'Always for Rust Architect' })).toHaveAttribute(
+      'title',
+      "Adds mirror.bücher.example to this agent's allowed hosts.",
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Allow *.bücher.example' }));
+    expect(submitted().at(-1)).toEqual({
+      requestId: 'net-1',
+      decision: { kind: 'allowAlways', entry: '*.xn--bcher-kva.example' },
+    });
+  });
+
   it('brackets an IPv6 host so its port reads apart from it', () => {
     render(<NetworkAccessCard req={request({ host: '2001:db8::1', port: 443, suggestedWildcard: null })} />);
     expect(screen.getByText('[2001:db8::1]:443')).toBeInTheDocument();

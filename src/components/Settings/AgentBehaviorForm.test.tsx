@@ -520,6 +520,33 @@ describe('AgentBehaviorForm', () => {
       });
     });
 
+    it('shows saved names in Unicode and stores what is added in the backend form', async () => {
+      api.workspaceGetAgent.mockResolvedValue(
+        withPolicy({ mode: 'allowlist', allowDomains: ['xn--bcher-kva.example'], denyDomains: [] }),
+      );
+      const { ref } = renderForm({ agentId: 'agent-1' });
+      await openAccess();
+      const allowed = await screen.findByRole('list', { name: 'Allowed hosts' });
+      expect(within(allowed).getByText('bücher.example')).toHaveAttribute('title', 'xn--bcher-kva.example');
+
+      const input = screen.getByRole('textbox', { name: 'New entry for allowed hosts' });
+      const add = within(input.parentElement!).getByRole('button', { name: 'Add' });
+      await userEvent.type(input, 'Bücher.example');
+      await userEvent.click(add);
+      expect(screen.getByRole('alert')).toHaveTextContent('bücher.example is already in the list.');
+
+      await userEvent.clear(input);
+      await userEvent.type(input, 'münchen.example');
+      await userEvent.click(add);
+      expect(within(allowed).getByText('münchen.example')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Remove münchen.example' })).toBeInTheDocument();
+      await submit(ref);
+      expect(sentUpdate().execution.sandbox.networkAccess.allowDomains).toEqual([
+        'xn--bcher-kva.example',
+        'xn--mnchen-3ya.example',
+      ]);
+    });
+
     it('offers Allowlist only where the sandbox can enforce it, with the reason', async () => {
       api.getSandboxStatus.mockResolvedValue(MACOS);
       renderForm({ agentId: 'agent-1' });
@@ -613,8 +640,8 @@ describe('AgentBehaviorForm', () => {
 
     // The cases `entries_are_parsed_by_one_rule` in network/matcher.rs runs.
     it('parses host entries as the backend matches them', () => {
-      for (const { entry, stored } of hostEntryCases.accepted) {
-        expect(parseHostEntry(entry), entry).toBe(stored);
+      for (const { entry, matched } of hostEntryCases.accepted) {
+        expect(parseHostEntry(entry), entry).toBe(matched);
       }
       for (const entry of hostEntryCases.rejected) {
         expect(parseHostEntry(entry), entry).toHaveProperty('error');

@@ -118,6 +118,7 @@ export const PrefixListEditor = ({
   label,
   placeholder,
   parse = singleSpaced,
+  display = (item: string) => item,
 }: {
   items: string[];
   onChange: (next: string[]) => void;
@@ -127,6 +128,8 @@ export const PrefixListEditor = ({
   placeholder: string;
   /** Turns what was typed into an entry, or says why it is not one. */
   parse?: (raw: string) => string | { error: string };
+  /** How an entry reads, when that differs from how it is stored. */
+  display?: (item: string) => string;
 }) => {
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -154,7 +157,7 @@ export const PrefixListEditor = ({
     setDraft('');
     if (!parsed) return;
     if (items.includes(parsed)) {
-      setError(`${parsed} is already in the list.`);
+      setError(`${display(parsed)} is already in the list.`);
       return;
     }
     added.current = parsed;
@@ -169,13 +172,15 @@ export const PrefixListEditor = ({
         <ul className={styles.list} aria-label={label} ref={list}>
           {items.map((item) => (
             <li key={item} className={styles.listItem} data-item={item}>
-              <span className={styles.listItemText}>{item}</span>
+              <span className={styles.listItemText} title={display(item) === item ? undefined : item}>
+                {display(item)}
+              </span>
               <button
                 type="button"
                 className={styles.removeButton}
                 onClick={() => onChange(items.filter((other) => other !== item))}
                 disabled={disabled}
-                aria-label={`Remove ${item}`}
+                aria-label={`Remove ${display(item)}`}
               >
                 ×
               </button>

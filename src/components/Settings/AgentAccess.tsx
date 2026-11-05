@@ -7,6 +7,7 @@
 import React, { useId } from 'react';
 import type { FilesystemPathGrant, GrantOrigin, NetworkMode, NetworkPolicy, SandboxStatus, ShellAccessMode } from '../../generated/bindings';
 import type { SandboxStatusState } from '../../hooks/useSandboxStatus';
+import { unicodeHost } from '../../permissions/hostNames';
 import { PathGrantEditor, PrefixListEditor, Switch } from './ListEditors';
 import form from './SettingsForm.module.css';
 import styles from './AgentBehaviorForm.module.css';
@@ -89,15 +90,13 @@ const idnaHost = (value: string): string | null => {
   }
 };
 
-// The characters IDNA reads as a dot.
-const IDNA_DOTS = /[\u3002\uff0e\uff61]/g;
-
 /**
  * A host entry as the backend accepts it: a host name or IP, `*` only as a
  * whole label. Saving enforces the backend rule (`parse_entry`,
  * src-tauri/src/assistant/network/matcher.rs); this mirrors it for instant
  * feedback, and both run the cases in hostEntryCases.json. Returns the
- * entry to store, or why the text is not one.
+ * entry to store, in the form the backend saves and compares (lower case,
+ * punycode), or why the text is not one.
  */
 export const parseHostEntry = (raw: string): string | { error: string } => {
   const value = raw.trim().toLowerCase().replace(/\.$/, '');
@@ -134,8 +133,9 @@ export const parseHostEntry = (raw: string): string | { error: string } => {
     return { error: 'It would allow every host; choose Host network instead.' };
   }
   if (!ascii.every((label) => label === '*' || /^[a-z0-9_-]+$/.test(label))) return { error: INVALID_CHARACTERS };
-  // Stored with plain dots, so `github。com` is found as a duplicate of github.com.
-  return value.replace(IDNA_DOTS, '.');
+  // The backend form, so `github。com` and `Bücher.example` are found as
+  // duplicates of the entries it saved.
+  return host;
 };
 
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
@@ -256,6 +256,7 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
               label="Allowed hosts"
               placeholder="example.com"
               parse={parseHostEntry}
+              display={unicodeHost}
             />
           </div>
           <div className={styles.prefixList}>
@@ -268,6 +269,7 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
               label="Denied hosts"
               placeholder="uploads.example.com"
               parse={parseHostEntry}
+              display={unicodeHost}
             />
           </div>
         </div>

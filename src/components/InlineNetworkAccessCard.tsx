@@ -3,7 +3,7 @@ import {
   listPendingNetworkAccessRequests,
   submitNetworkAccessDecision,
 } from '../permissions/networkAccessClient';
-import { hostWithPort } from '../permissions/hostNames';
+import { hostWithPort, unicodeHost } from '../permissions/hostNames';
 import type {
   HostLogEntry,
   NetworkAccessDecision,
@@ -38,11 +38,11 @@ const SaveScope = ({ req, workspaceName }: { req: NetworkAccessRequest; workspac
   }
   const saves = req.suggestedWildcard ? (
     <>
-      “Always” and “Allow {req.suggestedWildcard}” add their entry
+      “Always” and “Allow {unicodeHost(req.suggestedWildcard)}” add their entry
     </>
   ) : (
     <>
-      “Always” adds <code>{req.host}</code>
+      “Always” adds <code>{unicodeHost(req.host)}</code>
     </>
   );
   const here = workspaceName ? quoted(workspaceName) : null;
@@ -70,7 +70,7 @@ const RunHosts = ({ hosts }: { hosts: readonly HostLogEntry[] }) =>
       {hosts.slice(0, RUN_HOSTS_SHOWN).map((entry, i) => (
         <Fragment key={`${entry.host}-${entry.allowed}`}>
           {i > 0 && ' · '}
-          {entry.host}{' '}
+          {unicodeHost(entry.host)}{' '}
           <span role="img" aria-label={entry.allowed ? 'allowed' : 'refused'}>
             {entry.allowed ? '✓' : '✕'}
           </span>
@@ -103,6 +103,13 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
   const [isCollapsed, setCollapsed] = useState(false);
   const spoken = Boolean(speaker);
   const agentName = requester?.name ?? 'this agent';
+  // Names read in Unicode; the entries sent stay in the ASCII form the
+  // backend compares, and the full card shows that form too, so a look-alike
+  // name is not mistaken for the one it imitates.
+  const host = unicodeHost(req.host);
+  const asciiHost = host === req.host ? null : req.host;
+  const shown = hostWithPort(host, req.port);
+  const wildcard = req.suggestedWildcard ? unicodeHost(req.suggestedWildcard) : null;
 
   return (
     <article
@@ -138,20 +145,21 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
         </header>
       )}
       {isCollapsed ? (
-        <div className={styles.collapsedSummary}>{hostWithPort(req.host, req.port)}</div>
+        <div className={styles.collapsedSummary}>{shown}</div>
       ) : (
         <div className={styles.cardBody}>
           {speaker ? (
             speaker(
               <>
-                May I reach <code>{hostWithPort(req.host, req.port)}</code>?
+                May I reach <code title={asciiHost ?? undefined}>{shown}</code>?
                 <span className={grantStyles.spokenReason}>{req.reason || '(no reason given)'}</span>
               </>,
             )
           ) : (
             <>
               <div className={styles.segmentText}>
-                <code>{hostWithPort(req.host, req.port)}</code>
+                <code>{shown}</code>
+                {asciiHost && <span className={styles.mutedHint}>{asciiHost}</span>}
                 <span className={styles.ruleChip}>not in allowed hosts</span>
               </div>
               <div className={grantStyles.reasonBlock}>
@@ -181,10 +189,10 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
                   className={`${styles.btn} ${styles.btnAllow}`}
                   onClick={() => send({ kind: 'allowAlways', entry: req.host })}
                   disabled={isSubmitting}
-                  {...chipText(spoken, `Always for ${agentName}`, 'Always', `Adds ${req.host} to this agent's allowed hosts.`)}
+                  {...chipText(spoken, `Always for ${agentName}`, 'Always', `Adds ${host} to this agent's allowed hosts.`)}
                 />
               )}
-              {canSave(req) && req.suggestedWildcard && (
+              {canSave(req) && req.suggestedWildcard && wildcard && (
                 <button
                   type="button"
                   className={`${styles.btn} ${styles.btnAllow}`}
@@ -192,9 +200,9 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
                   disabled={isSubmitting}
                   {...chipText(
                     spoken,
-                    `Allow ${req.suggestedWildcard}`,
-                    req.suggestedWildcard,
-                    `Adds ${req.suggestedWildcard} to this agent's allowed hosts: every host under it.`,
+                    `Allow ${wildcard}`,
+                    wildcard,
+                    `Adds ${wildcard} to this agent's allowed hosts: every host under it.`,
                   )}
                 />
               )}
@@ -253,7 +261,7 @@ const InlineNetworkAccessCard = ({
       workspaceId={workspaceId}
       source={NETWORK_ACCESS_REQUESTS}
       className={styles.stack}
-      announce={(req) => `${requesterName(req)} wants network access to ${hostWithPort(req.host, req.port)}.`}
+      announce={(req) => `${requesterName(req)} wants network access to ${hostWithPort(unicodeHost(req.host), req.port)}.`}
       renderCard={(req, card) => <NetworkAccessCard {...card} req={req} requester={requester(req)} />}
     />
   );
