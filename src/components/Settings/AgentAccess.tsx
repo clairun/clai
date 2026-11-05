@@ -93,8 +93,8 @@ const asciiLabels = (labels: string[]): string[] | null => {
  * A host entry as the backend accepts it: a host name or IP, `*` only as a
  * whole label. Saving enforces the backend rule (`parse_entry`,
  * src-tauri/src/assistant/network/matcher.rs); this mirrors it for instant
- * feedback, and both test the same cases. Returns the entry to store, or why
- * the text is not one.
+ * feedback, and both run the cases in hostEntryCases.json. Returns the
+ * entry to store, or why the text is not one.
  */
 export const parseHostEntry = (raw: string): string | { error: string } => {
   const value = raw.trim().toLowerCase().replace(/\.$/, '');

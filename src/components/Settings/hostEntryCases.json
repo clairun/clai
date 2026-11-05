@@ -1,0 +1,85 @@
+{
+  "accepted": [
+    {
+      "entry": "github.com",
+      "stored": "github.com",
+      "matched": "github.com"
+    },
+    {
+      "entry": " GitHub.COM. ",
+      "stored": "github.com",
+      "matched": "github.com"
+    },
+    {
+      "entry": "*.github.com",
+      "stored": "*.github.com",
+      "matched": "*.github.com"
+    },
+    {
+      "entry": "s3.*.amazonaws.com",
+      "stored": "s3.*.amazonaws.com",
+      "matched": "s3.*.amazonaws.com"
+    },
+    {
+      "entry": "*.com",
+      "stored": "*.com",
+      "matched": "*.com"
+    },
+    {
+      "entry": "_dmarc.example.com",
+      "stored": "_dmarc.example.com",
+      "matched": "_dmarc.example.com"
+    },
+    {
+      "entry": "bücher.example",
+      "stored": "bücher.example",
+      "matched": "xn--bcher-kva.example"
+    },
+    {
+      "entry": "10.0.0.5",
+      "stored": "10.0.0.5",
+      "matched": "10.0.0.5"
+    },
+    {
+      "entry": "[2001:db8::1]",
+      "stored": "2001:db8::1",
+      "matched": "2001:db8::1"
+    },
+    {
+      "entry": "2001:0db8:0:0::1",
+      "stored": "2001:db8::1",
+      "matched": "2001:db8::1"
+    }
+  ],
+  "rejected": [
+    "",
+    "*",
+    "*.*",
+    "*.*.*",
+    "github.com:443",
+    "ab:443",
+    "abc:def:1",
+    "[foo]",
+    "[::1]:443",
+    "git@github.com",
+    "github.com?x",
+    "github.com#x",
+    "a|b.com",
+    "a^b.com",
+    "a!b.com",
+    "%2a.github.com",
+    "%41bc.com",
+    "a\\b.com",
+    "999.1.1.1",
+    "example.123",
+    "example.0x1",
+    "2130706433",
+    "010.0.0.5",
+    "*.0.0.5",
+    "https://github.com",
+    "github.com/x",
+    "git hub.com",
+    "a..com",
+    "gi*thub.com"
+  ]
+}

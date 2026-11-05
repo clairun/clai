@@ -497,56 +497,32 @@ mod tests {
     }
 
     // The same cases as `parses host entries` in AgentBehaviorForm.test.tsx.
+    /// The settings form's `parseHostEntry` runs the same cases.
     #[test]
     fn entries_are_parsed_by_one_rule() {
-        for (raw, normalized) in [
-            ("github.com", "github.com"),
-            (" GitHub.COM. ", "github.com"),
-            ("*.github.com", "*.github.com"),
-            ("s3.*.amazonaws.com", "s3.*.amazonaws.com"),
-            ("*.com", "*.com"),
-            ("_dmarc.example.com", "_dmarc.example.com"),
-            ("bücher.example", "xn--bcher-kva.example"),
-            ("10.0.0.5", "10.0.0.5"),
-            ("[2001:db8::1]", "2001:db8::1"),
-            ("2001:0db8:0:0::1", "2001:db8::1"),
-        ] {
+        #[derive(serde::Deserialize)]
+        struct Cases {
+            accepted: Vec<Accepted>,
+            rejected: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Accepted {
+            entry: String,
+            matched: String,
+        }
+        let cases: Cases = serde_json::from_str(include_str!(
+            "../../../../src/components/Settings/hostEntryCases.json"
+        ))
+        .expect("host entry cases");
+        for Accepted { entry, matched } in cases.accepted {
             assert_eq!(
-                parse_entry(raw).map(|entry| entry.normalized()),
-                Ok(normalized.to_string()),
-                "{raw:?}"
+                parse_entry(&entry).map(|entry| entry.normalized()),
+                Ok(matched),
+                "{entry:?}"
             );
         }
-        for raw in [
-            "",
-            "*",
-            "*.*",
-            "*.*.*",
-            "github.com:443",
-            "ab:443",
-            "abc:def:1",
-            "[foo]",
-            "[::1]:443",
-            "git@github.com",
-            "github.com?x",
-            "github.com#x",
-            "a|b.com",
-            "a^b.com",
-            "a!b.com",
-            "%2a.github.com",
-            "999.1.1.1",
-            "example.123",
-            "example.0x1",
-            "2130706433",
-            "010.0.0.5",
-            "*.0.0.5",
-            "https://github.com",
-            "github.com/x",
-            "git hub.com",
-            "a..com",
-            "gi*thub.com",
-        ] {
-            assert!(parse_entry(raw).is_err(), "{raw:?}");
+        for entry in cases.rejected {
+            assert!(parse_entry(&entry).is_err(), "{entry:?}");
         }
     }
 

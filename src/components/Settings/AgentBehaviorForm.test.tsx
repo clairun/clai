@@ -15,6 +15,7 @@ vi.mock('../../api/client', () => api);
 import { AgentBehaviorForm, type AgentDetail, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
 import { parseHostEntry } from './AgentAccess';
+import hostEntryCases from './hostEntryCases.json';
 import { resetSandboxStatusForTests } from '../../hooks/useSandboxStatus';
 import { StaleAgentError } from '../../api/errors';
 import formStyles from './SettingsForm.module.css';
@@ -610,31 +611,13 @@ describe('AgentBehaviorForm', () => {
       expect(sentUpdate().execution.sandbox.networkAccess.mode).toBe('off');
     });
 
-    // The same cases as `entries_are_parsed_by_one_rule` in network/matcher.rs.
+    // The cases `entries_are_parsed_by_one_rule` in network/matcher.rs runs.
     it('parses host entries as the backend matches them', () => {
-      const accepted: [string, string][] = [
-        ['github.com', 'github.com'],
-        [' GitHub.COM. ', 'github.com'],
-        ['*.github.com', '*.github.com'],
-        ['s3.*.amazonaws.com', 's3.*.amazonaws.com'],
-        ['*.com', '*.com'],
-        ['_dmarc.example.com', '_dmarc.example.com'],
-        ['bücher.example', 'bücher.example'],
-        ['10.0.0.5', '10.0.0.5'],
-        ['[2001:db8::1]', '2001:db8::1'],
-        ['2001:0db8:0:0::1', '2001:db8::1'],
-      ];
-      for (const [raw, entry] of accepted) {
-        expect(parseHostEntry(raw), raw).toBe(entry);
+      for (const { entry, stored } of hostEntryCases.accepted) {
+        expect(parseHostEntry(entry), entry).toBe(stored);
       }
-      for (const bad of [
-        '', '*', '*.*', '*.*.*',
-        'github.com:443', 'ab:443', 'abc:def:1', '[foo]', '[::1]:443',
-        'git@github.com', 'github.com?x', 'github.com#x', 'a|b.com', 'a^b.com', 'a!b.com', '%2a.github.com',
-        '999.1.1.1', 'example.123', 'example.0x1', '2130706433', '010.0.0.5', '*.0.0.5',
-        'https://github.com', 'github.com/x', 'git hub.com', 'a..com', 'gi*thub.com',
-      ]) {
-        expect(parseHostEntry(bad), bad).toHaveProperty('error');
+      for (const entry of hostEntryCases.rejected) {
+        expect(parseHostEntry(entry), entry).toHaveProperty('error');
       }
     });
   });
