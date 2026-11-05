@@ -67,12 +67,38 @@ describe('NetworkAccessCard', () => {
     render(<NetworkAccessCard req={request()} />);
     expect(screen.getByText('Network access requested')).toBeInTheDocument();
     expect(screen.getByText('mirror.example.org:443')).toBeInTheDocument();
-    expect(screen.getByText('not on allowlist')).toBeInTheDocument();
+    expect(screen.getByText('not in allowed hosts')).toBeInTheDocument();
     expect(screen.getByText('Download a test fixture.')).toBeInTheDocument();
     const runLine = screen.getByText(/^This run:/);
     expect(runLine).toHaveTextContent('This run: github.com ✓ · mirror.example.org ✕');
     expect(within(runLine).getByRole('img', { name: 'allowed' })).toBeInTheDocument();
     expect(within(runLine).getByRole('img', { name: 'refused' })).toBeInTheDocument();
+  });
+
+  it('brackets an IPv6 host so its port reads apart from it', () => {
+    render(<NetworkAccessCard req={request({ host: '2001:db8::1', port: 443, suggestedWildcard: null })} />);
+    expect(screen.getByText('[2001:db8::1]:443')).toBeInTheDocument();
+  });
+
+  it('names the first eight hosts of the run and counts the rest', () => {
+    const runHosts = Array.from({ length: 11 }, (_, i) => ({ host: `h${i}.example.org`, port: 443, allowed: i % 2 === 0 }));
+    render(<NetworkAccessCard req={request({ runHosts })} />);
+    const runLine = screen.getByText(/^This run:/);
+    expect(runLine).toHaveTextContent(/^This run: h0\.example\.org ✓ · .* · h7\.example\.org ✕ and 3 more$/);
+    expect(runLine).not.toHaveTextContent('h8.example.org');
+    expect(within(runLine).getAllByRole('img')).toHaveLength(8);
+  });
+
+  it('says the entry goes to the allowed hosts, as the settings call the list', () => {
+    render(<NetworkAccessCard req={request()} requester={requester} />);
+    expect(screen.getByRole('button', { name: 'Always for Rust Architect' })).toHaveAttribute(
+      'title',
+      "Adds mirror.example.org to this agent's allowed hosts.",
+    );
+    expect(screen.getByRole('button', { name: 'Allow *.example.org' })).toHaveAttribute(
+      'title',
+      "Adds *.example.org to this agent's allowed hosts: every host under it.",
+    );
   });
 
   it('sends each choice with its entry', async () => {
@@ -93,7 +119,7 @@ describe('NetworkAccessCard', () => {
   it('offers no wildcard when the host has no parent domain to widen to', () => {
     render(<NetworkAccessCard req={request({ host: 'example.org', suggestedWildcard: null })} />);
     expect(screen.queryByRole('button', { name: /^Allow \*\./ })).not.toBeInTheDocument();
-    expect(screen.getByText(/adds/)).toHaveTextContent(/Always. adds example\.org to this agent.s allowlist in this workspace only\./);
+    expect(screen.getByText(/adds/)).toHaveTextContent(/Always. adds example\.org to this agent.s allowed hosts in this workspace only\./);
   });
 
   it('denies with the reason the user typed, or none', async () => {
@@ -114,7 +140,7 @@ describe('NetworkAccessCard', () => {
 
   it('says where Always saves', () => {
     const { unmount } = render(<NetworkAccessCard req={request()} workspaceName="clai" />);
-    expect(screen.getByText(/add their entry/)).toHaveTextContent(/allowlist in .clai. only\.$/);
+    expect(screen.getByText(/add their entry/)).toHaveTextContent(/to this agent.s allowed hosts in .clai. only\.$/);
     unmount();
 
     render(
@@ -124,7 +150,7 @@ describe('NetworkAccessCard', () => {
       />,
     );
     expect(screen.getByText(/add their entry/)).toHaveTextContent(
-      /shared agent.s allowlist in every workspace that has it, now and later\. Today that is .clai. and .docs-site.\./,
+      /shared agent.s allowed hosts in every workspace that has it, now and later\. Today that is .clai. and .docs-site.\./,
     );
   });
 

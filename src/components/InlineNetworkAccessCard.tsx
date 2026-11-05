@@ -3,6 +3,7 @@ import {
   listPendingNetworkAccessRequests,
   submitNetworkAccessDecision,
 } from '../permissions/networkAccessClient';
+import { hostWithPort } from '../permissions/hostNames';
 import type {
   HostLogEntry,
   NetworkAccessDecision,
@@ -24,7 +25,8 @@ const NETWORK_ACCESS_REQUEST_EVENT = 'network-access://request';
 const NETWORK_ACCESS_RESOLVED_EVENT = 'network-access://resolved';
 
 
-const hostWithPort = (req: NetworkAccessRequest) => (req.port ? `${req.host}:${req.port}` : req.host);
+// The run log holds up to 200 hosts; the card names the first few.
+const RUN_HOSTS_SHOWN = 8;
 
 /** “Always” saves on the agent; the backend refuses it with no agent to save on. */
 const canSave = (req: NetworkAccessRequest) => Boolean(req.workspaceId && req.agentId);
@@ -47,25 +49,25 @@ const SaveScope = ({ req, workspaceName }: { req: NetworkAccessRequest; workspac
   if (!req.persistsToSharedAgent) {
     return (
       <>
-        {saves} to this agent's allowlist in {here ?? 'this workspace'} only.
+        {saves} to this agent's allowed hosts in {here ?? 'this workspace'} only.
       </>
     );
   }
   const others = req.alsoAffectsWorkspaces.map(quoted);
   return (
     <>
-      {saves} to this shared agent's allowlist in every workspace that has it, now and later.
+      {saves} to this shared agent's allowed hosts in every workspace that has it, now and later.
       {others.length > 0 && <> Today that is {listOf([here ?? 'this one', ...others])}.</>}
     </>
   );
 };
 
-/** “This run: github.com ✓ · example.org ✕” */
+/** “This run: github.com ✓ · example.org ✕ and 3 more” */
 const RunHosts = ({ hosts }: { hosts: readonly HostLogEntry[] }) =>
   hosts.length === 0 ? null : (
     <p className={styles.segmentHint}>
       This run:{' '}
-      {hosts.map((entry, i) => (
+      {hosts.slice(0, RUN_HOSTS_SHOWN).map((entry, i) => (
         <Fragment key={`${entry.host}-${entry.allowed}`}>
           {i > 0 && ' · '}
           {entry.host}{' '}
@@ -74,6 +76,7 @@ const RunHosts = ({ hosts }: { hosts: readonly HostLogEntry[] }) =>
           </span>
         </Fragment>
       ))}
+      {hosts.length > RUN_HOSTS_SHOWN && ` and ${hosts.length - RUN_HOSTS_SHOWN} more`}
     </p>
   );
 
@@ -135,21 +138,21 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
         </header>
       )}
       {isCollapsed ? (
-        <div className={styles.collapsedSummary}>{hostWithPort(req)}</div>
+        <div className={styles.collapsedSummary}>{hostWithPort(req.host, req.port)}</div>
       ) : (
         <div className={styles.cardBody}>
           {speaker ? (
             speaker(
               <>
-                May I reach <code>{hostWithPort(req)}</code>?
+                May I reach <code>{hostWithPort(req.host, req.port)}</code>?
                 <span className={grantStyles.spokenReason}>{req.reason || '(no reason given)'}</span>
               </>,
             )
           ) : (
             <>
               <div className={styles.segmentText}>
-                <code>{hostWithPort(req)}</code>
-                <span className={styles.ruleChip}>not on allowlist</span>
+                <code>{hostWithPort(req.host, req.port)}</code>
+                <span className={styles.ruleChip}>not in allowed hosts</span>
               </div>
               <div className={grantStyles.reasonBlock}>
                 <span className={grantStyles.reasonLabel}>Reason from agent:</span>
@@ -178,7 +181,7 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
                   className={`${styles.btn} ${styles.btnAllow}`}
                   onClick={() => send({ kind: 'allowAlways', entry: req.host })}
                   disabled={isSubmitting}
-                  {...chipText(spoken, `Always for ${agentName}`, 'Always', `Adds ${req.host} to the allowlist.`)}
+                  {...chipText(spoken, `Always for ${agentName}`, 'Always', `Adds ${req.host} to this agent's allowed hosts.`)}
                 />
               )}
               {canSave(req) && req.suggestedWildcard && (
@@ -191,7 +194,7 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
                     spoken,
                     `Allow ${req.suggestedWildcard}`,
                     req.suggestedWildcard,
-                    `Adds ${req.suggestedWildcard} to the allowlist: every host under it.`,
+                    `Adds ${req.suggestedWildcard} to this agent's allowed hosts: every host under it.`,
                   )}
                 />
               )}
@@ -250,7 +253,7 @@ const InlineNetworkAccessCard = ({
       workspaceId={workspaceId}
       source={NETWORK_ACCESS_REQUESTS}
       className={styles.stack}
-      announce={(req) => `${requesterName(req)} wants network access to ${hostWithPort(req)}.`}
+      announce={(req) => `${requesterName(req)} wants network access to ${hostWithPort(req.host, req.port)}.`}
       renderCard={(req, card) => <NetworkAccessCard {...card} req={req} requester={requester(req)} />}
     />
   );
