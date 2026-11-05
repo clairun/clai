@@ -170,22 +170,28 @@ export const PrefixListEditor = ({
         <p className={styles.listEmpty}>None.</p>
       ) : (
         <ul className={styles.list} aria-label={label} ref={list}>
-          {items.map((item) => (
-            <li key={item} className={styles.listItem} data-item={item}>
-              <span className={styles.listItemText} title={display(item) === item ? undefined : item}>
-                {display(item)}
-              </span>
-              <button
-                type="button"
-                className={styles.removeButton}
-                onClick={() => onChange(items.filter((other) => other !== item))}
-                disabled={disabled}
-                aria-label={`Remove ${display(item)}`}
-              >
-                ×
-              </button>
-            </li>
-          ))}
+          {items.map((item) => {
+            // Only a hand edit stores an entry that does not parse.
+            const parsed = parse(item);
+            const invalid = typeof parsed === 'string' ? null : parsed.error;
+            return (
+              <li key={item} className={styles.listItem} data-item={item}>
+                <span className={styles.listItemText} title={display(item) === item ? undefined : item}>
+                  {display(item)}
+                </span>
+                {invalid && <span className={styles.hintWarning}>Not valid: {invalid}</span>}
+                <button
+                  type="button"
+                  className={styles.removeButton}
+                  onClick={() => onChange(items.filter((other) => other !== item))}
+                  disabled={disabled}
+                  aria-label={`Remove ${display(item)}`}
+                >
+                  ×
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
       <div className={styles.addRow}>

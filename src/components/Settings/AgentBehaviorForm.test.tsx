@@ -577,6 +577,17 @@ describe('AgentBehaviorForm', () => {
       expect(screen.queryByText(/shell commands are not restricted/)).toBeNull();
     });
 
+    it('marks a stored host entry that is not valid', async () => {
+      api.getSandboxStatus.mockResolvedValue(LINUX);
+      api.workspaceGetAgent.mockResolvedValue(withPolicy({ ...NETWORK, mode: 'allowlist', denyDomains: ['x/y'] }));
+      renderForm({ agentId: 'agent-1' });
+      await openAccess();
+      const denied = await screen.findByRole('list', { name: 'Denied hosts' });
+      expect(within(denied).getByText('Not valid: Enter the host only, without a path.')).toBeInTheDocument();
+      const allowed = screen.getByRole('list', { name: 'Allowed hosts' });
+      expect(within(allowed).queryByText(/Not valid/)).toBeNull();
+    });
+
     it('says the mode covers only the web tools without a sandbox', async () => {
       api.getSandboxStatus.mockResolvedValue(NO_SANDBOX);
       renderForm({ agentId: 'agent-1' });
