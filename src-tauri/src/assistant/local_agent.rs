@@ -1,3 +1,4 @@
+use crate::assistant::network::run_state::RunNetwork;
 use crate::assistant::{
     cli_session::reset_cli_session_for_rotation, conversation::content_text,
     conversation::tool_groups, conversation::RunConversation,
@@ -368,7 +369,10 @@ pub async fn run_session_turn(
     }
 
     let mcp_runtime = local_mcp::ensure_started(&deps.app).await?;
-    let had_warnings = Arc::new(AtomicBool::new(false));
+    let run_network = Arc::new(RunNetwork::new(
+        &run_context.execution.sandbox.network_access,
+    ));
+    let had_warnings = Arc::new(AtomicBool::new(run_network.has_ignored_entries()));
     let session_grants = Arc::new(Mutex::new(Vec::new()));
     let run_removed_ask_first = Arc::new(Mutex::new(Vec::new()));
     // `binding_guard` removes the bearer token from the MCP runtime on
@@ -384,6 +388,7 @@ pub async fn run_session_turn(
         had_warnings: had_warnings.clone(),
         session_grants,
         run_removed_ask_first,
+        run_network,
     });
 
     // A single assistant message is reused across attempts (see

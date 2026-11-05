@@ -1080,6 +1080,7 @@ mod tests {
             had_warnings: Arc::new(AtomicBool::new(false)),
             session_grants: Arc::new(Mutex::new(Vec::new())),
             run_removed_ask_first: Arc::new(Mutex::new(Vec::new())),
+            run_network: Default::default(),
         };
         let manager_context = context(manager.id.clone());
         let assignee = create_assignment(

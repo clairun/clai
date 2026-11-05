@@ -159,39 +159,51 @@ fn ends_in_a_number(label: &str) -> bool {
 pub struct HostLists {
     allow: Vec<HostEntry>,
     deny: Vec<HostEntry>,
+    ignored: Vec<IgnoredEntry>,
+}
+
+/// A stored entry [`parse_entry`] refuses. Saving a config refuses those, so
+/// one on disk was edited by hand.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IgnoredEntry {
+    pub entry: String,
+    pub reason: &'static str,
+    /// On the deny list, where skipping it refuses nothing.
+    pub denied: bool,
 }
 
 impl HostLists {
-    /// Saving a config refuses invalid entries, so one here was edited by
-    /// hand. It is skipped: an allow entry then allows nothing, which fails
-    /// closed; a deny entry refuses nothing, so that is logged as an error.
+    /// Skips invalid entries, reported by [`Self::ignored`]: an allow entry
+    /// then allows nothing, which fails closed; a deny entry refuses nothing.
     pub fn new<S: AsRef<str>>(allow: &[S], deny: &[S]) -> Self {
-        let parse = |entries: &[S], denied: bool| {
+        let mut ignored = Vec::new();
+        let mut parse = |entries: &[S], denied: bool| {
             entries
                 .iter()
                 .filter_map(|raw| match parse_entry(raw.as_ref()) {
                     Ok(entry) => Some(entry),
-                    Err(reason) if denied => {
-                        tracing::error!(
-                            "Network deny entry `{}` is ignored and refuses nothing ({reason}); fix it in the agent's Access settings",
-                            raw.as_ref()
-                        );
-                        None
-                    }
                     Err(reason) => {
-                        tracing::warn!(
-                            "Network allow entry `{}` is ignored ({reason})",
-                            raw.as_ref()
-                        );
+                        ignored.push(IgnoredEntry {
+                            entry: raw.as_ref().to_string(),
+                            reason,
+                            denied,
+                        });
                         None
                     }
                 })
                 .collect()
         };
+        let allow = parse(allow, false);
+        let deny = parse(deny, true);
         Self {
-            allow: parse(allow, false),
-            deny: parse(deny, true),
+            allow,
+            deny,
+            ignored,
         }
+    }
+
+    pub fn ignored(&self) -> &[IgnoredEntry] {
+        &self.ignored
     }
 
     pub fn decide(&self, host: &str) -> HostDecision {
@@ -207,6 +219,15 @@ impl HostLists {
             return HostDecision::Allowed;
         }
         HostDecision::Unlisted
+    }
+}
+
+/// `raw` in the form the matcher compares (lower case, punycode, an IPv6
+/// address without brackets), or `None` when it is not a host name.
+pub fn canonical_host(raw: &str) -> Option<String> {
+    match normalize(raw)? {
+        Host::Domain(domain) => Some(domain),
+        Host::Ip(ip) => Some(ip.to_string()),
     }
 }
 
@@ -540,10 +561,39 @@ mod tests {
         ] {
             assert_eq!(decide(&[entry], &[], "github.com"), Unlisted, "{entry:?}");
         }
-        // An invalid deny entry refuses nothing (it is logged instead).
+        // An invalid deny entry refuses nothing; the run reports it.
         assert_eq!(
             decide(&["github.com"], &["github.com:443"], "github.com"),
             Allowed
         );
+    }
+
+    #[test]
+    fn invalid_entries_are_reported_with_their_list() {
+        let lists = HostLists::new(&["github.com", "x/y"], &["github.com:443"]);
+        let reported: Vec<(&str, bool)> = lists
+            .ignored()
+            .iter()
+            .map(|ignored| (ignored.entry.as_str(), ignored.denied))
+            .collect();
+        assert_eq!(reported, [("x/y", false), ("github.com:443", true)]);
+        assert!(HostLists::new(&["github.com"], &["*.s3.amazonaws.com"])
+            .ignored()
+            .is_empty());
+    }
+
+    #[test]
+    fn canonical_hosts_are_what_the_matcher_compares() {
+        assert_eq!(canonical_host("GitHub.COM.").as_deref(), Some("github.com"));
+        assert_eq!(
+            canonical_host("bücher.example").as_deref(),
+            Some("xn--bcher-kva.example")
+        );
+        assert_eq!(
+            canonical_host("[2001:DB8::1]").as_deref(),
+            Some("2001:db8::1")
+        );
+        assert_eq!(canonical_host("a..com"), None);
+        assert_eq!(canonical_host(""), None);
     }
 }

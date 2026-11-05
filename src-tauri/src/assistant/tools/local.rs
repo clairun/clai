@@ -13,14 +13,15 @@ use crate::assistant::network::addr::{
     is_blocked_web_fetch_hostname, reject_private_web_fetch_addrs, reject_private_web_fetch_ip,
     strip_ipv6_url_brackets,
 };
-use crate::assistant::network::matcher::{HostDecision, HostLists};
+use crate::assistant::network::matcher::HostDecision;
+use crate::assistant::network::run_state::RunNetwork;
 use crate::assistant::sandbox::{
     run_command, SandboxCommand, SandboxEnv, SandboxNetworkMode, SandboxProfile,
     SandboxSessionBusMode,
 };
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
-    NetworkPolicy, SandboxSessionBusConfig, ShellAccessMode,
+    SandboxSessionBusConfig, ShellAccessMode,
 };
 
 use super::ToolExecutionContext;
@@ -945,35 +946,39 @@ fn matches_prefix_literal(p: &str, command: &str) -> bool {
 
 /// Which hosts the web tools may reach for one agent. They run in this
 /// process, so they follow the mode on every PC, one without a sandbox too.
-#[derive(Debug)]
-enum WebGate {
+#[derive(Debug, Clone, Copy)]
+enum WebGate<'a> {
     /// Host network: any public host.
     AnyHost,
-    /// Allowlist: only the hosts this policy allows, on every redirect hop.
-    Allowlist(HostLists),
+    /// Allowlist: only the hosts the run allows, on every redirect hop.
+    Allowlist(&'a RunNetwork),
 }
 
-fn web_gate(context: &ToolExecutionContext) -> Result<WebGate, String> {
-    web_access(&context.run_context.execution.sandbox.network_access)
+fn web_gate(context: &ToolExecutionContext) -> Result<WebGate<'_>, String> {
+    web_access(
+        context.run_context.execution.sandbox.network_access.mode,
+        &context.run_network,
+    )
 }
 
-fn web_access(network: &NetworkPolicy) -> Result<WebGate, String> {
-    match network.mode {
+fn web_access(mode: NetworkMode, network: &RunNetwork) -> Result<WebGate<'_>, String> {
+    match mode {
         NetworkMode::Off => Err("Network access is off for this agent".to_string()),
-        NetworkMode::Allowlist => Ok(WebGate::Allowlist(HostLists::new(
-            &network.allow_domains,
-            &network.deny_domains,
-        ))),
+        NetworkMode::Allowlist => Ok(WebGate::Allowlist(network)),
         NetworkMode::HostNetwork => Ok(WebGate::AnyHost),
     }
 }
 
 /// `host` as the URL carries it: lower case, punycode, IPv6 in brackets.
-fn check_web_host(gate: &WebGate, host: &str) -> Result<(), String> {
-    let WebGate::Allowlist(lists) = gate else {
+/// In Allowlist the run's host log records the outcome.
+fn check_web_host(gate: WebGate<'_>, host: &str, port: Option<u16>) -> Result<(), String> {
+    let WebGate::Allowlist(network) = gate else {
         return Ok(());
     };
-    match lists.decide(host) {
+    let decision = network.decide(host);
+    let allowed = decision == HostDecision::Allowed;
+    network.record(host, port, allowed);
+    match decision {
         HostDecision::Allowed => Ok(()),
         HostDecision::Denied { entry } => Err(format!(
             "`{host}` is on this agent's network deny list (entry `{entry}`). The user can \
@@ -1150,7 +1155,7 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 async fn execute_web_fetch(
-    gate: WebGate,
+    gate: WebGate<'_>,
     params: WebFetchParams,
 ) -> Result<serde_json::Value, String> {
     let content_limit = params
@@ -1163,7 +1168,7 @@ async fn execute_web_fetch(
         .min(MAX_WEB_FETCH_TIMEOUT_MS);
 
     let url = parse_web_fetch_url(params.url.trim())?;
-    let response = fetch_public_url(url, timeout_ms, &gate).await?;
+    let response = fetch_public_url(url, timeout_ms, gate).await?;
     let final_url = response.url().clone();
 
     let status = response.status().as_u16();
@@ -1232,7 +1237,7 @@ fn validate_web_fetch_scheme(url: &reqwest::Url) -> Result<(), String> {
 async fn fetch_public_url(
     mut url: reqwest::Url,
     timeout_ms: u64,
-    gate: &WebGate,
+    gate: WebGate<'_>,
 ) -> Result<reqwest::Response, String> {
     // A redirect must never downgrade the transport: if the original request
     // was https, refuse to follow a redirect to plain http (a MITM/attacker
@@ -1301,7 +1306,7 @@ fn is_followable_redirect(status: reqwest::StatusCode) -> bool {
 /// Runs on every redirect hop.
 async fn resolve_public_web_fetch_target(
     url: &reqwest::Url,
-    gate: &WebGate,
+    gate: WebGate<'_>,
 ) -> Result<Option<(String, Vec<SocketAddr>)>, String> {
     validate_web_fetch_scheme(url)?;
     let host = url
@@ -1312,11 +1317,10 @@ async fn resolve_public_web_fetch_target(
     if is_blocked_web_fetch_hostname(&normalized_host) {
         return Err("Fetching private/local URLs is not allowed".to_string());
     }
-    check_web_host(gate, host)?;
-
     let port = url
         .port_or_known_default()
         .ok_or_else(|| "URL must include a valid port".to_string())?;
+    check_web_host(gate, host, Some(port))?;
 
     if let Ok(ip) = host_literal.parse::<IpAddr>() {
         reject_private_web_fetch_ip(ip)?;
@@ -1380,6 +1384,7 @@ fn append_limited_web_fetch_body_chunk(body: &mut Vec<u8>, chunk: &[u8], limit: 
 mod tests {
     use super::*;
     use crate::assistant::run_context::RunContext;
+    use crate::config::NetworkPolicy;
     use tempfile::tempdir;
 
     fn context_with_grants(
@@ -1402,6 +1407,7 @@ mod tests {
             had_warnings: Default::default(),
             session_grants: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             run_removed_ask_first: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            run_network: Default::default(),
         }
     }
 
@@ -1659,7 +1665,7 @@ mod tests {
     async fn web_fetch_rejects_private_ipv6_literals() {
         let url = parse_web_fetch_url("http://[::1]/admin").unwrap();
 
-        let err = resolve_public_web_fetch_target(&url, &WebGate::AnyHost)
+        let err = resolve_public_web_fetch_target(&url, WebGate::AnyHost)
             .await
             .unwrap_err();
         assert!(err.contains("private/local"));
@@ -1670,7 +1676,7 @@ mod tests {
         let start = parse_web_fetch_url("https://example.com/start").unwrap();
         let redirected = start.join("http://127.0.0.1/admin").unwrap();
 
-        let err = resolve_public_web_fetch_target(&redirected, &WebGate::AnyHost)
+        let err = resolve_public_web_fetch_target(&redirected, WebGate::AnyHost)
             .await
             .unwrap_err();
         assert!(err.contains("private/local"));
@@ -1688,28 +1694,40 @@ mod tests {
         }
     }
 
-    fn allowlist_gate(policy: &NetworkPolicy) -> WebGate {
-        WebGate::Allowlist(HostLists::new(&policy.allow_domains, &policy.deny_domains))
+    fn run_network(allow: &[&str], deny: &[&str]) -> RunNetwork {
+        RunNetwork::new(&allowlist(allow, deny))
+    }
+
+    fn logged(network: &RunNetwork) -> Vec<(String, Option<u16>, bool)> {
+        network
+            .host_log()
+            .into_iter()
+            .map(|entry| (entry.host, entry.port, entry.allowed))
+            .collect()
     }
 
     #[test]
     fn web_access_follows_the_mode() {
-        let mut policy = allowlist(&["github.com"], &[]);
-        assert!(matches!(web_access(&policy), Ok(WebGate::Allowlist(_))));
-        policy.mode = NetworkMode::HostNetwork;
-        assert!(matches!(web_access(&policy), Ok(WebGate::AnyHost)));
-        policy.mode = NetworkMode::Off;
+        let network = run_network(&["github.com"], &[]);
+        assert!(matches!(
+            web_access(NetworkMode::Allowlist, &network),
+            Ok(WebGate::Allowlist(_))
+        ));
+        assert!(matches!(
+            web_access(NetworkMode::HostNetwork, &network),
+            Ok(WebGate::AnyHost)
+        ));
         assert_eq!(
-            web_access(&policy).unwrap_err(),
+            web_access(NetworkMode::Off, &network).unwrap_err(),
             "Network access is off for this agent"
         );
     }
 
     #[tokio::test]
     async fn web_fetch_refuses_an_unlisted_host_naming_it_and_the_way_out() {
-        let policy = allowlist(&["github.com"], &[]);
+        let network = run_network(&["github.com"], &[]);
         let url = parse_web_fetch_url("https://example.org/page").unwrap();
-        let err = resolve_public_web_fetch_target(&url, &allowlist_gate(&policy))
+        let err = resolve_public_web_fetch_target(&url, WebGate::Allowlist(&network))
             .await
             .unwrap_err();
         assert!(
@@ -1717,13 +1735,17 @@ mod tests {
             "{err}"
         );
         assert!(err.contains("net_request_access"), "{err}");
+        assert_eq!(
+            logged(&network),
+            [("example.org".to_string(), Some(443), false)]
+        );
     }
 
     #[tokio::test]
     async fn web_fetch_refuses_a_denied_host_naming_the_entry() {
-        let policy = allowlist(&["*.amazonaws.com"], &["*.s3.amazonaws.com"]);
+        let network = run_network(&["*.amazonaws.com"], &["*.s3.amazonaws.com"]);
         let url = parse_web_fetch_url("https://bucket.s3.amazonaws.com/x").unwrap();
-        let err = resolve_public_web_fetch_target(&url, &allowlist_gate(&policy))
+        let err = resolve_public_web_fetch_target(&url, WebGate::Allowlist(&network))
             .await
             .unwrap_err();
         assert!(err.contains("`*.s3.amazonaws.com`"), "{err}");
@@ -1731,10 +1753,10 @@ mod tests {
 
     #[tokio::test]
     async fn web_fetch_checks_the_allowlist_on_every_redirect_hop() {
-        let policy = allowlist(&["github.com"], &[]);
+        let network = run_network(&["github.com"], &[]);
         let start = parse_web_fetch_url("https://github.com/start").unwrap();
         let redirected = start.join("https://example.org/landing").unwrap();
-        let err = resolve_public_web_fetch_target(&redirected, &allowlist_gate(&policy))
+        let err = resolve_public_web_fetch_target(&redirected, WebGate::Allowlist(&network))
             .await
             .unwrap_err();
         assert!(err.contains("`example.org`"), "{err}");
@@ -1742,15 +1764,15 @@ mod tests {
 
     #[tokio::test]
     async fn web_fetch_keeps_the_private_address_filter_in_every_mode() {
-        let listed = allowlist(&["10.0.0.5", "localhost"], &[]);
+        let listed = run_network(&["10.0.0.5", "localhost"], &[]);
         for (gate, raw) in [
             (WebGate::AnyHost, "http://127.0.0.1/admin"),
             (WebGate::AnyHost, "http://[::1]/"),
-            (allowlist_gate(&listed), "http://10.0.0.5/"),
-            (allowlist_gate(&listed), "http://localhost:8080/"),
+            (WebGate::Allowlist(&listed), "http://10.0.0.5/"),
+            (WebGate::Allowlist(&listed), "http://localhost:8080/"),
         ] {
             let url = parse_web_fetch_url(raw).unwrap();
-            let err = resolve_public_web_fetch_target(&url, &gate)
+            let err = resolve_public_web_fetch_target(&url, gate)
                 .await
                 .unwrap_err();
             assert!(err.contains("private/local"), "{raw}: {err}");
@@ -1758,12 +1780,21 @@ mod tests {
     }
 
     #[test]
-    fn only_the_allowlist_gate_checks_hosts() {
-        let policy = allowlist(&["github.com"], &[]);
-        assert!(check_web_host(&allowlist_gate(&policy), "github.com").is_ok());
-        assert!(check_web_host(&allowlist_gate(&policy), "example.org").is_err());
-        assert!(check_web_host(&allowlist_gate(&policy), "[2606:4700::1111]").is_err());
-        assert!(check_web_host(&WebGate::AnyHost, "example.org").is_ok());
+    fn only_the_allowlist_gate_checks_and_logs_hosts() {
+        let network = run_network(&["github.com"], &[]);
+        let gate = WebGate::Allowlist(&network);
+        assert!(check_web_host(gate, "github.com", Some(443)).is_ok());
+        assert!(check_web_host(gate, "example.org", Some(80)).is_err());
+        assert!(check_web_host(gate, "[2606:4700::1111]", Some(443)).is_err());
+        assert_eq!(
+            logged(&network),
+            [
+                ("github.com".to_string(), Some(443), true),
+                ("example.org".to_string(), Some(80), false),
+                ("2606:4700::1111".to_string(), Some(443), false),
+            ]
+        );
+        assert!(check_web_host(WebGate::AnyHost, "example.org", Some(443)).is_ok());
     }
 
     #[tokio::test]
