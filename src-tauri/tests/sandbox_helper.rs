@@ -89,6 +89,42 @@ fn ssh_traffic_reaches_the_proxy_through_the_bridge() {
     );
 }
 
+/// ssh keeps its end open and waits for each reply, so every byte it
+/// writes must reach the server at once, not when more data follows.
+#[test]
+fn bytes_written_while_the_tunnel_stays_open_arrive_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, _proxy) = proxy_socket(dir.path(), "HTTP/1.1 200 Connection established\r\n\r\n");
+    let port = free_port().to_string();
+    let proxy = format!("127.0.0.1:{port}");
+    let mut child = Command::new(HELPER)
+        .args(["bridge", "--socket", &socket, "--http", &port, "--"])
+        .args([HELPER, "connect", "--proxy", &proxy, "github.com", "22"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = child.stdout.take().unwrap();
+    // The size of an ssh KEXINIT: more than one TCP segment on loopback is
+    // not needed, a tail that is not a full segment is.
+    let message = vec![b'k'; 1712];
+    stdin.write_all(&message).unwrap();
+    let (sender, receiver) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let mut echoed = vec![0_u8; 1712];
+        let _ = sender.send(stdout.read_exact(&mut echoed).map(|()| echoed));
+    });
+    let echoed = receiver.recv_timeout(Duration::from_secs(5));
+    let _ = child.kill();
+    let _ = child.wait();
+    drop(stdin);
+    assert_eq!(
+        echoed.expect("the bytes are still held back").unwrap(),
+        message
+    );
+}
+
 #[test]
 fn a_refused_tunnel_fails_like_an_unreachable_ssh_host() {
     let dir = tempfile::tempdir().unwrap();

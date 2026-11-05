@@ -184,11 +184,31 @@ mod linux {
             return;
         };
         thread::spawn(move || {
-            let _ = io::copy(&mut &client_reader, &mut &proxy);
+            relay(&mut &client_reader, &mut &proxy);
             let _ = proxy.shutdown(Shutdown::Write);
         });
-        let _ = io::copy(&mut &proxy_reader, &mut &client);
+        relay(&mut &proxy_reader, &mut &client);
         let _ = client.shutdown(Shutdown::Write);
+    }
+
+    /// Writes each chunk as soon as it is read. Not `io::copy`: on Linux it
+    /// splices from the tunnel socket into ssh's stdout pipe, and part of a
+    /// reply stayed in the socket until more data arrived, so ssh, which
+    /// waits for each reply, stalled in its key exchange.
+    fn relay(reader: &mut impl Read, writer: &mut impl Write) {
+        let mut buffer = [0_u8; 16 * 1024];
+        loop {
+            match reader.read(&mut buffer) {
+                Ok(0) => return,
+                Ok(read) => {
+                    if writer.write_all(&buffer[..read]).is_err() {
+                        return;
+                    }
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(_) => return,
+            }
+        }
     }
 
     fn connect(proxy: &str, host: &str, port: u16) -> i32 {
@@ -208,10 +228,10 @@ mod linux {
             return CONNECT_FAILED;
         };
         thread::spawn(move || {
-            let _ = io::copy(&mut File::from(stdin), &mut &upstream);
+            relay(&mut File::from(stdin), &mut &upstream);
             let _ = upstream.shutdown(Shutdown::Write);
         });
-        let _ = io::copy(&mut &tunnel, &mut File::from(stdout));
+        relay(&mut &tunnel, &mut File::from(stdout));
         0
     }
 
