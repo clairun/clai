@@ -569,7 +569,7 @@ fn sandbox_prompt(
                     "sandboxed shell on Linux through bubblewrap when `bash_exec` is available (network: {mode}, {bus})"
                 ),
                 allowlist: in_allowlist.then(|| format!(
-                    "- Network allowlist: shell commands and `web_fetch` reach only the {} hosts on this agent's allowlist and any the user allows during this run. Shell traffic goes through CLAI's network proxy: `HTTP_PROXY` and `HTTPS_PROXY` are set, so tools that honour them work; DNS lookups fail inside the sandbox and tools that ignore the proxy variables cannot connect. An unlisted host fails with a 403 or a refused connection, and the `bash_exec` result names it under `network.refused`. When the task needs such a host, call `net_request_access` with the host and the reason; do not look for a way around the proxy. `localhost` inside the sandbox is reachable directly; services on the host computer are not.\n",
+                    "- Network allowlist: shell commands and `web_fetch` reach only the hosts matching the {} entries on this agent's allowlist and any the user allows during this run. Shell traffic goes through CLAI's network proxy: `HTTP_PROXY` and `HTTPS_PROXY` are set, so tools that honour them work; DNS lookups fail inside the sandbox and tools that ignore the proxy variables cannot connect. An unlisted host fails with a 403 or a refused connection, and the `bash_exec` result names it under `network.refused`. When the task needs such a host, call `net_request_access` with the host and the reason; do not look for a way around the proxy. `localhost` inside the sandbox is reachable directly. The proxy never connects to loopback or link-local addresses, so services on the host computer are not reachable, while a listed host that resolves to a private local-network address is reachable from shell commands (`web_fetch` refuses every non-public address).\n",
                     network.allow_domains.len()
                 )),
                 ssh: Some(if in_allowlist {
@@ -1505,7 +1505,10 @@ mod tests {
                     "{case}"
                 );
                 if linux_allowlist {
-                    assert!(allowlist.contains("only the 2 hosts"), "{allowlist}");
+                    assert!(
+                        allowlist.contains("only the hosts matching the 2 entries"),
+                        "{allowlist}"
+                    );
                     assert!(allowlist.contains("`network.refused`"), "{allowlist}");
                 }
 
