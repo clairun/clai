@@ -31,6 +31,7 @@ import { useReportDirty, type SectionHandle } from './sectionHandle';
 import McpServerSelect from './McpServerSelect';
 import { NoSkills, SkillSearch, SkillSources, SkillSourceView, groupSkills } from './SkillPicker';
 import { AccessView, accessSummary, type AccessDraft } from './AgentAccess';
+import { useSandboxStatus } from '../../hooks/useSandboxStatus';
 import { Switch } from './ListEditors';
 import form from './SettingsForm.module.css';
 import styles from './AgentBehaviorForm.module.css';
@@ -111,19 +112,25 @@ const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessD
   networkAccess: execution.sandbox?.networkAccess ?? null,
 });
 
-const executionFrom = (access: AccessDraft): ExecutionCapabilityConfig => ({
-  // Without a policy the backend applies this PC's default.
-  sandbox: {
+// Without a policy the backend applies this PC's default, so only
+// `networkAccess` may be missing.
+type SandboxDraft = Omit<ExecutionSandboxConfig, 'networkAccess'> & Partial<Pick<ExecutionSandboxConfig, 'networkAccess'>>;
+
+const executionFrom = (access: AccessDraft): ExecutionCapabilityConfig => {
+  const sandbox: SandboxDraft = {
     sessionBus: access.sessionBus ? 'allow' : 'deny',
     ...(access.networkAccess ? { networkAccess: access.networkAccess } : {}),
-  } as ExecutionSandboxConfig,
-  filesystem: { extraPaths: access.grants },
-  shell: {
-    mode: access.shellMode,
-    askFirstCommandPrefixes: access.askFirst,
-  },
-  web: { enabled: access.web },
-});
+  };
+  return {
+    sandbox: sandbox as ExecutionSandboxConfig,
+    filesystem: { extraPaths: access.grants },
+    shell: {
+      mode: access.shellMode,
+      askFirstCommandPrefixes: access.askFirst,
+    },
+    web: { enabled: access.web },
+  };
+};
 
 interface Draft {
   name: string;
@@ -214,6 +221,7 @@ export const AgentBehaviorForm = ({
   const [baseline, setBaseline] = useState<string | null>(null);
   const [view, setView] = useState<View>({ kind: 'overview' });
   const [skillQuery, setSkillQuery] = useState('');
+  const sandbox = useSandboxStatus();
 
   const isManager = agent?.isDefault === true;
   const canDelete = !saveBehavior && !isCreate && !isManager;
@@ -626,7 +634,7 @@ export const AgentBehaviorForm = ({
             </header>
             <div className={form.panelBody}>
               <ul className={styles.summary}>
-                {accessSummary(draft.access).map((line) => <li key={line}>{line}</li>)}
+                {accessSummary(draft.access, sandbox.status).map((line) => <li key={line}>{line}</li>)}
               </ul>
             </div>
           </section>

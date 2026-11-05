@@ -17,6 +17,7 @@ import type { SectionHandle } from './sectionHandle';
 import { parseHostEntry } from './AgentAccess';
 import { resetSandboxStatusForTests } from '../../hooks/useSandboxStatus';
 import { StaleAgentError } from '../../api/errors';
+import formStyles from './SettingsForm.module.css';
 import type { FilesystemPathGrant, NetworkPolicy, ProviderConnection, SandboxStatus } from '../../generated/bindings';
 
 const connection = (id: string, name: string, extra: Partial<ProviderConnection> = {}): ProviderConnection =>
@@ -487,6 +488,7 @@ describe('AgentBehaviorForm', () => {
       expect(await screen.findByText('Network: Allowlist (2 hosts)')).toBeInTheDocument();
       await openAccess();
 
+      expect(await screen.findByText('Allowed hosts · 2')).toBeInTheDocument();
       const input = await screen.findByRole('textbox', { name: 'New entry for allowed hosts' });
       const add = within(input.parentElement!).getByRole('button', { name: 'Add' });
       for (const [text, reason] of [
@@ -534,6 +536,51 @@ describe('AgentBehaviorForm', () => {
       renderForm({ agentId: 'agent-1' });
       await openAccess();
       expect(await screen.findByText(/Shell commands will not run until you choose Off or Host network/)).toBeInTheDocument();
+    });
+
+    it('says the network is not restricted without a sandbox, whatever mode is stored', async () => {
+      api.getSandboxStatus.mockResolvedValue(NO_SANDBOX);
+      renderForm({ agentId: 'agent-1' });
+      expect(await screen.findByText('Network: not restricted on this PC')).toBeInTheDocument();
+    });
+
+    it('marks the Host network hint as a warning and ties hints to their controls', async () => {
+      api.getSandboxStatus.mockResolvedValue(MACOS);
+      renderForm({ agentId: 'agent-1' });
+      await openAccess();
+      await waitFor(() => expect(networkButton('Off')).toBeEnabled());
+      const hint = screen.getByText(/including services on this computer/);
+      expect(hint).toHaveClass(formStyles.hintWarning!);
+      expect(screen.getByRole('group', { name: 'Network' })).toHaveAccessibleDescription(hint.textContent!);
+      expect(networkButton('Allowlist')).toHaveAccessibleDescription('Allowlist: Not available on macOS yet.');
+    });
+
+    it('says it is checking, and offers a retry when the status cannot be read', async () => {
+      api.getSandboxStatus.mockReturnValueOnce(new Promise(() => {}));
+      const first = renderForm({ agentId: 'agent-1' });
+      await openAccess();
+      expect(screen.getByText('Checking what this PC supports…')).toBeInTheDocument();
+      first.unmount();
+      resetSandboxStatusForTests();
+
+      api.getSandboxStatus.mockRejectedValue(new Error('ipc down'));
+      renderForm({ agentId: 'agent-1' });
+      await openAccess();
+      expect(await screen.findByText(/Could not check what this PC supports/)).toBeInTheDocument();
+      expect(networkButton('Off')).toBeDisabled();
+
+      api.getSandboxStatus.mockResolvedValue(LINUX);
+      await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+      await waitFor(() => expect(networkButton('Off')).toBeEnabled());
+      expect(screen.queryByText(/Could not check/)).toBeNull();
+    });
+
+    it('says this PC’s default applies when the defaults could not be loaded', async () => {
+      renderForm();
+      expect(await screen.findByText('Network: this PC’s default')).toBeInTheDocument();
+      await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
+      expect(screen.getByText('This PC’s default applies when you save.')).toBeInTheDocument();
+      expect(screen.queryByRole('group', { name: 'Network' })).toBeNull();
     });
 
     it('disables the whole control without a sandbox', async () => {

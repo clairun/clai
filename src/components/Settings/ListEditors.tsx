@@ -4,7 +4,7 @@
  * scrolls inside its panel if it ever outgrows it, the page never does.
  */
 
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import styles from './SettingsForm.module.css';
 
 export interface GrantLike {
@@ -130,15 +130,35 @@ export const PrefixListEditor = ({
 }) => {
   const [draft, setDraft] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const errorId = useId();
+  const list = useRef<HTMLUListElement>(null);
+  // The entry just added, scrolled into view once it arrives in `items`.
+  const added = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!added.current) return;
+    const item = Array.from(list.current?.children ?? []).find(
+      (child) => (child as HTMLElement).dataset.item === added.current,
+    );
+    added.current = null;
+    item?.scrollIntoView?.({ block: 'nearest' });
+  }, [items]);
 
   const add = () => {
+    if (!draft.trim()) return;
     const parsed = parse(draft);
     if (typeof parsed !== 'string') {
       setError(parsed.error);
       return;
     }
-    if (parsed && !items.includes(parsed)) onChange([...items, parsed]);
     setDraft('');
+    if (!parsed) return;
+    if (items.includes(parsed)) {
+      setError(`${parsed} is already in the list.`);
+      return;
+    }
+    added.current = parsed;
+    onChange([...items, parsed]);
   };
 
   return (
@@ -146,9 +166,9 @@ export const PrefixListEditor = ({
       {items.length === 0 ? (
         <p className={styles.listEmpty}>None.</p>
       ) : (
-        <ul className={styles.list} aria-label={label}>
+        <ul className={styles.list} aria-label={label} ref={list}>
           {items.map((item) => (
-            <li key={item} className={styles.listItem}>
+            <li key={item} className={styles.listItem} data-item={item}>
               <span className={styles.listItemText}>{item}</span>
               <button
                 type="button"
@@ -172,6 +192,7 @@ export const PrefixListEditor = ({
           placeholder={placeholder}
           aria-label={`New entry for ${label.toLowerCase()}`}
           aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
           disabled={disabled}
           spellCheck={false}
           onKeyDown={(e) => {
@@ -185,7 +206,7 @@ export const PrefixListEditor = ({
           Add
         </button>
       </div>
-      {error && <p className={styles.hintWarning} role="alert">{error}</p>}
+      {error && <p className={styles.hintWarning} role="alert" id={errorId}>{error}</p>}
     </>
   );
 };

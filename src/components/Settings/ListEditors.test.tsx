@@ -66,8 +66,33 @@ describe('PrefixListEditor', () => {
     const input = screen.getByRole('textbox', { name: 'New entry for ask first' });
 
     await userEvent.type(input, 'git push{Enter}');
+    expect(screen.getByRole('alert')).toHaveTextContent('git push is already in the list.');
+    expect(input).toHaveAccessibleDescription('git push is already in the list.');
     await userEvent.type(input, 'git    push{Enter}');
     expect(onChange).not.toHaveBeenCalled();
     expect(input).toHaveValue('');
+  });
+
+  it('does nothing on Enter in an empty field', async () => {
+    const onChange = vi.fn();
+    render(<PrefixListEditor items={[]} onChange={onChange} label="Hosts" placeholder="x" parse={() => ({ error: 'bad' })} />);
+
+    await userEvent.type(screen.getByRole('textbox', { name: 'New entry for hosts' }), '   {Enter}');
+    expect(onChange).not.toHaveBeenCalled();
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('scrolls a new entry into view', async () => {
+    const scrollIntoView = vi.fn();
+    Element.prototype.scrollIntoView = scrollIntoView;
+    const items = ['a', 'b', 'c'];
+    const onChange = vi.fn();
+    const { rerender } = render(<PrefixListEditor items={items} onChange={onChange} label="Hosts" placeholder="x" />);
+
+    await userEvent.type(screen.getByRole('textbox', { name: 'New entry for hosts' }), 'd{Enter}');
+    rerender(<PrefixListEditor items={onChange.mock.calls[0]![0]} onChange={onChange} label="Hosts" placeholder="x" />);
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    expect(scrollIntoView.mock.contexts[0]).toHaveTextContent('d');
   });
 });

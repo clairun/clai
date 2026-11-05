@@ -6,7 +6,7 @@
 
 import React, { useId } from 'react';
 import type { FilesystemPathGrant, GrantOrigin, NetworkMode, NetworkPolicy, SandboxStatus, ShellAccessMode } from '../../generated/bindings';
-import { useSandboxStatus } from '../../hooks/useSandboxStatus';
+import { useSandboxStatus, type SandboxStatusState } from '../../hooks/useSandboxStatus';
 import { PathGrantEditor, PrefixListEditor, Switch } from './ListEditors';
 import form from './SettingsForm.module.css';
 import styles from './AgentBehaviorForm.module.css';
@@ -142,70 +142,94 @@ export const grantOrigin = (grant: FilesystemPathGrant): { text: string; title?:
 };
 
 /** The overview's one-line answer to "what can it touch?". */
-export const accessSummary = (draft: AccessDraft): string[] => [
+export const accessSummary = (draft: AccessDraft, sandbox: SandboxStatus | null = null): string[] => [
   `Shell: ${SHELL_MODES.find((m) => m.mode === draft.shellMode)?.label ?? draft.shellMode}`,
   draft.grants.length ? plural(draft.grants.length, 'path') : 'No paths',
-  ...(draft.networkAccess ? [networkSummary(draft.networkAccess)] : []),
+  networkSummary(draft.networkAccess, sandbox),
   draft.web ? 'Web on' : 'Web off',
   draft.sessionBus ? 'Keyring on' : 'Keyring off',
 ];
 
-const networkSummary = (policy: NetworkPolicy): string => {
+const networkSummary = (policy: NetworkPolicy | null, sandbox: SandboxStatus | null): string => {
+  // Without a sandbox nothing is enforced, whatever mode is stored.
+  if (sandbox && !sandbox.available) return 'Network: not restricted on this PC';
+  if (!policy) return 'Network: this PC’s default';
   if (policy.mode === 'allowlist') return `Network: Allowlist (${plural(policy.allowDomains.length, 'host')})`;
   return policy.mode === 'off' ? 'Network: Off' : 'Network: Host network';
 };
 
 /** The network mode picker and, in Allowlist, the two host lists. */
-const NetworkSection = ({ policy, status, onChange, disabled, headingId }: {
+const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
   policy: NetworkPolicy;
-  status: SandboxStatus | null;
+  sandbox: SandboxStatusState;
   onChange: (policy: NetworkPolicy) => void;
   disabled?: boolean;
   headingId: string;
 }) => {
+  const { status, failed, retry } = sandbox;
   // Unknown until the backend answers; nothing is offered before that.
   const available = !!status?.available;
   const allowlistReason = status?.available && !status.allowlistAvailable
     ? status.allowlistUnavailableReason ?? 'Not available here'
     : null;
   const hint = NETWORK_MODES.find((m) => m.mode === policy.mode)?.hint;
+  const hintId = `${headingId}-hint`;
+  const reasonId = `${headingId}-reason`;
+
+  let statusHint: React.ReactNode;
+  if (failed) {
+    statusHint = (
+      <p className={form.hintWarning} id={hintId}>
+        Could not check what this PC supports.{' '}
+        <button type="button" className={form.linkButton} onClick={retry}>Retry</button>
+      </p>
+    );
+  } else if (!status) {
+    statusHint = <p className={form.hint} id={hintId}>Checking what this PC supports…</p>;
+  } else if (!status.available) {
+    statusHint = <p className={form.hint} id={hintId}>Not available on this PC.</p>;
+  } else {
+    statusHint = (
+      <p className={policy.mode === 'host_network' ? form.hintWarning : form.hint} id={hintId}>{hint}</p>
+    );
+  }
 
   return (
     <>
       <h4 className={styles.subheading} id={headingId}>Network</h4>
-      <div className={form.segmented} role="group" aria-labelledby={headingId}>
-        {NETWORK_MODES.map(({ mode, label }) => (
-          <button
-            key={mode}
-            type="button"
-            className={form.segment}
-            aria-pressed={policy.mode === mode}
-            onClick={() => onChange({ ...policy, mode })}
-            disabled={disabled || !available || (mode === 'allowlist' && !!allowlistReason)}
-            title={mode === 'allowlist' ? allowlistReason ?? undefined : undefined}
-          >
-            {label}
-          </button>
-        ))}
+      <div className={form.segmented} role="group" aria-labelledby={headingId} aria-describedby={hintId}>
+        {NETWORK_MODES.map(({ mode, label }) => {
+          const unavailable = mode === 'allowlist' && !!allowlistReason;
+          return (
+            <button
+              key={mode}
+              type="button"
+              className={form.segment}
+              aria-pressed={policy.mode === mode}
+              onClick={() => onChange({ ...policy, mode })}
+              disabled={disabled || !available || unavailable}
+              title={unavailable ? allowlistReason ?? undefined : undefined}
+              aria-describedby={unavailable ? reasonId : undefined}
+            >
+              {label}
+            </button>
+          );
+        })}
       </div>
-      {status && !status.available ? (
-        <p className={form.hint}>Not available on this PC.</p>
-      ) : (
-        <p className={form.hint}>{hint}</p>
-      )}
+      {statusHint}
       {allowlistReason && (
         policy.mode === 'allowlist' ? (
-          <p className={form.hintWarning}>
+          <p className={form.hintWarning} id={reasonId}>
             Allowlist: {allowlistReason}. Shell commands will not run until you choose Off or Host network.
           </p>
         ) : (
-          <p className={form.hint}>Allowlist: {allowlistReason}.</p>
+          <p className={form.hint} id={reasonId}>Allowlist: {allowlistReason}.</p>
         )
       )}
       {available && policy.mode === 'allowlist' && (
         <div className={styles.prefixColumns}>
           <div className={styles.prefixList}>
-            <span className={form.label}>Allowed hosts</span>
+            <span className={form.label}>Allowed hosts · {policy.allowDomains.length}</span>
             <p className={form.hint}>
               <code className={form.code}>*.example.com</code> matches its subdomains, not example.com itself.
             </p>
@@ -219,7 +243,7 @@ const NetworkSection = ({ policy, status, onChange, disabled, headingId }: {
             />
           </div>
           <div className={styles.prefixList}>
-            <span className={form.label}>Denied hosts</span>
+            <span className={form.label}>Denied hosts · {policy.denyDomains.length}</span>
             <p className={form.hint}>Checked first, so they win over an allowed entry.</p>
             <PrefixListEditor
               items={policy.denyDomains}
@@ -271,14 +295,19 @@ export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, cont
             disabled={disabled}
             label="Path grants"
           />
-          {draft.networkAccess && (
+          {draft.networkAccess ? (
             <NetworkSection
               policy={draft.networkAccess}
-              status={sandboxStatus}
+              sandbox={sandboxStatus}
               onChange={(networkAccess) => onChange({ networkAccess })}
               disabled={disabled}
               headingId={`${headingId}-network`}
             />
+          ) : (
+            <>
+              <h4 className={styles.subheading}>Network</h4>
+              <p className={form.hint}>This PC’s default applies when you save.</p>
+            </>
           )}
         </div>
 
