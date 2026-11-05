@@ -25,6 +25,10 @@ pub struct RefusedTargets {
 }
 
 impl RefusedTargets {
+    #[cfg_attr(
+        not(any(test, target_os = "linux")),
+        expect(dead_code, reason = "only the Linux network proxy calls it")
+    )]
     pub fn add(&mut self, target: String) {
         if self.targets.contains(&target) {
             return;
