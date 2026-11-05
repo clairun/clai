@@ -130,6 +130,7 @@ export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathG
   return (
     <article
       ref={ref}
+      tabIndex={-1}
       className={spoken ? `${styles.card} ${styles.spoken}` : styles.card}
       aria-label={requester ? `Path grant requested by ${requester.name}` : 'Path grant requested'}
     >
@@ -317,15 +318,20 @@ const InlinePathGrantCard = ({
   roster?: readonly WorkspaceAgentResponse[];
   /** The workspace's tasks, to find an agent removed from the roster mid-task. */
   loadedTasks?: () => readonly WorkspaceTaskResponse[];
-}) => (
-  <PendingRequestStack
-    workspaceId={workspaceId}
-    source={PATH_GRANT_REQUESTS}
-    className={styles.stack}
-    renderCard={(req, card) => (
-      <PathGrantCard {...card} req={req} requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])} />
-    )}
-  />
-);
+}) => {
+  const requester = (req: { agentId: string | null }) => requestingAgent(req.agentId, roster, loadedTasks?.() ?? []);
+  const requesterName = (req: { agentId: string | null }) => requester(req)?.name ?? 'An agent';
+  return (
+    <PendingRequestStack
+      workspaceId={workspaceId}
+      source={PATH_GRANT_REQUESTS}
+      className={styles.stack}
+      announce={(req) =>
+        `${requesterName(req)} wants ${req.requestedAccess === 'read_write' ? 'read and write' : 'read'} access to ${req.requestedPath}.`
+      }
+      renderCard={(req, card) => <PathGrantCard {...card} req={req} requester={requester(req)} />}
+    />
+  );
+};
 
 export default InlinePathGrantCard;

@@ -100,6 +100,7 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
   return (
     <article
       ref={ref}
+      tabIndex={-1}
       className={spoken ? `${styles.card} ${styles.spoken}` : styles.card}
       aria-label={requester ? `Network access requested by ${requester.name}` : 'Network access requested'}
     >
@@ -231,15 +232,18 @@ const InlineNetworkAccessCard = ({
   roster?: readonly WorkspaceAgentResponse[];
   /** The workspace's tasks, to find an agent removed from the roster mid-task. */
   loadedTasks?: () => readonly WorkspaceTaskResponse[];
-}) => (
-  <PendingRequestStack
-    workspaceId={workspaceId}
-    source={NETWORK_ACCESS_REQUESTS}
-    className={styles.stack}
-    renderCard={(req, card) => (
-      <NetworkAccessCard {...card} req={req} requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])} />
-    )}
-  />
-);
+}) => {
+  const requester = (req: { agentId: string | null }) => requestingAgent(req.agentId, roster, loadedTasks?.() ?? []);
+  const requesterName = (req: { agentId: string | null }) => requester(req)?.name ?? 'An agent';
+  return (
+    <PendingRequestStack
+      workspaceId={workspaceId}
+      source={NETWORK_ACCESS_REQUESTS}
+      className={styles.stack}
+      announce={(req) => `${requesterName(req)} wants network access to ${hostWithPort(req)}.`}
+      renderCard={(req, card) => <NetworkAccessCard {...card} req={req} requester={requester(req)} />}
+    />
+  );
+};
 
 export default InlineNetworkAccessCard;

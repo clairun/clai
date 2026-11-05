@@ -287,9 +287,13 @@ describe('ApprovalCard — spoken (the Fleet)', () => {
 });
 
 describe('InlineApprovalCard', () => {
-  it('renders nothing until a request for this workspace arrives', () => {
-    const { container } = render(<InlineApprovalCard workspaceId="ws-1" />);
-    expect(container).toBeEmptyDOMElement();
+  it('draws no card until a request for this workspace arrives, then names who asked', async () => {
+    render(<InlineApprovalCard workspaceId="ws-1" />);
+    expect(screen.queryByRole('article')).toBeNull();
+    expect(screen.getByRole('status')).toBeEmptyDOMElement();
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+    fireRequest(PUSH);
+    expect(screen.getByRole('status')).toHaveTextContent('An agent wants to run a command on your ask-first list.');
   });
 
   it('renders a card when a matching request fires, and ignores other workspaces', async () => {

@@ -159,6 +159,7 @@ describe('InlineNetworkAccessCard', () => {
     await waitFor(() => expect(listenHandlers['network-access://resolved']).toBeDefined());
     fire('network-access://request', request());
     expect(screen.getByRole('article', { name: 'Network access requested' })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('An agent wants network access to mirror.example.org:443.');
     fire('network-access://resolved', { requestId: 'net-1' });
     expect(screen.queryByRole('article')).not.toBeInTheDocument();
   });

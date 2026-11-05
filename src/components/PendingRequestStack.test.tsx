@@ -41,8 +41,9 @@ const Stack = ({ workspaceId }: { workspaceId: string | null }) => (
   <PendingRequestStack
     workspaceId={workspaceId}
     source={SOURCE}
+    announce={(req) => `${req.text} arrived.`}
     renderCard={(req, card) => (
-      <article ref={card.ref} aria-label={req.text}>
+      <article ref={card.ref} tabIndex={-1} aria-label={req.text}>
         <button type="button" onClick={() => card.onDecided(req.requestId)}>
           Answer {req.requestId}
         </button>
@@ -137,6 +138,89 @@ describe('PendingRequestStack', () => {
     expect(cards()).toEqual([]);
     expect(list).not.toHaveBeenCalled();
     expect(listeners).toEqual([]);
+  });
+
+  it('says who asked in a status region that is there before the first card', async () => {
+    render(<Stack workspaceId="ws-1" />);
+    const status = screen.getByRole('status');
+    expect(status).toBeEmptyDOMElement();
+    await subscribed();
+
+    fireRequest(ping('a'));
+    expect(status).toHaveTextContent(/^ping a arrived\.$/);
+    expect(screen.getByRole('article')).not.toContainElement(status);
+    fireRequest(ping('b'));
+    expect(status).toHaveTextContent(/^ping b arrived\.$/);
+    // A request that has left is not announced again.
+    fireResolved('b');
+    expect(status).toBeEmptyDOMElement();
+  });
+
+  it('announces every request the seed brings', async () => {
+    list.mockResolvedValue([ping('a'), ping('b')]);
+    render(<Stack workspaceId="ws-1" />);
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent(/^ping a arrived\. ping b arrived\.$/));
+  });
+
+  it('moves focus to the card that takes the place of the decided one', async () => {
+    list.mockResolvedValue([ping('a'), ping('b'), ping('c')]);
+    render(<Stack workspaceId="ws-1" />);
+    await waitFor(() => expect(cards()).toHaveLength(3));
+
+    await userEvent.click(screen.getByRole('button', { name: 'Answer b' }));
+    expect(screen.getByRole('article', { name: 'ping c' })).toHaveFocus();
+    await userEvent.click(screen.getByRole('button', { name: 'Answer c' }));
+    expect(screen.getByRole('article', { name: 'ping a' })).toHaveFocus();
+  });
+
+  it('moves focus to a card in another stack once this one is empty', async () => {
+    render(
+      <>
+        <Stack workspaceId="ws-1" />
+        <div data-request-stack="">
+          <article tabIndex={-1} aria-label="other kind" />
+        </div>
+      </>,
+    );
+    await subscribed();
+    fireRequest(ping('a'));
+    await userEvent.click(screen.getByRole('button', { name: 'Answer a' }));
+    expect(screen.getByRole('article', { name: 'other kind' })).toHaveFocus();
+  });
+
+  it('leaves focus alone when a card leaves because it was answered elsewhere, or the user moved on', async () => {
+    let accept: () => void = () => {};
+    render(
+      <>
+        <input aria-label="Message" />
+        <PendingRequestStack
+          workspaceId="ws-1"
+          source={SOURCE}
+          announce={(req) => req.text}
+          renderCard={(req, card) => (
+            <article ref={card.ref} tabIndex={-1} aria-label={req.text}>
+              <button type="button" onClick={() => (accept = () => card.onDecided(req.requestId))}>
+                Answer {req.requestId}
+              </button>
+            </article>
+          )}
+        />
+      </>,
+    );
+    await subscribed();
+    fireRequest(ping('a'));
+    fireRequest(ping('b'));
+    fireRequest(ping('c'));
+    const message = screen.getByRole('textbox', { name: 'Message' });
+
+    message.focus();
+    fireResolved('a');
+    expect(message).toHaveFocus();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Answer b' }));
+    message.focus();
+    act(() => accept());
+    expect(message).toHaveFocus();
   });
 
   it('scrolls the first card into view on the first arrival only', async () => {
