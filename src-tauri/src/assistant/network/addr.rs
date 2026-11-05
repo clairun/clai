@@ -103,6 +103,10 @@ const AWS_IPV6_METADATA: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0,
 /// allowlist says: loopback, link-local (cloud metadata included),
 /// unspecified, multicast and AWS's IPv6 metadata address. Private LAN
 /// ranges stay reachable, since the user may list a host that lives there.
+#[cfg_attr(
+    not(any(test, target_os = "linux")),
+    expect(dead_code, reason = "only the Linux network proxy calls it")
+)]
 pub(crate) fn is_proxy_forbidden_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_proxy_forbidden_ipv4(ip),
