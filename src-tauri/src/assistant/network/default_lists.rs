@@ -128,6 +128,13 @@ pub const DEFAULT_ALLOW_DOMAINS: &[&str] = &[
 /// Cloud hosts that accept uploads or serve anyone's endpoint, refused even
 /// when a user adds a broad entry such as `*.amazonaws.com` to the allow
 /// list. Checked before the allow list.
+///
+/// Best effort, not full coverage: the known upload endpoints that entries
+/// can express. Known gaps under a whole-provider entry: legacy S3 names
+/// such as `s3-us-west-2.amazonaws.com` (a label prefix, which entries cannot
+/// express), and services that accept anyone's writes once their owner
+/// allows it, such as SQS (`sqs.<region>.amazonaws.com`) and SNS
+/// (`sns.<region>.amazonaws.com`).
 pub const DEFAULT_DENY_DOMAINS: &[&str] = &[
     // S3, global and per bucket
     "s3.amazonaws.com",
@@ -142,6 +149,13 @@ pub const DEFAULT_DENY_DOMAINS: &[&str] = &[
     "*.s3-accelerate.amazonaws.com",
     "s3-accelerate.dualstack.amazonaws.com",
     "*.s3-accelerate.dualstack.amazonaws.com",
+    // S3, FIPS endpoints and access points
+    "s3-fips.*.amazonaws.com",
+    "*.s3-fips.*.amazonaws.com",
+    "s3-fips.dualstack.*.amazonaws.com",
+    "*.s3-fips.dualstack.*.amazonaws.com",
+    "*.s3-accesspoint.*.amazonaws.com",
+    "*.s3-accesspoint.dualstack.*.amazonaws.com",
     // API Gateway: any account's API, so any receiver
     "*.execute-api.*.amazonaws.com",
     // Google Cloud Storage

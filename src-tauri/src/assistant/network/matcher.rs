@@ -316,7 +316,8 @@ mod tests {
         }
     }
 
-    /// A user who adds a whole provider still cannot reach its storage.
+    /// A user who adds a whole provider still cannot reach the storage
+    /// endpoints the deny list names (best effort, see its doc).
     #[test]
     fn the_default_deny_list_covers_s3_and_gcs_under_a_broad_allow_entry() {
         let allow = ["*.amazonaws.com", "*.googleapis.com"];
@@ -341,6 +342,27 @@ mod tests {
             (
                 "bucket.s3-accelerate.dualstack.amazonaws.com",
                 "*.s3-accelerate.dualstack.amazonaws.com",
+            ),
+            ("s3-fips.us-east-1.amazonaws.com", "s3-fips.*.amazonaws.com"),
+            (
+                "bucket.s3-fips.us-east-1.amazonaws.com",
+                "*.s3-fips.*.amazonaws.com",
+            ),
+            (
+                "s3-fips.dualstack.us-east-1.amazonaws.com",
+                "s3-fips.dualstack.*.amazonaws.com",
+            ),
+            (
+                "bucket.s3-fips.dualstack.us-east-1.amazonaws.com",
+                "*.s3-fips.dualstack.*.amazonaws.com",
+            ),
+            (
+                "ap-123456789012.s3-accesspoint.us-east-1.amazonaws.com",
+                "*.s3-accesspoint.*.amazonaws.com",
+            ),
+            (
+                "ap-123456789012.s3-accesspoint.dualstack.us-east-1.amazonaws.com",
+                "*.s3-accesspoint.dualstack.*.amazonaws.com",
             ),
             (
                 "abc123.execute-api.us-east-1.amazonaws.com",
