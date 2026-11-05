@@ -1066,7 +1066,6 @@ async fn execute_net_request_access(
         context.run_network.host_log(),
     );
     let decision = await_network_access_decision(deps, context, request).await?;
-    context.note_warning();
     apply_network_decision(context, &host, decision)
 }
 
@@ -1113,7 +1112,8 @@ fn requested_host(
 
 /// Applies the user's answer to the run: an allowed host or entry joins
 /// the run's lists at once (an “Always” entry is already saved on the
-/// agent); a denial is the tool error.
+/// agent); a denial is the tool error and, as for ask-first, the run's
+/// warning.
 fn apply_network_decision(
     context: &ToolExecutionContext,
     host: &str,
@@ -1125,6 +1125,7 @@ fn apply_network_decision(
         NetworkAccessDecision::AllowRun => (host.to_string(), "run"),
         NetworkAccessDecision::AllowAlways { entry } => (entry, "always"),
         NetworkAccessDecision::Deny { reason } => {
+            context.note_warning();
             return Err(network_denied_message(host, reason.as_deref()));
         }
     };
@@ -2191,6 +2192,7 @@ mod tests {
             context.run_network.decide("secret.example.org"),
             HostDecision::Denied { .. }
         ));
+        assert!(!context.had_warnings(), "an allow is not a warning");
 
         let error = apply_network_decision(
             &context,
@@ -2203,6 +2205,10 @@ mod tests {
         assert_eq!(
             error,
             "User denied network access to `other.example.com`. Reason: not needed."
+        );
+        assert!(
+            context.had_warnings(),
+            "a denial ends the run with warnings"
         );
         assert_eq!(
             context.run_network.decide("other.example.com"),
