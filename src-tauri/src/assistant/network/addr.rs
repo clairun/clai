@@ -57,26 +57,17 @@ fn is_private_web_fetch_ipv4(ip: Ipv4Addr) -> bool {
 }
 
 fn is_private_web_fetch_ipv6(ip: Ipv6Addr) -> bool {
-    if let Some(mapped) = ip.to_ipv4_mapped() {
-        return is_private_web_fetch_ipv4(mapped);
+    if let Some(embedded) = embedded_ipv4(ip) {
+        return is_private_web_fetch_ipv4(embedded);
     }
 
     let octets = ip.octets();
     let segments = ip.segments();
 
-    // NAT64: the well-known prefix 64:ff9b::/96 embeds a target IPv4 in the
-    // low 32 bits, so `64:ff9b::7f00:1` would reach 127.0.0.1. Extract and
-    // apply the IPv4 blocklist rather than trusting the v6 literal. The
-    // local-use prefix 64:ff9b:1::/48 (RFC 8215) is site-internal by
-    // definition, so block it wholesale.
-    if segments[0] == 0x0064 && segments[1] == 0xff9b {
-        if segments[2] == 0x0001 {
-            return true;
-        }
-        if segments[2] == 0 && segments[3] == 0 && segments[4] == 0 && segments[5] == 0 {
-            let embedded = std::net::Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
-            return is_private_web_fetch_ipv4(embedded);
-        }
+    // The NAT64 local-use prefix 64:ff9b:1::/48 (RFC 8215) is site-internal
+    // by definition, so block it wholesale.
+    if segments[..3] == [0x0064, 0xff9b, 0x0001] {
+        return true;
     }
 
     ip.is_loopback()
@@ -89,6 +80,22 @@ fn is_private_web_fetch_ipv6(ip: Ipv6Addr) -> bool {
         || segments[0] == 0x2002
 }
 
+/// The IPv4 address an IPv6 one reaches: an IPv4-mapped address, or one
+/// under the NAT64 well-known prefix 64:ff9b::/96, whose low 32 bits are the
+/// address a translator connects to (`64:ff9b::7f00:1` reaches 127.0.0.1).
+/// Both filters judge the embedded address, not the IPv6 literal.
+fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+    if let Some(mapped) = ip.to_ipv4_mapped() {
+        return Some(mapped);
+    }
+    let [a, b, c, d, e, f, ..] = ip.segments();
+    if [a, b, c, d, e, f] != [0x0064, 0xff9b, 0, 0, 0, 0] {
+        return None;
+    }
+    let [.., w, x, y, z] = ip.octets();
+    Some(Ipv4Addr::new(w, x, y, z))
+}
+
 /// AWS's IPv6 instance metadata endpoint.
 const AWS_IPV6_METADATA: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254);
 
@@ -96,15 +103,11 @@ const AWS_IPV6_METADATA: Ipv6Addr = Ipv6Addr::new(0xfd00, 0x0ec2, 0, 0, 0, 0, 0,
 /// allowlist says: loopback, link-local (cloud metadata included),
 /// unspecified, multicast and AWS's IPv6 metadata address. Private LAN
 /// ranges stay reachable, since the user may list a host that lives there.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the proxy, added later, calls it")
-)]
 pub(crate) fn is_proxy_forbidden_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(ip) => is_proxy_forbidden_ipv4(ip),
-        IpAddr::V6(ip) => match ip.to_ipv4_mapped() {
-            Some(mapped) => is_proxy_forbidden_ipv4(mapped),
+        IpAddr::V6(ip) => match embedded_ipv4(ip) {
+            Some(embedded) => is_proxy_forbidden_ipv4(embedded),
             None => {
                 ip.is_loopback()
                     || ip.is_unspecified()
@@ -206,6 +209,8 @@ mod tests {
             "::",
             "::ffff:127.0.0.1",
             "::ffff:169.254.169.254",
+            "64:ff9b::7f00:1",
+            "64:ff9b::a9fe:a9fe",
             "fe80::1",
             "ff02::1",
             "fd00:ec2::254",
@@ -225,6 +230,7 @@ mod tests {
             "fd00::1",
             "2606:4700:4700::1111",
             "::ffff:10.0.0.1",
+            "64:ff9b::808:808",
         ] {
             assert!(!is_proxy_forbidden_ip(ip.parse().unwrap()), "{ip}");
         }

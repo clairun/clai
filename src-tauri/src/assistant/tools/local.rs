@@ -990,44 +990,14 @@ fn check_web_host(gate: WebGate<'_>, host: &str, port: Option<u16>) -> Result<()
         return Ok(());
     };
     let decision = network.decide(host);
-    let allowed = decision == HostDecision::Allowed;
-    network.record(host, port, allowed);
-    match decision {
-        HostDecision::Allowed => Ok(()),
-        HostDecision::Denied { entry } => Err(denied_host_message(host, &entry)),
-        HostDecision::InvalidDenyEntry { entry, reason } => {
-            Err(invalid_deny_entry_message(&entry, reason))
-        }
-        HostDecision::Unlisted => Err(unlisted_host_message(
-            host,
-            crate::assistant::sandbox::status().allowlist_available,
-        )),
+    network.record(host, port, decision == HostDecision::Allowed);
+    match decision.refusal(
+        host,
+        crate::assistant::sandbox::status().allowlist_available,
+    ) {
+        None => Ok(()),
+        Some(refusal) => Err(refusal),
     }
-}
-
-fn denied_host_message(host: &str, entry: &str) -> String {
-    format!(
-        "`{host}` is on this agent's network deny list (entry `{entry}`). The user can change \
-         the list in the agent's Access settings."
-    )
-}
-
-fn invalid_deny_entry_message(entry: &str, reason: &str) -> String {
-    format!(
-        "This agent's network deny list has an invalid entry `{entry}` ({reason}), so every \
-         host is refused until the user fixes or removes it in the agent's Access settings."
-    )
-}
-
-/// Points at `net_request_access` only where it is offered.
-fn unlisted_host_message(host: &str, can_ask: bool) -> String {
-    let way_out = if can_ask {
-        "Call `net_request_access` to ask the user, or they can add it in the agent's Access \
-         settings."
-    } else {
-        "The user can add it in the agent's Access settings."
-    };
-    format!("`{host}` is not on this agent's network allowlist. {way_out}")
 }
 
 // =============================================================================
@@ -1102,11 +1072,8 @@ fn requested_host(
     let host = entry.normalized();
     match network.decide(&host) {
         HostDecision::Allowed => Ok(None),
-        HostDecision::Denied { entry } => Err(denied_host_message(&host, &entry)),
-        HostDecision::InvalidDenyEntry { entry, reason } => {
-            Err(invalid_deny_entry_message(&entry, reason))
-        }
         HostDecision::Unlisted => Ok(Some(host)),
+        refused => Err(refused.refusal(&host, true).unwrap_or_default()),
     }
 }
 
@@ -2252,14 +2219,6 @@ mod tests {
         assert_eq!(cleared.load(Ordering::SeqCst), 1);
         drop(guard);
         assert_eq!(cleared.load(Ordering::SeqCst), 1, "cleared once");
-    }
-
-    #[test]
-    fn an_unlisted_host_points_at_the_request_tool_only_where_it_is_offered() {
-        assert!(unlisted_host_message("example.org", true).contains("net_request_access"));
-        let elsewhere = unlisted_host_message("example.org", false);
-        assert!(!elsewhere.contains("net_request_access"), "{elsewhere}");
-        assert!(elsewhere.contains("Access settings"), "{elsewhere}");
     }
 
     #[tokio::test]

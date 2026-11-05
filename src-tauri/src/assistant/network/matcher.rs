@@ -29,6 +29,37 @@ pub enum HostDecision {
     },
 }
 
+impl HostDecision {
+    /// Why `host` is refused, in the words the web tools and the network
+    /// proxy give the agent; `None` when it is allowed. `can_ask` says
+    /// whether `net_request_access` is offered to the agent.
+    pub fn refusal(&self, host: &str, can_ask: bool) -> Option<String> {
+        match self {
+            Self::Allowed => None,
+            Self::Denied { entry } => Some(format!(
+                "`{host}` is on this agent's network deny list (entry `{entry}`). The user can \
+                 change the list in the agent's Access settings."
+            )),
+            Self::InvalidDenyEntry { entry, reason } => Some(format!(
+                "This agent's network deny list has an invalid entry `{entry}` ({reason}), so \
+                 every host is refused until the user fixes or removes it in the agent's Access \
+                 settings."
+            )),
+            Self::Unlisted => {
+                let way_out = if can_ask {
+                    "Call `net_request_access` to ask the user, or they can add it in the \
+                     agent's Access settings."
+                } else {
+                    "The user can add it in the agent's Access settings."
+                };
+                Some(format!(
+                    "`{host}` is not on this agent's network allowlist. {way_out}"
+                ))
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Host {
     Domain(String),
@@ -741,5 +772,27 @@ mod tests {
         );
         assert_eq!(canonical_host("a..com"), None);
         assert_eq!(canonical_host(""), None);
+    }
+
+    #[test]
+    fn a_refusal_names_the_host_and_the_way_out() {
+        assert_eq!(HostDecision::Allowed.refusal("github.com", true), None);
+        let unlisted = HostDecision::Unlisted.refusal("example.org", true).unwrap();
+        assert!(unlisted.contains("`example.org`") && unlisted.contains("net_request_access"));
+        let elsewhere = HostDecision::Unlisted
+            .refusal("example.org", false)
+            .unwrap();
+        assert!(!elsewhere.contains("net_request_access"), "{elsewhere}");
+        assert!(elsewhere.contains("Access settings"), "{elsewhere}");
+        let denied = HostDecision::Denied {
+            entry: "*.s3.amazonaws.com".to_string(),
+        }
+        .refusal("b.s3.amazonaws.com", true)
+        .unwrap();
+        assert!(
+            denied.contains("deny list (entry `*.s3.amazonaws.com`)"),
+            "{denied}"
+        );
+        assert!(!denied.contains("net_request_access"), "{denied}");
     }
 }
