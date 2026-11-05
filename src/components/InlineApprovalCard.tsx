@@ -1,5 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useState, type ReactNode, type Ref } from 'react';
 import { listPendingPermissionRequests, submitPermissionDecision } from '../permissions/client';
 import type {
   AskFirstDecision,
@@ -13,12 +12,10 @@ import RequestingAgent from './Agents/RequestingAgent';
 import { chipText, listOf, quoted } from './requestChips';
 import { DenyReasonPanel, useDenial } from './DenyReasonPanel';
 import { useDecisionSender } from './useDecisionSender';
+import { PendingRequestStack, type PendingRequestSource } from './PendingRequestStack';
 import styles from './InlineApprovalCard.module.css';
 
 const PERMISSION_REQUEST_EVENT = 'permissions://request';
-// A pending request left the queue: a decision (here or in another view), a
-// cancelled or ended run, or a re-asked command superseded it. Drop the
-// card. Payload: { requestId }.
 const PERMISSION_RESOLVED_EVENT = 'permissions://resolved';
 
 
@@ -225,18 +222,16 @@ export const ApprovalCard = ({ req, speaker, requester, workspaceName, onDecided
   );
 };
 
+const PERMISSION_REQUESTS: PendingRequestSource<PermissionRequest> = {
+  list: listPendingPermissionRequests,
+  requestEvent: PERMISSION_REQUEST_EVENT,
+  resolvedEvent: PERMISSION_RESOLVED_EVENT,
+  isRequest: (req) => Array.isArray(req.rows),
+};
+
 /**
- * Inline permission-approval UI, rendered directly inside a workspace's
- * conversation view. Replaces the previous app-global modal: each
- * approval card now sits adjacent to the chat that produced it, so the
- * cause/effect is obvious and a pending request in workspace B no
- * longer hijacks the screen while the user is reading workspace A.
- *
- * Mount once per conversation render with the workspace's id. The
- * component subscribes to `permissions://request` events, filters by
- * workspaceId, and renders one card per pending request. A floating
- * chip near the input bar surfaces the count whenever there are
- * pending requests, with click-to-scroll into view.
+ * The workspace's pending ask-first requests, each a card beside the chat
+ * that produced it, so a request in workspace B never covers workspace A.
  */
 const InlineApprovalCard = ({
   workspaceId,
@@ -248,117 +243,15 @@ const InlineApprovalCard = ({
   roster?: readonly WorkspaceAgentResponse[];
   /** The workspace's tasks, to find an agent removed from the roster mid-task. */
   loadedTasks?: () => readonly WorkspaceTaskResponse[];
-}) => {
-  const [requests, setRequests] = useState<PermissionRequest[]>([]);
-  const firstCardRef = useRef<HTMLElement | null>(null);
-  const previousCountRef = useRef(0);
-
-  // Subscribe to backend approval-request events AND seed from the
-  // backend's pending list on mount. The seed catches requests that
-  // were registered before this component subscribed (e.g., the user
-  // navigated here after the original event fired). The listener
-  // catches new requests as they arrive. We dedupe by request_id so
-  // the seed and an in-flight event for the same request don't
-  // double-add.
-  useEffect(() => {
-    // Switching workspaces reuses this component instance — the Workspace
-    // page does NOT remount on workspace→workspace navigation — so any
-    // requests still held from the previous workspace must be dropped
-    // before we seed/subscribe for the new one. Without this, workspace
-    // A's pending approval card leaks into workspace B's view (it lingers
-    // until A's request happens to resolve). Clearing here keys the card's
-    // per-workspace state to workspaceId.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- subscription+seed effect: clear stale per-workspace state on workspaceId change (component instance is reused across workspace navigation), then seed from pending list and subscribe to backend events. Effect is required for the listener registration + cleanup; the lint rule cannot model the seed/listen interaction.
-    setRequests([]);
-    previousCountRef.current = 0;
-
-    if (!workspaceId) return undefined;
-
-    let cancelled = false;
-
-    // Seed from existing pending requests for this workspace.
-    listPendingPermissionRequests(workspaceId)
-      .then((pending) => {
-        if (cancelled || !Array.isArray(pending) || pending.length === 0) return;
-        setRequests((current) => {
-          const known = new Set(current.map((q) => q.requestId));
-          const additions = pending.filter((p) => !known.has(p.requestId));
-          if (additions.length === 0) return current;
-          return [...current, ...additions];
-        });
-      })
-      .catch(() => {
-        // Non-fatal: events will still populate as requests arrive.
-      });
-
-    const unlistenPromise = listen<PermissionRequest>(PERMISSION_REQUEST_EVENT, (event) => {
-      // The Tauri unlisten in the cleanup below is async — after a
-      // workspace switch this stale listener can still fire before it
-      // detaches, and its closure-captured workspaceId matches the OLD
-      // workspace, so the `req.workspaceId !== workspaceId` filter would
-      // pass and leak workspace A's card into the (reused) component now
-      // showing workspace B. The cancelled flag is the synchronous guard.
-      if (cancelled) return;
-      const req = event.payload;
-      if (!req || !req.requestId || !Array.isArray(req.rows)) return;
-      if (req.workspaceId !== workspaceId) return;
-      setRequests((current) => {
-        if (current.some((q) => q.requestId === req.requestId)) return current;
-        return [...current, req];
-      });
-    });
-
-    // Remove the card once its request leaves the queue. requestId
-    // is globally unique, so no workspace filter is needed — if it isn't in
-    // this card's list, the filter is a no-op.
-    const unlistenResolvedPromise = listen<{ requestId?: string }>(
-      PERMISSION_RESOLVED_EVENT,
-      (event) => {
-        if (cancelled) return;
-        const requestId = event.payload?.requestId;
-        if (!requestId) return;
-        setRequests((current) => current.filter((q) => q.requestId !== requestId));
-      },
-    );
-
-    return () => {
-      cancelled = true;
-      unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
-      unlistenResolvedPromise.then((unlisten) => unlisten()).catch(() => {});
-    };
-  }, [workspaceId]);
-
-  // Auto-scroll into view on first arrival (0 → 1+ transition only —
-  // we don't yank the page back every time a subsequent request lands).
-  useEffect(() => {
-    const prev = previousCountRef.current;
-    const next = requests.length;
-    previousCountRef.current = next;
-    if (prev === 0 && next > 0 && firstCardRef.current) {
-      firstCardRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  }, [requests.length]);
-
-  if (requests.length === 0) {
-    return null;
-  }
-
-  const dismissRequest = (requestId: string) =>
-    setRequests((current) => current.filter((q) => q.requestId !== requestId));
-
-  return (
-    <div className={styles.stack} aria-live="polite">
-      {requests.map((req, cardIndex) => (
-        <ApprovalCard
-          key={req.requestId}
-          ref={cardIndex === 0 ? firstCardRef : null}
-          req={req}
-          requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])}
-          onDecided={dismissRequest}
-        />
-      ))}
-    </div>
-  );
-};
+}) => (
+  <PendingRequestStack
+    workspaceId={workspaceId}
+    source={PERMISSION_REQUESTS}
+    className={styles.stack}
+    renderCard={(req, card) => (
+      <ApprovalCard {...card} req={req} requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])} />
+    )}
+  />
+);
 
 export default InlineApprovalCard;

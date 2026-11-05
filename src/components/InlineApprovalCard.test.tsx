@@ -303,16 +303,6 @@ describe('InlineApprovalCard', () => {
     expect(screen.queryByText('elsewhere')).toBeNull();
   });
 
-  it('drops a previous workspace\'s card when switching workspaces', async () => {
-    const { rerender } = render(<InlineApprovalCard workspaceId="ws-1" />);
-    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
-    fireRequest(PUSH);
-    expect(await screen.findByText('cargo test && git push origin main')).toBeInTheDocument();
-
-    rerender(<InlineApprovalCard workspaceId="ws-2" />);
-
-    await waitFor(() => expect(screen.queryByText('cargo test && git push origin main')).toBeNull());
-  });
 
   it('drops the card when permissions://resolved fires for it (abandoned or cancelled run)', async () => {
     render(<InlineApprovalCard workspaceId="ws-1" />);

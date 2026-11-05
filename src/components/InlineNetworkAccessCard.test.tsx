@@ -1,13 +1,19 @@
 import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import type { NetworkAccessRequest, WorkspaceAgentResponse } from '../generated/bindings';
 import { rosterAgent } from './AssistantChat/messageSender';
 
 const mockInvoke = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
-vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(() => {})) }));
+const listenHandlers = vi.hoisted(() => ({}) as Record<string, (event: { payload: unknown }) => void>);
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn((name: string, handler: (event: { payload: unknown }) => void) => {
+    listenHandlers[name] = handler;
+    return Promise.resolve(() => {});
+  }),
+}));
 
 import InlineNetworkAccessCard, { NetworkAccessCard } from './InlineNetworkAccessCard';
 
@@ -144,7 +150,28 @@ describe('NetworkAccessCard', () => {
   });
 });
 
+const fire = (name: string, payload: unknown) => act(() => listenHandlers[name]!({ payload }));
+
 describe('InlineNetworkAccessCard', () => {
+  it('shows a request from network-access://request and drops it on network-access://resolved', async () => {
+    mockInvoke.mockResolvedValue([]);
+    render(<InlineNetworkAccessCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['network-access://resolved']).toBeDefined());
+    fire('network-access://request', request());
+    expect(screen.getByRole('article', { name: 'Network access requested' })).toBeInTheDocument();
+    fire('network-access://resolved', { requestId: 'net-1' });
+    expect(screen.queryByRole('article')).not.toBeInTheDocument();
+  });
+
+  it('drops the card once its decision is accepted', async () => {
+    mockInvoke.mockImplementation((cmd: string) =>
+      Promise.resolve(cmd === 'list_pending_network_access_requests' ? [request()] : undefined),
+    );
+    render(<InlineNetworkAccessCard workspaceId="ws-1" />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Allow this run' }));
+    await waitFor(() => expect(screen.queryByRole('article')).not.toBeInTheDocument());
+  });
+
   it('shows the pending requests of its workspace', async () => {
     mockInvoke.mockImplementation((cmd: string) =>
       Promise.resolve(

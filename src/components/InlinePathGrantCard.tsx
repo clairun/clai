@@ -1,5 +1,4 @@
-import React, { useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { useState, type ReactNode, type Ref } from 'react';
 import { listPendingPathGrantRequests, submitPathGrantDecision } from '../permissions/pathGrantsClient';
 import type {
   FilesystemPathAccess,
@@ -12,11 +11,10 @@ import { requestingAgent, type SenderAgent } from './AssistantChat/messageSender
 import RequestingAgent from './Agents/RequestingAgent';
 import { chipText } from './requestChips';
 import { useDecisionSender } from './useDecisionSender';
+import { PendingRequestStack, type PendingRequestSource } from './PendingRequestStack';
 import styles from './InlinePathGrantCard.module.css';
 
 const PATH_GRANT_REQUEST_EVENT = 'path-grants://request';
-// A pending grant left the queue: a decision (here or in another view), a
-// cancelled or ended run, or a re-asked grant superseded it. Drop the card.
 const PATH_GRANT_RESOLVED_EVENT = 'path-grants://resolved';
 
 type PathAccess = FilesystemPathAccess;
@@ -297,16 +295,17 @@ export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathG
   );
 };
 
+const PATH_GRANT_REQUESTS: PendingRequestSource<PathGrantRequest> = {
+  list: listPendingPathGrantRequests,
+  requestEvent: PATH_GRANT_REQUEST_EVENT,
+  resolvedEvent: PATH_GRANT_RESOLVED_EVENT,
+  isRequest: (req) => Boolean(req.requestedPath && req.requestedAccess),
+};
+
 /**
- * Inline path-grant approval card. Mirrors the structure of
- * InlineApprovalCard (command-prefix approvals) but for filesystem grants.
- *
- * Mount once per workspace conversation view; this component:
- *   - subscribes to `path-grants://request` events filtered by workspaceId,
- *   - seeds from the backend's pending-list on mount,
- *   - renders one card per pending request with editable path + access toggle,
- *   - enforces the narrowing invariants client-side (no widening, no
- *     upgrading RO→RW) so the user never gets a confusing backend rejection.
+ * The workspace's pending path grants, one card each with an editable path
+ * and access. The card enforces the narrowing rules (no widening, no
+ * read-only to read-write) so the user never meets a backend rejection.
  */
 const InlinePathGrantCard = ({
   workspaceId,
@@ -318,106 +317,15 @@ const InlinePathGrantCard = ({
   roster?: readonly WorkspaceAgentResponse[];
   /** The workspace's tasks, to find an agent removed from the roster mid-task. */
   loadedTasks?: () => readonly WorkspaceTaskResponse[];
-}) => {
-  const [requests, setRequests] = useState<PathGrantRequest[]>([]);
-  const firstCardRef = useRef<HTMLElement | null>(null);
-  const previousCountRef = useRef(0);
-
-  useEffect(() => {
-    // Switching workspaces reuses this component instance — the Workspace
-    // page does NOT remount on workspace→workspace navigation — so drop any
-    // requests still held from the previous workspace before seeding/
-    // subscribing for the new one. Without this, workspace A's pending
-    // path-grant card leaks into workspace B's view until A's request
-    // happens to resolve.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- subscription+seed effect: clear stale per-workspace state on workspaceId change (component instance is reused across workspace navigation), then seed from pending list and subscribe to backend events. Effect is required for the listener registration + cleanup; the lint rule cannot model the seed/listen interaction.
-    setRequests([]);
-    previousCountRef.current = 0;
-
-    if (!workspaceId) return undefined;
-
-    let cancelled = false;
-
-    listPendingPathGrantRequests(workspaceId)
-      .then((pending) => {
-        if (cancelled || !Array.isArray(pending) || pending.length === 0) return;
-        setRequests((current) => {
-          const known = new Set(current.map((q) => q.requestId));
-          const additions = pending.filter((p) => !known.has(p.requestId));
-          if (additions.length === 0) return current;
-          return [...current, ...additions];
-        });
-      })
-      .catch(() => {
-        // Non-fatal — events still populate as new requests arrive.
-      });
-
-    const unlistenPromise = listen<PathGrantRequest>(PATH_GRANT_REQUEST_EVENT, (event) => {
-      // The Tauri unlisten in the cleanup below is async — after a
-      // workspace switch this stale listener can still fire before it
-      // detaches, and its closure-captured workspaceId matches the OLD
-      // workspace, so the workspace filter would pass and leak workspace
-      // A's card into the (reused) component now showing workspace B.
-      // The cancelled flag is the synchronous guard.
-      if (cancelled) return;
-      const req = event.payload;
-      if (!req || !req.requestId || !req.requestedPath || !req.requestedAccess) return;
-      if (req.workspaceId !== workspaceId) return;
-      setRequests((current) => {
-        if (current.some((q) => q.requestId === req.requestId)) return current;
-        return [...current, req];
-      });
-    });
-
-    // Remove the card once its grant leaves the queue. requestId is
-    // globally unique, so no workspace filter is needed.
-    const unlistenResolvedPromise = listen<{ requestId?: string }>(
-      PATH_GRANT_RESOLVED_EVENT,
-      (event) => {
-        if (cancelled) return;
-        const requestId = event.payload?.requestId;
-        if (!requestId) return;
-        setRequests((current) => current.filter((q) => q.requestId !== requestId));
-      },
-    );
-
-    return () => {
-      cancelled = true;
-      unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
-      unlistenResolvedPromise.then((unlisten) => unlisten()).catch(() => {});
-    };
-  }, [workspaceId]);
-
-  // Auto-scroll on 0→1 transition only (don't yank the page on every new request).
-  useEffect(() => {
-    const prev = previousCountRef.current;
-    const next = requests.length;
-    previousCountRef.current = next;
-    if (prev === 0 && next > 0 && firstCardRef.current) {
-      firstCardRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  }, [requests.length]);
-
-  if (requests.length === 0) {
-    return null;
-  }
-
-  const dismissRequest = (requestId: string) =>
-    setRequests((current) => current.filter((q) => q.requestId !== requestId));
-
-  return (
-    <div className={styles.stack} aria-live="polite">
-      {requests.map((req, cardIndex) => (
-        <PathGrantCard
-          key={req.requestId}
-          ref={cardIndex === 0 ? firstCardRef : null}
-          req={req}
-          requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])}
-          onDecided={dismissRequest}
-        />
-      ))}
-    </div>
-  );
-};
+}) => (
+  <PendingRequestStack
+    workspaceId={workspaceId}
+    source={PATH_GRANT_REQUESTS}
+    className={styles.stack}
+    renderCard={(req, card) => (
+      <PathGrantCard {...card} req={req} requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])} />
+    )}
+  />
+);
 
 export default InlinePathGrantCard;

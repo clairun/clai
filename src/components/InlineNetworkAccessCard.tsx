@@ -1,5 +1,4 @@
-import { Fragment, useEffect, useRef, useState, type ReactNode, type Ref } from 'react';
-import { listen } from '@tauri-apps/api/event';
+import { Fragment, useState, type ReactNode, type Ref } from 'react';
 import {
   listPendingNetworkAccessRequests,
   submitNetworkAccessDecision,
@@ -16,12 +15,11 @@ import RequestingAgent from './Agents/RequestingAgent';
 import { chipText, listOf, quoted } from './requestChips';
 import { DenyReasonPanel, useDenial } from './DenyReasonPanel';
 import { useDecisionSender } from './useDecisionSender';
+import { PendingRequestStack, type PendingRequestSource } from './PendingRequestStack';
 import styles from './InlineApprovalCard.module.css';
 import grantStyles from './InlinePathGrantCard.module.css';
 
 const NETWORK_ACCESS_REQUEST_EVENT = 'network-access://request';
-// The request left the queue: a decision (here or in another view), a
-// cancelled or ended run, or the agent asked again. Drop the card.
 const NETWORK_ACCESS_RESOLVED_EVENT = 'network-access://resolved';
 
 
@@ -215,11 +213,14 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
   );
 };
 
-/**
- * The workspace's pending network access requests, one card each, beside
- * the ask-first and path cards: seeded from the backend on mount, kept by
- * the request and resolved events.
- */
+const NETWORK_ACCESS_REQUESTS: PendingRequestSource<NetworkAccessRequest> = {
+  list: listPendingNetworkAccessRequests,
+  requestEvent: NETWORK_ACCESS_REQUEST_EVENT,
+  resolvedEvent: NETWORK_ACCESS_RESOLVED_EVENT,
+  isRequest: (req) => Boolean(req.host),
+};
+
+/** The workspace's pending network access requests, beside the ask-first and path cards. */
 const InlineNetworkAccessCard = ({
   workspaceId,
   roster = [],
@@ -230,85 +231,15 @@ const InlineNetworkAccessCard = ({
   roster?: readonly WorkspaceAgentResponse[];
   /** The workspace's tasks, to find an agent removed from the roster mid-task. */
   loadedTasks?: () => readonly WorkspaceTaskResponse[];
-}) => {
-  const [requests, setRequests] = useState<NetworkAccessRequest[]>([]);
-  const firstCardRef = useRef<HTMLElement | null>(null);
-  const previousCountRef = useRef(0);
-
-  useEffect(() => {
-    // The Workspace page reuses this instance across workspaces: drop the
-    // previous workspace's requests before seeding and subscribing.
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- subscription+seed effect: clear stale per-workspace state on workspaceId change, then seed from the pending list and subscribe; the lint rule cannot model the seed/listen interaction.
-    setRequests([]);
-    previousCountRef.current = 0;
-
-    if (!workspaceId) return undefined;
-
-    let cancelled = false;
-    const add = (incoming: NetworkAccessRequest[]) =>
-      setRequests((current) => {
-        const known = new Set(current.map((q) => q.requestId));
-        const additions = incoming.filter((q) => !known.has(q.requestId));
-        return additions.length === 0 ? current : [...current, ...additions];
-      });
-
-    listPendingNetworkAccessRequests(workspaceId)
-      .then((pending) => {
-        if (!cancelled && Array.isArray(pending)) add(pending);
-      })
-      .catch(() => {
-        // Non-fatal: events still bring new requests.
-      });
-
-    const unlistenPromise = listen<NetworkAccessRequest>(NETWORK_ACCESS_REQUEST_EVENT, (event) => {
-      // The unlisten below is async: a stale listener may still fire after
-      // a workspace switch, so the cancelled flag guards synchronously.
-      if (cancelled) return;
-      const req = event.payload;
-      if (!req?.requestId || !req.host || req.workspaceId !== workspaceId) return;
-      add([req]);
-    });
-    const unlistenResolvedPromise = listen<{ requestId?: string }>(NETWORK_ACCESS_RESOLVED_EVENT, (event) => {
-      if (cancelled) return;
-      const requestId = event.payload?.requestId;
-      if (requestId) setRequests((current) => current.filter((q) => q.requestId !== requestId));
-    });
-
-    return () => {
-      cancelled = true;
-      unlistenPromise.then((unlisten) => unlisten()).catch(() => {});
-      unlistenResolvedPromise.then((unlisten) => unlisten()).catch(() => {});
-    };
-  }, [workspaceId]);
-
-  // Scroll into view on the first arrival only.
-  useEffect(() => {
-    const prev = previousCountRef.current;
-    const next = requests.length;
-    previousCountRef.current = next;
-    if (prev === 0 && next > 0 && firstCardRef.current) {
-      firstCardRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  }, [requests.length]);
-
-  if (requests.length === 0) return null;
-
-  const dismissRequest = (requestId: string) =>
-    setRequests((current) => current.filter((q) => q.requestId !== requestId));
-
-  return (
-    <div className={styles.stack} aria-live="polite">
-      {requests.map((req, cardIndex) => (
-        <NetworkAccessCard
-          key={req.requestId}
-          ref={cardIndex === 0 ? firstCardRef : null}
-          req={req}
-          requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])}
-          onDecided={dismissRequest}
-        />
-      ))}
-    </div>
-  );
-};
+}) => (
+  <PendingRequestStack
+    workspaceId={workspaceId}
+    source={NETWORK_ACCESS_REQUESTS}
+    className={styles.stack}
+    renderCard={(req, card) => (
+      <NetworkAccessCard {...card} req={req} requester={requestingAgent(req.agentId, roster, loadedTasks?.() ?? [])} />
+    )}
+  />
+);
 
 export default InlineNetworkAccessCard;
