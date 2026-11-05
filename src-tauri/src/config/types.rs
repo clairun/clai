@@ -422,9 +422,10 @@ fn default_deny_domains() -> Vec<String> {
 }
 
 /// The policy of an agent stored before `networkAccess` existed, or created
-/// now, with the default lists. Legacy `disabled` stays Off. `enabled` or
-/// nothing becomes Allowlist where the sandbox can enforce it, and Host
-/// network elsewhere, which is what the shell does there.
+/// now, with the default lists. Legacy `disabled` stays Off on every PC, so
+/// it blocks the web tools even where no sandbox restricts the shell.
+/// `enabled` or nothing becomes Allowlist where the sandbox can enforce it,
+/// and Host network elsewhere, which is what the shell does there.
 pub fn network_access_from_legacy(
     legacy: Option<SandboxNetworkConfig>,
     allowlist_available: bool,

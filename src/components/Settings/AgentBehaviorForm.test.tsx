@@ -538,10 +538,10 @@ describe('AgentBehaviorForm', () => {
       expect(await screen.findByText(/Shell commands will not run until you choose Off or Host network/)).toBeInTheDocument();
     });
 
-    it('says the network is not restricted without a sandbox, whatever mode is stored', async () => {
+    it('says the mode covers only the web tools without a sandbox', async () => {
       api.getSandboxStatus.mockResolvedValue(NO_SANDBOX);
       renderForm({ agentId: 'agent-1' });
-      expect(await screen.findByText('Network: not restricted on this PC')).toBeInTheDocument();
+      expect(await screen.findByText('Network: Host network (web tools only)')).toBeInTheDocument();
     });
 
     it('marks the Host network hint as a warning and ties hints to their controls', async () => {
@@ -583,12 +583,20 @@ describe('AgentBehaviorForm', () => {
       expect(screen.queryByRole('group', { name: 'Network' })).toBeNull();
     });
 
-    it('disables the whole control without a sandbox', async () => {
+    it('offers Off and Host network for the web tools without a sandbox', async () => {
       api.getSandboxStatus.mockResolvedValue(NO_SANDBOX);
-      renderForm({ agentId: 'agent-1' });
+      const { ref } = renderForm({ agentId: 'agent-1' });
       await openAccess();
-      expect(await screen.findByText('Not available on this PC.')).toBeInTheDocument();
-      for (const name of ['Off', 'Allowlist', /Host network/]) expect(networkButton(name)).toBeDisabled();
+      await waitFor(() => expect(networkButton('Off')).toBeEnabled());
+      expect(screen.getByRole('group', { name: 'Network' }))
+        .toHaveAccessibleDescription('On this PC it applies to web tools only; shell commands are not restricted.');
+      expect(networkButton(/Host network/)).toBeEnabled();
+      expect(networkButton('Allowlist')).toBeDisabled();
+      expect(networkButton('Allowlist')).toHaveAttribute('title', 'Not available on this PC');
+
+      await userEvent.click(networkButton('Off'));
+      await submit(ref);
+      expect(sentUpdate().execution.sandbox.networkAccess.mode).toBe('off');
     });
 
     // The same cases as `entries_are_parsed_by_one_rule` in network/matcher.rs.

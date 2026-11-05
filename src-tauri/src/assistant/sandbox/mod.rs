@@ -38,8 +38,8 @@ pub enum SandboxBackend {
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
 pub struct SandboxStatus {
-    /// Whether shell commands run sandboxed at all. Without a sandbox there
-    /// is no network control, web tools included.
+    /// Whether shell commands run sandboxed at all. Without a sandbox the
+    /// network mode applies to the web tools only.
     pub available: bool,
     pub backend: Option<SandboxBackend>,
     /// Whether the Allowlist network mode can be enforced for shell commands.

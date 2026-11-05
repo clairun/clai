@@ -504,8 +504,8 @@ export type SandboxSessionBusConfig = "deny" | "allow";
  */
 export type SandboxStatus = { 
 /**
- * Whether shell commands run sandboxed at all. Without a sandbox there
- * is no network control, web tools included.
+ * Whether shell commands run sandboxed at all. Without a sandbox the
+ * network mode applies to the web tools only.
  */
 available: boolean, backend: SandboxBackend | null, 
 /**

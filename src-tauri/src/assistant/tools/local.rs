@@ -114,7 +114,7 @@ async fn execute_web_tool(
     if tool_name == "web_search" {
         let params: WebSearchParams = serde_json::from_value(params)
             .map_err(|e| format!("Invalid web_search params: {}", e))?;
-        execute_web_search(gate, params).await
+        execute_web_search(params).await
     } else {
         let params: WebFetchParams = serde_json::from_value(params)
             .map_err(|e| format!("Invalid web_fetch params: {}", e))?;
@@ -312,11 +312,8 @@ fn sandbox_network(
         NetworkMode::Off => Ok(SandboxNetworkMode::Disabled),
         NetworkMode::HostNetwork => Ok(SandboxNetworkMode::Host),
         // Shell commands keep the host network in Allowlist until the sandbox
-        // routes them through the network proxy. Without a sandbox nothing is
-        // enforced in any mode (D17), so nothing is refused either.
-        NetworkMode::Allowlist if sandbox.allowlist_available || !sandbox.available => {
-            Ok(SandboxNetworkMode::Host)
-        }
+        // routes them through the network proxy.
+        NetworkMode::Allowlist if sandbox.allowlist_available => Ok(SandboxNetworkMode::Host),
         NetworkMode::Allowlist => Err(format!(
             "Allowlist network mode: {}. Choose Off or Host network in the agent's Access \
              settings.",
@@ -946,11 +943,10 @@ fn matches_prefix_literal(p: &str, command: &str) -> bool {
 // Web tools
 // =============================================================================
 
-/// Which hosts the web tools may reach for one agent.
+/// Which hosts the web tools may reach for one agent. They run in this
+/// process, so they follow the mode on every PC, one without a sandbox too.
 #[derive(Debug)]
 enum WebGate {
-    /// No sandbox on this PC, so no network control at all.
-    Unchecked,
     /// Host network: any public host.
     AnyHost,
     /// Allowlist: only the hosts this policy allows, on every redirect hop.
@@ -958,19 +954,10 @@ enum WebGate {
 }
 
 fn web_gate(context: &ToolExecutionContext) -> Result<WebGate, String> {
-    web_access(
-        &context.run_context.execution.sandbox.network_access,
-        &crate::assistant::sandbox::status(),
-    )
+    web_access(&context.run_context.execution.sandbox.network_access)
 }
 
-fn web_access(
-    network: &NetworkPolicy,
-    sandbox: &crate::assistant::sandbox::SandboxStatus,
-) -> Result<WebGate, String> {
-    if !sandbox.available {
-        return Ok(WebGate::Unchecked);
-    }
+fn web_access(network: &NetworkPolicy) -> Result<WebGate, String> {
     match network.mode {
         NetworkMode::Off => Err("Network access is off for this agent".to_string()),
         NetworkMode::Allowlist => Ok(WebGate::Allowlist(HostLists::new(
@@ -1010,13 +997,6 @@ fn provider_redirect_allowed(url: &reqwest::Url) -> bool {
             .is_some_and(|host| host == "duckduckgo.com" || host.ends_with(".duckduckgo.com"))
 }
 
-fn web_search_redirect_policy(gate: &WebGate) -> reqwest::redirect::Policy {
-    if matches!(gate, WebGate::Unchecked) {
-        return reqwest::redirect::Policy::limited(MAX_WEB_SEARCH_REDIRECTS);
-    }
-    redirect_policy_within(provider_redirect_allowed)
-}
-
 /// Follows at most [`MAX_WEB_SEARCH_REDIRECTS`] redirects, each to a URL
 /// `allowed` accepts. The counting rule is reqwest's `Policy::limited`.
 fn redirect_policy_within(allowed: fn(&reqwest::Url) -> bool) -> reqwest::redirect::Policy {
@@ -1032,24 +1012,21 @@ fn redirect_policy_within(allowed: fn(&reqwest::Url) -> bool) -> reqwest::redire
     })
 }
 
-fn web_search_client(gate: &WebGate) -> Result<reqwest::Client, String> {
+fn web_search_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(Duration::from_millis(WEB_SEARCH_TIMEOUT_MS))
-        .redirect(web_search_redirect_policy(gate))
+        .redirect(redirect_policy_within(provider_redirect_allowed))
         .build()
         .map_err(|e| format!("Failed to create HTTP client: {}", e))
 }
 
-async fn execute_web_search(
-    gate: WebGate,
-    params: WebSearchParams,
-) -> Result<serde_json::Value, String> {
+async fn execute_web_search(params: WebSearchParams) -> Result<serde_json::Value, String> {
     let max_results = params
         .max_results
         .unwrap_or(DEFAULT_WEB_SEARCH_MAX_RESULTS)
         .min(MAX_WEB_SEARCH_MAX_RESULTS);
 
-    let response = web_search_client(&gate)?
+    let response = web_search_client()?
         .get("https://html.duckduckgo.com/html/")
         .query(&[("q", &params.query)])
         .header("User-Agent", "CLAI/1.0")
@@ -1661,7 +1638,7 @@ mod tests {
             max_content_chars: None,
             timeout_ms: None,
         };
-        let result = execute_web_fetch(WebGate::Unchecked, params).await;
+        let result = execute_web_fetch(WebGate::AnyHost, params).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("http:// or https://"));
     }
@@ -1673,7 +1650,7 @@ mod tests {
             max_content_chars: None,
             timeout_ms: None,
         };
-        let result = execute_web_fetch(WebGate::Unchecked, params).await;
+        let result = execute_web_fetch(WebGate::AnyHost, params).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("private/local"));
     }
@@ -1682,7 +1659,7 @@ mod tests {
     async fn web_fetch_rejects_private_ipv6_literals() {
         let url = parse_web_fetch_url("http://[::1]/admin").unwrap();
 
-        let err = resolve_public_web_fetch_target(&url, &WebGate::Unchecked)
+        let err = resolve_public_web_fetch_target(&url, &WebGate::AnyHost)
             .await
             .unwrap_err();
         assert!(err.contains("private/local"));
@@ -1693,7 +1670,7 @@ mod tests {
         let start = parse_web_fetch_url("https://example.com/start").unwrap();
         let redirected = start.join("http://127.0.0.1/admin").unwrap();
 
-        let err = resolve_public_web_fetch_target(&redirected, &WebGate::Unchecked)
+        let err = resolve_public_web_fetch_target(&redirected, &WebGate::AnyHost)
             .await
             .unwrap_err();
         assert!(err.contains("private/local"));
@@ -1716,34 +1693,16 @@ mod tests {
     }
 
     #[test]
-    fn web_access_follows_the_mode_where_a_sandbox_exists() {
-        use crate::assistant::sandbox::{status_for, SandboxBackend};
-        let linux = status_for(Some(SandboxBackend::Bubblewrap));
+    fn web_access_follows_the_mode() {
         let mut policy = allowlist(&["github.com"], &[]);
-        assert!(matches!(
-            web_access(&policy, &linux),
-            Ok(WebGate::Allowlist(_))
-        ));
+        assert!(matches!(web_access(&policy), Ok(WebGate::Allowlist(_))));
         policy.mode = NetworkMode::HostNetwork;
-        assert!(matches!(web_access(&policy, &linux), Ok(WebGate::AnyHost)));
+        assert!(matches!(web_access(&policy), Ok(WebGate::AnyHost)));
         policy.mode = NetworkMode::Off;
         assert_eq!(
-            web_access(&policy, &linux).unwrap_err(),
+            web_access(&policy).unwrap_err(),
             "Network access is off for this agent"
         );
-        // macOS enforces the list in the web tools although its shell cannot.
-        policy.mode = NetworkMode::Allowlist;
-        let macos = status_for(Some(SandboxBackend::Seatbelt));
-        assert!(matches!(
-            web_access(&policy, &macos),
-            Ok(WebGate::Allowlist(_))
-        ));
-        // Without a sandbox nothing is checked, a stored Off included.
-        policy.mode = NetworkMode::Off;
-        assert!(matches!(
-            web_access(&policy, &status_for(None)),
-            Ok(WebGate::Unchecked)
-        ));
     }
 
     #[tokio::test]
@@ -1805,15 +1764,10 @@ mod tests {
         assert!(check_web_host(&allowlist_gate(&policy), "example.org").is_err());
         assert!(check_web_host(&allowlist_gate(&policy), "[2606:4700::1111]").is_err());
         assert!(check_web_host(&WebGate::AnyHost, "example.org").is_ok());
-        assert!(check_web_host(&WebGate::Unchecked, "example.org").is_ok());
     }
 
     #[tokio::test]
     async fn web_tools_refuse_before_any_request_when_network_is_off() {
-        // Without a sandbox there is no network control (D17).
-        if !crate::assistant::sandbox::status().available {
-            return;
-        }
         let workspace = tempdir().unwrap();
         let mut context = context_with_grants(workspace.path(), Vec::new());
         let mut execution = context.run_context.execution.clone();
@@ -1866,22 +1820,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn web_search_refuses_a_redirect_off_the_provider_in_every_checked_mode() {
+    async fn web_search_refuses_a_redirect_off_the_provider() {
         use std::sync::atomic::Ordering;
-        for gate in [WebGate::AnyHost, allowlist_gate(&allowlist(&[], &[]))] {
-            let (base, hits) = redirecting_server().await;
-            let error = web_search_client(&gate)
-                .unwrap()
-                .get(format!("{base}/start"))
-                .send()
-                .await
-                .unwrap_err();
-            assert!(
-                format!("{error:?}").contains("leaves the search provider"),
-                "{gate:?}: {error:?}"
-            );
-            assert_eq!(hits.load(Ordering::SeqCst), 1, "{gate:?}");
-        }
+        let (base, hits) = redirecting_server().await;
+        let error = web_search_client()
+            .unwrap()
+            .get(format!("{base}/start"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("leaves the search provider"),
+            "{error:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]
@@ -1938,7 +1890,6 @@ mod tests {
         use SandboxNetworkMode::{Disabled, Host};
         let linux = status_for(Some(SandboxBackend::Bubblewrap));
         let macos = status_for(Some(SandboxBackend::Seatbelt));
-        // Without a sandbox nothing is enforced, so nothing is refused (D17).
         let none = status_for(None);
         for (status, mode, expected) in [
             (&linux, Off, Ok(Disabled)),
@@ -1948,7 +1899,7 @@ mod tests {
             (&macos, Allowlist, Err(())),
             (&macos, HostNetwork, Ok(Host)),
             (&none, Off, Ok(Disabled)),
-            (&none, Allowlist, Ok(Host)),
+            (&none, Allowlist, Err(())),
             (&none, HostNetwork, Ok(Host)),
         ] {
             assert_eq!(

@@ -59,6 +59,9 @@ const NETWORK_MODES: { mode: NetworkMode; label: string; hint: string }[] = [
 
 const INVALID_CHARACTERS = 'Use only letters, digits, hyphens and dots.';
 
+// Without a sandbox the mode reaches only the in-app web tools.
+const WEB_TOOLS_ONLY = 'web tools only';
+
 /** The address in the form URLs print it, or null if it is not IPv6. */
 const canonicalIpv6 = (text: string): string | null => {
   if (!/^[0-9a-f:.]+$/.test(text)) return null;
@@ -151,11 +154,11 @@ export const accessSummary = (draft: AccessDraft, sandbox: SandboxStatus | null 
 ];
 
 const networkSummary = (policy: NetworkPolicy | null, sandbox: SandboxStatus | null): string => {
-  // Without a sandbox nothing is enforced, whatever mode is stored.
-  if (sandbox && !sandbox.available) return 'Network: not restricted on this PC';
   if (!policy) return 'Network: this PC’s default';
-  if (policy.mode === 'allowlist') return `Network: Allowlist (${plural(policy.allowDomains.length, 'host')})`;
-  return policy.mode === 'off' ? 'Network: Off' : 'Network: Host network';
+  const mode = policy.mode === 'allowlist'
+    ? `Allowlist (${plural(policy.allowDomains.length, 'host')})`
+    : policy.mode === 'off' ? 'Off' : 'Host network';
+  return sandbox && !sandbox.available ? `Network: ${mode} (${WEB_TOOLS_ONLY})` : `Network: ${mode}`;
 };
 
 /** The network mode picker and, in Allowlist, the two host lists. */
@@ -168,8 +171,8 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
 }) => {
   const { status, failed, retry } = sandbox;
   // Unknown until the backend answers; nothing is offered before that.
-  const available = !!status?.available;
-  const allowlistReason = status?.available && !status.allowlistAvailable
+  const known = !!status;
+  const allowlistReason = status && !status.allowlistAvailable
     ? status.allowlistUnavailableReason ?? 'Not available here'
     : null;
   const hint = NETWORK_MODES.find((m) => m.mode === policy.mode)?.hint;
@@ -187,7 +190,11 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
   } else if (!status) {
     statusHint = <p className={form.hint} id={hintId}>Checking what this PC supports…</p>;
   } else if (!status.available) {
-    statusHint = <p className={form.hint} id={hintId}>Not available on this PC.</p>;
+    statusHint = (
+      <p className={form.hint} id={hintId}>
+        On this PC it applies to {WEB_TOOLS_ONLY}; shell commands are not restricted.
+      </p>
+    );
   } else {
     statusHint = (
       <p className={policy.mode === 'host_network' ? form.hintWarning : form.hint} id={hintId}>{hint}</p>
@@ -207,7 +214,7 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
               className={form.segment}
               aria-pressed={policy.mode === mode}
               onClick={() => onChange({ ...policy, mode })}
-              disabled={disabled || !available || unavailable}
+              disabled={disabled || !known || unavailable}
               title={unavailable ? allowlistReason ?? undefined : undefined}
               aria-describedby={unavailable ? reasonId : undefined}
             >
@@ -226,7 +233,7 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
           <p className={form.hint} id={reasonId}>Allowlist: {allowlistReason}.</p>
         )
       )}
-      {available && policy.mode === 'allowlist' && (
+      {known && policy.mode === 'allowlist' && (
         <div className={styles.prefixColumns}>
           <div className={styles.prefixList}>
             <span className={form.label}>Allowed hosts · {policy.allowDomains.length}</span>
