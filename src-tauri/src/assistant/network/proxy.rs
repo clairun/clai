@@ -319,9 +319,9 @@ mod tests {
         );
         assert!(
             unlisted.ends_with(
-                "`example.com` is not on this agent's network allowlist. Call \
+                "`example.com` is not in this agent's allowed hosts. Call \
                  `net_request_access` to ask the user, or they can add it in the agent's \
-                 Access settings.\n"
+                 Local access settings.\n"
             ),
             "{unlisted}"
         );
@@ -334,7 +334,7 @@ mod tests {
         .await;
         assert!(denied.starts_with("HTTP/1.1 403 Forbidden\r\n"), "{denied}");
         assert!(
-            denied.contains("deny list (entry `secret.example.org`)"),
+            denied.contains("denied hosts (entry `secret.example.org`)"),
             "{denied}"
         );
 

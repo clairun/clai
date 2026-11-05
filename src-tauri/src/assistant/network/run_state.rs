@@ -69,13 +69,13 @@ impl RunNetwork {
             for ignored in lists.ignored() {
                 if ignored.denied {
                     tracing::error!(
-                        "Network deny entry `{}` is invalid ({}), so every host is refused; fix it in the agent's Access settings",
+                        "Denied hosts entry `{}` is invalid ({}), so every host is refused; fix it in the agent's Local access settings",
                         ignored.entry,
                         ignored.reason
                     );
                 } else {
                     tracing::warn!(
-                        "Network allow entry `{}` is ignored ({}); fix it in the agent's Access settings",
+                        "Allowed hosts entry `{}` is ignored ({}); fix it in the agent's Local access settings",
                         ignored.entry,
                         ignored.reason
                     );

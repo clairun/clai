@@ -41,7 +41,7 @@ fn prepare_endpoint(
     let container =
         super::profile::workspace_mask(workspace_root, Some(home)).ok_or_else(|| {
             "Sandboxed shell is unavailable: the Allowlist network mode needs the workspace inside \
-         the home directory; choose Off or Host network in the agent's Access settings."
+         the home directory; choose Off or Host network in the agent's Local access settings."
                 .to_string()
         })?;
     let dir = container.join(NETWORK_DIR);

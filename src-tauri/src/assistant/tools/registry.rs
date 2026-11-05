@@ -67,13 +67,13 @@ pub(crate) fn net_request_access_refusal(
 ) -> Option<&'static str> {
     match execution.sandbox.network_access.mode {
         NetworkMode::Off => Some(
-            "Network access is off for this agent, so there is no allowlist to add a host to. The user can choose another network mode in the agent's Access settings.",
+            "Network access is off for this agent, so there is no allowlist to add a host to. The user can choose another network mode in the agent's Local access settings.",
         ),
         NetworkMode::HostNetwork => Some(
             "This agent is in Host network mode and can already reach any host; there is nothing to request.",
         ),
         NetworkMode::Allowlist if !allowlist_available => Some(
-            "Network access requests are not available on this PC. The user can add the host in the agent's Access settings.",
+            "Network access requests are not available on this PC. The user can add the host in the agent's Local access settings.",
         ),
         NetworkMode::Allowlist
             if matches!(execution.shell.mode, ShellAccessMode::Off) && !execution.web.enabled =>
@@ -217,7 +217,7 @@ fn fs_request_grant_def() -> ToolDefinition {
 fn net_request_access_def() -> ToolDefinition {
     ToolDefinition {
         name: "net_request_access".to_string(),
-        description: "Ask the user to let this agent reach a host that is not on its network allowlist. Call it when a shell command or web_fetch is refused because the host is not on the allowlist, before retrying. Ask for the one host you need (no wildcard); the user can allow it for this run, add it (or its parent domain) to the agent's allowlist, or deny. A host on the agent's deny list cannot be requested. If the host is already allowed, the tool returns immediately without asking.".to_string(),
+        description: "Ask the user to let this agent reach a host that is not on its network allowlist. Call it when a shell command or web_fetch is refused because the host is not on the allowlist, before retrying. Ask for the one host you need (no wildcard); the user can allow it for this run, add it (or its parent domain) to the agent's allowlist, or deny. A host in the agent's denied hosts cannot be requested. If the host is already allowed, the tool returns immediately without asking.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {

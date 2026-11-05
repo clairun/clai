@@ -264,8 +264,8 @@ async fn run_with_network(
     (run_command(command).await, RefusedTargets::default())
 }
 
-const REFUSED_HINT: &str = "CLAI's network proxy refused these hosts: they are not on this \
-                            agent's network allowlist, or are on its deny list. Call \
+const REFUSED_HINT: &str = "CLAI's network proxy refused these hosts: they are not in this \
+                            agent's allowed hosts, or are in its denied hosts. Call \
                             `net_request_access` for a host the task needs; do not look for a \
                             way around the proxy.";
 
@@ -424,7 +424,7 @@ fn sandbox_network(
             proxy_endpoint().map(SandboxNetworkMode::Proxied)
         }
         NetworkMode::Allowlist => Err(format!(
-            "Allowlist network mode: {}. Choose Off or Host network in the agent's Access \
+            "Allowlist network mode: {}. Choose Off or Host network in the agent's Local access \
              settings.",
             sandbox
                 .allowlist_unavailable_reason
@@ -2069,7 +2069,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(
-            err.contains("`example.org` is not on this agent's network allowlist"),
+            err.contains("`example.org` is not in this agent's allowed hosts"),
             "{err}"
         );
         assert!(err.contains("net_request_access"), "{err}");
@@ -2177,8 +2177,8 @@ mod tests {
         assert_eq!(ask("GitHub.com"), Ok(None), "already allowed: no card");
         let denied = ask("bucket.s3.amazonaws.com").unwrap_err();
         assert!(
-            denied.contains("deny list (entry `*.s3.amazonaws.com`)")
-                && denied.contains("Access settings"),
+            denied.contains("denied hosts (entry `*.s3.amazonaws.com`)")
+                && denied.contains("Local access settings"),
             "{denied}"
         );
         for raw in [
@@ -2206,7 +2206,7 @@ mod tests {
         ];
         for error in errors {
             assert!(
-                error.contains("`github.com:443`") && error.contains("Access settings"),
+                error.contains("`github.com:443`") && error.contains("Local access settings"),
                 "{error}"
             );
         }
@@ -2491,7 +2491,7 @@ mod tests {
         assert_eq!(
             sandbox_network(Allowlist, &macos, || Ok(test_endpoint())).unwrap_err(),
             "Allowlist network mode: Not available on macOS yet. Choose Off or Host network \
-             in the agent's Access settings."
+             in the agent's Local access settings."
         );
         let missing = || Err("Sandboxed shell is unavailable: network helper not found".into());
         assert_eq!(

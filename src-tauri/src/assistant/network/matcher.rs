@@ -37,23 +37,23 @@ impl HostDecision {
         match self {
             Self::Allowed => None,
             Self::Denied { entry } => Some(format!(
-                "`{host}` is on this agent's network deny list (entry `{entry}`). The user can \
-                 change the list in the agent's Access settings."
+                "`{host}` is in this agent's denied hosts (entry `{entry}`). The user can \
+                 change them in the agent's Local access settings."
             )),
             Self::InvalidDenyEntry { entry, reason } => Some(format!(
-                "This agent's network deny list has an invalid entry `{entry}` ({reason}), so \
-                 every host is refused until the user fixes or removes it in the agent's Access \
-                 settings."
+                "This agent's denied hosts have an invalid entry `{entry}` ({reason}), so \
+                 every host is refused until the user fixes or removes it in the agent's \
+                 Local access settings."
             )),
             Self::Unlisted => {
                 let way_out = if can_ask {
                     "Call `net_request_access` to ask the user, or they can add it in the \
-                     agent's Access settings."
+                     agent's Local access settings."
                 } else {
-                    "The user can add it in the agent's Access settings."
+                    "The user can add it in the agent's Local access settings."
                 };
                 Some(format!(
-                    "`{host}` is not on this agent's network allowlist. {way_out}"
+                    "`{host}` is not in this agent's allowed hosts. {way_out}"
                 ))
             }
         }
@@ -783,14 +783,14 @@ mod tests {
             .refusal("example.org", false)
             .unwrap();
         assert!(!elsewhere.contains("net_request_access"), "{elsewhere}");
-        assert!(elsewhere.contains("Access settings"), "{elsewhere}");
+        assert!(elsewhere.contains("Local access settings"), "{elsewhere}");
         let denied = HostDecision::Denied {
             entry: "*.s3.amazonaws.com".to_string(),
         }
         .refusal("b.s3.amazonaws.com", true)
         .unwrap();
         assert!(
-            denied.contains("deny list (entry `*.s3.amazonaws.com`)"),
+            denied.contains("denied hosts (entry `*.s3.amazonaws.com`)"),
             "{denied}"
         );
         assert!(!denied.contains("net_request_access"), "{denied}");
