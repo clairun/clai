@@ -211,8 +211,8 @@ async fn execute_bash_exec(
         },
         &context.run_network,
     )
-    .await
-    .inspect_err(|error| {
+    .await;
+    let output = output.inspect_err(|error| {
         // Surface sandbox-availability failures (bwrap missing, kernel
         // refused namespaces, etc.) as a run warning so the run completes
         // with warnings rather than as a generic tool failure. The sandbox runner uses the
@@ -221,46 +221,77 @@ async fn execute_bash_exec(
         if error.starts_with("Sandboxed shell is unavailable") {
             context.note_warning();
         }
-    })
-    .map_err(|error| augment_timeout_error(error, timeout_ms, explicit_timeout))?;
-
-    Ok(bash_exec_result(&output, &refused))
+    });
+    bash_exec_outcome(output, &refused, timeout_ms, explicit_timeout)
 }
 
 /// Runs the command, in Allowlist behind a network proxy session of its
-/// own. Returns the `host:port` targets the proxy refused.
+/// own. Also returns the `host:port` targets the proxy refused, when the
+/// command failed or timed out too: a client that kept retrying a refused
+/// host is a likely cause.
 #[cfg(target_os = "linux")]
 async fn run_with_network(
     command: SandboxCommand,
     run_network: &std::sync::Arc<RunNetwork>,
-) -> Result<(SandboxCommandOutput, RefusedTargets), String> {
+) -> (Result<SandboxCommandOutput, String>, RefusedTargets) {
     use crate::assistant::network::{connect::HostConnector, proxy::ProxySession};
     let session = match &command.profile.network {
-        SandboxNetworkMode::Proxied(endpoint) => Some(
-            ProxySession::start(
-                &endpoint.socket,
-                std::sync::Arc::clone(run_network),
-                std::sync::Arc::new(HostConnector),
-            )
-            .map_err(|error| {
-                format!("Sandboxed shell is unavailable: the network proxy did not start: {error}")
-            })?,
-        ),
+        SandboxNetworkMode::Proxied(endpoint) => match ProxySession::start(
+            &endpoint.socket,
+            std::sync::Arc::clone(run_network),
+            std::sync::Arc::new(HostConnector),
+        ) {
+            Ok(session) => Some(session),
+            Err(error) => {
+                let error = format!(
+                    "Sandboxed shell is unavailable: the network proxy did not start: {error}"
+                );
+                return (Err(error), RefusedTargets::default());
+            }
+        },
         _ => None,
     };
-    let output = run_command(command).await?;
-    Ok((
-        output,
-        session.map(|session| session.refused()).unwrap_or_default(),
-    ))
+    let output = run_command(command).await;
+    let refused = session.map(|session| session.refused()).unwrap_or_default();
+    (output, refused)
 }
 
 #[cfg(not(target_os = "linux"))]
 async fn run_with_network(
     command: SandboxCommand,
     _run_network: &std::sync::Arc<RunNetwork>,
-) -> Result<(SandboxCommandOutput, RefusedTargets), String> {
-    Ok((run_command(command).await?, RefusedTargets::default()))
+) -> (Result<SandboxCommandOutput, String>, RefusedTargets) {
+    (run_command(command).await, RefusedTargets::default())
+}
+
+const REFUSED_HINT: &str = "CLAI's network proxy refused these hosts: they are not on this \
+                            agent's network allowlist, or are on its deny list. Call \
+                            `net_request_access` for a host the task needs; do not look for a \
+                            way around the proxy.";
+
+fn bash_exec_outcome(
+    output: Result<SandboxCommandOutput, String>,
+    refused: &RefusedTargets,
+    timeout_ms: u64,
+    explicit_timeout: bool,
+) -> Result<serde_json::Value, String> {
+    match output {
+        Ok(output) => Ok(bash_exec_result(&output, refused)),
+        Err(error) => {
+            let error = augment_timeout_error(error, timeout_ms, explicit_timeout);
+            if refused.is_empty() {
+                return Err(error);
+            }
+            let more = match refused.more {
+                0 => String::new(),
+                more => format!(" and {more} more"),
+            };
+            Err(format!(
+                "{error}\nNetwork allowlist refused: {}{more}. {REFUSED_HINT}",
+                refused.targets.join(", ")
+            ))
+        }
+    }
 }
 
 /// Many clients hide the proxy's 403 body (curl prints only “CONNECT tunnel
@@ -276,9 +307,7 @@ fn bash_exec_result(output: &SandboxCommandOutput, refused: &RefusedTargets) -> 
     if !refused.is_empty() {
         result["network"] = serde_json::json!({
             "refused": refused.targets,
-            "hint": "CLAI's network proxy refused these hosts: they are not on this agent's \
-                     network allowlist, or are on its deny list. Call `net_request_access` \
-                     for a host the task needs; do not look for a way around the proxy.",
+            "hint": REFUSED_HINT,
         });
         if refused.more > 0 {
             result["network"]["refusedMore"] = refused.more.into();
@@ -2497,19 +2526,15 @@ mod tests {
         };
         std::fs::write(&endpoint.ssh_config, "").unwrap();
         let socket = endpoint.socket.clone();
-        let command = SandboxCommand {
-            argv: vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "/run/clai/helper connect --proxy 127.0.0.1:3128 example.org 443 </dev/null".into(),
-            ],
+        let command = |script: &str, timeout_ms| SandboxCommand {
+            argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
             cwd: workspace.path().to_path_buf(),
-            timeout_ms: 20_000,
+            timeout_ms,
             max_output_chars: 10_000,
             profile: SandboxProfile::for_test(
                 workspace.path().to_path_buf(),
                 Vec::new(),
-                SandboxNetworkMode::Proxied(endpoint),
+                SandboxNetworkMode::Proxied(endpoint.clone()),
                 SandboxSessionBusMode::Deny,
                 SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
@@ -2519,11 +2544,12 @@ mod tests {
                 None,
             ),
         };
+        let refuse = "/run/clai/helper connect --proxy 127.0.0.1:3128 example.org 443 </dev/null";
         let network = std::sync::Arc::new(run_network(&["github.com"], &[]));
-        let (output, refused) = match run_with_network(command, &network).await {
-            Ok(result) => result,
-            Err(error) if error.contains("Sandboxed shell is unavailable") => return,
-            Err(error) => panic!("{error}"),
+        let (output, refused) = match run_with_network(command(refuse, 20_000), &network).await {
+            (Ok(output), refused) => (output, refused),
+            (Err(error), _) if error.contains("Sandboxed shell is unavailable") => return,
+            (Err(error), _) => panic!("{error}"),
         };
         assert_eq!(output.exit_code, Some(255), "{output:?}");
         assert_eq!(refused.targets, ["example.org:443"]);
@@ -2532,6 +2558,39 @@ mod tests {
             [("example.org".to_string(), Some(443), false)]
         );
         assert!(!socket.exists(), "the session ended with the command");
+
+        let (output, refused) =
+            run_with_network(command(&format!("{refuse}; sleep 30"), 2_000), &network).await;
+        let error = output.unwrap_err();
+        assert!(error.contains("timed out after"), "{error}");
+        assert_eq!(
+            refused.targets,
+            ["example.org:443"],
+            "a timed-out command keeps its refusals"
+        );
+        assert!(!socket.exists(), "the session ended with the timeout");
+    }
+
+    #[test]
+    fn a_failed_command_still_names_the_hosts_the_proxy_refused() {
+        let mut refused = RefusedTargets::default();
+        let timed_out = || Err("Command timed out after 2000 ms".to_string());
+        let error = bash_exec_outcome(timed_out(), &refused, 2_000, true).unwrap_err();
+        assert!(!error.contains("Network allowlist refused"), "{error}");
+
+        refused.add("example.org:443".to_string());
+        refused.add("pypi.org:443".to_string());
+        refused.more = 2;
+        let error = bash_exec_outcome(timed_out(), &refused, 2_000, true).unwrap_err();
+        let (timeout, network) = error.split_once('\n').unwrap();
+        assert!(
+            timeout.contains("re-run with a higher `timeoutMs`"),
+            "{error}"
+        );
+        assert_eq!(
+            network,
+            format!("Network allowlist refused: example.org:443, pypi.org:443 and 2 more. {REFUSED_HINT}")
+        );
     }
 
     #[test]
