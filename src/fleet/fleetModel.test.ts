@@ -628,6 +628,12 @@ describe('snapshot', () => {
     expect(cardAttention(card(s)).total).toBe(0);
   });
 
+  it('names the host of a network request in Unicode, as the card and the toast do', () => {
+    const network = { requestId: 'n2', workspaceId: WS, agentId: null, host: 'xn--bcher-kva.example', port: null } as never;
+    const s = seedFleet(EMPTY_FLEET, [snapshotOf({ pendingNetworkRequests: [network] })]);
+    expect(card(s).requests['network:n2']).toMatchObject({ text: 'Reach bücher.example' });
+  });
+
   it('removes cards missing from the snapshot, e.g. deleted workspaces', () => {
     let s = apply(EMPTY_FLEET, askEvent('q', 1), env({ type: 'run_started', payload: { run: run('r') } }, 2, 's', 'deleted'));
     s = seedFleet(s, [snapshotOf()]);
