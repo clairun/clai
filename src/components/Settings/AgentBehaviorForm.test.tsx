@@ -575,6 +575,17 @@ describe('AgentBehaviorForm', () => {
       expect(screen.queryByText(/Could not check/)).toBeNull();
     });
 
+    it('updates the overview too when Retry reads the status', async () => {
+      api.getSandboxStatus.mockRejectedValueOnce(new Error('ipc down')).mockResolvedValue(NO_SANDBOX);
+      renderForm({ agentId: 'agent-1' });
+      await openAccess();
+      await userEvent.click(await screen.findByRole('button', { name: 'Retry' }));
+      await waitFor(() => expect(networkButton('Off')).toBeEnabled());
+      await userEvent.click(screen.getByRole('button', { name: 'Back to Reviewer' }));
+      expect(screen.getByText('Network: Host network (web tools only)')).toBeInTheDocument();
+      expect(api.getSandboxStatus).toHaveBeenCalledTimes(2);
+    });
+
     it('says this PC’s default applies when the defaults could not be loaded', async () => {
       renderForm();
       expect(await screen.findByText('Network: this PC’s default')).toBeInTheDocument();

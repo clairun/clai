@@ -435,6 +435,7 @@ export const AgentBehaviorForm = ({
       <div className={form.page} ref={rootRef}>
         <AccessView
           draft={draft.access}
+          sandbox={sandbox}
           onChange={(change) => patch({ access: { ...draft.access, ...change } })}
           disabled={busy}
           headingRef={viewHeading}

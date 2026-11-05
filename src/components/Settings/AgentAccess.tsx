@@ -6,7 +6,7 @@
 
 import React, { useId } from 'react';
 import type { FilesystemPathGrant, GrantOrigin, NetworkMode, NetworkPolicy, SandboxStatus, ShellAccessMode } from '../../generated/bindings';
-import { useSandboxStatus, type SandboxStatusState } from '../../hooks/useSandboxStatus';
+import type { SandboxStatusState } from '../../hooks/useSandboxStatus';
 import { PathGrantEditor, PrefixListEditor, Switch } from './ListEditors';
 import form from './SettingsForm.module.css';
 import styles from './AgentBehaviorForm.module.css';
@@ -267,8 +267,10 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
   );
 };
 
-export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, context }: {
+/** `sandbox` is the form's own lookup, so Retry here updates the overview too. */
+export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onBack, context }: {
   draft: AccessDraft;
+  sandbox: SandboxStatusState;
   onChange: (patch: Partial<AccessDraft>) => void;
   disabled?: boolean;
   headingRef: React.Ref<HTMLHeadingElement>;
@@ -276,7 +278,6 @@ export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, cont
   context: string;
 }) => {
   const headingId = useId();
-  const sandboxStatus = useSandboxStatus();
   const shellHint = SHELL_MODES.find((m) => m.mode === draft.shellMode)?.hint;
 
   return (
@@ -305,7 +306,7 @@ export const AccessView = ({ draft, onChange, disabled, headingRef, onBack, cont
           {draft.networkAccess ? (
             <NetworkSection
               policy={draft.networkAccess}
-              sandbox={sandboxStatus}
+              sandbox={sandbox}
               onChange={(networkAccess) => onChange({ networkAccess })}
               disabled={disabled}
               headingId={`${headingId}-network`}
