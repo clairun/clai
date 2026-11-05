@@ -128,6 +128,17 @@ describe('NetworkAccessCard', () => {
     );
   });
 
+  it.each([
+    ['agent', { agentId: null }],
+    ['workspace', { workspaceId: null }],
+  ])('offers this run only when there is no %s to save an entry on', (_, missing) => {
+    render(<NetworkAccessCard req={request(missing)} requester={requester} />);
+    expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual(['▾', 'Allow this run', 'Deny']);
+    expect(screen.getByText(/no agent to save/)).toHaveTextContent(
+      /^There is no agent to save an entry on, so the host can be allowed for this run only\.$/,
+    );
+  });
+
   it('keeps a refused decision on the card so the user can answer again', async () => {
     mockInvoke.mockRejectedValueOnce('not a narrow entry').mockResolvedValue(undefined);
     const onDecided = vi.fn();

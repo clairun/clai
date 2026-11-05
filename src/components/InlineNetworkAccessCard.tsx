@@ -26,10 +26,13 @@ const NETWORK_ACCESS_RESOLVED_EVENT = 'network-access://resolved';
 
 const hostWithPort = (req: NetworkAccessRequest) => (req.port ? `${req.host}:${req.port}` : req.host);
 
+/** “Always” saves on the agent; the backend refuses it with no agent to save on. */
+const canSave = (req: NetworkAccessRequest) => Boolean(req.workspaceId && req.agentId);
+
 /** Where “Always” saves, as for the ask-first card. */
 const SaveScope = ({ req, workspaceName }: { req: NetworkAccessRequest; workspaceName?: string }) => {
-  if (!req.workspaceId || !req.agentId) {
-    return <>Nothing is saved: an allowed host stays allowed for the rest of this run only.</>;
+  if (!canSave(req)) {
+    return <>There is no agent to save an entry on, so the host can be allowed for this run only.</>;
   }
   const saves = req.suggestedWildcard ? (
     <>
@@ -169,14 +172,16 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
                 disabled={isSubmitting}
                 {...chipText(spoken, 'Allow this run', 'This run', 'A later run asks again.')}
               />
-              <button
-                type="button"
-                className={`${styles.btn} ${styles.btnAllow}`}
-                onClick={() => send({ kind: 'allowAlways', entry: req.host })}
-                disabled={isSubmitting}
-                {...chipText(spoken, `Always for ${agentName}`, 'Always', `Adds ${req.host} to the allowlist.`)}
-              />
-              {req.suggestedWildcard && (
+              {canSave(req) && (
+                <button
+                  type="button"
+                  className={`${styles.btn} ${styles.btnAllow}`}
+                  onClick={() => send({ kind: 'allowAlways', entry: req.host })}
+                  disabled={isSubmitting}
+                  {...chipText(spoken, `Always for ${agentName}`, 'Always', `Adds ${req.host} to the allowlist.`)}
+                />
+              )}
+              {canSave(req) && req.suggestedWildcard && (
                 <button
                   type="button"
                   className={`${styles.btn} ${styles.btnAllow}`}
