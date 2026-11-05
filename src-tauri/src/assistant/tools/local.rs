@@ -13,7 +13,7 @@ use crate::assistant::network::addr::{
     is_blocked_web_fetch_hostname, reject_private_web_fetch_addrs, reject_private_web_fetch_ip,
     strip_ipv6_url_brackets,
 };
-use crate::assistant::network::matcher::HostDecision;
+use crate::assistant::network::matcher::{canonical_host, parse_entry, HostDecision};
 use crate::assistant::network::run_state::RunNetwork;
 use crate::assistant::sandbox::{
     run_command, SandboxCommand, SandboxEnv, SandboxNetworkMode, SandboxProfile,
@@ -68,6 +68,15 @@ struct FsRequestGrantParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct NetRequestAccessParams {
+    host: String,
+    #[serde(default)]
+    port: Option<u16>,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WebSearchParams {
     query: String,
     #[serde(default)]
@@ -102,6 +111,11 @@ pub async fn execute_local_tool(
             execute_fs_request_grant(deps, context, params).await
         }
         "web_search" | "web_fetch" => execute_web_tool(context, tool_name, params).await,
+        "net_request_access" => {
+            let params: NetRequestAccessParams = serde_json::from_value(params)
+                .map_err(|e| format!("Invalid net_request_access params: {}", e))?;
+            execute_net_request_access(deps, context, params).await
+        }
         _ => Err(format!("Unknown local tool: {}", tool_name)),
     }
 }
@@ -980,14 +994,259 @@ fn check_web_host(gate: WebGate<'_>, host: &str, port: Option<u16>) -> Result<()
     network.record(host, port, allowed);
     match decision {
         HostDecision::Allowed => Ok(()),
-        HostDecision::Denied { entry } => Err(format!(
-            "`{host}` is on this agent's network deny list (entry `{entry}`). The user can \
-             change the list in the agent's Access settings."
+        HostDecision::Denied { entry } => Err(denied_host_message(host, &entry)),
+        HostDecision::Unlisted => Err(unlisted_host_message(
+            host,
+            crate::assistant::sandbox::status().allowlist_available,
         )),
-        HostDecision::Unlisted => Err(format!(
-            "`{host}` is not on this agent's network allowlist. Call `net_request_access` to ask \
-             the user, or they can add it in the agent's Access settings."
-        )),
+    }
+}
+
+fn denied_host_message(host: &str, entry: &str) -> String {
+    format!(
+        "`{host}` is on this agent's network deny list (entry `{entry}`). The user can change \
+         the list in the agent's Access settings."
+    )
+}
+
+/// Points at `net_request_access` only where it is offered.
+fn unlisted_host_message(host: &str, can_ask: bool) -> String {
+    let way_out = if can_ask {
+        "Call `net_request_access` to ask the user, or they can add it in the agent's Access \
+         settings."
+    } else {
+        "The user can add it in the agent's Access settings."
+    };
+    format!("`{host}` is not on this agent's network allowlist. {way_out}")
+}
+
+// =============================================================================
+// net_request_access
+// =============================================================================
+
+async fn execute_net_request_access(
+    deps: &crate::assistant::engine::AssistantDeps,
+    context: &ToolExecutionContext,
+    params: NetRequestAccessParams,
+) -> Result<serde_json::Value, String> {
+    use crate::commands::network_access::NetworkAccessRequest;
+    use tauri::Manager;
+
+    let host = requested_host(
+        &context.run_context.execution,
+        crate::assistant::sandbox::status().allowlist_available,
+        &context.run_network,
+        &params.host,
+    )?;
+    let Some(host) = host else {
+        return Ok(serde_json::json!({
+            "granted": true,
+            "host": canonical_host(&params.host),
+            "scope": "already-allowed",
+        }));
+    };
+
+    let request = NetworkAccessRequest::for_agent(
+        &deps.app.state::<crate::AppState>(),
+        Some(deps.workspace_id.clone()),
+        context.run_context.automation_id.clone(),
+        host.clone(),
+        params.port,
+        params.reason,
+        context.run_network.host_log(),
+    );
+    let decision = await_network_access_decision(deps, context, request).await?;
+    context.note_warning();
+    apply_network_decision(context, &host, decision)
+}
+
+/// The host to ask the user about, or `None` when the run already allows
+/// it. Refuses, without a card, where the tool is not offered (a stale tool
+/// list), a host that is not one, and a host on the deny list.
+fn requested_host(
+    execution: &ExecutionCapabilityConfig,
+    allowlist_available: bool,
+    network: &RunNetwork,
+    raw: &str,
+) -> Result<Option<String>, String> {
+    if let Some(refusal) =
+        super::registry::net_request_access_refusal(execution, allowlist_available)
+    {
+        return Err(refusal.to_string());
+    }
+    let raw = raw.trim();
+    if raw.contains('*') {
+        return Err(
+            "Ask for one host, not a wildcard; the user can choose to allow its parent domain."
+                .to_string(),
+        );
+    }
+    let host = canonical_host(raw).ok_or_else(|| {
+        format!(
+            "`{raw}` is not a host name. Give the host only, such as `mirror.example.org`, \
+             without a scheme, path or port."
+        )
+    })?;
+    match network.decide(&host) {
+        HostDecision::Allowed => Ok(None),
+        HostDecision::Denied { entry } => Err(denied_host_message(&host, &entry)),
+        HostDecision::Unlisted => Ok(Some(host)),
+    }
+}
+
+/// Applies the user's answer to the run: an allowed host or entry joins
+/// the run's lists at once (an “Always” entry is already saved on the
+/// agent); a denial is the tool error.
+fn apply_network_decision(
+    context: &ToolExecutionContext,
+    host: &str,
+    decision: crate::commands::network_access::NetworkAccessDecision,
+) -> Result<serde_json::Value, String> {
+    use crate::commands::network_access::NetworkAccessDecision;
+
+    let (entry, scope) = match decision {
+        NetworkAccessDecision::AllowRun => (host.to_string(), "run"),
+        NetworkAccessDecision::AllowAlways { entry } => (entry, "always"),
+        NetworkAccessDecision::Deny { reason } => {
+            return Err(network_denied_message(host, reason.as_deref()));
+        }
+    };
+    let parsed = parse_entry(&entry).map_err(|reason| format!("`{entry}`: {reason}"))?;
+    context.run_network.allow(parsed);
+    let mut result = serde_json::json!({
+        "granted": true,
+        "host": host,
+        "entry": entry,
+        "scope": scope,
+    });
+    if scope == "run" {
+        result["note"] = serde_json::json!(
+            "Allowed for the rest of this run only; a later run has to ask again."
+        );
+    }
+    Ok(result)
+}
+
+pub(crate) fn network_denied_message(host: &str, reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) => format!("User denied network access to `{host}`. Reason: {reason}."),
+        None => format!("User denied network access to `{host}`."),
+    }
+}
+
+/// Network-request analogue of [`AbandonedPathGrantGuard`]: clears the
+/// pending request, drops its card, and cancels the run when the wait is
+/// abandoned without a decision.
+struct AbandonedNetworkRequestGuard {
+    app: tauri::AppHandle,
+    cancel_token: tokio_util::sync::CancellationToken,
+    request_id: String,
+    workspace_id: Option<String>,
+    armed: bool,
+}
+
+impl AbandonedNetworkRequestGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+
+    async fn expire_and_stop<T>(&mut self) -> T {
+        use crate::commands::network_access::{emit_attention, emit_network_access_resolved};
+        use tauri::Manager;
+
+        let state = self.app.state::<crate::AppState>();
+        if let Some((_, remaining)) = state.pending_network_requests.take(&self.request_id).await {
+            emit_network_access_resolved(&self.app, &self.request_id);
+            emit_attention(&self.app, self.workspace_id.clone(), remaining);
+        }
+        self.armed = false;
+        super::cancel_run_and_park(&self.cancel_token).await
+    }
+}
+
+impl Drop for AbandonedNetworkRequestGuard {
+    fn drop(&mut self) {
+        use crate::commands::network_access::{emit_attention, emit_network_access_resolved};
+        use tauri::Manager;
+
+        if !self.armed {
+            return;
+        }
+        self.cancel_token.cancel();
+        let app = self.app.clone();
+        let request_id = std::mem::take(&mut self.request_id);
+        let workspace_id = self.workspace_id.take();
+        tauri::async_runtime::spawn(async move {
+            let state = app.state::<crate::AppState>();
+            if let Some((_, remaining)) = state.pending_network_requests.take(&request_id).await {
+                emit_network_access_resolved(&app, &request_id);
+                emit_attention(&app, workspace_id, remaining);
+            }
+        });
+    }
+}
+
+/// Registers the request, shows the card and waits for the user, as
+/// [`await_path_grant_decision`] does for paths.
+async fn await_network_access_decision(
+    deps: &crate::assistant::engine::AssistantDeps,
+    context: &ToolExecutionContext,
+    request: crate::commands::network_access::NetworkAccessRequest,
+) -> Result<crate::commands::network_access::NetworkAccessDecision, String> {
+    use crate::commands::network_access::{
+        emit_attention, emit_network_access_resolved, PendingNetworkOutcome,
+        NETWORK_ACCESS_REQUEST_EVENT,
+    };
+    use tauri::{Emitter, Manager};
+
+    let app_state = deps.app.state::<crate::AppState>();
+    let workspace_id = Some(deps.workspace_id.clone());
+
+    // A request of this run for the same host still pending is an orphan of
+    // a CLI transport drop; the fresh one replaces it and its card.
+    for stale in app_state
+        .pending_network_requests
+        .take_superseded(&context.run_id, &request.host)
+        .await
+    {
+        emit_network_access_resolved(&deps.app, &stale.request_id);
+        emit_attention(&deps.app, stale.workspace_id, stale.remaining);
+    }
+
+    let (rx, count) = app_state
+        .pending_network_requests
+        .register(request.clone(), context.run_id.clone())
+        .await;
+    if let Err(e) = deps.app.emit(NETWORK_ACCESS_REQUEST_EVENT, &request) {
+        tracing::warn!("Failed to emit network access request event: {}", e);
+    }
+    emit_attention(&deps.app, workspace_id.clone(), count);
+
+    let mut abandon_guard = AbandonedNetworkRequestGuard {
+        app: deps.app.clone(),
+        cancel_token: context.cancel_token.clone(),
+        request_id: request.request_id,
+        workspace_id,
+        armed: true,
+    };
+
+    match rx.await {
+        Ok(PendingNetworkOutcome::Decision(decision)) => {
+            abandon_guard.disarm();
+            Ok(decision)
+        }
+        Ok(PendingNetworkOutcome::Superseded) => {
+            abandon_guard.disarm();
+            Err(
+                "Network access request was superseded by a newer request for the same host \
+                 before a decision was made"
+                    .to_string(),
+            )
+        }
+        Err(_) if context.cancel_token.is_cancelled() => {
+            super::cancel_run_and_park(&context.cancel_token).await
+        }
+        Err(_) => abandon_guard.expire_and_stop().await,
     }
 }
 
@@ -1795,6 +2054,131 @@ mod tests {
             ]
         );
         assert!(check_web_host(WebGate::AnyHost, "example.org", Some(443)).is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // net_request_access
+    // ------------------------------------------------------------------
+
+    fn allowlist_execution(allow: &[&str], deny: &[&str]) -> ExecutionCapabilityConfig {
+        let mut execution = ExecutionCapabilityConfig::default();
+        execution.sandbox.network_access = allowlist(allow, deny);
+        execution.shell.mode = ShellAccessMode::Restricted;
+        execution
+    }
+
+    #[test]
+    fn a_request_is_refused_without_a_card_where_the_tool_is_not_offered() {
+        let network = RunNetwork::default();
+        let mut execution = allowlist_execution(&[], &[]);
+        assert!(requested_host(&execution, false, &network, "example.org")
+            .unwrap_err()
+            .contains("not available on this PC"));
+        for (mode, says) in [
+            (NetworkMode::Off, "Network access is off"),
+            (NetworkMode::HostNetwork, "can already reach any host"),
+        ] {
+            execution.sandbox.network_access.mode = mode;
+            let error = requested_host(&execution, true, &network, "example.org").unwrap_err();
+            assert!(error.contains(says), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_request_names_one_host_the_lists_do_not_decide() {
+        let execution = allowlist_execution(&["github.com"], &["*.s3.amazonaws.com"]);
+        let network = RunNetwork::new(&execution.sandbox.network_access);
+        let ask = |raw| requested_host(&execution, true, &network, raw);
+
+        assert_eq!(
+            ask(" Mirror.Example.ORG. "),
+            Ok(Some("mirror.example.org".to_string()))
+        );
+        assert_eq!(ask("[2001:db8::1]"), Ok(Some("2001:db8::1".to_string())));
+        assert_eq!(ask("GitHub.com"), Ok(None), "already allowed: no card");
+        let denied = ask("bucket.s3.amazonaws.com").unwrap_err();
+        assert!(
+            denied.contains("deny list (entry `*.s3.amazonaws.com`)")
+                && denied.contains("Access settings"),
+            "{denied}"
+        );
+        for raw in [
+            "*.example.org",
+            "https://example.org",
+            "example.org/x",
+            "a b",
+            "",
+        ] {
+            assert!(ask(raw).is_err(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_answer_widens_this_run_and_a_denial_carries_its_reason() {
+        use crate::commands::network_access::NetworkAccessDecision;
+
+        let workspace = tempdir().unwrap();
+        let mut context = context_with_grants(workspace.path(), Vec::new());
+        context.run_network = std::sync::Arc::new(run_network(&[], &["secret.example.org"]));
+
+        let allowed = apply_network_decision(
+            &context,
+            "mirror.example.org",
+            NetworkAccessDecision::AllowRun,
+        )
+        .unwrap();
+        assert_eq!(allowed["scope"], "run");
+        assert_eq!(
+            context.run_network.decide("mirror.example.org"),
+            HostDecision::Allowed
+        );
+        assert_eq!(
+            context.run_network.decide("www.example.org"),
+            HostDecision::Unlisted
+        );
+
+        let always = apply_network_decision(
+            &context,
+            "www.example.org",
+            NetworkAccessDecision::AllowAlways {
+                entry: "*.example.org".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(always["entry"], "*.example.org");
+        assert_eq!(
+            context.run_network.decide("cdn.example.org"),
+            HostDecision::Allowed
+        );
+        assert!(matches!(
+            context.run_network.decide("secret.example.org"),
+            HostDecision::Denied { .. }
+        ));
+
+        let error = apply_network_decision(
+            &context,
+            "other.example.com",
+            NetworkAccessDecision::Deny {
+                reason: Some("not needed".to_string()),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "User denied network access to `other.example.com`. Reason: not needed."
+        );
+        assert_eq!(
+            context.run_network.decide("other.example.com"),
+            HostDecision::Unlisted
+        );
+    }
+
+    #[test]
+    fn an_unlisted_host_points_at_the_request_tool_only_where_it_is_offered() {
+        assert!(unlisted_host_message("example.org", true).contains("net_request_access"));
+        let elsewhere = unlisted_host_message("example.org", false);
+        assert!(!elsewhere.contains("net_request_access"), "{elsewhere}");
+        assert!(elsewhere.contains("Access settings"), "{elsewhere}");
     }
 
     #[tokio::test]

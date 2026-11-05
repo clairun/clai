@@ -203,7 +203,7 @@ activeRunIds: Array<string>,
 /**
  * Unfinished tasks plus the most recently finished ones, newest first.
  */
-tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingAsks: Array<PendingAsk>, 
+tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingNetworkRequests: Array<NetworkAccessRequest>, pendingAsks: Array<PendingAsk>, 
 /**
  * The main session's newest assistant reply with text.
  */
@@ -226,6 +226,11 @@ agents: Array<AgentRefSnapshot>, };
  * `None` (the historical shape) is treated as `Manual` by the UI.
  */
 export type GrantOrigin = { "kind": "manual" } | { "kind": "credentialsPreset" } | { "kind": "approval", reason: string, grantedAtUnixMs: bigint, };
+
+/**
+ * One host the run tried to reach, and whether it was let through.
+ */
+export type HostLogEntry = { host: string, port: number | null, allowed: boolean, };
 
 export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 
@@ -314,6 +319,35 @@ supportsImages: boolean, };
  * How to list models for the provider (quirk-as-data).
  */
 export type ModelsEndpointStyle = "standard" | "none" | { "open_ai_compatible": { url: string, } };
+
+/**
+ * The user's answer to a [`NetworkAccessRequest`].
+ */
+export type NetworkAccessDecision = { "kind": "allowRun" } | { "kind": "allowAlways", entry: string, } | { "kind": "deny", reason?: string, };
+
+export type NetworkAccessRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, 
+/**
+ * As the matcher compares it: lower case, punycode, an IPv6 address
+ * without brackets.
+ */
+host: string, port: number | null, reason: string, 
+/**
+ * The hosts the run tried so far, for the card's “This run” line.
+ */
+runHosts: Array<HostLogEntry>, 
+/**
+ * `*.` and the host's parent domain, when the card may offer it.
+ */
+suggestedWildcard: string | null, 
+/**
+ * True when “Always” edits a shared agent definition rather than this
+ * workspace's Main (see `PermissionRequest`).
+ */
+persistsToSharedAgent: boolean, 
+/**
+ * The other workspaces that “Always” reaches today.
+ */
+alsoAffectsWorkspaces: Array<string>, };
 
 /**
  * How an agent's shell commands and web tools reach the network.

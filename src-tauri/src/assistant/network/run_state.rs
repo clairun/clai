@@ -4,7 +4,9 @@
 
 use std::sync::{Mutex, PoisonError, RwLock};
 
-use super::matcher::{canonical_host, HostDecision, HostLists};
+use serde::Serialize;
+
+use super::matcher::{canonical_host, HostDecision, HostEntry, HostLists};
 use crate::config::{NetworkMode, NetworkPolicy};
 
 /// Enough for the network card's “This run” line; the oldest entry goes
@@ -12,7 +14,9 @@ use crate::config::{NetworkMode, NetworkPolicy};
 pub const MAX_HOST_LOG_ENTRIES: usize = 200;
 
 /// One host the run tried to reach, and whether it was let through.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct HostLogEntry {
     pub host: String,
     pub port: Option<u16>,
@@ -69,6 +73,14 @@ impl RunNetwork {
             .decide(host)
     }
 
+    /// Allows `entry` for the rest of the run. The deny list still wins.
+    pub fn allow(&self, entry: HostEntry) {
+        self.lists
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .add_allow(entry);
+    }
+
     /// Adds a host to the run's log, once per host and outcome.
     pub fn record(&self, host: &str, port: Option<u16>, allowed: bool) {
         let host = canonical_host(host).unwrap_or_else(|| host.trim().to_string());
@@ -89,7 +101,6 @@ impl RunNetwork {
         });
     }
 
-    #[cfg(test)]
     pub fn host_log(&self) -> Vec<HostLogEntry> {
         self.log
             .lock()
@@ -133,6 +144,30 @@ mod tests {
             }
         );
         assert_eq!(network.decide("example.com"), HostDecision::Unlisted);
+    }
+
+    #[test]
+    fn a_host_allowed_for_the_run_never_overrides_the_deny_list() {
+        let network = RunNetwork::new(&policy(
+            NetworkMode::Allowlist,
+            &[],
+            &["*.s3.amazonaws.com"],
+        ));
+        let entry = |raw| crate::assistant::network::matcher::parse_entry(raw).unwrap();
+        network.allow(entry("mirror.example.org"));
+        network.allow(entry("*.amazonaws.com"));
+        assert_eq!(network.decide("mirror.example.org"), HostDecision::Allowed);
+        assert_eq!(network.decide("www.example.org"), HostDecision::Unlisted);
+        assert_eq!(
+            network.decide("ec2.us-east-1.amazonaws.com"),
+            HostDecision::Allowed
+        );
+        assert_eq!(
+            network.decide("bucket.s3.amazonaws.com"),
+            HostDecision::Denied {
+                entry: "*.s3.amazonaws.com".to_string()
+            }
+        );
     }
 
     #[test]

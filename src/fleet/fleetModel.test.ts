@@ -334,6 +334,7 @@ describe('the highlight feed', () => {
         tasks: [],
         pendingPermissions: [],
         pendingPathGrants: [],
+        pendingNetworkRequests: [],
         pendingAsks: [],
         lastAssistantMessage: null,
         recentMessages: [
@@ -587,6 +588,7 @@ const snapshotOf = (patch: Partial<FleetWorkspace> = {}): FleetWorkspace => ({
   tasks: [],
   pendingPermissions: [],
   pendingPathGrants: [],
+  pendingNetworkRequests: [],
   pendingAsks: [],
   lastAssistantMessage: null,
   recentMessages: [],

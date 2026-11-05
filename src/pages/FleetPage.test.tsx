@@ -33,6 +33,7 @@ const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspac
   tasks: [],
   pendingPermissions: [],
   pendingPathGrants: [],
+  pendingNetworkRequests: [],
   pendingAsks: [],
   lastAssistantMessage: null,
   recentMessages: [],

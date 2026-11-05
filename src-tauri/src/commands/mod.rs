@@ -9,6 +9,7 @@ pub mod assistant;
 pub mod fleet;
 pub mod global_agents;
 pub mod mcp_servers;
+pub mod network_access;
 pub mod path_grants;
 pub mod permissions;
 pub mod provider_connections;

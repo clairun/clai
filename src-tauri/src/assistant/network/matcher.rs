@@ -40,8 +40,7 @@ pub struct HostEntry {
 impl HostEntry {
     /// The form the matcher compares: lower case, punycode, IPv6 without
     /// brackets.
-    #[cfg(test)]
-    fn normalized(&self) -> String {
+    pub fn normalized(&self) -> String {
         match &self.host {
             Host::Domain(domain) => domain.clone(),
             Host::Ip(ip) => ip.to_string(),
@@ -206,6 +205,17 @@ impl HostLists {
         &self.ignored
     }
 
+    /// Adds an allow entry. The deny list still wins over it.
+    pub fn add_allow(&mut self, entry: HostEntry) {
+        if !self
+            .allow
+            .iter()
+            .any(|existing| existing.host == entry.host)
+        {
+            self.allow.push(entry);
+        }
+    }
+
     pub fn decide(&self, host: &str) -> HostDecision {
         let Some(host) = normalize(host).filter(|host| !has_wildcard(host)) else {
             return HostDecision::Unlisted;
@@ -229,6 +239,47 @@ pub fn canonical_host(raw: &str) -> Option<String> {
         Host::Domain(domain) => Some(domain),
         Host::Ip(ip) => Some(ip.to_string()),
     }
+}
+
+/// The wider entry the network card offers for `host`: `*.` and the host
+/// without its first label, when at least two labels remain. Never for an
+/// IP address.
+pub fn parent_wildcard(host: &str) -> Option<String> {
+    let Some(Host::Domain(domain)) = normalize(host) else {
+        return None;
+    };
+    let (_, parent) = domain.split_once('.')?;
+    if parent.contains('*') || parent.split('.').count() < 2 {
+        return None;
+    }
+    let entry = format!("*.{parent}");
+    parse_entry(&entry).ok().map(|_| entry)
+}
+
+/// The entry a user may add to the allow list when asked about `host`: the
+/// host itself, or `*.` and a suffix of it with at least two labels. An
+/// entry that would cover more is refused, and so is an IP wildcard.
+pub fn approved_entry(host: &str, entry: &str) -> Result<HostEntry, String> {
+    let host_value = normalize(host)
+        .filter(|host| !has_wildcard(host))
+        .ok_or_else(|| format!("`{host}` is not a host name"))?;
+    let approved = parse_entry(entry)
+        .map_err(|reason| format!("`{entry}` is not a valid host entry: {reason}"))?;
+    if approved.host == host_value {
+        return Ok(approved);
+    }
+    let parent = match &approved.host {
+        Host::Domain(domain) => domain.strip_prefix("*."),
+        Host::Ip(_) => None,
+    };
+    let narrow_wildcard =
+        parent.is_some_and(|parent| !parent.contains('*') && parent.split('.').count() >= 2);
+    if narrow_wildcard && approved.matches(&host_value) {
+        return Ok(approved);
+    }
+    Err(format!(
+        "`{entry}` is neither `{host}` nor `*.` and a parent domain of it with at least two labels"
+    ))
 }
 
 /// A host as a URL or a CONNECT line carries it: lower case, one trailing
@@ -580,6 +631,55 @@ mod tests {
         assert!(HostLists::new(&["github.com"], &["*.s3.amazonaws.com"])
             .ignored()
             .is_empty());
+    }
+
+    #[test]
+    fn the_card_offers_the_parent_domain_with_at_least_two_labels() {
+        for (host, offer) in [
+            ("mirror.example.org", Some("*.example.org")),
+            ("a.b.example.org", Some("*.b.example.org")),
+            ("Mirror.Example.ORG.", Some("*.example.org")),
+            ("www.bücher.example", Some("*.xn--bcher-kva.example")),
+            ("example.org", None),
+            ("org", None),
+            ("10.0.0.5", None),
+            ("2001:db8::1", None),
+            ("", None),
+        ] {
+            assert_eq!(parent_wildcard(host).as_deref(), offer, "{host:?}");
+        }
+    }
+
+    #[test]
+    fn an_approved_entry_is_the_host_or_a_narrow_parent_wildcard() {
+        let host = "mirror.example.org";
+        for (entry, normalized) in [
+            ("mirror.example.org", "mirror.example.org"),
+            ("MIRROR.example.org.", "mirror.example.org"),
+            ("*.example.org", "*.example.org"),
+        ] {
+            assert_eq!(
+                approved_entry(host, entry).map(|entry| entry.normalized()),
+                Ok(normalized.to_string()),
+                "{entry}"
+            );
+        }
+        for entry in [
+            "*.org",
+            "*.other.org",
+            "example.org",
+            "*.*.org",
+            "*.mirror.example.org",
+            "other.example.org",
+            "https://mirror.example.org",
+        ] {
+            assert!(approved_entry(host, entry).is_err(), "{entry}");
+        }
+        assert!(approved_entry("a.b.example.org", "*.example.org").is_ok());
+        assert!(approved_entry("10.0.0.5", "10.0.0.5").is_ok());
+        assert!(approved_entry("10.0.0.5", "10.0.0.*").is_err());
+        assert!(approved_entry("10.0.0.5", "10.0.0.6").is_err());
+        assert!(approved_entry("*.example.org", "*.example.org").is_err());
     }
 
     #[test]

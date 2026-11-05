@@ -206,9 +206,12 @@ pub(crate) fn build_system_prompt(
     // needed here. Scoped to sessions that actually expose such a tool;
     // ordinary read/write tools, which can be retried without side effects,
     // need no special handling.
-    let has_interactive_tool = tool_names
-        .iter()
-        .any(|n| matches!(*n, "ask_user" | "bash_exec" | "fs_request_grant"));
+    let has_interactive_tool = tool_names.iter().any(|n| {
+        matches!(
+            *n,
+            "ask_user" | "bash_exec" | "fs_request_grant" | "net_request_access"
+        )
+    });
     if has_interactive_tool {
         prompt.push_str(
             "\n## Interactive Tool Reliability\n\

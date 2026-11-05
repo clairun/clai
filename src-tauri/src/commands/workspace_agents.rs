@@ -527,6 +527,46 @@ mod stored_agent_tests {
     }
 
     #[test]
+    fn a_save_from_a_form_opened_before_a_network_always_is_refused() {
+        let fixture = Fixture::new();
+        let opened = update_request(&fixture);
+        let listed = |agent: &crate::config::WorkspaceAgent| {
+            agent
+                .execution
+                .sandbox
+                .network_access
+                .allow_domains
+                .contains(&"mirror.example.org".to_string())
+        };
+
+        // “Always for Manager” on a network card, saved while the form is open.
+        crate::commands::network_access::persist_network_allow(
+            &fixture.state,
+            WORKSPACE_ID,
+            MAIN_ID,
+            "mirror.example.org",
+        )
+        .expect("approval saved");
+
+        let error = update_main_agent(&fixture.state, opened).expect_err("stale");
+        assert!(
+            matches!(&error, WorkspaceAgentUpdateError::Stale { .. }),
+            "{error:?}"
+        );
+        let stored = fixture.config().main_agent.unwrap();
+        assert_ne!(stored.description, "edited");
+        assert!(listed(&stored), "the saved host survives");
+
+        let saved = update_main_agent(&fixture.state, update_request(&fixture)).expect("fresh");
+        assert!(saved
+            .execution
+            .sandbox
+            .network_access
+            .allow_domains
+            .contains(&"mirror.example.org".to_string()));
+    }
+
+    #[test]
     fn a_write_in_the_same_millisecond_as_a_save_makes_that_save_stale() {
         let fixture = Fixture::new();
         let saved = update_main_agent(&fixture.state, update_request(&fixture)).expect("save");

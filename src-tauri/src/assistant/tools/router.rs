@@ -36,7 +36,7 @@ pub async fn execute_tool(
     let name_for_dispatch = canonical.as_str();
     validate_builtin_params(name_for_dispatch, &params)?;
     match name_for_dispatch {
-        "fs_request_grant" | "bash_exec" | "web_search" | "web_fetch" => {
+        "fs_request_grant" | "bash_exec" | "web_search" | "web_fetch" | "net_request_access" => {
             local::execute_local_tool(deps, context, name_for_dispatch, params).await
         }
         "fs_list" | "fs_glob" | "fs_read" | "fs_write" => Err(

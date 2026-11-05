@@ -79,6 +79,8 @@ pub struct AppState {
     pub pending_approvals: commands::permissions::PendingApprovals,
     /// In-flight filesystem path-grant requests awaiting user decision.
     pub pending_path_grants: commands::path_grants::PendingPathGrants,
+    /// In-flight network access requests awaiting user decision.
+    pub pending_network_requests: commands::network_access::PendingNetworkRequests,
     /// File-backed workspace discovery index.
     pub workspace_index: Arc<RwLock<WorkspaceIndex>>,
     /// Live integrated-terminal sessions (Phase 1 spike).
@@ -106,6 +108,7 @@ impl AppState {
             scheduler: agents::create_shared_scheduler(),
             pending_approvals: commands::permissions::PendingApprovals::new(),
             pending_path_grants: commands::path_grants::PendingPathGrants::new(),
+            pending_network_requests: commands::network_access::PendingNetworkRequests::new(),
             workspace_index: Arc::new(RwLock::new(workspace_index)),
             terminals: commands::terminal::TerminalRegistry::new(),
             app_updates: commands::app_updates::AppUpdateRuntime::new(),
@@ -372,6 +375,7 @@ pub fn run() {
         scheduler,
         pending_approvals: commands::permissions::PendingApprovals::new(),
         pending_path_grants: commands::path_grants::PendingPathGrants::new(),
+        pending_network_requests: commands::network_access::PendingNetworkRequests::new(),
         workspace_index: Arc::new(RwLock::new(workspace_index)),
         terminals: commands::terminal::TerminalRegistry::new(),
         app_updates: commands::app_updates::AppUpdateRuntime::new(),
@@ -545,6 +549,9 @@ pub fn run() {
             commands::path_grants::submit_path_grant_decision,
             commands::path_grants::list_pending_path_grant_requests,
             commands::path_grants::list_pending_path_grant_counts,
+            commands::network_access::submit_network_access_decision,
+            commands::network_access::list_pending_network_access_requests,
+            commands::network_access::list_pending_network_access_counts,
             commands::sandbox::get_sandbox_status,
         ])
         .build(tauri::generate_context!())

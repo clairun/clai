@@ -3454,9 +3454,16 @@ async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), 
             let _ = crate::assistant::runtime::cancel_run(run_id);
         })
         .await;
+    let purged_network_requests = state
+        .pending_network_requests
+        .purge_workspace_canceling_runs(&workspace_id, |run_id| {
+            let _ = crate::assistant::runtime::cancel_run(run_id);
+        })
+        .await;
     let mut purged_run_ids: Vec<String> = purged_approvals
         .iter()
         .chain(purged_path_grants.iter())
+        .chain(purged_network_requests.iter())
         .cloned()
         .collect();
     purged_run_ids.sort();
@@ -3467,6 +3474,7 @@ async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), 
         instances_cleared,
         approvals_purged = purged_approvals.len(),
         path_grants_purged = purged_path_grants.len(),
+        network_requests_purged = purged_network_requests.len(),
         runs_cancelled = purged_run_ids.len(),
         wiped = wipe.is_ok(),
         "Deleted general workspace"
