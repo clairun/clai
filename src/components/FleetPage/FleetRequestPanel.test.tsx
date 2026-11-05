@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { PermissionRequest } from '../../generated/bindings';
+import type { NetworkAccessRequest, PermissionRequest } from '../../generated/bindings';
 import type { PendingAskUser } from '../../assistant/sessionStore';
 
 const mockInvoke = vi.hoisted(() => vi.fn());
@@ -91,6 +91,45 @@ describe('FleetRequestPanel', () => {
     await userEvent.click(within(section).getByRole('button', { name: 'Deny command' }));
     // No reason typed, so none is sent.
     expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', { requestId: 'perm-1', decision: { kind: 'deny' } });
+  });
+
+  it('answers a network request with the network card, naming the workspace', async () => {
+    const network: NetworkAccessRequest = {
+      requestId: 'net-1',
+      workspaceId: 'ws-1',
+      agentId: 'wa-c',
+      agentName: null,
+      host: 'mirror.example.org',
+      port: 443,
+      reason: 'Download a fixture',
+      runHosts: [],
+      suggestedWildcard: '*.example.org',
+      persistsToSharedAgent: false,
+      alsoAffectsWorkspaces: [],
+    };
+    const card = {
+      ...emptyCard('ws-1'),
+      agents: [{ id: 'wa-c', name: 'Committer', seed: 'def-c' }],
+      requests: { 'network:net-1': { kind: 'network', request: network, at: 1 } as unknown as FleetRequest },
+    };
+    render(
+      <FleetRequestPanel
+        scene={requestScene(card, { runs: {}, tasks: {} })!}
+        faces={castFor({}, null)}
+        loud={false}
+        now={10}
+        workspaceTitle="Alpha"
+      />,
+    );
+    const section = screen.getByRole('region', { name: 'Committer needs you' });
+    expect(within(section).getByText('mirror.example.org:443')).toBeInTheDocument();
+    expect(within(section).getByText(/add their entry/)).toHaveTextContent(/allowed hosts in “Alpha” only\.$/);
+    expect(within(section).getAllByRole('button').map((b) => b.textContent)).toEqual(['This run', 'Always', '*.example.org', 'Deny']);
+    await userEvent.click(within(section).getByRole('button', { name: 'This run' }));
+    expect(mockInvoke).toHaveBeenCalledWith('submit_network_access_decision', {
+      requestId: 'net-1',
+      decision: { kind: 'allowRun' },
+    });
   });
 
   it('names the workspace in the Always allow line', () => {
