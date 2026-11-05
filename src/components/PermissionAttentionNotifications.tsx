@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useLocation, useNavigate } from 'react-router';
-import type { PathGrantRequest, PermissionRequest } from '../generated/bindings';
+import type { NetworkAccessRequest, PathGrantRequest, PermissionRequest } from '../generated/bindings';
 // Reuse the WorkspaceTaskNotifications stack styles so the global
 // notifications share visual language. The two surfaces are
 // conceptually the same: a toast in the upper-right corner that the
@@ -10,6 +10,7 @@ import styles from './WorkspaceTaskNotifications.module.css';
 
 const PERMISSION_REQUEST_EVENT = 'permissions://request';
 const PATH_GRANT_REQUEST_EVENT = 'path-grants://request';
+const NETWORK_ACCESS_REQUEST_EVENT = 'network-access://request';
 const MAX_NOTIFICATIONS = 4;
 const AUTO_DISMISS_MS = 15000;
 
@@ -60,6 +61,20 @@ const buildPathGrantNotification = (
     title,
     badge: 'Path access',
     body,
+  };
+};
+
+const buildNetworkAccessNotification = (
+  request: NetworkAccessRequest,
+): NotificationItem | null => {
+  if (!request?.workspaceId || !request?.requestId) return null;
+  return {
+    id: `net:${request.requestId}`,
+    requestId: request.requestId,
+    workspaceId: request.workspaceId,
+    title: request.agentName || 'Agent',
+    badge: 'Network access',
+    body: `Needs network access to \`${truncate(request.host)}\``,
   };
 };
 
@@ -135,6 +150,9 @@ const PermissionAttentionNotifications = () => {
       }),
       listen<PathGrantRequest>(PATH_GRANT_REQUEST_EVENT, (event) => {
         enqueue(buildPathGrantNotification(event.payload));
+      }),
+      listen<NetworkAccessRequest>(NETWORK_ACCESS_REQUEST_EVENT, (event) => {
+        enqueue(buildNetworkAccessNotification(event.payload));
       }),
     ];
 

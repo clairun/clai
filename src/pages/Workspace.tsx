@@ -25,6 +25,7 @@ import { runFailure, type RunFailure } from '../assistant/runErrors';
 import { mainIdentity } from '../components/Agents/agentIdentity';
 import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
+import InlineNetworkAccessCard from '../components/InlineNetworkAccessCard';
 import VirtualizedList from '../components/common/VirtualizedList';
 import {
   getOrCreateWorkspaceSession,
@@ -1513,6 +1514,7 @@ const ChatFirstLayout = ({
           <AskUserPanel sessionId={sessionId} asker={asker} />
           <InlineApprovalCard workspaceId={workspaceId} roster={taskRoster} loadedTasks={loadedTasks} />
           <InlinePathGrantCard workspaceId={workspaceId} roster={taskRoster} loadedTasks={loadedTasks} />
+          <InlineNetworkAccessCard workspaceId={workspaceId} roster={taskRoster} loadedTasks={loadedTasks} />
         </>
       ) : isHydrating ? (
         <div className={styles.chatFirstLoading} aria-live="polite" aria-busy="true">

@@ -619,6 +619,15 @@ describe('snapshot', () => {
     expect(c.requests['grant:g1']).toMatchObject({ at: 10 });
   });
 
+  it('takes the network access requests of the snapshot, counted with the access requests', () => {
+    const network = { requestId: 'n1', workspaceId: WS, agentId: null, host: 'mirror.example.org', port: 443 } as never;
+    let s = seedFleet(EMPTY_FLEET, [snapshotOf({ pendingNetworkRequests: [network] })]);
+    expect(card(s).requests['network:n1']).toMatchObject({ kind: 'network', text: 'Reach mirror.example.org', at: 10 });
+    expect(cardAttention(card(s))).toMatchObject({ grants: 1, total: 1 });
+    s = applyRequestResolved(s, 'network', 'n1');
+    expect(cardAttention(card(s)).total).toBe(0);
+  });
+
   it('removes cards missing from the snapshot, e.g. deleted workspaces', () => {
     let s = apply(EMPTY_FLEET, askEvent('q', 1), env({ type: 'run_started', payload: { run: run('r') } }, 2, 's', 'deleted'));
     s = seedFleet(s, [snapshotOf()]);

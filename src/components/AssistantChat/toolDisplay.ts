@@ -190,6 +190,8 @@ export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSu
       return { verb: 'Glob', arg: get('pattern') };
     case 'fs_request_grant':
       return { verb: 'Request access', arg: get('path') };
+    case 'net_request_access':
+      return { verb: 'Request network', arg: get('host') };
     case 'bash_exec':
       return { verb: 'Bash', arg: get('command') };
     case 'web_search':

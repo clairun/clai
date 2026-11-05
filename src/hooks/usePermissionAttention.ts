@@ -4,9 +4,11 @@ import {
   listPendingPathGrantCounts,
   listPendingPermissionCounts,
 } from '../permissions/client';
+import { listPendingNetworkAccessCounts } from '../permissions/networkAccessClient';
 
 const PERMISSION_ATTENTION_EVENT = 'permissions://attention';
 const PATH_GRANT_ATTENTION_EVENT = 'path-grants://attention';
+const NETWORK_ACCESS_ATTENTION_EVENT = 'network-access://attention';
 
 interface AttentionPayload {
   pendingCount: number;
@@ -42,13 +44,14 @@ const applyUpdate = (current: Counts, payload: AttentionPayload | undefined): Co
  * After that the event stream (`permissions://attention`,
  * `path-grants://attention`) keeps the map current.
  *
- * The two streams are merged: callers see one count per workspace
- * spanning both shell-command approvals and filesystem path grants,
- * since "needs attention" is a single UI signal.
+ * The streams are merged: callers see one count per workspace spanning
+ * shell-command approvals, filesystem path grants and network access
+ * requests, since "needs attention" is a single UI signal.
  */
 export function usePermissionAttention(): Counts {
   const [permissionCounts, setPermissionCounts] = useState<Counts>({});
   const [pathGrantCounts, setPathGrantCounts] = useState<Counts>({});
+  const [networkCounts, setNetworkCounts] = useState<Counts>({});
 
   useEffect(() => {
     let cancelled = false;
@@ -58,11 +61,12 @@ export function usePermissionAttention(): Counts {
     // before mount. A race where an event arrives during the seed is
     // harmless: each event carries the absolute count, so the latest
     // value wins.
-    Promise.all([listPendingPermissionCounts(), listPendingPathGrantCounts()])
-      .then(([perms, paths]) => {
+    Promise.all([listPendingPermissionCounts(), listPendingPathGrantCounts(), listPendingNetworkAccessCounts()])
+      .then(([perms, paths, network]) => {
         if (cancelled) return;
         setPermissionCounts(perms || {});
         setPathGrantCounts(paths || {});
+        setNetworkCounts(network || {});
       })
       .catch(() => {
         // Non-fatal: live events will still update the badge.
@@ -78,6 +82,11 @@ export function usePermissionAttention(): Counts {
         setPathGrantCounts((current) => applyUpdate(current, event.payload));
       }),
     );
+    unlistenPromises.push(
+      listen<AttentionPayload>(NETWORK_ACCESS_ATTENTION_EVENT, (event) => {
+        setNetworkCounts((current) => applyUpdate(current, event.payload));
+      }),
+    );
 
     return () => {
       cancelled = true;
@@ -88,8 +97,10 @@ export function usePermissionAttention(): Counts {
   }, []);
 
   const merged: Counts = { ...permissionCounts };
-  for (const [key, value] of Object.entries(pathGrantCounts)) {
-    merged[key] = (merged[key] || 0) + value;
+  for (const counts of [pathGrantCounts, networkCounts]) {
+    for (const [key, value] of Object.entries(counts)) {
+      merged[key] = (merged[key] || 0) + value;
+    }
   }
   return merged;
 }

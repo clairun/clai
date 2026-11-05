@@ -49,7 +49,7 @@ const Feed = ({ state, live = IDLE, now = NOW, onOpen = () => {} }: { state: Fle
 /** A snapshot of the card with these recent messages. */
 const snapshotWith = (...recentMessages: FleetHighlight[]) =>
   ({ workspaceId: WS, mainSessionId: MAIN, lastActivityAt: 0n, lastOpenedAt: 0n, lastMainRun: null, lastAssistantMessage: null, recentMessages,
-    pendingAsks: [], pendingPermissions: [], pendingPathGrants: [], agents: [] }) as unknown as FleetWorkspace;
+    pendingAsks: [], pendingPermissions: [], pendingPathGrants: [], pendingNetworkRequests: [], agents: [] }) as unknown as FleetWorkspace;
 const saying = (markdown: string) => fleet(updated(message('m1', [text(markdown), tool('c1')]), NOW - 1000));
 
 const bubbleOf = (words: RegExp) => screen.getByText(words).closest<HTMLElement>('[role=button]')!;
@@ -828,7 +828,7 @@ describe('pictures in the feed', () => {
     seedFleet(EMPTY_FLEET, [
       { workspaceId: WS, mainSessionId: MAIN, lastActivityAt: 0n, lastOpenedAt: 0n, lastMainRun: null, lastAssistantMessage: null,
         recentMessages: messages.map((m) => ({ message: m, runId: null, truncated: false })),
-        pendingAsks: [], pendingPermissions: [], pendingPathGrants: [], agents: [] } as unknown as FleetWorkspace,
+        pendingAsks: [], pendingPermissions: [], pendingPathGrants: [], pendingNetworkRequests: [], agents: [] } as unknown as FleetWorkspace,
     ]);
 
   beforeEach(() => {

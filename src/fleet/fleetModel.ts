@@ -21,6 +21,7 @@ import type {
   FleetHighlight,
   FleetWorkspace,
   MessageOrigin,
+  NetworkAccessRequest,
   PathGrantRequest,
   PermissionRequest,
   TaskStatus,
@@ -35,10 +36,11 @@ export const RECENT_WINDOW_MS = 12 * 60 * 60 * 1000;
 /** Messages a card keeps; a miniature shows fewer. */
 export const SAID_LIMIT = 24;
 
-/** A command approval or a path grant, as it arrives. */
+/** A command approval, a path grant or a network access request, as it arrives. */
 export type FleetPendingRequest =
   | { kind: 'approval'; request: PermissionRequest }
-  | { kind: 'grant'; request: PathGrantRequest };
+  | { kind: 'grant'; request: PathGrantRequest }
+  | { kind: 'network'; request: NetworkAccessRequest };
 
 export type FleetRequestKind = FleetPendingRequest['kind'];
 
@@ -340,14 +342,20 @@ export const applyAssistantEvent = (
   });
 };
 
-const requestText = (request: PermissionRequest | PathGrantRequest): string =>
-  'command' in request
-    ? request.command
-    : `${request.requestedAccess === 'read_write' ? 'Write' : 'Read'} ${request.requestedPath}`;
+const requestText = (pending: FleetPendingRequest): string => {
+  switch (pending.kind) {
+    case 'approval':
+      return pending.request.command;
+    case 'grant':
+      return `${pending.request.requestedAccess === 'read_write' ? 'Write' : 'Read'} ${pending.request.requestedPath}`;
+    case 'network':
+      return `Reach ${pending.request.host}`;
+  }
+};
 
 const toRequest = (pending: FleetPendingRequest, at: number): FleetRequest => ({
   ...pending,
-  text: requestText(pending.request),
+  text: requestText(pending),
   at,
 });
 
@@ -421,6 +429,7 @@ export const seedFleet = (state: FleetState, snapshot: readonly FleetWorkspace[]
     for (const a of ws.pendingAsks) requests[requestKey('ask', a.pendingId)] = askRequest(a, Number(a.requestedAt));
     for (const r of ws.pendingPermissions) requests[requestKey('approval', r.requestId)] = toRequest({ kind: 'approval', request: r }, activity);
     for (const r of ws.pendingPathGrants) requests[requestKey('grant', r.requestId)] = toRequest({ kind: 'grant', request: r }, activity);
+    for (const r of ws.pendingNetworkRequests) requests[requestKey('network', r.requestId)] = toRequest({ kind: 'network', request: r }, activity);
     // A request the store already holds keeps its own time.
     for (const key of Object.keys(requests)) if (card.requests[key]) requests[key] = card.requests[key];
     cards[ws.workspaceId] = addSaid(
@@ -450,6 +459,7 @@ export type FleetPhase = 'waiting' | 'working' | 'stopped';
 export interface FleetAttention {
   asks: number;
   approvals: number;
+  /** Path and network access requests. */
   grants: number;
   total: number;
 }
@@ -464,7 +474,7 @@ export const cardAttention = (card: FleetCard): FleetAttention => {
   return {
     asks: count('ask'),
     approvals: count('approval'),
-    grants: count('grant'),
+    grants: count('grant') + count('network'),
     total: open.length,
   };
 };
