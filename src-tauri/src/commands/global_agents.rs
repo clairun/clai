@@ -158,6 +158,12 @@ pub async fn agent_definition_save(
     outcome
 }
 
+/// Worded as the Main's stale save is, naming the control the library
+/// editor has: going back re-reads the library.
+const STALE_DEFINITION: &str = "This agent was changed elsewhere after you opened it. Go back \
+     to Agents and open it again to load the latest settings; your unsaved edits here will be \
+     lost.";
+
 /// Create or update one definition in the catalog.
 ///
 /// Runs inside the app config's write lock, which is what makes the revision
@@ -185,7 +191,7 @@ fn upsert_definition(
         return Err("This shared agent no longer exists.".to_string());
     }
     if previous.map(|definition| definition.revision) != request.expected_revision {
-        return Err("This agent changed somewhere else. Reload it before saving.".to_string());
+        return Err(STALE_DEFINITION.to_string());
     }
     let mut execution = request.execution.clone();
     execution.sandbox.network_access.canonicalize()?;
@@ -611,7 +617,7 @@ mod tests {
             ..save_request("Reviewer")
         };
         let error = upsert_definition(&mut config, &stale, 300).expect_err("stale save refused");
-        assert!(error.contains("Reload"), "{error}");
+        assert_eq!(error, STALE_DEFINITION);
         assert_eq!(
             config.agent_definitions[0].behavior.description,
             "sharpened"
