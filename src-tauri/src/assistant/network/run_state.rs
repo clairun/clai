@@ -13,6 +13,34 @@ use crate::config::{NetworkMode, NetworkPolicy};
 /// first.
 pub const MAX_HOST_LOG_ENTRIES: usize = 200;
 
+/// The `host:port` targets the network proxy refused for one command, once
+/// each and in order. Past [`MAX_HOST_LOG_ENTRIES`] refusals are only
+/// counted, so a crawler cannot fill the `bash_exec` result.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct RefusedTargets {
+    pub targets: Vec<String>,
+    /// Refusals of unlisted targets after the list was full; a target
+    /// refused twice then counts twice.
+    pub more: usize,
+}
+
+impl RefusedTargets {
+    pub fn add(&mut self, target: String) {
+        if self.targets.contains(&target) {
+            return;
+        }
+        if self.targets.len() < MAX_HOST_LOG_ENTRIES {
+            self.targets.push(target);
+        } else {
+            self.more += 1;
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+}
+
 /// One host the run tried to reach, and whether it was let through.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
@@ -200,6 +228,21 @@ mod tests {
             log.last().unwrap().0,
             format!("h{MAX_HOST_LOG_ENTRIES}.example")
         );
+    }
+
+    #[test]
+    fn refused_targets_are_listed_once_each_and_counted_past_the_cap() {
+        let mut refused = RefusedTargets::default();
+        refused.add("a.example:443".to_string());
+        refused.add("a.example:443".to_string());
+        assert_eq!(refused.targets, ["a.example:443"]);
+        for index in 1..MAX_HOST_LOG_ENTRIES + 2 {
+            refused.add(format!("h{index}.example:443"));
+        }
+        assert_eq!(refused.targets.len(), MAX_HOST_LOG_ENTRIES);
+        assert_eq!(refused.more, 2);
+        refused.add("a.example:443".to_string());
+        assert_eq!(refused.more, 2, "a listed target is not counted again");
     }
 
     #[test]

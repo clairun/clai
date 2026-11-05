@@ -1424,7 +1424,10 @@ mod tests {
         );
         assert!(output.stdout.contains("no-dns"), "{output:?}");
         assert!(output.stderr.contains("403 Forbidden"), "{output:?}");
-        assert_eq!(box_network.session.refused(), ["example.invalid:443"]);
+        assert_eq!(
+            box_network.session.refused().targets,
+            ["example.invalid:443"]
+        );
     }
 
     /// `NO_PROXY` keeps an agent's own test server reachable: the proxy

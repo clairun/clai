@@ -175,6 +175,10 @@ describe('toPreviewText', () => {
     expect(toPreviewText('bash_exec', result, null)).toBe(
       'curl: (56) CONNECT tunnel failed, response 403\nNetwork allowlist refused: example.org:443, [2001:db8::1]:22',
     );
+    const capped = { stdout: '', stderr: '', network: { refused: ['a.example:443'], refusedMore: 3 } };
+    expect(toPreviewText('bash_exec', capped, null)).toBe(
+      'Network allowlist refused: a.example:443 and 3 more',
+    );
   });
 
   it('returns file content verbatim', () => {

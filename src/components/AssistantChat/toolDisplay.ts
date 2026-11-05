@@ -339,8 +339,9 @@ export const toPreviewText = (
     const refused = Array.isArray(network?.refused)
       ? network.refused.filter((target): target is string => typeof target === 'string')
       : [];
+    const more = typeof network?.refusedMore === 'number' ? network.refusedMore : 0;
     const refusedLine = refused.length
-      ? `Network allowlist refused: ${refused.join(', ')}`
+      ? `Network allowlist refused: ${refused.join(', ')}${more > 0 ? ` and ${more} more` : ''}`
       : '';
     const combined = [stdout.trimEnd(), stderr.trimEnd(), refusedLine].filter(Boolean).join('\n');
     return combined || '(no output)';

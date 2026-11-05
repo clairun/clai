@@ -14,7 +14,7 @@ use crate::assistant::network::addr::{
     strip_ipv6_url_brackets,
 };
 use crate::assistant::network::matcher::{canonical_host, parse_entry, HostDecision};
-use crate::assistant::network::run_state::RunNetwork;
+use crate::assistant::network::run_state::{RefusedTargets, RunNetwork};
 use crate::assistant::sandbox::{
     run_command, ProxyEndpoint, SandboxCommand, SandboxCommandOutput, SandboxEnv,
     SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode,
@@ -233,7 +233,7 @@ async fn execute_bash_exec(
 async fn run_with_network(
     command: SandboxCommand,
     run_network: &std::sync::Arc<RunNetwork>,
-) -> Result<(SandboxCommandOutput, Vec<String>), String> {
+) -> Result<(SandboxCommandOutput, RefusedTargets), String> {
     use crate::assistant::network::{connect::HostConnector, proxy::ProxySession};
     let session = match &command.profile.network {
         SandboxNetworkMode::Proxied(endpoint) => Some(
@@ -259,13 +259,13 @@ async fn run_with_network(
 async fn run_with_network(
     command: SandboxCommand,
     _run_network: &std::sync::Arc<RunNetwork>,
-) -> Result<(SandboxCommandOutput, Vec<String>), String> {
-    Ok((run_command(command).await?, Vec::new()))
+) -> Result<(SandboxCommandOutput, RefusedTargets), String> {
+    Ok((run_command(command).await?, RefusedTargets::default()))
 }
 
 /// Many clients hide the proxy's 403 body (curl prints only “CONNECT tunnel
 /// failed, response 403”), so the result itself names the refused hosts.
-fn bash_exec_result(output: &SandboxCommandOutput, refused: &[String]) -> serde_json::Value {
+fn bash_exec_result(output: &SandboxCommandOutput, refused: &RefusedTargets) -> serde_json::Value {
     let mut result = serde_json::json!({
         "cwd": agent_path_string(&output.cwd),
         "exitCode": output.exit_code,
@@ -275,11 +275,14 @@ fn bash_exec_result(output: &SandboxCommandOutput, refused: &[String]) -> serde_
     });
     if !refused.is_empty() {
         result["network"] = serde_json::json!({
-            "refused": refused,
+            "refused": refused.targets,
             "hint": "CLAI's network proxy refused these hosts: they are not on this agent's \
                      network allowlist, or are on its deny list. Call `net_request_access` \
                      for a host the task needs; do not look for a way around the proxy.",
         });
+        if refused.more > 0 {
+            result["network"]["refusedMore"] = refused.more.into();
+        }
     }
     result
 }
@@ -2523,7 +2526,7 @@ mod tests {
             Err(error) => panic!("{error}"),
         };
         assert_eq!(output.exit_code, Some(255), "{output:?}");
-        assert_eq!(refused, ["example.org:443"]);
+        assert_eq!(refused.targets, ["example.org:443"]);
         assert_eq!(
             logged(&network),
             [("example.org".to_string(), Some(443), false)]
@@ -2540,15 +2543,26 @@ mod tests {
             stdout: String::new(),
             stderr: "curl: (56) CONNECT tunnel failed, response 403".to_string(),
         };
-        assert!(bash_exec_result(&output, &[]).get("network").is_none());
-        let result = bash_exec_result(&output, &["example.org:443".to_string()]);
+        assert!(bash_exec_result(&output, &RefusedTargets::default())
+            .get("network")
+            .is_none());
+        let mut refused = RefusedTargets::default();
+        refused.add("example.org:443".to_string());
+        let result = bash_exec_result(&output, &refused);
         assert_eq!(
             result["network"]["refused"],
             serde_json::json!(["example.org:443"])
         );
+        assert!(result["network"].get("refusedMore").is_none());
         let hint = result["network"]["hint"].as_str().unwrap();
         assert!(hint.contains("net_request_access"), "{hint}");
         assert_eq!(result["exitCode"], 7);
+
+        refused.more = 3;
+        assert_eq!(
+            bash_exec_result(&output, &refused)["network"]["refusedMore"],
+            3
+        );
     }
 
     #[test]

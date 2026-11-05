@@ -17,7 +17,7 @@ use tokio_util::sync::CancellationToken;
 use super::connect::{ConnectError, Connector};
 use super::http::{parse_request, read_head, Request, HEAD_TIMEOUT};
 use super::matcher::{canonical_host, HostDecision};
-use super::run_state::RunNetwork;
+use super::run_state::{RefusedTargets, RunNetwork};
 
 /// Open connections one command may hold through the proxy. Each holds
 /// file descriptors in the CLAI process, so a command that opens many
@@ -28,14 +28,14 @@ const MAX_CONNECTIONS: usize = 128;
 /// it opened, and removes the socket file.
 pub struct ProxySession {
     socket: PathBuf,
-    refused: Arc<Mutex<Vec<String>>>,
+    refused: Arc<Mutex<RefusedTargets>>,
     cancel: CancellationToken,
 }
 
 struct Shared {
     network: Arc<RunNetwork>,
     connector: Arc<dyn Connector>,
-    refused: Arc<Mutex<Vec<String>>>,
+    refused: Arc<Mutex<RefusedTargets>>,
 }
 
 impl ProxySession {
@@ -56,7 +56,7 @@ impl ProxySession {
         max_connections: usize,
     ) -> std::io::Result<Self> {
         let listener = UnixListener::bind(socket)?;
-        let refused = Arc::new(Mutex::new(Vec::new()));
+        let refused = Arc::new(Mutex::new(RefusedTargets::default()));
         let cancel = CancellationToken::new();
         let shared = Arc::new(Shared {
             network,
@@ -72,8 +72,8 @@ impl ProxySession {
         })
     }
 
-    /// The `host:port` targets this session refused, once each, in order.
-    pub fn refused(&self) -> Vec<String> {
+    /// The `host:port` targets this session refused.
+    pub fn refused(&self) -> RefusedTargets {
         self.refused
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
@@ -178,10 +178,10 @@ async fn serve<S: AsyncRead + AsyncWrite + Unpin>(mut client: S, shared: &Shared
 
 impl Shared {
     fn refuse(&self, target: String) {
-        let mut refused = self.refused.lock().unwrap_or_else(PoisonError::into_inner);
-        if !refused.contains(&target) {
-            refused.push(target);
-        }
+        self.refused
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .add(target);
     }
 }
 
@@ -339,7 +339,7 @@ mod tests {
         );
 
         assert_eq!(
-            running.session.refused(),
+            running.session.refused().targets,
             ["example.com:443", "secret.example.org:80"]
         );
         assert_eq!(echo.dials.load(Ordering::SeqCst), 0, "nothing was dialled");
@@ -480,7 +480,7 @@ mod tests {
             ]
         );
         assert_eq!(
-            running.session.refused(),
+            running.session.refused().targets,
             ["example.org:443", "example.org:80"]
         );
     }
