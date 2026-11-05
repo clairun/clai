@@ -45,7 +45,11 @@ use crate::assistant::{compaction, compaction_service};
 
 const CLAUDE_DISABLED_TOOLS: &str =
     "Bash,Read,Edit,Write,Glob,Grep,WebFetch,WebSearch,Task,TodoWrite,NotebookEdit,LSP";
-const CODEX_MCP_TOKEN_ENV: &str = "CLAI_MCP_TOKEN";
+/// Carries the CLAI MCP server bearer token to the CLIs: Codex reads it by
+/// name (`bearer_token_env_var`), Claude Code expands it in the header of
+/// [`claude_mcp_config`]. In the environment rather than a file, which the
+/// default read grant on the home directory would expose to the shell.
+const MCP_TOKEN_ENV: &str = "CLAI_MCP_TOKEN";
 const CODEX_TURN_INPUT_MAX_CHARS: usize = 1_048_576;
 /// How often the app-server driver polls the queue to steer new user
 /// messages into the active turn.
@@ -69,7 +73,7 @@ const MCP_STARTUP_TIMEOUT_MS: &str = "3600000";
 /// - `MCP_TIMEOUT`: MCP server startup timeout (see [`MCP_STARTUP_TIMEOUT_MS`]).
 /// - `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT`: idle timeout for *remote* (HTTP) MCP
 ///   tool calls — CLAI's tool server is registered as HTTP (see
-///   `write_mcp_config`). Claude Code's 300s default aborts any tool call
+///   `claude_mcp_config`). Claude Code's 300s default aborts any tool call
 ///   silent for 5 min: unattended human waits (`ask_user` / approval / path
 ///   grant) and any `bash_exec` over 5 min. Claude Code ignores MCP progress
 ///   notifications for timeout purposes, so widening the idle window is the
@@ -406,21 +410,7 @@ pub async fn run_session_turn(
             CliProviderRuntime::ClaudeCode => {
                 let (cli_session_id, is_new_session) =
                     ensure_cli_session_id(deps, &mut session, &connection.protocol_id).await?;
-                let mcp_config_path =
-                    match write_mcp_config(mcp_runtime.url(), binding_guard.token()) {
-                        Ok(path) => path,
-                        Err(error) => {
-                            let message = error.message();
-                            fail_run(deps, &session, &run_id, &message).await?;
-                            discard_if_unanswered(deps, &session, &run_id, &assistant_slot).await;
-                            return Err(AssistantEngineError::Provider(
-                                crate::assistant::providers::types::ProviderError::RequestFailed(
-                                    message,
-                                ),
-                            ));
-                        }
-                    };
-                let result = run_claude_turn(
+                run_claude_turn(
                     deps,
                     &run_context.workspace_root,
                     &session,
@@ -428,7 +418,8 @@ pub async fn run_session_turn(
                     &run_id,
                     &cli_session_id,
                     is_new_session,
-                    &mcp_config_path,
+                    mcp_runtime.url(),
+                    binding_guard.token(),
                     &input.cancel_token,
                     trigger_message.as_ref(),
                     &system_prompt,
@@ -436,9 +427,7 @@ pub async fn run_session_turn(
                     &mut conversation,
                     &run_input,
                 )
-                .await;
-                let _ = std::fs::remove_file(&mcp_config_path);
-                result
+                .await
             }
             CliProviderRuntime::Codex => {
                 if codex_app_server::app_server_enabled() {
@@ -1131,7 +1120,8 @@ struct ClaudeTurnCommand<'turn> {
     workspace_root: &'turn Path,
     cli_session_id: &'turn str,
     is_new_session: bool,
-    mcp_config_path: &'turn Path,
+    mcp_url: &'turn str,
+    mcp_token: &'turn str,
     system_prompt: &'turn str,
     model_id: &'turn str,
     midrun_input: bool,
@@ -1148,11 +1138,10 @@ impl ClaudeTurnCommand<'_> {
         let idle_ms = crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT
             .as_millis()
             .to_string();
-        let mut command = crate::providers::build_host_cli_command(
-            self.binary,
-            &claude_code_host_env(&idle_ms),
-            Some(self.workspace_root),
-        );
+        let mut env = claude_code_host_env(&idle_ms).to_vec();
+        env.push((MCP_TOKEN_ENV, self.mcp_token));
+        let mut command =
+            crate::providers::build_host_cli_command(self.binary, &env, Some(self.workspace_root));
         command
             .arg("-p")
             .arg("--output-format")
@@ -1172,7 +1161,7 @@ impl ClaudeTurnCommand<'_> {
         }
         command
             .arg("--mcp-config")
-            .arg(self.mcp_config_path)
+            .arg(claude_mcp_config(self.mcp_url))
             .arg("--strict-mcp-config")
             .arg("--tools")
             .arg("")
@@ -1227,7 +1216,8 @@ async fn run_claude_turn(
     run_id: &str,
     cli_session_id: &str,
     is_new_session: bool,
-    mcp_config_path: &PathBuf,
+    mcp_url: &str,
+    mcp_token: &str,
     cancel_token: &CancellationToken,
     trigger_message: Option<&ProviderInputMessage>,
     system_prompt: &str,
@@ -1274,7 +1264,8 @@ async fn run_claude_turn(
         workspace_root,
         cli_session_id,
         is_new_session,
-        mcp_config_path,
+        mcp_url,
+        mcp_token,
         system_prompt,
         model_id: &connection.model_id,
         midrun_input,
@@ -1565,7 +1556,7 @@ async fn run_codex_turn(
     let mut command = crate::providers::build_host_cli_command(
         &binary,
         &[
-            (CODEX_MCP_TOKEN_ENV, mcp_token),
+            (MCP_TOKEN_ENV, mcp_token),
             ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
         ],
         Some(workspace_root),
@@ -1800,7 +1791,7 @@ async fn run_codex_turn_app_server(
     let command = crate::providers::build_host_cli_command(
         &binary,
         &[
-            (CODEX_MCP_TOKEN_ENV, mcp_token),
+            (MCP_TOKEN_ENV, mcp_token),
             ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
         ],
         Some(workspace_root),
@@ -1841,7 +1832,7 @@ async fn run_codex_turn_app_server(
             thread_id,
             model,
             mcp_url,
-            CODEX_MCP_TOKEN_ENV,
+            MCP_TOKEN_ENV,
             tool_timeout,
             &developer_instructions,
         ),
@@ -1850,7 +1841,7 @@ async fn run_codex_turn_app_server(
             cwd.as_deref(),
             model,
             mcp_url,
-            CODEX_MCP_TOKEN_ENV,
+            MCP_TOKEN_ENV,
             tool_timeout,
             &developer_instructions,
         ),
@@ -2860,7 +2851,7 @@ fn add_codex_common_args(
         .arg("-c")
         .arg(format!(
             "mcp_servers.clai.bearer_token_env_var={}",
-            toml_string_value(CODEX_MCP_TOKEN_ENV)
+            toml_string_value(MCP_TOKEN_ENV)
         ))
         .arg("-c")
         .arg("mcp_servers.clai.enabled=true")
@@ -4931,43 +4922,21 @@ fn content_part_text(part: &ContentPart) -> Option<String> {
     }
 }
 
-fn write_mcp_config(url: &str, token: &str) -> Result<PathBuf, LocalAgentRunError> {
-    let dir = dirs::config_dir()
-        .ok_or_else(|| LocalAgentRunError::failed("Could not determine config directory"))?
-        .join("clai")
-        .join("tmp");
-    std::fs::create_dir_all(&dir).map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
-    let path = dir.join(format!("claude-mcp-{}.json", Uuid::new_v4()));
-    let config = serde_json::json!({
+/// The `--mcp-config` JSON for Claude Code. The token stays out of it: Claude
+/// Code expands `${MCP_TOKEN_ENV}` from its environment.
+fn claude_mcp_config(url: &str) -> String {
+    serde_json::json!({
         "mcpServers": {
             "clai": {
                 "type": "http",
                 "url": url,
                 "headers": {
-                    "Authorization": format!("Bearer {}", token)
+                    "Authorization": format!("Bearer ${{{MCP_TOKEN_ENV}}}")
                 }
             }
         }
-    });
-    std::fs::write(
-        &path,
-        serde_json::to_vec_pretty(&config)
-            .map_err(|e| LocalAgentRunError::failed(e.to_string()))?,
-    )
-    .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&path)
-            .map_err(|e| LocalAgentRunError::failed(e.to_string()))?
-            .permissions();
-        permissions.set_mode(0o600);
-        std::fs::set_permissions(&path, permissions)
-            .map_err(|e| LocalAgentRunError::failed(e.to_string()))?;
-    }
-
-    Ok(path)
+    })
+    .to_string()
 }
 
 fn spawn_stderr_logger(
@@ -5001,13 +4970,6 @@ impl LocalAgentRunError {
             message: message.into(),
         }
     }
-
-    fn message(self) -> String {
-        match self {
-            LocalAgentRunError::Cancelled => "run cancelled".to_string(),
-            LocalAgentRunError::Failed { message, .. } => message,
-        }
-    }
 }
 
 impl From<String> for LocalAgentRunError {
@@ -5029,7 +4991,8 @@ mod tests {
             workspace_root: Path::new("/ws"),
             cli_session_id: "00000000-0000-0000-0000-000000000000",
             is_new_session: true,
-            mcp_config_path: Path::new("/cfg.json"),
+            mcp_url: "http://127.0.0.1:4000/mcp",
+            mcp_token: "secret-token",
             system_prompt: "system",
             model_id: "",
             midrun_input: false,
@@ -5043,6 +5006,21 @@ mod tests {
         let has = |pair: &[&str]| args.windows(pair.len()).any(|window| window == pair);
         assert!(has(&["--setting-sources", "user"]), "{args:?}");
         assert!(has(&["--strict-mcp-config"]), "{args:?}");
+        // The MCP bearer token reaches Claude Code in its environment, never
+        // in an argument or a file.
+        assert!(has(&[
+            "--mcp-config",
+            r#"{"mcpServers":{"clai":{"headers":{"Authorization":"Bearer ${CLAI_MCP_TOKEN}"},"type":"http","url":"http://127.0.0.1:4000/mcp"}}}"#
+        ]));
+        assert!(
+            !args.iter().any(|arg| arg.contains("secret-token")),
+            "{args:?}"
+        );
+        assert!(command
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == "CLAI_MCP_TOKEN"
+                && value == Some(std::ffi::OsStr::new("secret-token"))));
         assert_eq!(
             command.as_std().get_current_dir(),
             Some(Path::new("/ws")),
@@ -5858,7 +5836,7 @@ mod tests {
     #[test]
     fn opencode_config_disables_native_tools_and_enables_clai_mcp() {
         let raw = opencode_config_content("http://127.0.0.1:1234/mcp", "token")
-            .unwrap_or_else(|error| panic!("{}", error.message()));
+            .unwrap_or_else(|_| panic!("opencode config"));
         let value: Value = serde_json::from_str(&raw).expect("json");
 
         assert_eq!(value["tools"]["bash"], false);
