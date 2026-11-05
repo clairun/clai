@@ -181,7 +181,14 @@ pub async fn workspace_create_agent(
     request: WorkspaceAgentCreateRequest,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceAgentDetail, String> {
-    let app_config = app_config(state.inner())?;
+    create_main_agent(state.inner(), request)
+}
+
+fn create_main_agent(
+    state: &AppState,
+    request: WorkspaceAgentCreateRequest,
+) -> Result<WorkspaceAgentDetail, String> {
+    let app_config = app_config(state)?;
     let id = request
         .id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -542,6 +549,41 @@ mod stored_agent_tests {
         );
         let stored = fixture.config().main_agent.expect("main");
         assert_eq!(stored.description, "written elsewhere");
+    }
+
+    #[test]
+    fn creating_the_main_with_an_invalid_host_entry_is_refused_naming_it() {
+        let fixture = Fixture::new();
+        fixture
+            .state
+            .update_workspace_config(WORKSPACE_ID, |config| {
+                config.main_agent = None;
+                Ok(())
+            })
+            .expect("drop the main");
+        let request = |allow: &str| WorkspaceAgentCreateRequest {
+            workspace_id: WORKSPACE_ID.to_string(),
+            name: "Manager".to_string(),
+            description: String::new(),
+            selected_skill_ids: Vec::new(),
+            selected_mcp_server_ids: Vec::new(),
+            provider_connection_ids: Vec::new(),
+            execution: {
+                let mut execution = ExecutionCapabilityConfig::default();
+                execution.sandbox.network_access.allow_domains = vec![allow.to_string()];
+                execution
+            },
+            enabled: true,
+            id: None,
+        };
+
+        let error =
+            create_main_agent(&fixture.state, request("git@github.com")).expect_err("refused");
+        assert!(error.contains("`git@github.com`"), "{error}");
+        assert!(fixture.config().main_agent.is_none());
+
+        create_main_agent(&fixture.state, request("github.com")).expect("valid create");
+        assert!(fixture.config().main_agent.is_some());
     }
 
     #[test]
