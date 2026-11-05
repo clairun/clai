@@ -11,12 +11,18 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::UnixListener;
+use tokio::sync::Semaphore;
 use tokio_util::sync::CancellationToken;
 
 use super::connect::{ConnectError, Connector};
 use super::http::{parse_request, read_head, Request, HEAD_TIMEOUT};
 use super::matcher::{canonical_host, HostDecision};
 use super::run_state::RunNetwork;
+
+/// Open connections one command may hold through the proxy. Each holds
+/// file descriptors in the CLAI process, so a command that opens many
+/// cannot starve the rest of the app; the next one gets a 503.
+const MAX_CONNECTIONS: usize = 128;
 
 /// Listens while it lives; dropping it closes the listener, every tunnel
 /// it opened, and removes the socket file.
@@ -40,6 +46,15 @@ impl ProxySession {
         network: Arc<RunNetwork>,
         connector: Arc<dyn Connector>,
     ) -> std::io::Result<Self> {
+        Self::start_with_limit(socket, network, connector, MAX_CONNECTIONS)
+    }
+
+    fn start_with_limit(
+        socket: &Path,
+        network: Arc<RunNetwork>,
+        connector: Arc<dyn Connector>,
+        max_connections: usize,
+    ) -> std::io::Result<Self> {
         let listener = UnixListener::bind(socket)?;
         let refused = Arc::new(Mutex::new(Vec::new()));
         let cancel = CancellationToken::new();
@@ -48,7 +63,8 @@ impl ProxySession {
             connector,
             refused: Arc::clone(&refused),
         });
-        tokio::spawn(accept_loop(listener, shared, cancel.clone()));
+        let slots = Arc::new(Semaphore::new(max_connections));
+        tokio::spawn(accept_loop(listener, shared, slots, cancel.clone()));
         Ok(Self {
             socket: socket.to_path_buf(),
             refused,
@@ -72,17 +88,33 @@ impl Drop for ProxySession {
     }
 }
 
-async fn accept_loop(listener: UnixListener, shared: Arc<Shared>, cancel: CancellationToken) {
+async fn accept_loop(
+    listener: UnixListener,
+    shared: Arc<Shared>,
+    slots: Arc<Semaphore>,
+    cancel: CancellationToken,
+) {
     loop {
         let accepted = tokio::select! {
             () = cancel.cancelled() => return,
             accepted = listener.accept() => accepted,
         };
         match accepted {
-            Ok((stream, _)) => {
+            Ok((mut stream, _)) => {
+                let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
+                    // Read the head first so the client gets the answer, not a
+                    // reset; the bound keeps a silent client from stalling accept.
+                    let _ = tokio::time::timeout(REFUSAL_TIMEOUT, async {
+                        let _ = read_head(&mut stream).await;
+                        respond(&mut stream, "503 Service Unavailable", TOO_MANY).await;
+                    })
+                    .await;
+                    continue;
+                };
                 let shared = Arc::clone(&shared);
                 let cancel = cancel.clone();
                 tokio::spawn(async move {
+                    let _slot = slot;
                     tokio::select! {
                         () = cancel.cancelled() => {}
                         () = serve(stream, &shared) => {}
@@ -152,6 +184,10 @@ impl Shared {
         }
     }
 }
+
+const TOO_MANY: &str = "This command has too many connections open through the CLAI network \
+                        proxy; close some before opening more.";
+const REFUSAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
 
 fn target_text(host: &str, port: u16) -> String {
     if host.contains(':') {
@@ -447,6 +483,60 @@ mod tests {
             running.session.refused(),
             ["example.org:443", "example.org:80"]
         );
+    }
+
+    #[tokio::test]
+    async fn past_its_connection_limit_a_command_gets_a_503_until_a_tunnel_closes() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let session = ProxySession::start_with_limit(
+            &dir.path().join("net.sock"),
+            network(&["github.com"], &[]),
+            Arc::new(Upstream {
+                addr,
+                dials: AtomicUsize::new(0),
+            }),
+            2,
+        )
+        .unwrap();
+        let running = Running { session, _dir: dir };
+        let mut tunnels = Vec::new();
+        for _ in 0..2 {
+            let mut client = UnixStream::connect(&running.session.socket).await.unwrap();
+            client
+                .write_all(b"CONNECT github.com:443 HTTP/1.1\r\n\r\n")
+                .await
+                .unwrap();
+            let mut established = [0_u8; 39];
+            client.read_exact(&mut established).await.unwrap();
+            let (upstream_side, _) = listener.accept().await.unwrap();
+            tunnels.push((client, upstream_side));
+        }
+
+        // Every request needs a slot, a refused one too.
+        let unlisted = "CONNECT example.com:443 HTTP/1.1\r\n\r\n";
+        let full = exchange(&running, unlisted, b"").await;
+        assert!(
+            full.starts_with("HTTP/1.1 503 Service Unavailable\r\n"),
+            "{full}"
+        );
+        assert!(full.contains("too many connections"), "{full}");
+        assert!(running.session.refused().is_empty());
+
+        drop(tunnels.pop());
+        let freed = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let response = exchange(&running, unlisted, b"").await;
+                if !response.starts_with("HTTP/1.1 503") {
+                    return response;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the closed tunnel gave its slot back");
+        assert!(freed.starts_with("HTTP/1.1 403 Forbidden\r\n"), "{freed}");
     }
 
     #[tokio::test]
