@@ -253,6 +253,7 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
     append_rule(&mut profile, "file-read*", &read_filters);
     append_rule(&mut profile, "file-write*", &write_filters);
     append_workspace_mask(&mut profile, command)?;
+    append_read_only_state(&mut profile, command, private_tmp)?;
     Ok(profile)
 }
 
@@ -313,17 +314,46 @@ fn append_workspace_mask(profile: &mut String, command: &SandboxCommand) -> Resu
             write.push(path_literal(path)?);
         }
     }
-    append_subpath_allow(profile, "file-read*", &read);
-    append_subpath_allow(profile, "file-write*", &write);
+    append_subpath_rule(profile, "allow file-read*", &read);
+    append_subpath_rule(profile, "allow file-write*", &write);
     Ok(())
 }
 
-fn append_subpath_allow(profile: &mut String, operation: &str, paths: &[String]) {
+/// CLAI's own state stays read-only inside the allowed roots (see
+/// `EffectiveFilesystemPolicy::read_only_state`). Its write deny comes after
+/// every write allow, since the last matching rule wins; then the agent's
+/// memory and an ephemeral temp dir in `.clai/tmp` are writable again.
+fn append_read_only_state(
+    profile: &mut String,
+    command: &SandboxCommand,
+    private_tmp: &Path,
+) -> Result<(), String> {
+    let filesystem = &command.profile.filesystem;
+    let denied = filesystem
+        .read_only_state
+        .iter()
+        .map(|path| path_literal(path))
+        .collect::<Result<Vec<_>, _>>()?;
+    append_subpath_rule(profile, "deny file-write*", &denied);
+    let mut allowed = Vec::new();
+    if let Some(memory) = &filesystem.memory {
+        allowed.push(path_literal(memory)?);
+    }
+    if let Ok(tmp) = canonicalize_existing(private_tmp) {
+        if filesystem.is_read_only_state(&tmp) {
+            allowed.push(path_literal(&tmp)?);
+        }
+    }
+    append_subpath_rule(profile, "allow file-write*", &allowed);
+    Ok(())
+}
+
+fn append_subpath_rule(profile: &mut String, rule: &str, paths: &[String]) {
     if paths.is_empty() {
         return;
     }
-    profile.push_str("(allow ");
-    profile.push_str(operation);
+    profile.push('(');
+    profile.push_str(rule);
     profile.push('\n');
     for path in paths {
         profile.push_str("  (subpath \"");
@@ -696,6 +726,63 @@ mod tests {
             reexpose_idx > deny_idx,
             "workspace re-expose must come after the deny; profile:\n{profile}"
         );
+    }
+
+    #[test]
+    fn profile_denies_writes_to_clai_state_after_every_allow_then_allows_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let app = home.join(".clai");
+        let workspace = app.join("workspaces").join("ws");
+        let state = workspace.join(".clai");
+        fs::create_dir_all(state.join("memory")).unwrap();
+        fs::create_dir_all(state.join("tmp")).unwrap();
+        fs::write(app.join("config.json"), "{}").unwrap();
+        // The ephemeral temp fallback lives in `.clai/tmp`.
+        let private_tmp = tempfile::tempdir_in(state.join("tmp")).unwrap();
+
+        let mut command = sample_command(&workspace);
+        command.profile.filesystem =
+            super::super::filesystem::EffectiveFilesystemPolicy::compile_in(
+                &workspace,
+                &[SandboxPathGrant {
+                    host_path: home.clone(),
+                    access: SandboxPathAccess::ReadWrite,
+                }],
+                Some(&home),
+                Some(&app),
+            )
+            .unwrap();
+        let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
+
+        let subpath = |path: &Path| {
+            format!(
+                "(subpath \"{}\")",
+                escape_sbpl_string(&path.display().to_string())
+            )
+        };
+        let deny = profile
+            .find("(deny file-write*\n")
+            .unwrap_or_else(|| panic!("state should be denied; profile:\n{profile}"));
+        let allow = profile.rfind("(allow file-write*").unwrap();
+        assert_eq!(
+            profile[deny..].matches("(allow file-write*").count(),
+            1,
+            "the deny must follow every other write allow; profile:\n{profile}"
+        );
+        let denied = &profile[deny..allow];
+        assert!(denied.contains(&subpath(&state)), "{profile}");
+        assert!(
+            denied.contains(&subpath(&app.join("config.json"))),
+            "{profile}"
+        );
+        let allowed = &profile[allow..];
+        assert!(
+            allowed.contains(&subpath(&state.join("memory"))),
+            "{profile}"
+        );
+        assert!(allowed.contains(&subpath(private_tmp.path())), "{profile}");
+        assert!(!allowed.contains(&subpath(&state)), "{profile}");
     }
 
     #[test]

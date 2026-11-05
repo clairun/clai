@@ -549,6 +549,9 @@ fn append_workspace_and_grants(args: &mut Vec<OsString>, command: &SandboxComman
                 args.push(os("--tmpfs"));
                 args.push(path.as_os_str().to_owned());
             }
+            FilesystemOperation::Protect(path) => {
+                append_bind(args, SandboxPathAccess::ReadOnly, path, path, false);
+            }
         }
     }
 }
@@ -789,6 +792,45 @@ mod tests {
             tmpfs_idx < ws_bind_idx,
             "tmpfs over the container must precede the workspace bind; got {rendered:?}"
         );
+    }
+
+    #[test]
+    fn clai_state_is_bound_read_only_after_its_write_roots_and_memory_after_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let app = home.join(".clai");
+        let workspace = app.join("workspaces").join("ws");
+        let state = workspace.join(".clai");
+        std::fs::create_dir_all(state.join("memory")).unwrap();
+        std::fs::write(app.join("config.json"), "{}").unwrap();
+        let mut command = sample_command();
+        command.cwd = workspace.clone();
+        command.profile.filesystem =
+            super::super::filesystem::EffectiveFilesystemPolicy::compile_in(
+                &workspace,
+                &[SandboxPathGrant {
+                    host_path: home.clone(),
+                    access: SandboxPathAccess::ReadWrite,
+                }],
+                Some(&home),
+                Some(&app),
+            )
+            .unwrap();
+        let rendered: Vec<String> = bwrap_args(&command)
+            .unwrap()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let bind = |flag: &str, path: &Path| {
+            let path = path.to_string_lossy();
+            rendered
+                .windows(3)
+                .position(|w| w[0] == flag && w[1] == path && w[2] == path)
+                .unwrap_or_else(|| panic!("expected {flag} {path}; got {rendered:?}"))
+        };
+        assert!(bind("--bind-try", &home) < bind("--ro-bind", &app.join("config.json")));
+        assert!(bind("--bind", &workspace) < bind("--ro-bind", &state));
+        assert!(bind("--ro-bind", &state) < bind("--bind-try", &state.join("memory")));
     }
 
     #[test]
@@ -2215,6 +2257,87 @@ else:
             ),
         }
     }
+    /// H1: from inside the sandbox the agent cannot rewrite its workspace's
+    /// policy or the app's config, with or without a write grant covering
+    /// them, while the workspace and its memory stay writable.
+    #[tokio::test]
+    async fn clai_state_is_read_only_inside_the_sandbox_except_memory() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let app = home.join(".clai");
+        let workspace = app.join("workspaces").join("ws");
+        std::fs::create_dir_all(workspace.join(".clai/memory")).unwrap();
+        std::fs::write(workspace.join(".clai/config.json"), "{}").unwrap();
+        std::fs::write(app.join("config.json"), "{}").unwrap();
+        let script = format!(
+            "w() {{ if (echo pwned > \"$1\") 2>/dev/null; then echo \"wrote $1\"; \\
+             else echo \"refused $1\"; fi; }}; \\
+             w .clai/config.json; w .clai/new; w .clai/memory/x; w notes; \\
+             w '{}'; mv .clai .clai-moved 2>/dev/null && echo moved",
+            app.join("config.json").display()
+        );
+        let home_grant = SandboxPathGrant {
+            host_path: home.clone(),
+            access: SandboxPathAccess::ReadWrite,
+        };
+        for grants in [vec![], vec![home_grant]] {
+            let mut command = SandboxCommand {
+                argv: vec![os("/bin/sh"), os("-c"), os(&script)],
+                cwd: workspace.clone(),
+                timeout_ms: 10_000,
+                max_output_chars: 2_000,
+                profile: SandboxProfile::for_test(
+                    workspace.clone(),
+                    vec![],
+                    SandboxNetworkMode::Disabled,
+                    SandboxSessionBusMode::Deny,
+                    SandboxEnv::filtered_from_iter(
+                        [("PATH", "/usr/bin:/bin")],
+                        &home,
+                        SandboxSessionBusMode::Deny,
+                    ),
+                    None,
+                ),
+            };
+            command.profile.filesystem =
+                super::super::filesystem::EffectiveFilesystemPolicy::compile_in(
+                    &workspace,
+                    &grants,
+                    Some(&home),
+                    Some(&app),
+                )
+                .unwrap();
+            let output = match run(command).await {
+                Ok(output) => output,
+                Err(e) if e.contains("Sandboxed shell is unavailable") => {
+                    crate::assistant::sandbox::skip_without_bwrap(&e);
+                    return;
+                }
+                Err(e) => panic!("sandbox command failed unexpectedly: {e}"),
+            };
+            let mut lines = output.stdout.lines();
+            for expected in [
+                "refused .clai/config.json",
+                "refused .clai/new",
+                "wrote .clai/memory/x",
+                "wrote notes",
+            ] {
+                assert_eq!(lines.next(), Some(expected), "grants: {grants:?}");
+            }
+            // Without the grant the app config is not mounted: the write lands
+            // in the sandbox's private /tmp, and the host file is checked below.
+            if !grants.is_empty() {
+                let refused = format!("refused {}", app.join("config.json").display());
+                assert_eq!(lines.next(), Some(refused.as_str()));
+            }
+            assert!(!output.stdout.contains("moved"), "{}", output.stdout);
+        }
+        for config in [workspace.join(".clai/config.json"), app.join("config.json")] {
+            assert_eq!(std::fs::read_to_string(config).unwrap(), "{}");
+        }
+        assert!(workspace.join(".clai").is_dir());
+    }
+
     /// Isolation regression. Scratch lives at `<container>/.scratch/<id>`,
     /// inside the workspace container that `workspace_mask` already hides, so
     /// a broad `$HOME` read-only grant must NOT expose another workspace's
