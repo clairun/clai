@@ -1074,19 +1074,23 @@ fn requested_host(
     {
         return Err(refusal.to_string());
     }
+    // An entry, so that what reaches the card is what “Allow this run” can
+    // apply: `parse_entry` refuses `%` (`%2a` would decode to a wildcard)
+    // and characters a host entry may not hold.
     let raw = raw.trim();
-    if raw.contains('*') {
+    let entry = parse_entry(raw).map_err(|reason| {
+        format!(
+            "`{raw}` is not a host name ({reason}). Give the host only, such as \
+             `mirror.example.org`, without a scheme, path or port."
+        )
+    })?;
+    if entry.is_wildcard() {
         return Err(
             "Ask for one host, not a wildcard; the user can choose to allow its parent domain."
                 .to_string(),
         );
     }
-    let host = canonical_host(raw).ok_or_else(|| {
-        format!(
-            "`{raw}` is not a host name. Give the host only, such as `mirror.example.org`, \
-             without a scheme, path or port."
-        )
-    })?;
+    let host = entry.normalized();
     match network.decide(&host) {
         HostDecision::Allowed => Ok(None),
         HostDecision::Denied { entry } => Err(denied_host_message(&host, &entry)),
@@ -2104,8 +2108,12 @@ mod tests {
         );
         for raw in [
             "*.example.org",
+            "%2a.com",
+            "%2a.example.org",
+            "a!b.example.org",
             "https://example.org",
             "example.org/x",
+            "example.org:443",
             "a b",
             "",
         ] {

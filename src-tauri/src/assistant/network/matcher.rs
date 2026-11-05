@@ -47,6 +47,10 @@ impl HostEntry {
         }
     }
 
+    pub fn is_wildcard(&self) -> bool {
+        has_wildcard(&self.host)
+    }
+
     fn matches(&self, host: &Host) -> bool {
         match (&self.host, host) {
             (Host::Ip(entry), Host::Ip(host)) => entry == host,
