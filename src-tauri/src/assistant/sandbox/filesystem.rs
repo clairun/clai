@@ -914,6 +914,22 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn memory_stays_out_of_reach_when_its_clai_leads_outside_every_write_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().canonicalize().unwrap();
+        let workspace = base.join("ws");
+        let state = base.join("elsewhere");
+        fs::create_dir_all(state.join("memory")).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        std::os::unix::fs::symlink(&state, workspace.join(".clai")).unwrap();
+
+        let policy = EffectiveFilesystemPolicy::compile_in(&workspace, &[], None, None).unwrap();
+        assert!(policy.read_only_state.is_empty());
+        assert_eq!(policy.memory, None);
+    }
+
     #[test]
     fn cwd_allows_read_grants_and_missing_descendants_but_rejects_escape() {
         let temp = tempfile::tempdir().unwrap();
