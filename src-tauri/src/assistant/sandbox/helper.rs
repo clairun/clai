@@ -30,13 +30,72 @@ pub fn endpoint(workspace_root: &Path) -> Result<ProxyEndpoint, String> {
     prepare_endpoint(workspace_root, &process_home(workspace_root), helper)
 }
 
-/// A socket path of its own for one command's session bus proxy, beside its
-/// network proxy socket; `None` when the workspace is outside the home
-/// directory or the directory cannot be made.
+/// A socket path of its own for one command's session bus proxy: beside its
+/// network proxy socket, or, when the workspace has no masked container
+/// (it is directly in the home directory or outside it), in
+/// `$XDG_RUNTIME_DIR/clai`, which no sandbox binds unless a grant names it.
+/// `None` when neither directory can be made.
 pub(crate) fn bus_socket(workspace_root: &Path) -> Option<PathBuf> {
-    let dir = private_dir(workspace_root, &process_home(workspace_root))?.ok()?;
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    bus_socket_in(
+        workspace_root,
+        &process_home(workspace_root),
+        runtime.as_deref(),
+    )
+}
+
+fn bus_socket_in(workspace_root: &Path, home: &Path, runtime: Option<&Path>) -> Option<PathBuf> {
+    let dir = match private_dir(workspace_root, home) {
+        Some(Ok(dir)) => dir,
+        _ => runtime_private_dir(runtime?)?,
+    };
+    sweep_stale_bus_sockets(&dir);
     let id = uuid::Uuid::new_v4().simple().to_string();
     Some(dir.join(format!("bus-{}.sock", &id[..12])))
+}
+
+/// `<runtime>/clai`, made private if missing. The runtime directory is the
+/// user's own (mode 0700), so nobody else can plant a link there.
+fn runtime_private_dir(runtime: &Path) -> Option<PathBuf> {
+    if !runtime.is_absolute() {
+        return None;
+    }
+    let dir = runtime.join("clai");
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return None,
+    }
+    let metadata = std::fs::symlink_metadata(&dir).ok()?;
+    metadata.is_dir().then_some(dir)
+}
+
+/// Removes the proxy sockets a CLAI that was killed left in `dir`, the first
+/// time this process uses it: the proxies exit with CLAI, their sockets do
+/// not.
+fn sweep_stale_bus_sockets(dir: &Path) {
+    use std::os::unix::fs::FileTypeExt;
+    static SWEPT: std::sync::Mutex<Vec<PathBuf>> = std::sync::Mutex::new(Vec::new());
+    let mut swept = SWEPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if swept.iter().any(|known| known == dir) {
+        return;
+    }
+    swept.push(dir.to_path_buf());
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if name.starts_with("bus-")
+            && name.ends_with(".sock")
+            && entry.file_type().is_ok_and(|kind| kind.is_socket())
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn process_home(workspace_root: &Path) -> PathBuf {
@@ -270,6 +329,59 @@ mod tests {
         assert!(ssh_config_text().contains(
             "Host *\n    ProxyCommand /run/clai/helper connect --proxy 127.0.0.1:3128 %h %p\n"
         ));
+    }
+
+    #[test]
+    fn a_bus_socket_without_a_masked_container_lives_in_the_runtime_dir() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = tempfile::tempdir().unwrap();
+        let runtime = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let in_home = home.path().join("ws");
+        let contained = home.path().join(".clai/workspaces/ws");
+        std::fs::create_dir_all(&contained).unwrap();
+        let private = runtime.path().join("clai");
+
+        for workspace in [in_home.as_path(), outside.path()] {
+            let socket = bus_socket_in(workspace, home.path(), Some(runtime.path())).unwrap();
+            assert_eq!(socket.parent(), Some(private.as_path()), "{workspace:?}");
+        }
+        assert_eq!(
+            std::fs::metadata(&private).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let socket = bus_socket_in(&contained, home.path(), Some(runtime.path())).unwrap();
+        assert_eq!(
+            socket.parent(),
+            Some(home.path().join(".clai/workspaces/.clai-net").as_path())
+        );
+        assert_eq!(bus_socket_in(outside.path(), home.path(), None), None);
+        assert_eq!(
+            bus_socket_in(outside.path(), home.path(), Some(Path::new("run"))),
+            None
+        );
+    }
+
+    #[test]
+    fn stale_bus_sockets_are_removed_once_and_others_kept() {
+        let runtime = tempfile::tempdir().unwrap();
+        let dir = runtime.path().join("clai");
+        std::fs::create_dir(&dir).unwrap();
+        let stale = dir.join("bus-0123456789ab.sock");
+        drop(std::os::unix::net::UnixListener::bind(&stale).unwrap());
+        let other = dir.join("net.sock");
+        drop(std::os::unix::net::UnixListener::bind(&other).unwrap());
+        let workspace = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+
+        bus_socket_in(workspace.path(), home.path(), Some(runtime.path())).unwrap();
+        assert!(!stale.exists(), "a socket left by a killed CLAI is removed");
+        assert!(other.exists(), "only bus proxy sockets are swept");
+
+        let live = dir.join("bus-live00000000.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&live).unwrap();
+        bus_socket_in(workspace.path(), home.path(), Some(runtime.path())).unwrap();
+        assert!(live.exists(), "a running proxy's socket is kept");
     }
 
     #[test]

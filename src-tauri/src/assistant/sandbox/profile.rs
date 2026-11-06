@@ -42,6 +42,31 @@ pub struct SandboxProfile {
     /// With [`SandboxSessionBusMode::Allow`]: the keyring-only proxy to bind
     /// in place of the session bus. `None` binds the bus itself.
     pub session_bus_proxy: Option<SessionBusProxy>,
+    /// Why an agent set to keyring only gets no bus for this command, worded
+    /// for the user. Keyring only never falls back to the whole bus.
+    pub session_bus_unavailable: Option<String>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl SandboxProfile {
+    /// Keyring only whose proxy cannot run: the command gets no bus at all.
+    pub fn drop_session_bus(&mut self, reason: String) {
+        self.session_bus = SandboxSessionBusMode::Deny;
+        self.session_bus_proxy = None;
+        self.session_bus_unavailable = Some(reason);
+        self.env
+            .vars
+            .retain(|key, _| !ENV_SESSION_BUS_PASSTHROUGH.contains(&key.as_str()));
+    }
+}
+
+/// One line for the user and the agent: why a keyring-only agent has no
+/// session bus here, and how to give it the whole bus.
+pub fn keyring_only_unavailable_note(reason: &str) -> String {
+    format!(
+        "Keyring-only agents get no session bus here: {reason}. To give an agent the whole \
+         session bus, set its Session bus to Full in its Local access settings."
+    )
 }
 
 /// The socket of the filtering proxy CLAI runs for one command (see
@@ -252,6 +277,7 @@ impl SandboxProfile {
             scratch_tmp,
             sockets: SocketPolicy::default(),
             session_bus_proxy: None,
+            session_bus_unavailable: None,
         }
     }
 }

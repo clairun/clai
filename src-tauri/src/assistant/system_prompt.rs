@@ -450,12 +450,13 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
     if let Some(allowlist) = &sandbox.allowlist {
         prompt.push_str(allowlist);
     }
-    if cfg!(target_os = "linux")
-        && context.execution.sandbox.session_bus != crate::config::SandboxSessionBusConfig::Deny
-    {
-        prompt.push_str(
-            "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n",
-        );
+    if cfg!(target_os = "linux") {
+        let unfiltered = crate::assistant::sandbox::status().session_bus_filter_unavailable_reason;
+        if let Some(line) =
+            session_bus_line(context.execution.sandbox.session_bus, unfiltered.as_deref())
+        {
+            prompt.push_str(&line);
+        }
     }
 
     if matches!(
@@ -532,6 +533,25 @@ struct SandboxPrompt {
 const SSH_HOME_CONFIG_ONLY: &str = "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh`, so OpenSSH only consults `~/.ssh/config` and its built-in defaults. You do not need `-F /dev/null` workarounds; if you see `Bad owner or permissions` from ssh, the cause is something else (likely an explicit `-F` pointing at an unreadable path).\n";
 
 const SSH_THROUGH_PROXY: &str = "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh` and binds a CLAI-written `/etc/ssh/ssh_config` there that sends ssh (and git, scp and rsync over ssh) through the network proxy, so ssh to an allowed host works. `~/.ssh/config` is read first: a `ProxyCommand` or `ProxyJump` there overrides CLAI's and then fails inside the sandbox. You do not need `-F /dev/null` workarounds.\n";
+
+/// What the shell's session bus offers on Linux. Keyring only where the bus
+/// cannot be filtered is no bus: `unfiltered` says why and how to get one.
+fn session_bus_line(
+    bus: crate::config::SandboxSessionBusConfig,
+    unfiltered: Option<&str>,
+) -> Option<String> {
+    use crate::config::SandboxSessionBusConfig;
+    match (bus, unfiltered) {
+        (SandboxSessionBusConfig::Deny, _) => None,
+        (SandboxSessionBusConfig::KeyringOnly, Some(note)) => {
+            Some(format!("- No session bus in shell commands. {note}\n"))
+        }
+        _ => Some(
+            "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n"
+                .to_string(),
+        ),
+    }
+}
 
 fn sandbox_prompt_for(context: &RunContext) -> SandboxPrompt {
     sandbox_prompt(
@@ -1457,6 +1477,20 @@ mod tests {
             assert!(text.contains("Knowledge is not a dashboard"));
         }
     }
+    #[test]
+    fn a_keyring_only_agent_is_told_it_has_no_bus_where_it_cannot_be_filtered() {
+        use crate::config::SandboxSessionBusConfig::{Deny, Full, KeyringOnly};
+        let note = "Keyring-only agents get no session bus here: x. Set Full.";
+        let available = |line: Option<String>| line.unwrap().contains("Session bus is available");
+        assert!(available(session_bus_line(KeyringOnly, None)));
+        assert!(available(session_bus_line(Full, Some(note))));
+        assert_eq!(
+            session_bus_line(KeyringOnly, Some(note)).as_deref(),
+            Some(format!("- No session bus in shell commands. {note}\n").as_str())
+        );
+        assert_eq!(session_bus_line(Deny, None), None);
+    }
+
     #[test]
     fn the_sandbox_lines_follow_the_platform_and_the_network_mode() {
         use crate::assistant::sandbox::SandboxBackend::{self, Bubblewrap, Seatbelt};

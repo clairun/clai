@@ -3458,6 +3458,7 @@ else:
                 scratch_tmp: None,
                 sockets: Default::default(),
                 session_bus_proxy: None,
+                session_bus_unavailable: None,
             },
         };
         let output = match run(command).await {

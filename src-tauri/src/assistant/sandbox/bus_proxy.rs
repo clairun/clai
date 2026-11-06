@@ -34,7 +34,7 @@ fn binary() -> Option<&'static Path> {
 /// run too.
 pub(crate) fn unavailable_reason() -> Option<&'static str> {
     if crate::providers::is_flatpak() {
-        Some("The Flatpak build cannot filter the session bus yet")
+        Some("the Flatpak build cannot filter the session bus yet")
     } else if binary().is_none() {
         Some("xdg-dbus-proxy is not installed")
     } else {
@@ -43,15 +43,18 @@ pub(crate) fn unavailable_reason() -> Option<&'static str> {
 }
 
 /// Where a keyring-only command's proxy listens and the bus it stands in
-/// for; `None` when the bus cannot be filtered here or there is no bus.
-pub(crate) fn plan(workspace_root: &Path) -> Option<SessionBusProxy> {
-    if unavailable_reason().is_some() {
-        return None;
+/// for. `Ok(None)` when there is no session bus to filter; an error, worded
+/// for the user, when there is one but it cannot be filtered here.
+pub(crate) fn plan(workspace_root: &Path) -> Result<Option<SessionBusProxy>, String> {
+    let Some(bus) = super::linux_bwrap::resolve_session_bus_socket(false) else {
+        return Ok(None);
+    };
+    if let Some(reason) = unavailable_reason() {
+        return Err(reason.to_string());
     }
-    Some(SessionBusProxy {
-        bus: super::linux_bwrap::resolve_session_bus_socket(false)?,
-        socket: super::helper::bus_socket(workspace_root)?,
-    })
+    let socket = super::helper::bus_socket(workspace_root)
+        .ok_or("CLAI cannot make a private directory for the keyring proxy socket")?;
+    Ok(Some(SessionBusProxy { bus, socket }))
 }
 
 /// A running proxy. Dropping it stops the proxy and removes its socket.
@@ -98,26 +101,35 @@ impl BusProxy {
             socket: plan.socket.clone(),
             alive,
         };
-        proxy.wait_ready()?;
+        wait_ready(&proxy.alive, READY_TIMEOUT_MS)?;
         Ok(proxy)
     }
+}
 
-    /// The proxy writes one byte to its `--fd` once it listens; it closes
-    /// the pipe instead if it fails.
-    fn wait_ready(&self) -> Result<(), String> {
-        let mut poll = libc::pollfd {
-            fd: self.alive.as_raw_fd(),
-            events: libc::POLLIN,
-            revents: 0,
-        };
+/// The proxy writes one byte to its `--fd` once it listens; it closes the
+/// pipe instead if it fails. A signal does not cut the wait short.
+fn wait_ready(alive: &File, timeout_ms: i32) -> Result<(), String> {
+    let mut poll = libc::pollfd {
+        fd: alive.as_raw_fd(),
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms as u64);
+    let ready = loop {
+        let left = deadline.saturating_duration_since(std::time::Instant::now());
         // SAFETY: one valid pollfd for the duration of the call.
-        let ready = unsafe { libc::poll(&mut poll, 1, READY_TIMEOUT_MS) };
-        let mut byte = [0_u8; 1];
-        if ready == 1 && (&self.alive).read(&mut byte).is_ok_and(|read| read == 1) {
-            Ok(())
-        } else {
-            Err("xdg-dbus-proxy did not start".to_string())
+        let ready = unsafe { libc::poll(&mut poll, 1, left.as_millis() as i32) };
+        let interrupted = ready == -1
+            && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted;
+        if !interrupted || left.is_zero() {
+            break ready;
         }
+    };
+    let mut byte = [0_u8; 1];
+    if ready == 1 && (&*alive).read(&mut byte).is_ok_and(|read| read == 1) {
+        Ok(())
+    } else {
+        Err("xdg-dbus-proxy did not start".to_string())
     }
 }
 
@@ -282,6 +294,23 @@ mod tests {
         drop(proxy);
         assert!(!plan.socket.exists());
         assert!(!Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[test]
+    fn a_signal_does_not_cut_the_ready_wait_short() {
+        use std::io::Write;
+        use std::os::unix::thread::JoinHandleExt;
+        extern "C" fn ignore(_: libc::c_int) {}
+        // SAFETY: a handler that does nothing, for a signal no other test uses.
+        unsafe { libc::signal(libc::SIGUSR2, ignore as libc::sighandler_t) };
+        let (alive, write) = pipe().unwrap();
+        let waiter = std::thread::spawn(move || wait_ready(&alive, 5_000));
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        // SAFETY: the thread is alive until it is joined below.
+        unsafe { libc::pthread_kill(waiter.as_pthread_t(), libc::SIGUSR2) };
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        File::from(write).write_all(&[1]).unwrap();
+        assert_eq!(waiter.join().unwrap(), Ok(()));
     }
 
     #[test]

@@ -16,8 +16,9 @@ use crate::assistant::network::addr::{
 use crate::assistant::network::matcher::{canonical_host, parse_entry, HostDecision};
 use crate::assistant::network::run_state::{RefusedTargets, RunNetwork};
 use crate::assistant::sandbox::{
-    run_command, ProxyEndpoint, SandboxCommand, SandboxCommandOutput, SandboxEnv,
-    SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode, SessionBusProxy, SocketPolicy,
+    keyring_only_unavailable_note, run_command, ProxyEndpoint, SandboxCommand,
+    SandboxCommandOutput, SandboxEnv, SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode,
+    SessionBusProxy, SocketPolicy,
 };
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
@@ -203,7 +204,7 @@ async fn execute_bash_exec(
         }
     };
 
-    let (output, refused) = run_with_network(
+    let run = run_with_network(
         SandboxCommand {
             argv,
             cwd,
@@ -214,7 +215,7 @@ async fn execute_bash_exec(
         &context.run_network,
     )
     .await;
-    let output = output.inspect_err(|error| {
+    let output = run.output.inspect_err(|error| {
         // Surface sandbox-availability failures (bwrap missing, kernel
         // refused namespaces, etc.) as a run warning so the run completes
         // with warnings rather than as a generic tool failure. The sandbox runner uses the
@@ -224,33 +225,59 @@ async fn execute_bash_exec(
             context.note_warning();
         }
     });
-    bash_exec_outcome(output, &refused, &sockets, timeout_ms, explicit_timeout)
+    let bus = run.session_bus_unavailable.as_deref();
+    bash_exec_outcome(
+        output,
+        &run.refused,
+        &sockets,
+        bus,
+        timeout_ms,
+        explicit_timeout,
+    )
+}
+
+/// What a command run returned, and what the sandbox kept from it: the
+/// `host:port` targets the network proxy refused, kept when the command
+/// failed or timed out too (a client that kept retrying a refused host is a
+/// likely cause), and why a keyring-only agent got no session bus.
+struct NetworkRun {
+    output: Result<SandboxCommandOutput, String>,
+    refused: RefusedTargets,
+    session_bus_unavailable: Option<String>,
 }
 
 /// Runs the command, in Allowlist behind a network proxy session of its
-/// own, and with the keyring-only bus behind a bus proxy of its own. Also
-/// returns the `host:port` targets the network proxy refused, when the
-/// command failed or timed out too: a client that kept retrying a refused
-/// host is a likely cause.
+/// own, and with the keyring-only bus behind a bus proxy of its own. A bus
+/// proxy that does not start leaves the command with no bus, never the
+/// whole one.
 #[cfg(target_os = "linux")]
 async fn run_with_network(
-    command: SandboxCommand,
+    mut command: SandboxCommand,
     run_network: &std::sync::Arc<RunNetwork>,
-) -> (Result<SandboxCommandOutput, String>, RefusedTargets) {
+) -> NetworkRun {
     use crate::assistant::network::{connect::HostConnector, proxy::ProxySession};
     use crate::assistant::sandbox::bus_proxy::BusProxy;
-    let _bus_proxy = match command
-        .profile
-        .session_bus_proxy
-        .as_ref()
-        .map(BusProxy::start)
-    {
-        Some(Err(error)) => {
-            let error =
-                format!("Sandboxed shell is unavailable: the keyring proxy did not start: {error}");
-            return (Err(error), RefusedTargets::default());
+    // Starting waits for the proxy, and stopping waits for it to exit: both
+    // block, so neither runs on a runtime worker.
+    let bus_proxy = match command.profile.session_bus_proxy.clone() {
+        Some(plan) => match tokio::task::spawn_blocking(move || BusProxy::start(&plan)).await {
+            Ok(Ok(proxy)) => Some(proxy),
+            Ok(Err(error)) => {
+                command.profile.drop_session_bus(error);
+                None
+            }
+            Err(error) => {
+                command.profile.drop_session_bus(error.to_string());
+                None
+            }
+        },
+        None => None,
+    };
+    let session_bus_unavailable = command.profile.session_bus_unavailable.clone();
+    let stop_bus_proxy = || {
+        if let Some(proxy) = bus_proxy {
+            tokio::task::spawn_blocking(move || drop(proxy));
         }
-        started => started.and_then(Result::ok),
     };
     let session = match &command.profile.network {
         SandboxNetworkMode::Proxied(endpoint) => match ProxySession::start(
@@ -260,25 +287,38 @@ async fn run_with_network(
         ) {
             Ok(session) => Some(session),
             Err(error) => {
-                let error = format!(
-                    "Sandboxed shell is unavailable: the network proxy did not start: {error}"
-                );
-                return (Err(error), RefusedTargets::default());
+                stop_bus_proxy();
+                return NetworkRun {
+                    output: Err(format!(
+                        "Sandboxed shell is unavailable: the network proxy did not start: {error}"
+                    )),
+                    refused: RefusedTargets::default(),
+                    session_bus_unavailable,
+                };
             }
         },
         _ => None,
     };
     let output = run_command(command).await;
-    let refused = session.map(|session| session.refused()).unwrap_or_default();
-    (output, refused)
+    stop_bus_proxy();
+    NetworkRun {
+        output,
+        refused: session.map(|session| session.refused()).unwrap_or_default(),
+        session_bus_unavailable,
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
 async fn run_with_network(
     command: SandboxCommand,
     _run_network: &std::sync::Arc<RunNetwork>,
-) -> (Result<SandboxCommandOutput, String>, RefusedTargets) {
-    (run_command(command).await, RefusedTargets::default())
+) -> NetworkRun {
+    let session_bus_unavailable = command.profile.session_bus_unavailable.clone();
+    NetworkRun {
+        output: run_command(command).await,
+        refused: RefusedTargets::default(),
+        session_bus_unavailable,
+    }
 }
 
 const REFUSED_HINT: &str = "CLAI's network proxy refused these hosts: they are not in this \
@@ -295,13 +335,22 @@ fn bash_exec_outcome(
     output: Result<SandboxCommandOutput, String>,
     refused: &RefusedTargets,
     sockets: &SocketPolicy,
+    session_bus_unavailable: Option<&str>,
     timeout_ms: u64,
     explicit_timeout: bool,
 ) -> Result<serde_json::Value, String> {
     match output {
-        Ok(output) => Ok(bash_exec_result(&output, refused, sockets)),
+        Ok(output) => Ok(bash_exec_result(
+            &output,
+            refused,
+            sockets,
+            session_bus_unavailable,
+        )),
         Err(error) => {
-            let error = augment_timeout_error(error, timeout_ms, explicit_timeout);
+            let mut error = augment_timeout_error(error, timeout_ms, explicit_timeout);
+            if let Some(reason) = session_bus_unavailable {
+                error = format!("{error}\n{}", keyring_only_unavailable_note(reason));
+            }
             if refused.is_empty() {
                 return Err(error);
             }
@@ -324,6 +373,7 @@ fn bash_exec_result(
     output: &SandboxCommandOutput,
     refused: &RefusedTargets,
     sockets: &SocketPolicy,
+    session_bus_unavailable: Option<&str>,
 ) -> serde_json::Value {
     let mut result = serde_json::json!({
         "cwd": agent_path_string(&output.cwd),
@@ -347,6 +397,9 @@ fn bash_exec_result(
             "unreachable": unreachable,
             "hint": SOCKET_HINT,
         });
+    }
+    if let Some(reason) = session_bus_unavailable {
+        result["sessionBus"] = keyring_only_unavailable_note(reason).into();
     }
     result
 }
@@ -472,16 +525,10 @@ fn sandbox_profile(
         || proxy_endpoint(&workspace_root),
     )?;
 
-    let bus_config = context.run_context.execution.sandbox.session_bus;
-    let session_bus = match bus_config {
-        SandboxSessionBusConfig::Deny => SandboxSessionBusMode::Deny,
-        SandboxSessionBusConfig::KeyringOnly | SandboxSessionBusConfig::Full => {
-            SandboxSessionBusMode::Allow
-        }
-    };
-    let session_bus_proxy = (bus_config == SandboxSessionBusConfig::KeyringOnly)
-        .then(|| keyring_proxy(&workspace_root))
-        .flatten();
+    let (session_bus, session_bus_proxy, session_bus_unavailable) =
+        session_bus_for(context.run_context.execution.sandbox.session_bus, || {
+            keyring_proxy(&workspace_root)
+        });
 
     let scratch_tmp = crate::assistant::sandbox::session_scratch(&workspace_root);
 
@@ -510,20 +557,43 @@ fn sandbox_profile(
         scratch_tmp,
         sockets,
         session_bus_proxy,
+        session_bus_unavailable,
     })
 }
 
-/// The keyring-only bus proxy for a command. Where the bus cannot be
-/// filtered (see `SandboxStatus::session_bus_filter_available`) there is
-/// none and the agent gets the whole bus.
+/// The bus a command gets for the agent's setting. Only Full binds the
+/// real bus. Keyring only gets its proxy, or, where the bus cannot be
+/// filtered, no bus and the reason; `Ok(None)` from `plan` means the host
+/// has no bus to give.
+fn session_bus_for(
+    config: SandboxSessionBusConfig,
+    plan: impl FnOnce() -> Result<Option<SessionBusProxy>, String>,
+) -> (
+    SandboxSessionBusMode,
+    Option<SessionBusProxy>,
+    Option<String>,
+) {
+    match config {
+        SandboxSessionBusConfig::Deny => (SandboxSessionBusMode::Deny, None, None),
+        SandboxSessionBusConfig::Full => (SandboxSessionBusMode::Allow, None, None),
+        SandboxSessionBusConfig::KeyringOnly => match plan() {
+            Ok(Some(proxy)) => (SandboxSessionBusMode::Allow, Some(proxy), None),
+            Ok(None) => (SandboxSessionBusMode::Deny, None, None),
+            Err(reason) => (SandboxSessionBusMode::Deny, None, Some(reason)),
+        },
+    }
+}
+
+/// The keyring-only bus proxy for a command (see `bus_proxy::plan`).
 #[cfg(target_os = "linux")]
-fn keyring_proxy(workspace_root: &Path) -> Option<SessionBusProxy> {
+fn keyring_proxy(workspace_root: &Path) -> Result<Option<SessionBusProxy>, String> {
     crate::assistant::sandbox::bus_proxy::plan(workspace_root)
 }
 
+/// No session bus to filter: macOS and Windows have none.
 #[cfg(not(target_os = "linux"))]
-fn keyring_proxy(_workspace_root: &Path) -> Option<SessionBusProxy> {
-    None
+fn keyring_proxy(_workspace_root: &Path) -> Result<Option<SessionBusProxy>, String> {
+    Ok(None)
 }
 
 /// The shell's network for a mode. A stored Allowlist where the sandbox
@@ -2683,13 +2753,14 @@ mod tests {
         };
         let refuse = "/run/clai/helper connect --proxy 127.0.0.1:3128 example.org 443 </dev/null";
         let network = std::sync::Arc::new(run_network(&["github.com"], &[]));
-        let (output, refused) = match run_with_network(command(refuse, 20_000), &network).await {
-            (Ok(output), refused) => (output, refused),
-            (Err(error), _) if error.contains("Sandboxed shell is unavailable") => {
+        let run = run_with_network(command(refuse, 20_000), &network).await;
+        let (output, refused) = match run.output {
+            Ok(output) => (output, run.refused),
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
                 crate::assistant::sandbox::skip_without_bwrap(&error);
                 return;
             }
-            (Err(error), _) => panic!("{error}"),
+            Err(error) => panic!("{error}"),
         };
         assert_eq!(output.exit_code, Some(255), "{output:?}");
         assert_eq!(refused.targets, ["example.org:443"]);
@@ -2699,9 +2770,9 @@ mod tests {
         );
         assert!(!socket.exists(), "the session ended with the command");
 
-        let (output, refused) =
-            run_with_network(command(&format!("{refuse}; sleep 30"), 2_000), &network).await;
-        let error = output.unwrap_err();
+        let run = run_with_network(command(&format!("{refuse}; sleep 30"), 2_000), &network).await;
+        let refused = run.refused;
+        let error = run.output.unwrap_err();
         assert!(error.contains("timed out after"), "{error}");
         assert_eq!(
             refused.targets,
@@ -2715,15 +2786,29 @@ mod tests {
     fn a_failed_command_still_names_the_hosts_the_proxy_refused() {
         let mut refused = RefusedTargets::default();
         let timed_out = || Err("Command timed out after 2000 ms".to_string());
-        let error = bash_exec_outcome(timed_out(), &refused, &SocketPolicy::default(), 2_000, true)
-            .unwrap_err();
+        let error = bash_exec_outcome(
+            timed_out(),
+            &refused,
+            &SocketPolicy::default(),
+            None,
+            2_000,
+            true,
+        )
+        .unwrap_err();
         assert!(!error.contains("Network allowlist refused"), "{error}");
 
         refused.add("example.org:443".to_string());
         refused.add("pypi.org:443".to_string());
         refused.more = 2;
-        let error = bash_exec_outcome(timed_out(), &refused, &SocketPolicy::default(), 2_000, true)
-            .unwrap_err();
+        let error = bash_exec_outcome(
+            timed_out(),
+            &refused,
+            &SocketPolicy::default(),
+            None,
+            2_000,
+            true,
+        )
+        .unwrap_err();
         let (timeout, network) = error.split_once('\n').unwrap();
         assert!(
             timeout.contains("re-run with a higher `timeoutMs`"),
@@ -2747,13 +2832,14 @@ mod tests {
         assert!(bash_exec_result(
             &output,
             &RefusedTargets::default(),
-            &SocketPolicy::default()
+            &SocketPolicy::default(),
+            None
         )
         .get("network")
         .is_none());
         let mut refused = RefusedTargets::default();
         refused.add("example.org:443".to_string());
-        let result = bash_exec_result(&output, &refused, &SocketPolicy::default());
+        let result = bash_exec_result(&output, &refused, &SocketPolicy::default(), None);
         assert_eq!(
             result["network"]["refused"],
             serde_json::json!(["example.org:443"])
@@ -2765,7 +2851,8 @@ mod tests {
 
         refused.more = 3;
         assert_eq!(
-            bash_exec_result(&output, &refused, &SocketPolicy::default())["network"]["refusedMore"],
+            bash_exec_result(&output, &refused, &SocketPolicy::default(), None)["network"]
+                ["refusedMore"],
             3
         );
     }
@@ -2787,7 +2874,7 @@ mod tests {
             stderr: stderr.to_string(),
         };
         let unreachable = |output: &SandboxCommandOutput, sockets: &SocketPolicy| {
-            bash_exec_result(output, &RefusedTargets::default(), sockets)
+            bash_exec_result(output, &RefusedTargets::default(), sockets, None)
                 .get("sockets")
                 .map(|sockets| sockets["unreachable"].clone())
         };
@@ -2809,7 +2896,7 @@ mod tests {
             unreachable(&denied, &confined),
             Some(serde_json::json!([path]))
         );
-        let result = bash_exec_result(&denied, &RefusedTargets::default(), &confined);
+        let result = bash_exec_result(&denied, &RefusedTargets::default(), &confined, None);
         assert!(result["sockets"]["hint"]
             .as_str()
             .unwrap()
@@ -2868,6 +2955,162 @@ mod tests {
             .starts_with("Sandboxed shell is unavailable: network helper not found"));
         let macos = status_for(Some(SandboxBackend::Seatbelt));
         assert!(profile(NetworkMode::Allowlist, &macos).is_err());
+    }
+
+    #[test]
+    fn only_full_binds_the_whole_bus_and_keyring_only_fails_closed() {
+        let proxy = SessionBusProxy {
+            socket: PathBuf::from("/c/.clai-net/bus-1.sock"),
+            bus: PathBuf::from("/run/user/1000/bus"),
+        };
+        let unused = || -> Result<Option<SessionBusProxy>, String> { panic!("no plan needed") };
+        assert_eq!(
+            session_bus_for(SandboxSessionBusConfig::Full, unused),
+            (SandboxSessionBusMode::Allow, None, None)
+        );
+        assert_eq!(
+            session_bus_for(SandboxSessionBusConfig::Deny, unused),
+            (SandboxSessionBusMode::Deny, None, None)
+        );
+        let keyring = |plan: Result<Option<SessionBusProxy>, String>| {
+            session_bus_for(SandboxSessionBusConfig::KeyringOnly, || plan)
+        };
+        assert_eq!(
+            keyring(Ok(Some(proxy.clone()))),
+            (SandboxSessionBusMode::Allow, Some(proxy), None)
+        );
+        assert_eq!(
+            keyring(Err("xdg-dbus-proxy is not installed".to_string())),
+            (
+                SandboxSessionBusMode::Deny,
+                None,
+                Some("xdg-dbus-proxy is not installed".to_string())
+            )
+        );
+        assert_eq!(keyring(Ok(None)), (SandboxSessionBusMode::Deny, None, None));
+    }
+
+    /// The review's B1 case: a keyring-only agent whose workspace is outside
+    /// the home directory. Whatever this host offers, the profile never binds
+    /// the real bus: it has the proxy, or no bus.
+    #[test]
+    fn a_keyring_only_profile_never_binds_the_real_bus() {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
+        let workspace = tempdir().unwrap();
+        let mut context = context_with_grants(workspace.path(), Vec::new());
+        let mut execution = context.run_context.execution.clone();
+        execution.sandbox.network_access = network(NetworkMode::Off);
+        execution.sandbox.session_bus = SandboxSessionBusConfig::KeyringOnly;
+        context.run_context = std::sync::Arc::new(RunContext {
+            execution,
+            ..(*context.run_context).clone()
+        });
+        let filesystem = filesystem_policy(&context).unwrap();
+        let profile = sandbox_profile(
+            &context,
+            workspace.path().to_path_buf(),
+            filesystem,
+            &status_for(Some(SandboxBackend::Bubblewrap)),
+        )
+        .unwrap();
+        match profile.session_bus {
+            SandboxSessionBusMode::Allow => assert!(profile.session_bus_proxy.is_some()),
+            SandboxSessionBusMode::Deny => {
+                assert!(profile.session_bus_proxy.is_none());
+                assert!(!profile
+                    .env
+                    .iter()
+                    .any(|(key, _)| key == "DBUS_SESSION_BUS_ADDRESS"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_result_says_why_keyring_only_has_no_bus_and_how_to_get_it() {
+        let output = SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(0),
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let none = SocketPolicy::default();
+        let refused = RefusedTargets::default();
+        assert!(bash_exec_result(&output, &refused, &none, None)
+            .get("sessionBus")
+            .is_none());
+        let reason = Some("xdg-dbus-proxy is not installed");
+        let note = bash_exec_result(&output, &refused, &none, reason)["sessionBus"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!note.contains('\n'), "one line: {note}");
+        assert!(note.contains("xdg-dbus-proxy is not installed"), "{note}");
+        assert!(note.contains("set its Session bus to Full"), "{note}");
+        let error = bash_exec_outcome(
+            Err("Command timed out after 2000 ms".to_string()),
+            &refused,
+            &none,
+            reason,
+            2_000,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.ends_with(&note), "{error}");
+    }
+
+    /// A keyring proxy that cannot start leaves the command with no bus and
+    /// says so; it neither fails the command nor binds the real bus.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_keyring_proxy_that_does_not_start_leaves_no_bus() {
+        let workspace = tempdir().unwrap();
+        let bus = workspace.path().join("host-bus");
+        let mut profile = SandboxProfile::for_test(
+            workspace.path().to_path_buf(),
+            Vec::new(),
+            SandboxNetworkMode::Disabled,
+            SandboxSessionBusMode::Allow,
+            SandboxEnv::filtered_from_iter(
+                [
+                    ("PATH", "/usr/bin:/bin"),
+                    ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/bus"),
+                ],
+                workspace.path(),
+                SandboxSessionBusMode::Allow,
+            ),
+            None,
+        );
+        profile.session_bus_proxy = Some(SessionBusProxy {
+            socket: PathBuf::from("/nonexistent/dir/bus-1.sock"),
+            bus: bus.clone(),
+        });
+        let command = SandboxCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo ${DBUS_SESSION_BUS_ADDRESS-none}".into(),
+            ],
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms: 10_000,
+            max_output_chars: 10_000,
+            profile,
+        };
+        let network = std::sync::Arc::new(run_network(&[], &[]));
+        let run = run_with_network(command, &network).await;
+        assert!(
+            run.session_bus_unavailable.is_some(),
+            "the result says why there is no bus"
+        );
+        let output = match run.output {
+            Ok(output) => output,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(output.stdout.trim(), "none", "{output:?}");
     }
 
     #[cfg(target_os = "linux")]

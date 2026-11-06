@@ -21,8 +21,8 @@ mod macos_seatbelt;
 mod unsupported;
 
 pub use profile::{
-    AllowedSocket, ProxyEndpoint, SandboxEnv, SandboxNetworkMode, SandboxPathAccess,
-    SandboxProfile, SandboxSessionBusMode, SessionBusProxy, SocketPolicy,
+    keyring_only_unavailable_note, AllowedSocket, ProxyEndpoint, SandboxEnv, SandboxNetworkMode,
+    SandboxPathAccess, SandboxProfile, SandboxSessionBusMode, SessionBusProxy, SocketPolicy,
 };
 pub use runner::{run_command, SandboxCommand, SandboxCommandOutput};
 
@@ -59,9 +59,10 @@ pub struct SandboxStatus {
     /// Why socket isolation is unavailable, worded for the user.
     pub socket_isolation_unavailable_reason: Option<String>,
     /// Whether the keyring-only session bus is filtered here. Without it an
-    /// agent set to keyring only gets the whole, unfiltered bus.
+    /// agent set to keyring only gets no bus, never the whole one.
     pub session_bus_filter_available: bool,
-    /// Why the session bus cannot be filtered, worded for the user.
+    /// Why the session bus cannot be filtered and how to give an agent the
+    /// whole bus instead, worded for the user.
     pub session_bus_filter_unavailable_reason: Option<String>,
 }
 
@@ -81,7 +82,8 @@ pub fn status() -> SandboxStatus {
         status.socket_isolation_unavailable_reason = socket_isolation_reason(&sockets);
         let bus_filter = bus_proxy::unavailable_reason();
         status.session_bus_filter_available = bus_filter.is_none();
-        status.session_bus_filter_unavailable_reason = bus_filter.map(str::to_string);
+        status.session_bus_filter_unavailable_reason =
+            bus_filter.map(profile::keyring_only_unavailable_note);
     }
     status
 }
@@ -271,8 +273,8 @@ mod tests {
             sockets.confined()
         );
         assert_eq!(
-            status.session_bus_filter_unavailable_reason.as_deref(),
-            bus_proxy::unavailable_reason()
+            status.session_bus_filter_unavailable_reason,
+            bus_proxy::unavailable_reason().map(keyring_only_unavailable_note)
         );
         assert_eq!(
             status.session_bus_filter_available,
