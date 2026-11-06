@@ -264,19 +264,22 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
 }
 
 /// The helper's mode and the sockets it lets the command reach: the
-/// session bus when bound and the agent's allowed sockets.
+/// session bus when bound and the agent's allowed sockets. In Host network
+/// host abstract sockets (X11, for one) stay reachable: that mode reaches
+/// every host service on localhost, so refusing them guards nothing and
+/// leaves the user no way to grant them.
 fn append_helper_entry(args: &mut Vec<OsString>, command: &SandboxCommand, bus: Option<&Path>) {
     args.push(os(BOX_HELPER));
-    if let SandboxNetworkMode::Proxied(_) = command.profile.network {
-        args.extend([
+    match command.profile.network {
+        SandboxNetworkMode::Proxied(_) => args.extend([
             os("bridge"),
             os("--socket"),
             os(BOX_SOCKET),
             os("--http"),
             os(BOX_PROXY_PORT.to_string()),
-        ]);
-    } else {
-        args.push(os("run"));
+        ]),
+        SandboxNetworkMode::Host => args.extend([os("run"), os("--host-abstract-unix")]),
+        SandboxNetworkMode::Disabled => args.push(os("run")),
     }
     // One rule per socket: Landlock allows the file, under either name.
     let allowed = command
@@ -1571,7 +1574,19 @@ mod tests {
                     "-lc",
                     "pwd",
                 ],
-                _ => vec!["run", "--allow-unix", &bus, "--", "/bin/sh", "-lc", "pwd"],
+                SandboxNetworkMode::Host => vec![
+                    "run",
+                    "--host-abstract-unix",
+                    "--allow-unix",
+                    &bus,
+                    "--",
+                    "/bin/sh",
+                    "-lc",
+                    "pwd",
+                ],
+                SandboxNetworkMode::Disabled => {
+                    vec!["run", "--allow-unix", &bus, "--", "/bin/sh", "-lc", "pwd"]
+                }
             };
             assert_eq!(entry, expected, "{network:?}");
             let helper_binds: Vec<&[String]> = args
@@ -1632,9 +1647,10 @@ mod tests {
     }
 
     /// E2/E3: in Host network, with a read grant on a directory that holds a
-    /// host socket, the confined command reaches neither that socket nor a
-    /// host abstract socket, but its own sockets and cross-directory renames
-    /// still work. Without the helper both host sockets are reachable.
+    /// host socket, the confined command does not reach that socket, but its
+    /// own sockets, host abstract sockets (Host network reaches the host's
+    /// services anyway) and cross-directory renames work. Without the helper
+    /// the host socket is reachable.
     #[tokio::test]
     async fn the_helper_confines_unix_sockets_to_those_made_in_the_sandbox() {
         let Some(helper) = built_helper() else {
@@ -1707,7 +1723,7 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
         };
         assert_eq!(
             confined.stdout.trim(),
-            "PermissionError PermissionError ok",
+            "PermissionError ok ok",
             "{confined:?}"
         );
         let open = tempfile::tempdir().unwrap();

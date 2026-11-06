@@ -328,8 +328,8 @@ const REFUSED_HINT: &str = "CLAI's network proxy refused these hosts: they are n
 
 const SOCKET_HINT: &str = "The sandbox kept the command from reaching these Unix sockets of \
                            this computer. Do not look for a way around the sandbox: if the task \
-                           needs one, tell the user, who can allow it for this agent in its Local \
-                           access settings.";
+                           needs one, ask the user to add its path to Allowed sockets in this \
+                           agent's Local access settings.";
 
 fn bash_exec_outcome(
     output: Result<SandboxCommandOutput, String>,
@@ -2900,7 +2900,7 @@ mod tests {
         assert!(result["sockets"]["hint"]
             .as_str()
             .unwrap()
-            .contains("allow it for this agent"));
+            .contains("add its path to Allowed sockets in this agent's Local access"));
 
         // Without Landlock a refusal comes from the host's permissions.
         let unconfined = SocketPolicy {

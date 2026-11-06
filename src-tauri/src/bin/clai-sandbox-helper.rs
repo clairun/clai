@@ -45,7 +45,7 @@ mod linux {
     use std::process::Command;
     use std::thread;
 
-    const USAGE: &str = "usage: clai-sandbox-helper run [--allow-unix <path>]... -- <command>...\n       clai-sandbox-helper bridge --socket <path> --http <port> [--allow-unix <path>]... -- <command>...\n       clai-sandbox-helper connect --proxy <host:port> <host> <port>";
+    const USAGE: &str = "usage: clai-sandbox-helper run [--allow-unix <path>]... [--host-abstract-unix] -- <command>...\n       clai-sandbox-helper bridge --socket <path> --http <port> [--allow-unix <path>]... -- <command>...\n       clai-sandbox-helper connect --proxy <host:port> <host> <port>";
     const MAX_HEAD_BYTES: usize = 16 * 1024;
     /// What ssh reports for a ProxyCommand that could not connect.
     const CONNECT_FAILED: i32 = 255;
@@ -54,6 +54,9 @@ mod linux {
     pub(crate) enum Mode {
         Run {
             allow_unix: Vec<PathBuf>,
+            /// Host network: host abstract sockets stay reachable, as every
+            /// host service on localhost is.
+            host_abstract_unix: bool,
             argv: Vec<OsString>,
         },
         Bridge {
@@ -77,6 +80,13 @@ mod linux {
                 return 2;
             }
         };
+        let scope_abstract = !matches!(
+            mode,
+            Mode::Run {
+                host_abstract_unix: true,
+                ..
+            }
+        );
         let allowed = match &mode {
             Mode::Run { allow_unix, .. } => allow_unix.clone(),
             Mode::Bridge {
@@ -87,7 +97,7 @@ mod linux {
             Mode::Connect { .. } => Vec::new(),
         };
         if !matches!(mode, Mode::Connect { .. }) {
-            if let Err(error) = landlock::confine_unix_sockets(&allowed) {
+            if let Err(error) = landlock::confine_unix_sockets(&allowed, scope_abstract) {
                 eprintln!("clai-sandbox-helper: cannot confine Unix sockets: {error}");
                 return 125;
             }
@@ -110,6 +120,7 @@ mod linux {
             Some(name @ ("run" | "bridge")) => {
                 let bridge = name == "bridge";
                 let (mut socket, mut http_port, mut allow_unix) = (None, None, Vec::new());
+                let mut host_abstract_unix = false;
                 loop {
                     let arg = args
                         .next()
@@ -125,6 +136,7 @@ mod linux {
                                 .filter(|path| path.is_absolute())
                                 .ok_or("--allow-unix needs an absolute path")?,
                         ),
+                        Some("--host-abstract-unix") if !bridge => host_abstract_unix = true,
                         Some("--") => break,
                         _ => return Err(format!("unexpected argument {arg:?}")),
                     }
@@ -134,7 +146,11 @@ mod linux {
                     return Err(format!("{name} needs a command after `--`"));
                 }
                 if !bridge {
-                    return Ok(Mode::Run { allow_unix, argv });
+                    return Ok(Mode::Run {
+                        allow_unix,
+                        host_abstract_unix,
+                        argv,
+                    });
                 }
                 Ok(Mode::Bridge {
                     socket: socket.ok_or("--socket needs a path")?,
@@ -377,20 +393,21 @@ mod linux {
             version.max(0)
         }
 
-        /// What a domain confines at `abi`, `None` when it confines nothing.
+        /// What a domain confines at `abi`, `None` when it confines nothing;
+        /// host abstract sockets only with `scope_abstract`.
         /// Refer is handled with the socket right because a domain that
         /// handles a filesystem right refuses a rename or link across
         /// directories unless refer is allowed there; it is allowed everywhere.
-        pub(crate) fn ruleset(abi: i64) -> Option<RulesetAttr> {
+        pub(crate) fn ruleset(abi: i64, scope_abstract: bool) -> Option<RulesetAttr> {
             let handled_access_fs = if abi >= 9 {
                 ACCESS_FS_RESOLVE_UNIX | ACCESS_FS_REFER
             } else {
                 0
             };
-            let scoped = if abi >= 6 {
-                SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL
-            } else {
-                0
+            let scoped = match (abi >= 6, scope_abstract) {
+                (false, _) => 0,
+                (true, true) => SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL,
+                (true, false) => SCOPE_SIGNAL,
             };
             (handled_access_fs != 0 || scoped != 0).then_some(RulesetAttr {
                 handled_access_fs,
@@ -401,8 +418,11 @@ mod linux {
 
         /// Confines this thread and everything it starts. An allowed path
         /// that cannot be opened is skipped: its socket is not there.
-        pub(crate) fn confine_unix_sockets(allowed: &[PathBuf]) -> Result<(), String> {
-            let Some(attr) = ruleset(abi()) else {
+        pub(crate) fn confine_unix_sockets(
+            allowed: &[PathBuf],
+            scope_abstract: bool,
+        ) -> Result<(), String> {
+            let Some(attr) = ruleset(abi(), scope_abstract) else {
                 return Ok(());
             };
             // SAFETY: `attr` is a ruleset attribute of the size passed.
@@ -490,17 +510,19 @@ mod linux {
 
             #[test]
             fn what_each_abi_confines() {
-                assert_eq!(ruleset(0), None);
-                assert_eq!(ruleset(5), None);
+                assert_eq!(ruleset(0, true), None);
+                assert_eq!(ruleset(5, true), None);
+                assert_eq!(ruleset(5, false), None);
                 let scopes = SCOPE_ABSTRACT_UNIX_SOCKET | SCOPE_SIGNAL;
-                assert_eq!(
-                    ruleset(6).map(|r| (r.handled_access_fs, r.scoped)),
-                    Some((0, scopes))
-                );
-                assert_eq!(
-                    ruleset(9).map(|r| (r.handled_access_fs, r.scoped)),
-                    Some((ACCESS_FS_RESOLVE_UNIX | ACCESS_FS_REFER, scopes))
-                );
+                let fs = ACCESS_FS_RESOLVE_UNIX | ACCESS_FS_REFER;
+                let confines = |abi, scope_abstract| {
+                    ruleset(abi, scope_abstract).map(|r| (r.handled_access_fs, r.scoped))
+                };
+                assert_eq!(confines(6, true), Some((0, scopes)));
+                assert_eq!(confines(9, true), Some((fs, scopes)));
+                // Host network: signals only, not host abstract sockets.
+                assert_eq!(confines(6, false), Some((0, SCOPE_SIGNAL)));
+                assert_eq!(confines(9, false), Some((fs, SCOPE_SIGNAL)));
                 assert_eq!(
                     std::mem::size_of::<PathBeneathAttr>(),
                     12,
@@ -527,7 +549,7 @@ mod linux {
                 let paths = (allowed.clone(), other.clone(), dir.path().to_path_buf());
                 let results = std::thread::spawn(move || {
                     let (allowed, other, dir) = paths;
-                    confine_unix_sockets(std::slice::from_ref(&allowed)).unwrap();
+                    confine_unix_sockets(std::slice::from_ref(&allowed), true).unwrap();
                     (
                         UnixStream::connect(&allowed)
                             .map(|_| ())
@@ -556,6 +578,22 @@ mod linux {
                 }
                 // This thread was not confined.
                 assert!(UnixStream::connect(&other).is_ok());
+            }
+
+            /// Host network: host abstract sockets (X11, for one) stay
+            /// reachable, as every service on localhost does.
+            #[test]
+            fn a_host_network_thread_still_reaches_host_abstract_sockets() {
+                let name = format!("clai-helper-host-{}", std::process::id());
+                let address = SocketAddr::from_abstract_name(name.as_bytes()).unwrap();
+                let _abstract = UnixListener::bind_addr(&address).unwrap();
+                let reached = std::thread::spawn(move || {
+                    confine_unix_sockets(&[], false).unwrap();
+                    UnixStream::connect_addr(&address).map(|_| ())
+                })
+                .join()
+                .unwrap();
+                assert!(reached.is_ok(), "{reached:?}");
             }
         }
     }
@@ -621,6 +659,7 @@ mod linux {
                 ])),
                 Ok(Mode::Run {
                     allow_unix: vec![PathBuf::from("/a.sock"), PathBuf::from("/b.sock")],
+                    host_abstract_unix: false,
                     argv: args(&["sh", "--"]),
                 })
             );
@@ -656,6 +695,29 @@ mod linux {
             ] {
                 assert!(parse(args(bad)).is_err(), "{bad:?}");
             }
+        }
+
+        #[test]
+        fn only_run_takes_host_abstract_sockets() {
+            assert_eq!(
+                parse(args(&["run", "--host-abstract-unix", "--", "sh"])),
+                Ok(Mode::Run {
+                    allow_unix: Vec::new(),
+                    host_abstract_unix: true,
+                    argv: args(&["sh"]),
+                })
+            );
+            let bridge = [
+                "bridge",
+                "--socket",
+                "/s",
+                "--http",
+                "3128",
+                "--host-abstract-unix",
+                "--",
+                "sh",
+            ];
+            assert!(parse(args(&bridge)).is_err());
         }
 
         /// A proxy that answers one CONNECT with `answer`, then echoes.
