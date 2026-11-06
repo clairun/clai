@@ -166,8 +166,17 @@ export const accessSummary = (draft: AccessDraft, sandbox: SandboxStatus | null 
   draft.grants.length ? plural(draft.grants.length, 'path') : 'No paths',
   networkSummary(draft.networkAccess, sandbox),
   draft.web ? 'Web on' : 'Web off',
-  draft.sessionBus ? 'Keyring on' : 'Keyring off',
+  busSummary(draft, sandbox),
 ];
+
+/** Which bus the agent gets: only Full is the whole bus, and keyring only
+ * where it cannot be filtered is no bus at all. */
+const busSummary = (draft: AccessDraft, sandbox: SandboxStatus | null): string => {
+  if (!draft.sessionBus) return 'Bus off';
+  if (draft.sessionBusMode === 'full') return 'Bus: full';
+  if (sandbox && !sandbox.sessionBusFilterAvailable) return 'Bus off (keyring only unavailable here)';
+  return 'Bus: keyring only';
+};
 
 const networkSummary = (policy: NetworkPolicy | null, sandbox: SandboxStatus | null): string => {
   if (!policy) return 'Network: this PC’s default';
@@ -388,7 +397,9 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
             <Switch label="Web access" hint="Fetch pages and search the web." checked={draft.web} onChange={(web) => onChange({ web })} disabled={disabled} />
             <Switch
               label="Session D-Bus"
-              hint="Lets tools such as gh or git use your keyring (libsecret)."
+              hint={draft.sessionBusMode === 'full'
+                ? 'Every desktop service on your session bus, unfiltered, including ones that can start programs outside the sandbox.'
+                : 'Only your keyring (libsecret), so tools such as gh or git can use it; nothing else on your desktop.'}
               checked={draft.sessionBus}
               onChange={(sessionBus) => onChange({ sessionBus })}
               disabled={disabled}
