@@ -591,14 +591,21 @@ struct StoredExecutionSandboxConfig {
     allowed_sockets: Vec<String>,
 }
 
-/// An allowed socket as saved: trimmed, absolute or under `~/`, without a
-/// wildcard, and not a directory. A path that does not exist yet is kept: a
-/// socket appears when its service starts.
-fn allowed_socket_entry(entry: &str, home: Option<&std::path::Path>) -> Result<String, String> {
+/// An allowed socket as saved, and as checked again before each command
+/// for a hand-edited config: trimmed, absolute or under `~/`, without a
+/// wildcard, `.` or `..`, and not a directory. A path that does not exist
+/// yet is kept: a socket appears when its service starts.
+pub(crate) fn allowed_socket_entry(
+    entry: &str,
+    home: Option<&std::path::Path>,
+) -> Result<String, String> {
     let entry = entry.trim();
     let refuse = |reason: &str| Err(format!("Allowed sockets: `{entry}` {reason}."));
     if entry.contains(['*', '?', '[']) {
         return refuse("has a wildcard; name one socket file");
+    }
+    if entry.split('/').any(|part| part == "." || part == "..") {
+        return refuse("has a . or .. part; name the socket by its full path");
     }
     let path = match entry.strip_prefix("~/") {
         Some(rest) => home.map(|home| home.join(rest)),
@@ -1496,6 +1503,9 @@ mod tests {
             ("~other/x.sock", "absolute or ~/"),
             ("/run/", "directory"),
             ("~/.docker", "directory"),
+            ("/run/../tmp/x.sock", ". or .."),
+            ("/run/./docker.sock", ". or .."),
+            ("~/../other/x.sock", ". or .."),
         ] {
             let error = entry(bad).unwrap_err();
             assert!(

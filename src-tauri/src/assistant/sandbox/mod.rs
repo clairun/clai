@@ -171,6 +171,10 @@ fn host_socket(
 ) -> Result<AllowedSocket, SocketSkip> {
     use std::os::unix::fs::FileTypeExt;
     let absent = |reason: String| SocketSkip::Absent(reason);
+    // Saving checks entries; a hand-edited config is checked here.
+    let entry =
+        crate::config::types::allowed_socket_entry(entry, home).map_err(SocketSkip::Refused)?;
+    let entry = entry.as_str();
     let path = match (entry.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => home.join(rest),
         (Some(_), None) => return Err(absent("the home directory is unknown".to_string())),
@@ -496,6 +500,20 @@ mod tests {
         let (allowed, _) = resolve_allowed_sockets(&entries[..2], None, &|_| false);
         assert!(allowed.iter().all(|socket| socket.host == bus));
         assert_eq!(allowed.len(), 2);
+    }
+
+    /// m6: a hand-edited entry the settings would refuse is refused before
+    /// each command too, not resolved against CLAI's own working directory.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_hand_edited_entry_is_checked_before_each_command() {
+        let entries = ["docker.sock", "/run/../tmp/x.sock", "/run/*.sock"].map(String::from);
+        let (allowed, refused) = resolve_allowed_sockets(&entries, None, &|_| false);
+        assert!(allowed.is_empty());
+        assert_eq!(refused.len(), 3, "{refused:?}");
+        for (entry, refusal) in entries.iter().zip(&refused) {
+            assert!(refusal.starts_with(entry.as_str()), "{refusal}");
+        }
     }
 
     #[cfg(target_os = "linux")]

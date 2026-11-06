@@ -222,7 +222,7 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
     append_runtime_file_binds(&mut args, in_flatpak);
     append_workspace_and_grants(&mut args, command);
     append_socket_masks(&mut args, command);
-    append_allowed_socket_binds(&mut args, command, in_flatpak);
+    append_allowed_socket_binds(&mut args, command);
 
     for (key, value) in command.profile.env.iter() {
         args.push(os("--setenv"));
@@ -380,27 +380,21 @@ fn sockets_under(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// The host sockets the agent may connect to, bound at the host path and at
-/// the path the agent named, after the grants and the socket directory
-/// masks, so neither hides them.
-fn append_allowed_socket_binds(
-    args: &mut Vec<OsString>,
-    command: &SandboxCommand,
-    in_flatpak: bool,
-) {
+/// the path the agent named, after the grants and the socket masks, so
+/// neither hides them. A name under a system bind (`/etc`, `/usr`) is
+/// already there and cannot take a mount point. `--ro-bind-try`: a socket
+/// that went away since it was resolved (a restarted service) leaves the
+/// command without it instead of failing it.
+fn append_allowed_socket_binds(args: &mut Vec<OsString>, command: &SandboxCommand) {
     for socket in &command.profile.sockets.allowed {
         let names = std::iter::once(&socket.host)
-            .chain(Some(&socket.path).filter(|path| **path != socket.host));
+            .chain(Some(&socket.path).filter(|path| **path != socket.host))
+            .filter(|name| !path_is_covered_by_system_bind(name));
         for name in names {
             for dir in private_parent_dirs_for(name) {
                 args.extend([os("--dir"), dir.into_os_string()]);
             }
-            // Under Flatpak the path was resolved in the app's view of the host.
-            let bind = if in_flatpak {
-                "--ro-bind-try"
-            } else {
-                "--ro-bind"
-            };
-            args.extend([os(bind), os(&socket.host), os(name)]);
+            args.extend([os("--ro-bind-try"), os(&socket.host), os(name)]);
         }
     }
 }
@@ -1890,14 +1884,26 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
         command.profile.sockets = SocketPolicy {
             helper: Some(PathBuf::from("/opt/h")),
             kernel_confines: false,
-            allowed: vec![AllowedSocket {
-                path: socket.clone(),
-                host: host.clone(),
-            }],
+            allowed: vec![
+                AllowedSocket {
+                    path: socket.clone(),
+                    host: host.clone(),
+                },
+                // m4: a name under a system bind gets no bind of its own.
+                AllowedSocket {
+                    path: PathBuf::from("/etc/app/app.sock"),
+                    host: PathBuf::from("/etc/app/app.sock"),
+                },
+            ],
             skipped: Vec::new(),
             hint_places: Vec::new(),
         };
         let args = rendered(&bwrap_args(&command).unwrap());
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("/etc/app")
+                && !args.windows(2).any(|w| w == ["--allow-unix", arg.as_str()])),
+            "{args:?}"
+        );
         let (socket, host) = (socket.to_string_lossy(), host.to_string_lossy());
         let mask = args
             .windows(3)
@@ -1905,7 +1911,7 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
             .expect("the socket is masked without Landlock");
         let bound = |name: &str| {
             args.windows(3)
-                .position(|w| w == ["--ro-bind", &*host, name])
+                .position(|w| w == ["--ro-bind-try", &*host, name])
                 .unwrap_or_else(|| panic!("{name}: {args:?}"))
         };
         bound(&host);
@@ -1915,8 +1921,16 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
             .position(|w| w == ["--", BOX_HELPER])
             .unwrap_or_else(|| panic!("{args:?}"));
         assert_eq!(
-            args[start + 2..start + 7],
-            ["run", "--host-abstract-unix", "--allow-unix", &*host, "--"],
+            args[start + 2..start + 9],
+            [
+                "run",
+                "--host-abstract-unix",
+                "--allow-unix",
+                &*host,
+                "--allow-unix",
+                "/etc/app/app.sock",
+                "--"
+            ],
             "{args:?}"
         );
     }
