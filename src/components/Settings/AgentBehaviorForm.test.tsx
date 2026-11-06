@@ -19,7 +19,9 @@ import hostEntryCases from './hostEntryCases.json';
 import { resetSandboxStatusForTests } from '../../hooks/useSandboxStatus';
 import { StaleAgentError } from '../../api/errors';
 import formStyles from './SettingsForm.module.css';
-import type { FilesystemPathGrant, NetworkPolicy, ProviderConnection, SandboxStatus } from '../../generated/bindings';
+import type {
+  ExecutionSandboxConfig, FilesystemPathGrant, NetworkPolicy, ProviderConnection, SandboxStatus,
+} from '../../generated/bindings';
 
 const connection = (id: string, name: string, extra: Partial<ProviderConnection> = {}): ProviderConnection =>
   ({ id, name, enabled: true, modelId: '', ...extra } as unknown as ProviderConnection);
@@ -44,12 +46,20 @@ const HOME_GRANT: FilesystemPathGrant = { path: '/home/u', access: 'read_only', 
 // A stored policy the form must save back unchanged.
 const NETWORK: NetworkPolicy = { mode: 'host_network', allowDomains: ['github.com', '*.example.org'], denyDomains: ['bad.example.org'] };
 
-const LINUX: SandboxStatus = { available: true, backend: 'bubblewrap', allowlistAvailable: true, allowlistUnavailableReason: null };
+const LINUX: SandboxStatus = {
+  available: true, backend: 'bubblewrap', allowlistAvailable: true, allowlistUnavailableReason: null,
+  socketIsolationAvailable: true, socketIsolationUnavailableReason: null,
+  sessionBusFilterAvailable: true, sessionBusFilterUnavailableReason: null,
+};
 const MACOS: SandboxStatus = {
   available: true, backend: 'seatbelt', allowlistAvailable: false, allowlistUnavailableReason: 'Not available on macOS yet',
+  socketIsolationAvailable: false, socketIsolationUnavailableReason: 'Not available on macOS yet',
+  sessionBusFilterAvailable: false, sessionBusFilterUnavailableReason: 'Not available on macOS yet',
 };
 const NO_SANDBOX: SandboxStatus = {
   available: false, backend: null, allowlistAvailable: false, allowlistUnavailableReason: 'Not available on this PC',
+  socketIsolationAvailable: false, socketIsolationUnavailableReason: 'Not available on this PC',
+  sessionBusFilterAvailable: false, sessionBusFilterUnavailableReason: 'Not available on this PC',
 };
 
 const REVIEWER: AgentDetail = {
@@ -62,7 +72,7 @@ const REVIEWER: AgentDetail = {
   selectedMcpServerIds: ['srv-a'],
   providerConnectionIds: ['conn-a'],
   execution: {
-    sandbox: { networkAccess: NETWORK, sessionBus: 'allow' },
+    sandbox: { networkAccess: NETWORK, sessionBusMode: 'full' },
     filesystem: { extraPaths: [HOME_GRANT] },
     shell: {
       mode: 'restricted',
@@ -104,11 +114,20 @@ const sentUpdate = () => api.workspaceUpdateAgent.mock.calls.at(-1)![0] as {
     filesystem: { extraPaths: FilesystemPathGrant[] };
     shell: { mode: string; askFirstCommandPrefixes: string[] };
     web: { enabled: boolean };
-    sandbox: { sessionBus: string; networkAccess: NetworkPolicy };
+    sandbox: { sessionBusMode: string; networkAccess: NetworkPolicy };
   };
 };
 
 const model = () => screen.getByRole('combobox', { name: /Runs on/ });
+const busGroup = () => screen.getByRole('group', { name: 'Session bus' });
+const busButton = (name: string) => within(busGroup()).getByRole('button', { name });
+
+// The Reviewer with another stored sandbox section, typed loosely so a
+// section saved before the bus modes can be passed too.
+const withSandbox = (sandbox: object): AgentDetail => ({
+  ...REVIEWER,
+  execution: { ...REVIEWER.execution, sandbox: sandbox as ExecutionSandboxConfig },
+});
 
 describe('AgentBehaviorForm', () => {
   afterEach(() => { vi.restoreAllMocks(); });
@@ -147,7 +166,7 @@ describe('AgentBehaviorForm', () => {
       selectedMcpServerIds: ['srv-a'],
       providerConnectionIds: ['conn-a'],
       execution: {
-        sandbox: { networkAccess: NETWORK, sessionBus: 'allow' },
+        sandbox: { networkAccess: NETWORK, sessionBusMode: 'full' },
         filesystem: { extraPaths: [HOME_GRANT] },
         shell: {
           mode: 'restricted',
@@ -204,8 +223,9 @@ describe('AgentBehaviorForm', () => {
       };
     };
     expect(request.name).toBe('Scout');
-    // The defaults carried no network policy, so the backend picks this PC's.
-    expect(request.execution.sandbox).toEqual({ sessionBus: 'allow' });
+    // The defaults carried no network policy, so the backend picks this PC's,
+    // and no bus mode, so the agent gets no bus.
+    expect(request.execution.sandbox).toEqual({ sessionBusMode: 'deny' });
     expect(request.providerConnectionIds).toEqual(['conn-b']);
     expect(request.execution.filesystem.extraPaths).toEqual([HOME_GRANT]);
     expect(request.execution.shell.mode).toBe('off');
@@ -426,7 +446,7 @@ describe('AgentBehaviorForm', () => {
       // Full reads no list, so none is shown.
       expect(screen.queryByRole('list', { name: 'Ask-first command prefixes' })).toBeNull();
       await userEvent.click(screen.getByRole('switch', { name: 'Web access' }));
-      await userEvent.click(screen.getByRole('switch', { name: 'Session D-Bus' }));
+      await userEvent.click(busButton('Off'));
 
       await userEvent.click(screen.getByRole('button', { name: 'Back to Reviewer' }));
       expect(screen.getByRole('button', { name: 'Edit local access' })).toHaveFocus();
@@ -440,7 +460,187 @@ describe('AgentBehaviorForm', () => {
         askFirstCommandPrefixes: ['git push'],
       });
       expect(execution.web.enabled).toBe(false);
-      expect(execution.sandbox.sessionBus).toBe('deny');
+      expect(execution.sandbox.sessionBusMode).toBe('deny');
+    });
+
+    describe('session bus', () => {
+      const openAccess = async () => {
+        await screen.findByDisplayValue('Reviewer');
+        await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
+      };
+
+      it('offers every bus mode with its hint and saves the one picked', async () => {
+        const { ref } = renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        expect(busButton('Full')).toHaveAttribute('aria-pressed', 'true');
+        const modes = [
+          ['Off', 'deny', /^No desktop services/],
+          ['Keyring only', 'keyring_only', /^Only the system keyring/],
+          ['Full', 'full', /^Every desktop service, unfiltered/],
+        ] as const;
+        for (const [label, mode, hint] of modes) {
+          await userEvent.click(busButton(label));
+          expect(busButton(label)).toHaveAttribute('aria-pressed', 'true');
+          expect(busGroup()).toHaveAccessibleDescription(hint);
+          await submit(ref);
+          expect(sentUpdate().execution.sandbox.sessionBusMode).toBe(mode);
+        }
+        // Full reaches services that start programs outside the sandbox.
+        expect(screen.getByText(/^Every desktop service/)).toHaveClass(formStyles.hintWarning!);
+      });
+
+      it('shows the backend reason as is where keyring only cannot be filtered, and still offers Full', async () => {
+        const reason = 'Keyring-only agents get no session bus here: xdg-dbus-proxy is not installed. '
+          + 'To give an agent the whole session bus, set its Session bus to Full in its Local access settings.';
+        api.getSandboxStatus.mockResolvedValue({ ...LINUX, sessionBusFilterAvailable: false, sessionBusFilterUnavailableReason: reason });
+        api.workspaceGetAgent.mockResolvedValue(
+          withSandbox({ networkAccess: NETWORK, sessionBusMode: 'keyring_only' }),
+        );
+        const { ref } = renderForm({ agentId: 'agent-1' });
+        expect(await screen.findByText('Bus off (keyring only unavailable here)')).toBeInTheDocument();
+        await openAccess();
+
+        const warning = await screen.findByText(reason);
+        expect(warning).toHaveClass(formStyles.hintWarning!);
+        expect(busGroup()).toHaveAccessibleDescription(expect.stringContaining(reason));
+        expect(screen.queryByText(/gets the full session bus/)).toBeNull();
+
+        await userEvent.click(busButton('Full'));
+        expect(screen.queryByText(reason)).toBeNull();
+        await submit(ref);
+        expect(sentUpdate().execution.sandbox.sessionBusMode).toBe('full');
+      });
+
+      it('shows the bus only for the Linux sandbox, below Web access, and a save keeps it either way', async () => {
+        for (const status of [MACOS, NO_SANDBOX]) {
+          api.getSandboxStatus.mockResolvedValue(status);
+          resetSandboxStatusForTests();
+          const { ref, unmount } = renderForm({ agentId: 'agent-1' });
+          await openAccess();
+          await waitFor(() => expect(screen.queryByText(/Checking what this PC supports/)).toBeNull());
+          expect(screen.queryByRole('group', { name: 'Session bus' })).toBeNull();
+          expect(screen.getByRole('switch', { name: 'Web access' })).toBeInTheDocument();
+          await submit(ref);
+          expect(sentUpdate().execution.sandbox).toMatchObject({ sessionBusMode: 'full' });
+          unmount();
+        }
+
+        api.getSandboxStatus.mockResolvedValue(LINUX);
+        resetSandboxStatusForTests();
+        renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        const bus = await screen.findByRole('group', { name: 'Session bus' });
+        // Web access sits above the bus, not pinned below it where it scrolls out of view.
+        expect(screen.getByRole('switch', { name: 'Web access' }).compareDocumentPosition(bus))
+          .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
+      });
+
+      it('keeps the bus mode exactly across a save and a reload', async () => {
+        const labels = { deny: 'Off', keyring_only: 'Keyring only', full: 'Full' } as const;
+        for (const mode of ['deny', 'keyring_only', 'full'] as const) {
+          const stored = withSandbox({ networkAccess: NETWORK, sessionBusMode: mode });
+          api.workspaceGetAgent.mockResolvedValue(stored);
+          const first = renderForm({ agentId: 'agent-1' });
+          await screen.findByDisplayValue('Reviewer');
+          await userEvent.type(screen.getByLabelText('Instructions'), ' again');
+          await submit(first.ref);
+          const saved = sentUpdate().execution.sandbox;
+          expect(saved).toEqual({ networkAccess: NETWORK, sessionBusMode: mode });
+          first.unmount();
+
+          api.workspaceGetAgent.mockResolvedValue(withSandbox(saved));
+          const second = renderForm({ agentId: 'agent-1' });
+          await openAccess();
+          expect(await within(await screen.findByRole('group', { name: 'Session bus' }))
+            .findByRole('button', { name: labels[mode] })).toHaveAttribute('aria-pressed', 'true');
+          expect(second.onDirtyChange).not.toHaveBeenCalledWith(true);
+          second.unmount();
+        }
+      });
+
+      it('reads an agent saved before the bus modes as the backend does, and saves that', async () => {
+        // `allowedSockets` from an unreleased build is not sent back.
+        const cases = [
+          [{ networkAccess: NETWORK, sessionBus: 'allow', allowedSockets: ['/run/docker.sock'] }, 'keyring_only', 'Keyring only'],
+          [{ networkAccess: NETWORK }, 'keyring_only', 'Keyring only'],
+          [{ networkAccess: NETWORK, sessionBus: 'deny' }, 'deny', 'Off'],
+        ] as const;
+        for (const [sandbox, mode, label] of cases) {
+          api.workspaceGetAgent.mockResolvedValue(withSandbox(sandbox));
+          const { ref, unmount, onDirtyChange } = renderForm({ agentId: 'agent-1' });
+          await openAccess();
+          expect(await within(await screen.findByRole('group', { name: 'Session bus' }))
+            .findByRole('button', { name: label })).toHaveAttribute('aria-pressed', 'true');
+          expect(onDirtyChange).not.toHaveBeenCalledWith(true);
+          await submit(ref);
+          expect(sentUpdate().execution.sandbox).toEqual({ networkAccess: NETWORK, sessionBusMode: mode });
+          unmount();
+        }
+      });
+    });
+
+    describe('socket grants', () => {
+      const openAccess = async () => {
+        await screen.findByDisplayValue('Reviewer');
+        await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
+      };
+      const warning = /^Granting a Docker, Podman or containerd socket gives this agent full control of this computer/;
+      const grantItem = (path: string) => within(screen.getByRole('list', { name: 'Path grants' }))
+        .getAllByRole('listitem').find((item) => item.textContent?.startsWith(path))!;
+      const addPath = async (path: string) => {
+        await userEvent.type(screen.getByRole('textbox', { name: 'New path for path grants' }), `${path}{Enter}`);
+      };
+
+      it('warns under a container engine socket in Paths and still saves it', async () => {
+        const { ref } = renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        const sockets = ['/var/run/docker.sock', '/run/user/1000/podman/podman.sock', '/run/containerd/containerd.sock'];
+        for (const path of [...sockets, '/srv/data']) await addPath(path);
+
+        for (const path of sockets) {
+          expect(within(grantItem(path)).getByText(warning)).toHaveClass(formStyles.hintWarning!);
+        }
+        for (const path of ['/home/u', '/srv/data']) {
+          expect(within(grantItem(path)).queryByText(warning)).toBeNull();
+        }
+        expect(screen.getAllByText(warning)).toHaveLength(3);
+
+        expect(await submit(ref)).toEqual({ ok: true });
+        expect(sentUpdate().execution.filesystem.extraPaths.map((grant) => grant.path))
+          .toEqual(['/home/u', ...sockets, '/srv/data']);
+      });
+
+      it('says a socket needs its exact path, and when this kernel cannot isolate sockets', async () => {
+        const help = /^A Unix socket, such as Docker’s, is reachable only when granted by its exact path/;
+        const first = renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        expect(await screen.findByText(help)).toBeInTheDocument();
+        expect(screen.queryByText(/Socket isolation is unavailable/)).toBeNull();
+        first.unmount();
+
+        api.getSandboxStatus.mockResolvedValue({
+          ...LINUX,
+          socketIsolationAvailable: false,
+          socketIsolationUnavailableReason: 'This Linux kernel cannot confine Unix sockets (it needs Landlock ABI 9)',
+        });
+        resetSandboxStatusForTests();
+        const second = renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        expect(await screen.findByText(
+          'Socket isolation is unavailable here: This Linux kernel cannot confine Unix sockets (it needs Landlock ABI 9). '
+            + 'A socket inside a granted folder can still be reachable.',
+        )).toHaveClass(formStyles.hint!);
+        second.unmount();
+
+        // Only the Linux sandbox has the exact-path rule.
+        api.getSandboxStatus.mockResolvedValue(MACOS);
+        resetSandboxStatusForTests();
+        renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        await waitFor(() => expect(screen.queryByText(/Checking what this PC supports/)).toBeNull());
+        expect(screen.queryByText(help)).toBeNull();
+        expect(screen.queryByText(/Socket isolation is unavailable/)).toBeNull();
+      });
     });
 
     it('hides the ask-first list when the shell is off', async () => {
@@ -465,7 +665,7 @@ describe('AgentBehaviorForm', () => {
       within(screen.getByRole('group', { name: 'Network' })).getByRole('button', { name });
     const withPolicy = (networkAccess: NetworkPolicy): AgentDetail => ({
       ...REVIEWER,
-      execution: { ...REVIEWER.execution, sandbox: { networkAccess, sessionBus: 'allow' } },
+      execution: { ...REVIEWER.execution, sandbox: { networkAccess, sessionBusMode: 'full' } },
     });
 
     it('saves each mode and keeps the lists across modes', async () => {

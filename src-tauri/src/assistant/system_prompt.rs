@@ -326,7 +326,7 @@ pub(crate) fn build_system_prompt(
     prompt.push_str("\n## Local Execution Capabilities\n");
     if shell_enabled {
         prompt.push_str(&format!(
-            "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace. Its `.clai/` directory is CLAI's own state (settings, conversation history): write there only under `.clai/memory/`; on Linux and macOS the shell can only read the rest.\n",
+            "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace. Its `.clai/` directory is CLAI's own state (settings, conversation history): write there only under `.clai/memory/`; on Linux and macOS the shell can only read the rest. The same holds for the provider CLI configuration at the workspace root (`.claude/`, `.codex/`, `.opencode/`, `.mcp.json`, `opencode.json`, `opencode.jsonc`).\n",
         ));
     } else {
         prompt.push_str(&format!(
@@ -450,15 +450,13 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
     if let Some(allowlist) = &sandbox.allowlist {
         prompt.push_str(allowlist);
     }
-    if cfg!(target_os = "linux")
-        && matches!(
-            context.execution.sandbox.session_bus,
-            crate::config::SandboxSessionBusConfig::Allow
-        )
-    {
-        prompt.push_str(
-            "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n",
-        );
+    if cfg!(target_os = "linux") {
+        let unfiltered = crate::assistant::sandbox::status().session_bus_filter_unavailable_reason;
+        if let Some(line) =
+            session_bus_line(context.execution.sandbox.session_bus, unfiltered.as_deref())
+        {
+            prompt.push_str(&line);
+        }
     }
 
     if matches!(
@@ -536,6 +534,25 @@ const SSH_HOME_CONFIG_ONLY: &str = "             - The Linux sandbox overlays an
 
 const SSH_THROUGH_PROXY: &str = "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh` and binds a CLAI-written `/etc/ssh/ssh_config` there that sends ssh (and git, scp and rsync over ssh) through the network proxy, so ssh to an allowed host works. `~/.ssh/config` is read first: a `ProxyCommand` or `ProxyJump` there overrides CLAI's and then fails inside the sandbox. You do not need `-F /dev/null` workarounds.\n";
 
+/// What the shell's session bus offers on Linux. Keyring only where the bus
+/// cannot be filtered is no bus: `unfiltered` says why and how to get one.
+fn session_bus_line(
+    bus: crate::config::SandboxSessionBusConfig,
+    unfiltered: Option<&str>,
+) -> Option<String> {
+    use crate::config::SandboxSessionBusConfig;
+    match (bus, unfiltered) {
+        (SandboxSessionBusConfig::Deny, _) => None,
+        (SandboxSessionBusConfig::KeyringOnly, Some(note)) => {
+            Some(format!("- No session bus in shell commands. {note}\n"))
+        }
+        _ => Some(
+            "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n"
+                .to_string(),
+        ),
+    }
+}
+
 fn sandbox_prompt_for(context: &RunContext) -> SandboxPrompt {
     sandbox_prompt(
         crate::assistant::sandbox::status().backend,
@@ -560,7 +577,8 @@ fn sandbox_prompt(
     match backend {
         Some(SandboxBackend::Bubblewrap) => {
             let bus = match session_bus {
-                crate::config::SandboxSessionBusConfig::Allow => "session bus available",
+                crate::config::SandboxSessionBusConfig::Full => "session bus available",
+                crate::config::SandboxSessionBusConfig::KeyringOnly => "session bus: keyring only",
                 crate::config::SandboxSessionBusConfig::Deny => "session bus blocked",
             };
             let in_allowlist = network.mode == NetworkMode::Allowlist;
@@ -1459,6 +1477,20 @@ mod tests {
             assert!(text.contains("Knowledge is not a dashboard"));
         }
     }
+    #[test]
+    fn a_keyring_only_agent_is_told_it_has_no_bus_where_it_cannot_be_filtered() {
+        use crate::config::SandboxSessionBusConfig::{Deny, Full, KeyringOnly};
+        let note = "Keyring-only agents get no session bus here: x. Set Full.";
+        let available = |line: Option<String>| line.unwrap().contains("Session bus is available");
+        assert!(available(session_bus_line(KeyringOnly, None)));
+        assert!(available(session_bus_line(Full, Some(note))));
+        assert_eq!(
+            session_bus_line(KeyringOnly, Some(note)).as_deref(),
+            Some(format!("- No session bus in shell commands. {note}\n").as_str())
+        );
+        assert_eq!(session_bus_line(Deny, None), None);
+    }
+
     #[test]
     fn the_sandbox_lines_follow_the_platform_and_the_network_mode() {
         use crate::assistant::sandbox::SandboxBackend::{self, Bubblewrap, Seatbelt};

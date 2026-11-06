@@ -194,7 +194,7 @@ fn upsert_definition(
         return Err(STALE_DEFINITION.to_string());
     }
     let mut execution = request.execution.clone();
-    execution.sandbox.network_access.canonicalize()?;
+    execution.sandbox.canonicalize()?;
 
     if matches!(&request.avatar, Some(avatar) if avatar.seed.trim().is_empty()) {
         return Err("The agent's face needs a seed.".to_string());

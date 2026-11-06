@@ -16,8 +16,9 @@ use crate::assistant::network::addr::{
 use crate::assistant::network::matcher::{canonical_host, parse_entry, HostDecision};
 use crate::assistant::network::run_state::{RefusedTargets, RunNetwork};
 use crate::assistant::sandbox::{
-    run_command, ProxyEndpoint, SandboxCommand, SandboxCommandOutput, SandboxEnv,
-    SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode,
+    keyring_only_unavailable_note, run_command, ProxyEndpoint, SandboxCommand,
+    SandboxCommandOutput, SandboxEnv, SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode,
+    SessionBusProxy, SocketPolicy,
 };
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
@@ -166,6 +167,8 @@ async fn execute_bash_exec(
         }
     })?;
 
+    let sockets = profile.sockets.clone();
+
     if params.command.trim().is_empty() {
         return Err("Shell command cannot be empty".to_string());
     }
@@ -201,7 +204,7 @@ async fn execute_bash_exec(
         }
     };
 
-    let (output, refused) = run_with_network(
+    let run = run_with_network(
         SandboxCommand {
             argv,
             cwd,
@@ -212,7 +215,7 @@ async fn execute_bash_exec(
         &context.run_network,
     )
     .await;
-    let output = output.inspect_err(|error| {
+    let output = run.output.inspect_err(|error| {
         // Surface sandbox-availability failures (bwrap missing, kernel
         // refused namespaces, etc.) as a run warning so the run completes
         // with warnings rather than as a generic tool failure. The sandbox runner uses the
@@ -222,19 +225,60 @@ async fn execute_bash_exec(
             context.note_warning();
         }
     });
-    bash_exec_outcome(output, &refused, timeout_ms, explicit_timeout)
+    let bus = run.session_bus_unavailable.as_deref();
+    bash_exec_outcome(
+        output,
+        &run.refused,
+        &sockets,
+        bus,
+        timeout_ms,
+        explicit_timeout,
+    )
+}
+
+/// What a command run returned, and what the sandbox kept from it: the
+/// `host:port` targets the network proxy refused, kept when the command
+/// failed or timed out too (a client that kept retrying a refused host is a
+/// likely cause), and why a keyring-only agent got no session bus.
+struct NetworkRun {
+    output: Result<SandboxCommandOutput, String>,
+    refused: RefusedTargets,
+    session_bus_unavailable: Option<String>,
 }
 
 /// Runs the command, in Allowlist behind a network proxy session of its
-/// own. Also returns the `host:port` targets the proxy refused, when the
-/// command failed or timed out too: a client that kept retrying a refused
-/// host is a likely cause.
+/// own, and with the keyring-only bus behind a bus proxy of its own. A bus
+/// proxy that does not start leaves the command with no bus, never the
+/// whole one.
 #[cfg(target_os = "linux")]
 async fn run_with_network(
-    command: SandboxCommand,
+    mut command: SandboxCommand,
     run_network: &std::sync::Arc<RunNetwork>,
-) -> (Result<SandboxCommandOutput, String>, RefusedTargets) {
+) -> NetworkRun {
     use crate::assistant::network::{connect::HostConnector, proxy::ProxySession};
+    use crate::assistant::sandbox::bus_proxy::BusProxy;
+    // Starting waits for the proxy, and stopping waits for it to exit: both
+    // block, so neither runs on a runtime worker.
+    let bus_proxy = match command.profile.session_bus_proxy.clone() {
+        Some(plan) => match tokio::task::spawn_blocking(move || BusProxy::start(&plan)).await {
+            Ok(Ok(proxy)) => Some(proxy),
+            Ok(Err(error)) => {
+                command.profile.drop_session_bus(error);
+                None
+            }
+            Err(error) => {
+                command.profile.drop_session_bus(error.to_string());
+                None
+            }
+        },
+        None => None,
+    };
+    let session_bus_unavailable = command.profile.session_bus_unavailable.clone();
+    let stop_bus_proxy = || {
+        if let Some(proxy) = bus_proxy {
+            tokio::task::spawn_blocking(move || drop(proxy));
+        }
+    };
     let session = match &command.profile.network {
         SandboxNetworkMode::Proxied(endpoint) => match ProxySession::start(
             &endpoint.socket,
@@ -243,25 +287,38 @@ async fn run_with_network(
         ) {
             Ok(session) => Some(session),
             Err(error) => {
-                let error = format!(
-                    "Sandboxed shell is unavailable: the network proxy did not start: {error}"
-                );
-                return (Err(error), RefusedTargets::default());
+                stop_bus_proxy();
+                return NetworkRun {
+                    output: Err(format!(
+                        "Sandboxed shell is unavailable: the network proxy did not start: {error}"
+                    )),
+                    refused: RefusedTargets::default(),
+                    session_bus_unavailable,
+                };
             }
         },
         _ => None,
     };
     let output = run_command(command).await;
-    let refused = session.map(|session| session.refused()).unwrap_or_default();
-    (output, refused)
+    stop_bus_proxy();
+    NetworkRun {
+        output,
+        refused: session.map(|session| session.refused()).unwrap_or_default(),
+        session_bus_unavailable,
+    }
 }
 
 #[cfg(not(target_os = "linux"))]
 async fn run_with_network(
     command: SandboxCommand,
     _run_network: &std::sync::Arc<RunNetwork>,
-) -> (Result<SandboxCommandOutput, String>, RefusedTargets) {
-    (run_command(command).await, RefusedTargets::default())
+) -> NetworkRun {
+    let session_bus_unavailable = command.profile.session_bus_unavailable.clone();
+    NetworkRun {
+        output: run_command(command).await,
+        refused: RefusedTargets::default(),
+        session_bus_unavailable,
+    }
 }
 
 const REFUSED_HINT: &str = "CLAI's network proxy refused these hosts: they are not in this \
@@ -269,16 +326,32 @@ const REFUSED_HINT: &str = "CLAI's network proxy refused these hosts: they are n
                             `net_request_access` for a host the task needs; do not look for a \
                             way around the proxy.";
 
+const SOCKET_HINT: &str = "The sandbox kept the command from reaching these Unix sockets of \
+                           this computer. Do not look for a way around the sandbox: if the task \
+                           needs one, call `fs_request_grant` with the exact socket path, not \
+                           its folder. A Docker, Podman or containerd socket gives control of \
+                           the whole computer, so say in the reason why the task needs it.";
+
 fn bash_exec_outcome(
     output: Result<SandboxCommandOutput, String>,
     refused: &RefusedTargets,
+    sockets: &SocketPolicy,
+    session_bus_unavailable: Option<&str>,
     timeout_ms: u64,
     explicit_timeout: bool,
 ) -> Result<serde_json::Value, String> {
     match output {
-        Ok(output) => Ok(bash_exec_result(&output, refused)),
+        Ok(output) => Ok(bash_exec_result(
+            &output,
+            refused,
+            sockets,
+            session_bus_unavailable,
+        )),
         Err(error) => {
-            let error = augment_timeout_error(error, timeout_ms, explicit_timeout);
+            let mut error = augment_timeout_error(error, timeout_ms, explicit_timeout);
+            if let Some(reason) = session_bus_unavailable {
+                error = format!("{error}\n{}", keyring_only_unavailable_note(reason));
+            }
             if refused.is_empty() {
                 return Err(error);
             }
@@ -295,8 +368,14 @@ fn bash_exec_outcome(
 }
 
 /// Many clients hide the proxy's 403 body (curl prints only “CONNECT tunnel
-/// failed, response 403”), so the result itself names the refused hosts.
-fn bash_exec_result(output: &SandboxCommandOutput, refused: &RefusedTargets) -> serde_json::Value {
+/// failed, response 403”), so the result itself names the refused hosts, and
+/// the host sockets the command could not reach.
+fn bash_exec_result(
+    output: &SandboxCommandOutput,
+    refused: &RefusedTargets,
+    sockets: &SocketPolicy,
+    session_bus_unavailable: Option<&str>,
+) -> serde_json::Value {
     let mut result = serde_json::json!({
         "cwd": agent_path_string(&output.cwd),
         "exitCode": output.exit_code,
@@ -313,7 +392,88 @@ fn bash_exec_result(output: &SandboxCommandOutput, refused: &RefusedTargets) -> 
             result["network"]["refusedMore"] = refused.more.into();
         }
     }
+    let unreachable = unreachable_sockets(output, sockets);
+    if !unreachable.is_empty() {
+        result["sockets"] = serde_json::json!({
+            "unreachable": unreachable,
+            "hint": SOCKET_HINT,
+        });
+    }
+    if !sockets.skipped.is_empty() {
+        result["socketGrantsSkipped"] = serde_json::json!(sockets.skipped);
+    }
+    if let Some(reason) = session_bus_unavailable {
+        result["sessionBus"] = keyring_only_unavailable_note(reason).into();
+    }
     result
+}
+
+/// Host Unix sockets a failed command could not reach, read from its output:
+/// a path on a line that says "no such file or directory" (the socket is not
+/// bound into the sandbox) or, where Landlock confines sockets, "permission
+/// denied", when that path is a socket on the host and not an allowed one.
+/// Only paths in `sockets.hint_places` are looked up, at most
+/// `MAX_LOOKUPS` per result: the command chooses what it prints.
+#[cfg(target_os = "linux")]
+fn unreachable_sockets(output: &SandboxCommandOutput, sockets: &SocketPolicy) -> Vec<String> {
+    use std::os::unix::fs::FileTypeExt;
+    const MAX_SOCKETS: usize = 5;
+    const MAX_LOOKUPS: usize = 16;
+    let mut found: Vec<String> = Vec::new();
+    let mut lookups = 0;
+    if output.success {
+        return found;
+    }
+    for line in output.stderr.lines().chain(output.stdout.lines()) {
+        let lower = line.to_ascii_lowercase();
+        if !(lower.contains("no such file or directory")
+            || sockets.confined() && lower.contains("permission denied"))
+        {
+            continue;
+        }
+        for word in line.split(|c: char| c.is_whitespace() || "\"'(),;".contains(c)) {
+            let path = word.strip_prefix("unix://").unwrap_or(word);
+            let path = path.trim_end_matches([':', '.']);
+            let in_place = Path::new(path).is_absolute()
+                && sockets
+                    .hint_places
+                    .iter()
+                    .any(|place| Path::new(path).starts_with(place));
+            if !in_place || found.iter().any(|known| known == path) {
+                continue;
+            }
+            lookups += 1;
+            if lookups > MAX_LOOKUPS {
+                return found;
+            }
+            let Ok(resolved) = fs::canonicalize(path) else {
+                continue;
+            };
+            if !sockets
+                .hint_places
+                .iter()
+                .any(|place| resolved.starts_with(place))
+            {
+                continue;
+            }
+            let is_socket = resolved
+                .metadata()
+                .is_ok_and(|meta| meta.file_type().is_socket());
+            if is_socket && !sockets.allowed.iter().any(|socket| socket.host == resolved) {
+                found.push(path.to_string());
+                if found.len() == MAX_SOCKETS {
+                    return found;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Only the Linux sandbox keeps sockets out; elsewhere nothing to report.
+#[cfg(not(target_os = "linux"))]
+fn unreachable_sockets(_output: &SandboxCommandOutput, _sockets: &SocketPolicy) -> Vec<String> {
+    Vec::new()
 }
 
 /// Turn a bare sandbox timeout into an actionable error the model can recover
@@ -349,13 +509,18 @@ fn augment_timeout_error(error: String, timeout_ms: u64, explicit_timeout: bool)
 
 fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesystemPolicy, String> {
     let workspace = ensure_workspace_root(context)?;
-    let mut grants = context.run_context.execution.filesystem.extra_paths.clone();
-    grants.extend(context.session_grants_snapshot());
     EffectiveFilesystemPolicy::from_config(
         &workspace,
-        &grants,
+        &path_grants(context),
         crate::paths::real_home().as_deref(),
     )
+}
+
+/// The agent's saved path grants and those approved for this run only.
+fn path_grants(context: &ToolExecutionContext) -> Vec<FilesystemPathGrant> {
+    let mut grants = context.run_context.execution.filesystem.extra_paths.clone();
+    grants.extend(context.session_grants_snapshot());
+    grants
 }
 
 fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, String> {
@@ -372,6 +537,7 @@ fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, Stri
             e
         )
     })?;
+    crate::assistant::sandbox::filesystem::ensure_cli_project_config_dirs(&workspace_root);
 
     Ok(workspace_root)
 }
@@ -388,10 +554,10 @@ fn sandbox_profile(
         || proxy_endpoint(&workspace_root),
     )?;
 
-    let session_bus = match context.run_context.execution.sandbox.session_bus {
-        SandboxSessionBusConfig::Deny => SandboxSessionBusMode::Deny,
-        SandboxSessionBusConfig::Allow => SandboxSessionBusMode::Allow,
-    };
+    let (session_bus, session_bus_proxy, session_bus_unavailable) =
+        session_bus_for(context.run_context.execution.sandbox.session_bus, || {
+            keyring_proxy(&workspace_root)
+        });
 
     let scratch_tmp = crate::assistant::sandbox::session_scratch(&workspace_root);
 
@@ -399,13 +565,72 @@ fn sandbox_profile(
         .home
         .as_deref()
         .unwrap_or(&filesystem.workspace_root);
+    // Looked up for each command: a socket that appears, or a grant approved
+    // during the run, counts from the next command on.
+    #[cfg(target_os = "linux")]
+    let sockets = {
+        let grants: Vec<PathBuf> = path_grants(context)
+            .iter()
+            .filter_map(|grant| {
+                crate::assistant::sandbox::filesystem::resolve_configured_path(&grant.path).ok()
+            })
+            .collect();
+        let (allowed, skipped) = crate::assistant::sandbox::granted_sockets(&grants, &|path| {
+            filesystem.covers(path, FilesystemPathAccess::ReadWrite)
+        });
+        SocketPolicy {
+            allowed,
+            skipped,
+            ..crate::assistant::sandbox::socket_policy()
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let sockets = Default::default();
     Ok(SandboxProfile {
         env: SandboxEnv::filtered_from_current(env_home, session_bus),
         filesystem,
         network,
         session_bus,
         scratch_tmp,
+        sockets,
+        session_bus_proxy,
+        session_bus_unavailable,
     })
+}
+
+/// The bus a command gets for the agent's setting. Only Full binds the
+/// real bus. Keyring only gets its proxy, or, where the bus cannot be
+/// filtered, no bus and the reason; `Ok(None)` from `plan` means the host
+/// has no bus to give.
+fn session_bus_for(
+    config: SandboxSessionBusConfig,
+    plan: impl FnOnce() -> Result<Option<SessionBusProxy>, String>,
+) -> (
+    SandboxSessionBusMode,
+    Option<SessionBusProxy>,
+    Option<String>,
+) {
+    match config {
+        SandboxSessionBusConfig::Deny => (SandboxSessionBusMode::Deny, None, None),
+        SandboxSessionBusConfig::Full => (SandboxSessionBusMode::Allow, None, None),
+        SandboxSessionBusConfig::KeyringOnly => match plan() {
+            Ok(Some(proxy)) => (SandboxSessionBusMode::Allow, Some(proxy), None),
+            Ok(None) => (SandboxSessionBusMode::Deny, None, None),
+            Err(reason) => (SandboxSessionBusMode::Deny, None, Some(reason)),
+        },
+    }
+}
+
+/// The keyring-only bus proxy for a command (see `bus_proxy::plan`).
+#[cfg(target_os = "linux")]
+fn keyring_proxy(workspace_root: &Path) -> Result<Option<SessionBusProxy>, String> {
+    crate::assistant::sandbox::bus_proxy::plan(workspace_root)
+}
+
+/// No session bus to filter: macOS and Windows have none.
+#[cfg(not(target_os = "linux"))]
+fn keyring_proxy(_workspace_root: &Path) -> Result<Option<SessionBusProxy>, String> {
+    Ok(None)
 }
 
 /// The shell's network for a mode. A stored Allowlist where the sandbox
@@ -807,7 +1032,7 @@ async fn execute_fs_request_grant(
         canonicalize_requested_path(&params.path, crate::paths::real_home().as_deref())?;
     let canonical_str = agent_path_string(&canonical);
 
-    // If the path is already covered (by extra_paths, the preset, or an
+    // If the path is already granted (by extra_paths, the preset, or an
     // earlier session grant), short-circuit — no user prompt, just say yes.
     // This keeps repeated requests cheap and avoids modal spam when the LLM
     // forgets it already has the grant.
@@ -816,11 +1041,12 @@ async fn execute_fs_request_grant(
         && filesystem.is_read_only_state(&canonical)
     {
         return Err(format!(
-            "{canonical_str} is CLAI's own state, which the shell may only read; \
+            "{canonical_str} is CLAI's own state or a provider CLI's project \
+             configuration, which the shell may only read; \
              agents write only under their own `.clai/memory/`"
         ));
     }
-    if filesystem.covers(&canonical, params.access) {
+    if already_granted(&filesystem, &canonical, params.access) {
         return Ok(serde_json::json!({
             "granted": true,
             "path": canonical_str,
@@ -875,6 +1101,29 @@ async fn execute_fs_request_grant(
             }))
         }
     }
+}
+
+/// Whether the agent's grants answer a request for `path`. On Linux a
+/// socket needs a grant on itself: a folder grant shows the socket, but
+/// commands cannot connect to it.
+fn already_granted(
+    filesystem: &EffectiveFilesystemPolicy,
+    path: &Path,
+    access: FilesystemPathAccess,
+) -> bool {
+    filesystem.covers(path, access)
+        && (!is_socket(path) || filesystem.path_grants.iter().any(|g| g.host_path == path))
+}
+
+#[cfg(target_os = "linux")]
+fn is_socket(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    fs::metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_socket(_path: &Path) -> bool {
+    false
 }
 
 /// Turn the agent's requested path into the identity the compiled policy
@@ -2564,13 +2813,14 @@ mod tests {
         };
         let refuse = "/run/clai/helper connect --proxy 127.0.0.1:3128 example.org 443 </dev/null";
         let network = std::sync::Arc::new(run_network(&["github.com"], &[]));
-        let (output, refused) = match run_with_network(command(refuse, 20_000), &network).await {
-            (Ok(output), refused) => (output, refused),
-            (Err(error), _) if error.contains("Sandboxed shell is unavailable") => {
+        let run = run_with_network(command(refuse, 20_000), &network).await;
+        let (output, refused) = match run.output {
+            Ok(output) => (output, run.refused),
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
                 crate::assistant::sandbox::skip_without_bwrap(&error);
                 return;
             }
-            (Err(error), _) => panic!("{error}"),
+            Err(error) => panic!("{error}"),
         };
         assert_eq!(output.exit_code, Some(255), "{output:?}");
         assert_eq!(refused.targets, ["example.org:443"]);
@@ -2580,9 +2830,9 @@ mod tests {
         );
         assert!(!socket.exists(), "the session ended with the command");
 
-        let (output, refused) =
-            run_with_network(command(&format!("{refuse}; sleep 30"), 2_000), &network).await;
-        let error = output.unwrap_err();
+        let run = run_with_network(command(&format!("{refuse}; sleep 30"), 2_000), &network).await;
+        let refused = run.refused;
+        let error = run.output.unwrap_err();
         assert!(error.contains("timed out after"), "{error}");
         assert_eq!(
             refused.targets,
@@ -2596,13 +2846,29 @@ mod tests {
     fn a_failed_command_still_names_the_hosts_the_proxy_refused() {
         let mut refused = RefusedTargets::default();
         let timed_out = || Err("Command timed out after 2000 ms".to_string());
-        let error = bash_exec_outcome(timed_out(), &refused, 2_000, true).unwrap_err();
+        let error = bash_exec_outcome(
+            timed_out(),
+            &refused,
+            &SocketPolicy::default(),
+            None,
+            2_000,
+            true,
+        )
+        .unwrap_err();
         assert!(!error.contains("Network allowlist refused"), "{error}");
 
         refused.add("example.org:443".to_string());
         refused.add("pypi.org:443".to_string());
         refused.more = 2;
-        let error = bash_exec_outcome(timed_out(), &refused, 2_000, true).unwrap_err();
+        let error = bash_exec_outcome(
+            timed_out(),
+            &refused,
+            &SocketPolicy::default(),
+            None,
+            2_000,
+            true,
+        )
+        .unwrap_err();
         let (timeout, network) = error.split_once('\n').unwrap();
         assert!(
             timeout.contains("re-run with a higher `timeoutMs`"),
@@ -2623,12 +2889,17 @@ mod tests {
             stdout: String::new(),
             stderr: "curl: (56) CONNECT tunnel failed, response 403".to_string(),
         };
-        assert!(bash_exec_result(&output, &RefusedTargets::default())
-            .get("network")
-            .is_none());
+        assert!(bash_exec_result(
+            &output,
+            &RefusedTargets::default(),
+            &SocketPolicy::default(),
+            None
+        )
+        .get("network")
+        .is_none());
         let mut refused = RefusedTargets::default();
         refused.add("example.org:443".to_string());
-        let result = bash_exec_result(&output, &refused);
+        let result = bash_exec_result(&output, &refused, &SocketPolicy::default(), None);
         assert_eq!(
             result["network"]["refused"],
             serde_json::json!(["example.org:443"])
@@ -2640,8 +2911,129 @@ mod tests {
 
         refused.more = 3;
         assert_eq!(
-            bash_exec_result(&output, &refused)["network"]["refusedMore"],
+            bash_exec_result(&output, &refused, &SocketPolicy::default(), None)["network"]
+                ["refusedMore"],
             3
+        );
+    }
+
+    /// The hint leads to the folder-access card, for the socket itself.
+    #[test]
+    fn the_socket_hint_asks_for_a_grant_on_the_socket_and_says_why() {
+        assert!(SOCKET_HINT.contains("call `fs_request_grant` with the exact socket path"));
+        assert!(SOCKET_HINT.contains("not its folder"));
+        assert!(SOCKET_HINT.contains("A Docker, Podman or containerd socket gives control"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_result_names_the_host_sockets_a_failed_command_could_not_reach() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().canonicalize().unwrap().join("docker.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let file = temp.path().join("plain.sock");
+        fs::write(&file, "").unwrap();
+        let path = socket.display().to_string();
+        let output = |success: bool, stderr: &str| SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(if success { 0 } else { 1 }),
+            success,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        };
+        let unreachable = |output: &SandboxCommandOutput, sockets: &SocketPolicy| {
+            bash_exec_result(output, &RefusedTargets::default(), sockets, None)
+                .get("sockets")
+                .map(|sockets| sockets["unreachable"].clone())
+        };
+        let confined = SocketPolicy {
+            helper: Some(PathBuf::from("/opt/h")),
+            kernel_confines: true,
+            allowed: Vec::new(),
+            skipped: Vec::new(),
+            hint_places: vec![temp.path().canonicalize().unwrap()],
+        };
+        let denied = output(
+            false,
+            &format!(
+                "permission denied while trying to connect to the Docker daemon socket at \
+                 unix://{path}: dial unix {path}: connect: permission denied\nopen {}: \
+                 permission denied",
+                file.display()
+            ),
+        );
+        assert_eq!(
+            unreachable(&denied, &confined),
+            Some(serde_json::json!([path]))
+        );
+        let result = bash_exec_result(&denied, &RefusedTargets::default(), &confined, None);
+        assert_eq!(result["sockets"]["hint"], SOCKET_HINT);
+
+        // Without Landlock a refusal comes from the host's permissions.
+        let unconfined = SocketPolicy {
+            kernel_confines: false,
+            ..confined.clone()
+        };
+        assert_eq!(unreachable(&denied, &unconfined), None);
+        // A socket not bound into the sandbox is named either way.
+        let missing = output(
+            false,
+            &format!("dial unix {path}: connect: no such file or directory"),
+        );
+        assert_eq!(
+            unreachable(&missing, &unconfined),
+            Some(serde_json::json!([path]))
+        );
+        let allowed = SocketPolicy {
+            allowed: vec![crate::assistant::sandbox::AllowedSocket {
+                path: socket.clone(),
+                host: socket.clone(),
+            }],
+            ..confined.clone()
+        };
+        assert_eq!(unreachable(&denied, &allowed), None);
+        assert_eq!(unreachable(&output(true, &denied.stderr), &confined), None);
+
+        // m3: a path outside the usual socket places is never looked up, so
+        // a command cannot probe the host by printing paths.
+        let elsewhere = tempdir().unwrap();
+        let hidden = elsewhere.path().canonicalize().unwrap().join("hidden.sock");
+        let _hidden = std::os::unix::net::UnixListener::bind(&hidden).unwrap();
+        let probe = |path: String| output(false, &format!("{path}: no such file or directory"));
+        assert_eq!(
+            unreachable(&probe(hidden.display().to_string()), &confined),
+            None
+        );
+        // Nor is one that only seems to be in such a place.
+        let dotdot = format!(
+            "{}/../{}",
+            temp.path().canonicalize().unwrap().display(),
+            hidden
+                .strip_prefix(elsewhere.path().parent().unwrap().canonicalize().unwrap())
+                .unwrap()
+                .display()
+        );
+        assert_eq!(unreachable(&probe(dotdot), &confined), None);
+        // At most 16 lookups per result: a socket after 16 other paths is
+        // not named.
+        let mut many: String = (0..16)
+            .map(|index| {
+                format!(
+                    "{}/missing-{index}: no such file or directory\n",
+                    temp.path().display()
+                )
+            })
+            .collect();
+        many.push_str(&missing.stderr);
+        assert_eq!(unreachable(&output(false, &many), &unconfined), None);
+        // Paths elsewhere are not even looked up, so they use none of them.
+        let mut elsewhere_paths: String = (0..16)
+            .map(|index| format!("/elsewhere/missing-{index}: no such file or directory\n"))
+            .collect();
+        elsewhere_paths.push_str(&missing.stderr);
+        assert_eq!(
+            unreachable(&output(false, &elsewhere_paths), &unconfined),
+            Some(serde_json::json!([path]))
         );
     }
 
@@ -2672,6 +3064,340 @@ mod tests {
             .starts_with("Sandboxed shell is unavailable: network helper not found"));
         let macos = status_for(Some(SandboxBackend::Seatbelt));
         assert!(profile(NetworkMode::Allowlist, &macos).is_err());
+    }
+
+    #[test]
+    fn only_full_binds_the_whole_bus_and_keyring_only_fails_closed() {
+        let proxy = SessionBusProxy {
+            socket: PathBuf::from("/c/.clai-net/bus-1.sock"),
+            bus: PathBuf::from("/run/user/1000/bus"),
+        };
+        let unused = || -> Result<Option<SessionBusProxy>, String> { panic!("no plan needed") };
+        assert_eq!(
+            session_bus_for(SandboxSessionBusConfig::Full, unused),
+            (SandboxSessionBusMode::Allow, None, None)
+        );
+        assert_eq!(
+            session_bus_for(SandboxSessionBusConfig::Deny, unused),
+            (SandboxSessionBusMode::Deny, None, None)
+        );
+        let keyring = |plan: Result<Option<SessionBusProxy>, String>| {
+            session_bus_for(SandboxSessionBusConfig::KeyringOnly, || plan)
+        };
+        assert_eq!(
+            keyring(Ok(Some(proxy.clone()))),
+            (SandboxSessionBusMode::Allow, Some(proxy), None)
+        );
+        assert_eq!(
+            keyring(Err("xdg-dbus-proxy is not installed".to_string())),
+            (
+                SandboxSessionBusMode::Deny,
+                None,
+                Some("xdg-dbus-proxy is not installed".to_string())
+            )
+        );
+        assert_eq!(keyring(Ok(None)), (SandboxSessionBusMode::Deny, None, None));
+    }
+
+    /// The review's B1 case: a keyring-only agent whose workspace is outside
+    /// the home directory. Whatever this host offers, the profile never binds
+    /// the real bus: it has the proxy, or no bus.
+    #[test]
+    fn a_keyring_only_profile_never_binds_the_real_bus() {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
+        let workspace = tempdir().unwrap();
+        let mut context = context_with_grants(workspace.path(), Vec::new());
+        let mut execution = context.run_context.execution.clone();
+        execution.sandbox.network_access = network(NetworkMode::Off);
+        execution.sandbox.session_bus = SandboxSessionBusConfig::KeyringOnly;
+        context.run_context = std::sync::Arc::new(RunContext {
+            execution,
+            ..(*context.run_context).clone()
+        });
+        let filesystem = filesystem_policy(&context).unwrap();
+        let profile = sandbox_profile(
+            &context,
+            workspace.path().to_path_buf(),
+            filesystem,
+            &status_for(Some(SandboxBackend::Bubblewrap)),
+        )
+        .unwrap();
+        match profile.session_bus {
+            SandboxSessionBusMode::Allow => assert!(profile.session_bus_proxy.is_some()),
+            SandboxSessionBusMode::Deny => {
+                assert!(profile.session_bus_proxy.is_none());
+                assert!(!profile
+                    .env
+                    .iter()
+                    .any(|(key, _)| key == "DBUS_SESSION_BUS_ADDRESS"));
+            }
+        }
+    }
+
+    #[test]
+    fn a_result_says_why_keyring_only_has_no_bus_and_how_to_get_it() {
+        let output = SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(0),
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let none = SocketPolicy::default();
+        let refused = RefusedTargets::default();
+        assert!(bash_exec_result(&output, &refused, &none, None)
+            .get("sessionBus")
+            .is_none());
+        let reason = Some("xdg-dbus-proxy is not installed");
+        let note = bash_exec_result(&output, &refused, &none, reason)["sessionBus"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!note.contains('\n'), "one line: {note}");
+        assert!(note.contains("xdg-dbus-proxy is not installed"), "{note}");
+        assert!(note.contains("set its Session bus to Full"), "{note}");
+        let error = bash_exec_outcome(
+            Err("Command timed out after 2000 ms".to_string()),
+            &refused,
+            &none,
+            reason,
+            2_000,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.ends_with(&note), "{error}");
+    }
+
+    /// A keyring proxy that cannot start leaves the command with no bus and
+    /// says so; it neither fails the command nor binds the real bus.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_keyring_proxy_that_does_not_start_leaves_no_bus() {
+        let workspace = tempdir().unwrap();
+        let bus = workspace.path().join("host-bus");
+        let mut profile = SandboxProfile::for_test(
+            workspace.path().to_path_buf(),
+            Vec::new(),
+            SandboxNetworkMode::Disabled,
+            SandboxSessionBusMode::Allow,
+            SandboxEnv::filtered_from_iter(
+                [
+                    ("PATH", "/usr/bin:/bin"),
+                    ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/bus"),
+                ],
+                workspace.path(),
+                SandboxSessionBusMode::Allow,
+            ),
+            None,
+        );
+        profile.session_bus_proxy = Some(SessionBusProxy {
+            socket: PathBuf::from("/nonexistent/dir/bus-1.sock"),
+            bus: bus.clone(),
+        });
+        let command = SandboxCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo ${DBUS_SESSION_BUS_ADDRESS-none}".into(),
+            ],
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms: 10_000,
+            max_output_chars: 10_000,
+            profile,
+        };
+        let network = std::sync::Arc::new(run_network(&[], &[]));
+        let run = run_with_network(command, &network).await;
+        assert!(
+            run.session_bus_unavailable.is_some(),
+            "the result says why there is no bus"
+        );
+        let output = match run.output {
+            Ok(output) => output,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(output.stdout.trim(), "none", "{output:?}");
+    }
+
+    /// The sockets a shell profile hands over for these saved and run-only
+    /// grants.
+    #[cfg(target_os = "linux")]
+    fn sockets_for(
+        workspace: &Path,
+        saved: Vec<FilesystemPathGrant>,
+        run_only: Vec<FilesystemPathGrant>,
+    ) -> SocketPolicy {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
+        let mut context = context_with_grants(workspace, saved);
+        let mut execution = context.run_context.execution.clone();
+        execution.sandbox.network_access = network(NetworkMode::Off);
+        context.run_context = std::sync::Arc::new(RunContext {
+            execution,
+            ..(*context.run_context).clone()
+        });
+        for grant in run_only {
+            context.add_session_grant(grant);
+        }
+        let filesystem = filesystem_policy(&context).unwrap();
+        sandbox_profile(
+            &context,
+            workspace.to_path_buf(),
+            filesystem,
+            &status_for(Some(SandboxBackend::Bubblewrap)),
+        )
+        .unwrap()
+        .sockets
+    }
+
+    #[cfg(target_os = "linux")]
+    fn grant_on(path: &Path, access: FilesystemPathAccess) -> FilesystemPathGrant {
+        FilesystemPathGrant {
+            path: path.display().to_string(),
+            access,
+            origin: None,
+        }
+    }
+
+    /// A socket and the directory that holds it, outside the workspace.
+    #[cfg(target_os = "linux")]
+    fn listening_socket() -> (tempfile::TempDir, PathBuf, std::os::unix::net::UnixListener) {
+        let dir = tempdir().unwrap();
+        let socket = dir.path().canonicalize().unwrap().join("docker.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        (dir, socket, listener)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exact_grant_on_a_socket_lets_commands_connect_read_only_or_read_write() {
+        let workspace = tempdir().unwrap();
+        let (_dir, socket, _listener) = listening_socket();
+        for access in [
+            FilesystemPathAccess::ReadWrite,
+            FilesystemPathAccess::ReadOnly,
+        ] {
+            let sockets = sockets_for(
+                workspace.path(),
+                vec![grant_on(&socket, access)],
+                Vec::new(),
+            );
+            assert_eq!(
+                sockets.allowed,
+                [crate::assistant::sandbox::AllowedSocket {
+                    path: socket.clone(),
+                    host: socket.clone(),
+                }],
+                "{access:?}: {sockets:?}"
+            );
+            assert!(sockets.skipped.is_empty(), "{access:?}: {sockets:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_grant_on_a_socket_for_this_run_only_counts() {
+        let workspace = tempdir().unwrap();
+        let (_dir, socket, _listener) = listening_socket();
+        let run_only = vec![grant_on(&socket, FilesystemPathAccess::ReadOnly)];
+        let sockets = sockets_for(workspace.path(), Vec::new(), run_only);
+        assert_eq!(sockets.allowed.len(), 1, "{sockets:?}");
+        assert_eq!(sockets.allowed[0].host, socket);
+    }
+
+    /// The hint sends the agent to `fs_request_grant` for a socket; a folder
+    /// grant over it must not answer that request without a card.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_under_a_granted_folder_still_needs_its_own_grant() {
+        let workspace = tempdir().unwrap();
+        let (dir, socket, _listener) = listening_socket();
+        let file = dir.path().canonicalize().unwrap().join("notes.txt");
+        fs::write(&file, "").unwrap();
+        let read = FilesystemPathAccess::ReadOnly;
+        let context = context_with_grants(workspace.path(), vec![grant_on(dir.path(), read)]);
+        let filesystem = filesystem_policy(&context).unwrap();
+        assert!(already_granted(&filesystem, &file, read));
+        assert!(!already_granted(&filesystem, &socket, read));
+
+        context.add_session_grant(grant_on(&socket, read));
+        let filesystem = filesystem_policy(&context).unwrap();
+        assert!(already_granted(&filesystem, &socket, read));
+        assert!(!already_granted(
+            &filesystem,
+            &socket,
+            FilesystemPathAccess::ReadWrite
+        ));
+    }
+
+    /// H2: a directory grant shows a socket in it, but does not let a
+    /// command connect to it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_under_a_granted_directory_stays_unreachable() {
+        let workspace = tempdir().unwrap();
+        let (dir, _socket, _listener) = listening_socket();
+        for access in [
+            FilesystemPathAccess::ReadOnly,
+            FilesystemPathAccess::ReadWrite,
+        ] {
+            let sockets = sockets_for(
+                workspace.path(),
+                vec![grant_on(dir.path(), access)],
+                Vec::new(),
+            );
+            assert!(sockets.allowed.is_empty(), "{access:?}: {sockets:?}");
+            assert!(sockets.skipped.is_empty(), "{access:?}: {sockets:?}");
+        }
+    }
+
+    /// M2: in a directory the sandbox can write, a command could swap the
+    /// socket for a link to another one, so its grant is refused and the
+    /// result says why: under a read-write directory grant, or in the
+    /// workspace.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_grant_in_a_writable_directory_is_refused_and_the_result_says_why() {
+        let workspace = tempdir().unwrap();
+        let (dir, socket, _listener) = listening_socket();
+        let in_workspace = workspace.path().canonicalize().unwrap().join("dev.sock");
+        let _dev = std::os::unix::net::UnixListener::bind(&in_workspace).unwrap();
+        let sockets = sockets_for(
+            workspace.path(),
+            vec![
+                grant_on(dir.path(), FilesystemPathAccess::ReadWrite),
+                grant_on(&socket, FilesystemPathAccess::ReadWrite),
+            ],
+            vec![grant_on(&in_workspace, FilesystemPathAccess::ReadOnly)],
+        );
+        assert!(sockets.allowed.is_empty(), "{sockets:?}");
+        let output = SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(0),
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let result = bash_exec_result(&output, &RefusedTargets::default(), &sockets, None);
+        let skipped = result["socketGrantsSkipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        let dir = dir.path().canonicalize().unwrap();
+        for (refusal, (path, writable)) in skipped.iter().zip([
+            (&socket, dir.as_path()),
+            (&in_workspace, in_workspace.parent().unwrap()),
+        ]) {
+            let refusal = refusal.as_str().unwrap();
+            assert!(
+                refusal.starts_with(&path.display().to_string()),
+                "{refusal}"
+            );
+            assert!(
+                refusal.contains(&format!("can write at {}", writable.display())),
+                "{refusal}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

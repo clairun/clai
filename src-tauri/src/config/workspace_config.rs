@@ -543,6 +543,11 @@ pub fn default_agent_execution() -> ExecutionCapabilityConfig {
     // commands on its ask-first list; the user can still set it back to off in
     // agent settings.
     execution.shell.mode = ShellAccessMode::Restricted;
+    // The keyring, so `gh` and git credentials work, where the bus can be
+    // filtered to it; otherwise no bus. Agents saved before keep theirs.
+    execution.sandbox.session_bus = super::SandboxSessionBusConfig::for_new_agent(
+        crate::assistant::sandbox::status().session_bus_filter_available,
+    );
     execution
 }
 
@@ -1014,6 +1019,17 @@ mod attach_provider_tests {
         );
         // Members stay off the network until the user opts in.
         assert!(!execution.web.enabled);
+    }
+
+    #[test]
+    fn new_agents_get_the_keyring_where_the_bus_can_be_filtered_and_no_bus_otherwise() {
+        let filtered = crate::assistant::sandbox::status().session_bus_filter_available;
+        let expected = if filtered {
+            crate::config::SandboxSessionBusConfig::KeyringOnly
+        } else {
+            crate::config::SandboxSessionBusConfig::Deny
+        };
+        assert_eq!(default_agent_execution().sandbox.session_bus, expected);
     }
 
     #[test]

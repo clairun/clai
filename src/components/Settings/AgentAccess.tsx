@@ -5,8 +5,11 @@
  */
 
 import React, { useId } from 'react';
-import type { FilesystemPathGrant, GrantOrigin, NetworkMode, NetworkPolicy, SandboxStatus, ShellAccessMode } from '../../generated/bindings';
+import type {
+  FilesystemPathGrant, GrantOrigin, NetworkMode, NetworkPolicy, SandboxSessionBusConfig, SandboxStatus, ShellAccessMode,
+} from '../../generated/bindings';
 import type { SandboxStatusState } from '../../hooks/useSandboxStatus';
+import { containerEngineWarning } from '../../permissions/containerEngineSocket';
 import { unicodeHost } from '../../permissions/hostNames';
 import { PathGrantEditor, PrefixListEditor, Switch } from './ListEditors';
 import form from './SettingsForm.module.css';
@@ -17,7 +20,7 @@ export interface AccessDraft {
   shellMode: ShellAccessMode;
   askFirst: string[];
   web: boolean;
-  sessionBus: boolean;
+  sessionBusMode: SandboxSessionBusConfig;
   /** Null only when the backend defaults could not be loaded; saving then lets the backend pick. */
   networkAccess: NetworkPolicy | null;
 }
@@ -55,6 +58,24 @@ const NETWORK_MODES: { mode: NetworkMode; label: string; hint: string }[] = [
     mode: 'host_network',
     label: 'Host network (unfiltered)',
     hint: 'Reaches any host, including services on this computer and your local network.',
+  },
+];
+
+const BUS_MODES: { mode: SandboxSessionBusConfig; label: string; hint: string }[] = [
+  {
+    mode: 'deny',
+    label: 'Off',
+    hint: 'No desktop services. Tools that read the keyring, such as gh, ask for a token instead.',
+  },
+  {
+    mode: 'keyring_only',
+    label: 'Keyring only',
+    hint: 'Only the system keyring, so gh, git-credential-libsecret and secret-tool work. Nothing else on your desktop is reachable.',
+  },
+  {
+    mode: 'full',
+    label: 'Full',
+    hint: 'Every desktop service, unfiltered, including ones that can start programs outside the sandbox. Use only for agents you trust.',
   },
 ];
 
@@ -159,8 +180,17 @@ export const accessSummary = (draft: AccessDraft, sandbox: SandboxStatus | null 
   draft.grants.length ? plural(draft.grants.length, 'path') : 'No paths',
   networkSummary(draft.networkAccess, sandbox),
   draft.web ? 'Web on' : 'Web off',
-  draft.sessionBus ? 'Keyring on' : 'Keyring off',
+  busSummary(draft, sandbox),
 ];
+
+/** Which bus the agent gets: only Full is the whole bus, and keyring only
+ * where it cannot be filtered is no bus at all. */
+const busSummary = (draft: AccessDraft, sandbox: SandboxStatus | null): string => {
+  if (draft.sessionBusMode === 'deny') return 'Bus off';
+  if (draft.sessionBusMode === 'full') return 'Bus: full';
+  if (sandbox && !sandbox.sessionBusFilterAvailable) return 'Bus off (keyring only unavailable here)';
+  return 'Bus: keyring only';
+};
 
 const networkSummary = (policy: NetworkPolicy | null, sandbox: SandboxStatus | null): string => {
   if (!policy) return 'Network: this PC’s default';
@@ -288,6 +318,51 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
   );
 };
 
+/** Linux only: how much of the desktop session bus the shell reaches. */
+const SessionBusSection = ({ mode, status, onChange, disabled, headingId }: {
+  mode: SandboxSessionBusConfig;
+  status: SandboxStatus;
+  onChange: (mode: SandboxSessionBusConfig) => void;
+  disabled?: boolean;
+  headingId: string;
+}) => {
+  const hint = BUS_MODES.find((m) => m.mode === mode)?.hint;
+  const hintId = `${headingId}-hint`;
+  const reasonId = `${headingId}-reason`;
+  // The backend reason is a whole sentence: why, and that Full is the way out.
+  const unfiltered = mode === 'keyring_only' && !status.sessionBusFilterAvailable;
+  return (
+    <>
+      <h4 className={styles.subheading} id={headingId}>Session bus</h4>
+      <div
+        className={form.segmented}
+        role="group"
+        aria-labelledby={headingId}
+        aria-describedby={unfiltered ? `${hintId} ${reasonId}` : hintId}
+      >
+        {BUS_MODES.map(({ mode: option, label }) => (
+          <button
+            key={option}
+            type="button"
+            className={form.segment}
+            aria-pressed={mode === option}
+            onClick={() => onChange(option)}
+            disabled={disabled}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <p className={mode === 'full' ? form.hintWarning : form.hint} id={hintId}>{hint}</p>
+      {unfiltered && (
+        <p className={form.hintWarning} id={reasonId}>
+          {status.sessionBusFilterUnavailableReason ?? 'Keyring only is not available here, so this agent gets no session bus.'}
+        </p>
+      )}
+    </>
+  );
+};
+
 /** `sandbox` is the form's own lookup, so Retry here updates the overview too. */
 export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onBack, context }: {
   draft: AccessDraft;
@@ -300,6 +375,8 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
 }) => {
   const headingId = useId();
   const shellHint = SHELL_MODES.find((m) => m.mode === draft.shellMode)?.hint;
+  // The bus and the socket rule are what the Linux sandbox enforces.
+  const linux = sandbox.status?.backend === 'bubblewrap' ? sandbox.status : null;
 
   return (
     <section className={`${form.panel} ${form.panelFill}`}>
@@ -316,14 +393,26 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
           <p className={form.hint}>
             Every new agent starts with <code className={form.code}>$HOME</code> read-only. Remove it to isolate the agent.
           </p>
+          {linux && (
+            <p className={form.hint}>
+              A Unix socket, such as Docker’s, is reachable only when granted by its exact path, not through its folder.
+            </p>
+          )}
           <PathGrantEditor
             grants={draft.grants}
             onChange={(grants) => onChange({ grants })}
             make={(path, access) => ({ path, access, origin: null })}
             describe={grantOrigin}
+            warning={(grant) => containerEngineWarning(grant.path)}
             disabled={disabled}
             label="Path grants"
           />
+          {linux && !linux.socketIsolationAvailable && (
+            <p className={form.hint}>
+              Socket isolation is unavailable here: {linux.socketIsolationUnavailableReason ?? 'not supported'}. A socket
+              inside a granted folder can still be reachable.
+            </p>
+          )}
           {draft.networkAccess ? (
             <NetworkSection
               policy={draft.networkAccess}
@@ -377,16 +466,17 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
             </div>
           )}
 
-          <div className={styles.switches}>
-            <Switch label="Web access" hint="Fetch pages and search the web." checked={draft.web} onChange={(web) => onChange({ web })} disabled={disabled} />
-            <Switch
-              label="Session D-Bus"
-              hint="Lets tools such as gh or git use your keyring (libsecret)."
-              checked={draft.sessionBus}
-              onChange={(sessionBus) => onChange({ sessionBus })}
+          <Switch label="Web access" hint="Fetch pages and search the web." checked={draft.web} onChange={(web) => onChange({ web })} disabled={disabled} />
+
+          {linux && (
+            <SessionBusSection
+              mode={draft.sessionBusMode}
+              status={linux}
+              onChange={(sessionBusMode) => onChange({ sessionBusMode })}
               disabled={disabled}
+              headingId={`${headingId}-bus`}
             />
-          </div>
+          )}
         </div>
       </div>
     </section>

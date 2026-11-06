@@ -246,9 +246,11 @@ pub(crate) fn resolve_command_path(cmd: &str) -> Option<String> {
 ///
 /// Under Flatpak the binary lives on the **host** (the sandbox can't see host
 /// system paths like `/usr/bin`), so we run it via `flatpak-spawn --host`.
-/// Environment variables are injected with `--env=` because the host command
-/// runs in the host's environment, not the sandbox's, so sandbox-side `.env()`
-/// values wouldn't survive the hop. The working directory is set on the
+/// Environment variables are handed over on a file descriptor (`--env-fd`)
+/// because the host command runs in the host's environment, not the
+/// sandbox's, so sandbox-side `.env()` values wouldn't survive the hop; not
+/// as `--env=` arguments, which every local user can read, and the MCP token
+/// is among them. The working directory is set on the
 /// wrapper process — `flatpak-spawn` forwards its cwd to the host command, and
 /// the path is valid host-side because `--filesystem=home` maps the real home
 /// at the same path inside the sandbox.
@@ -273,8 +275,10 @@ fn build_host_cli_command_impl(
     let mut command = if in_flatpak {
         let mut command = tokio::process::Command::new("flatpak-spawn");
         command.arg("--host");
-        for (key, value) in envs {
-            command.arg(format!("--env={}={}", key, value));
+        if !envs.is_empty() {
+            if let Err(error) = pass_env_fd(&mut command, envs) {
+                tracing::error!("Cannot hand the environment to flatpak-spawn: {error}");
+            }
         }
         command.arg(binary);
         command
@@ -293,6 +297,51 @@ fn build_host_cli_command_impl(
     // (windows_console.rs).
     command.hide_console_window();
     command
+}
+
+/// Adds `--env-fd` with a memory file holding `envs` in `env -0` form, which
+/// only flatpak-spawn inherits; it reads and closes it.
+#[cfg(target_os = "linux")]
+fn pass_env_fd(
+    command: &mut tokio::process::Command,
+    envs: &[(&str, &str)],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    let block: Vec<u8> = envs
+        .iter()
+        .flat_map(|(key, value)| format!("{key}={value}\0").into_bytes())
+        .collect();
+    // SAFETY: a valid C string name; the result is checked.
+    let fd = unsafe { libc::memfd_create(c"clai-env".as_ptr(), libc::MFD_CLOEXEC) };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // SAFETY: a new descriptor nothing else owns.
+    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+    std::fs::File::from(fd.try_clone()?).write_all(&block)?;
+    command.arg(format!("--env-fd={}", fd.as_raw_fd()));
+    // SAFETY: fcntl is async-signal-safe. It clears close-on-exec in the
+    // child only; the closure keeps the descriptor open until the command
+    // is dropped.
+    unsafe {
+        command.pre_exec(move || {
+            if libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, 0) == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(())
+}
+
+/// Flatpak runs on Linux only.
+#[cfg(not(target_os = "linux"))]
+fn pass_env_fd(
+    _command: &mut tokio::process::Command,
+    _envs: &[(&str, &str)],
+) -> std::io::Result<()> {
+    Err(std::io::Error::other("Flatpak runs on Linux only"))
 }
 
 /// Gets the version of a command by running `<cmd> --version`.
@@ -403,6 +452,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn host_cli_command_in_flatpak_wraps_with_flatpak_spawn() {
         let command = build_host_cli_command_impl(
@@ -411,19 +461,22 @@ mod tests {
             &[("CLAI_MCP_TOKEN", "tok"), ("MCP_TIMEOUT", "3600000")],
             Some(std::path::Path::new("/home/u/ws")),
         );
-        // flatpak-spawn --host --env=... --env=... <binary>; env is injected as
-        // argv flags (the host command runs in the host's env, so .env() on the
-        // wrapper wouldn't reach it), and the binary is the last arg here so
-        // caller-appended CLI args land after it.
+        // flatpak-spawn --host --env-fd=N <binary>: the host command runs in
+        // the host's env, so .env() on the wrapper wouldn't reach it, and the
+        // token must not be in arguments any local user can read. The binary
+        // is the last arg here so caller-appended CLI args land after it.
+        let args = argv(&command);
+        assert_eq!(args.len(), 4, "{args:?}");
+        assert_eq!(args[..2], ["flatpak-spawn", "--host"]);
+        assert_eq!(args[3], "/usr/bin/codex");
+        let fd = args[2]
+            .strip_prefix("--env-fd=")
+            .expect("an --env-fd argument");
+        assert!(!args.iter().any(|arg| arg.contains("tok")), "{args:?}");
+        // The command holds the descriptor open, as flatpak-spawn will read it.
         assert_eq!(
-            argv(&command),
-            vec![
-                "flatpak-spawn".to_string(),
-                "--host".to_string(),
-                "--env=CLAI_MCP_TOKEN=tok".to_string(),
-                "--env=MCP_TIMEOUT=3600000".to_string(),
-                "/usr/bin/codex".to_string(),
-            ]
+            std::fs::read(format!("/proc/self/fd/{fd}")).unwrap(),
+            b"CLAI_MCP_TOKEN=tok\0MCP_TIMEOUT=3600000\0"
         );
         // cwd is set on the wrapper; flatpak-spawn forwards it to the host cmd.
         assert_eq!(

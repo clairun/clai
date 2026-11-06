@@ -24,6 +24,7 @@ import type {
   ExecutionCapabilityConfig,
   ExecutionSandboxConfig,
   FilesystemPathGrant,
+  SandboxSessionBusConfig,
   ProviderConnection,
 } from '../../generated/bindings';
 import { openGlobalSettings } from '../../utils/globalSettings';
@@ -97,6 +98,18 @@ const DEFAULT_ASK_FIRST = [
 
 const clean = (items: string[] = []): string[] => items.map((item) => item.trim()).filter(Boolean);
 
+// The bus mode as the backend reads a stored agent (`ExecutionSandboxConfig`
+// deserialize, config/types.rs): one saved before the modes has only the
+// legacy `sessionBus` switch and gets keyring only unless that was off. A
+// draft without the backend defaults has no sandbox at all: no bus.
+const storedBusMode = (
+  sandbox: (Partial<ExecutionSandboxConfig> & { sessionBus?: string }) | undefined,
+): SandboxSessionBusConfig => {
+  if (!sandbox) return 'deny';
+  if (sandbox.sessionBusMode) return sandbox.sessionBusMode;
+  return sandbox.sessionBus === 'deny' ? 'deny' : 'keyring_only';
+};
+
 const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessDraft => ({
   grants: (execution.filesystem?.extraPaths || [])
     .map((grant: FilesystemPathGrant) => ({
@@ -108,7 +121,7 @@ const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessD
   shellMode: execution.shell?.mode || 'off',
   askFirst: clean(execution.shell?.askFirstCommandPrefixes || DEFAULT_ASK_FIRST),
   web: execution.web?.enabled || false,
-  sessionBus: (execution.sandbox?.sessionBus || 'allow') === 'allow',
+  sessionBusMode: storedBusMode(execution.sandbox),
   networkAccess: execution.sandbox?.networkAccess ?? null,
 });
 
@@ -118,7 +131,7 @@ type SandboxDraft = Omit<ExecutionSandboxConfig, 'networkAccess'> & Partial<Pick
 
 const executionFrom = (access: AccessDraft): ExecutionCapabilityConfig => {
   const sandbox: SandboxDraft = {
-    sessionBus: access.sessionBus ? 'allow' : 'deny',
+    sessionBusMode: access.sessionBusMode,
     ...(access.networkAccess ? { networkAccess: access.networkAccess } : {}),
   };
   return {

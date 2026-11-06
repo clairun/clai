@@ -489,6 +489,17 @@
   color: var(--color-text-primary);
 }
 
+/* A grant with a warning: the warning takes its own line under the row. */
+.listItemWarned {
+  flex-wrap: wrap;
+  row-gap: 0;
+}
+
+.listItemNote {
+  flex-basis: 100%;
+  padding-bottom: 6px;
+}
+
 .listEmpty {
   margin: 0;
   font-size: 12px;

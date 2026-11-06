@@ -38,6 +38,86 @@ pub struct SandboxProfile {
     /// [`super::scratch`]. `None` means scratch space was unavailable and the
     /// backend must fall back to an ephemeral per-command temp dir.
     pub scratch_tmp: Option<PathBuf>,
+    pub sockets: SocketPolicy,
+    /// With [`SandboxSessionBusMode::Allow`]: the keyring-only proxy to bind
+    /// in place of the session bus. `None` binds the bus itself.
+    pub session_bus_proxy: Option<SessionBusProxy>,
+    /// Why an agent set to keyring only gets no bus for this command, worded
+    /// for the user. Keyring only never falls back to the whole bus.
+    pub session_bus_unavailable: Option<String>,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl SandboxProfile {
+    /// Keyring only whose proxy cannot run: the command gets no bus at all.
+    pub fn drop_session_bus(&mut self, reason: String) {
+        self.session_bus = SandboxSessionBusMode::Deny;
+        self.session_bus_proxy = None;
+        self.session_bus_unavailable = Some(reason);
+        self.env
+            .vars
+            .retain(|key, _| !ENV_SESSION_BUS_PASSTHROUGH.contains(&key.as_str()));
+    }
+}
+
+/// One line for the user and the agent: why a keyring-only agent has no
+/// session bus here, and how to give it the whole bus.
+pub fn keyring_only_unavailable_note(reason: &str) -> String {
+    format!(
+        "Keyring-only agents get no session bus here: {reason}. To give an agent the whole \
+         session bus, set its Session bus to Full in its Local access settings."
+    )
+}
+
+/// The socket of the filtering proxy CLAI runs for one command (see
+/// `bus_proxy`), and the session bus socket it stands in for: the sandbox
+/// sees the proxy at the bus path.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionBusProxy {
+    pub socket: PathBuf,
+    pub bus: PathBuf,
+}
+
+/// How the Linux sandbox confines Unix sockets: `clai-sandbox-helper` starts
+/// every command and applies Landlock, so a command reaches only the sockets
+/// CLAI binds on purpose, not any other socket a grant makes visible.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SocketPolicy {
+    /// The helper as the sandbox's bwrap sees it; `None` when it is not
+    /// installed here.
+    pub helper: Option<PathBuf>,
+    /// Whether the kernel lets the helper confine pathname sockets (Landlock
+    /// ABI 9). Without it CLAI hides known socket directories instead.
+    pub kernel_confines: bool,
+    /// Host sockets the agent may connect to, its path grants on a socket
+    /// (see `granted_sockets`): bound into the sandbox and allowed by
+    /// Landlock.
+    pub allowed: Vec<AllowedSocket>,
+    /// Socket grants refused for this command, each with the reason, worded
+    /// for the user.
+    pub skipped: Vec<String>,
+    /// Where on the host a failed command's output may name a socket the
+    /// result points out; other paths are never looked up.
+    pub hint_places: Vec<PathBuf>,
+}
+
+/// A host socket the agent may connect to, bound at `host`, where it
+/// resolves, and at `path`, as its grant names it, unless the sandbox link
+/// `/var/run` to `/run` already makes them one file.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowedSocket {
+    pub path: PathBuf,
+    pub host: PathBuf,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl SocketPolicy {
+    pub fn confined(&self) -> bool {
+        self.helper.is_some() && self.kernel_confines
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +282,9 @@ impl SandboxProfile {
             session_bus,
             env,
             scratch_tmp,
+            sockets: SocketPolicy::default(),
+            session_bus_proxy: None,
+            session_bus_unavailable: None,
         }
     }
 }

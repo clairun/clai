@@ -17,6 +17,7 @@ export function PathGrantEditor<T extends GrantLike>({
   onChange,
   make,
   describe,
+  warning,
   disabled,
   label = 'Path grants',
   placeholder = '/home/user/project',
@@ -27,6 +28,8 @@ export function PathGrantEditor<T extends GrantLike>({
   make: (path: string, access: 'read_only' | 'read_write') => T;
   /** Optional provenance shown next to each grant (Manual, Preset, Approved …). */
   describe?: (grant: T) => { text: string; title?: string } | null;
+  /** Optional warning drawn under a grant. It informs; the grant stays. */
+  warning?: (grant: T) => string | null;
   disabled?: boolean;
   /** Accessible name of the list and the add row. */
   label?: string;
@@ -52,8 +55,9 @@ export function PathGrantEditor<T extends GrantLike>({
           {grants.map((grant) => {
             const origin = describe?.(grant);
             const write = grant.access === 'read_write';
+            const note = warning?.(grant);
             return (
-              <li key={grant.path} className={styles.listItem}>
+              <li key={grant.path} className={note ? `${styles.listItem} ${styles.listItemWarned}` : styles.listItem}>
                 <span className={styles.listItemText} title={grant.path}>{grant.path}</span>
                 {origin && <span className={styles.tag} title={origin.title}>{origin.text}</span>}
                 <span className={`${styles.tag} ${write ? styles.tagWrite : ''}`}>
@@ -68,6 +72,7 @@ export function PathGrantEditor<T extends GrantLike>({
                 >
                   ×
                 </button>
+                {note && <p className={`${styles.hintWarning} ${styles.listItemNote}`}>{note}</p>}
               </li>
             );
           })}

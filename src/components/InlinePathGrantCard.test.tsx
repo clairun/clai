@@ -40,6 +40,46 @@ describe('PathGrantCard — spoken (the Fleet)', () => {
   });
 });
 
+describe('PathGrantCard — container engine sockets', () => {
+  const warning = /Granting a Docker, Podman or containerd socket gives this agent full control of this computer/;
+
+  it('warns on a container engine socket, spoken or not, instead of the credentials warning', () => {
+    for (const path of ['/run/docker.sock', '/run/user/1000/podman/podman.sock', '/run/containerd/containerd.sock']) {
+      const { unmount } = render(<PathGrantCard req={{ ...grant, requestedPath: path }} />);
+      expect(screen.getByText(warning)).toHaveTextContent(/Containers also do not follow this agent's network mode\./);
+      unmount();
+    }
+    // ~/.docker holds credentials, but the socket is what matters here.
+    render(
+      <PathGrantCard
+        req={{ ...grant, requestedPath: '/home/me/.docker/run/docker.sock' }}
+        speaker={(prompt: ReactNode) => <div>{prompt}</div>}
+      />,
+    );
+    expect(screen.getByText(warning)).toBeInTheDocument();
+    expect(screen.queryByText(/typically holds credentials or secrets/)).not.toBeInTheDocument();
+  });
+
+  it('does not warn about a folder or another socket', () => {
+    for (const path of ['/srv/data', '/run/user/1000/gnupg/S.gpg-agent', '/home/me/docker.sock.d']) {
+      const { unmount } = render(<PathGrantCard req={{ ...grant, requestedPath: path }} />);
+      expect(screen.queryByText(warning)).not.toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  it('still lets the user approve the socket', async () => {
+    mockInvoke.mockReset().mockResolvedValue(undefined);
+    render(<PathGrantCard req={{ ...grant, requestedPath: '/run/docker.sock', requestedAccess: 'read_write' }} />);
+    expect(screen.getByText(warning)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Always allow (this agent)' }));
+    expect(mockInvoke).toHaveBeenCalledWith('submit_path_grant_decision', {
+      requestId: 'grant-1',
+      decision: { kind: 'allowAlways', path: '/run/docker.sock', access: 'read_write', scope: 'agent' },
+    });
+  });
+});
+
 describe('InlinePathGrantCard — each card its own submit', () => {
   it('shows a failed submit on that card only, and leaves the other card answerable', async () => {
     let reject: (reason: unknown) => void = () => {};
