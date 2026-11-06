@@ -67,7 +67,7 @@ const REVIEWER: AgentDetail = {
   selectedMcpServerIds: ['srv-a'],
   providerConnectionIds: ['conn-a'],
   execution: {
-    sandbox: { networkAccess: NETWORK, sessionBus: 'allow' },
+    sandbox: { networkAccess: NETWORK, sessionBus: 'allow', allowedSockets: ['/run/docker.sock'] },
     filesystem: { extraPaths: [HOME_GRANT] },
     shell: {
       mode: 'restricted',
@@ -109,7 +109,7 @@ const sentUpdate = () => api.workspaceUpdateAgent.mock.calls.at(-1)![0] as {
     filesystem: { extraPaths: FilesystemPathGrant[] };
     shell: { mode: string; askFirstCommandPrefixes: string[] };
     web: { enabled: boolean };
-    sandbox: { sessionBus: string; networkAccess: NetworkPolicy };
+    sandbox: { sessionBus: string; networkAccess: NetworkPolicy; allowedSockets: string[] };
   };
 };
 
@@ -152,7 +152,7 @@ describe('AgentBehaviorForm', () => {
       selectedMcpServerIds: ['srv-a'],
       providerConnectionIds: ['conn-a'],
       execution: {
-        sandbox: { networkAccess: NETWORK, sessionBus: 'allow' },
+        sandbox: { networkAccess: NETWORK, sessionBus: 'allow', allowedSockets: ['/run/docker.sock'] },
         filesystem: { extraPaths: [HOME_GRANT] },
         shell: {
           mode: 'restricted',
@@ -210,7 +210,7 @@ describe('AgentBehaviorForm', () => {
     };
     expect(request.name).toBe('Scout');
     // The defaults carried no network policy, so the backend picks this PC's.
-    expect(request.execution.sandbox).toEqual({ sessionBus: 'allow' });
+    expect(request.execution.sandbox).toEqual({ sessionBus: 'allow', allowedSockets: [] });
     expect(request.providerConnectionIds).toEqual(['conn-b']);
     expect(request.execution.filesystem.extraPaths).toEqual([HOME_GRANT]);
     expect(request.execution.shell.mode).toBe('off');
@@ -446,6 +446,8 @@ describe('AgentBehaviorForm', () => {
       });
       expect(execution.web.enabled).toBe(false);
       expect(execution.sandbox.sessionBus).toBe('deny');
+      // Not edited in the form yet, but a save keeps it.
+      expect(execution.sandbox.allowedSockets).toEqual(['/run/docker.sock']);
     });
 
     it('hides the ask-first list when the shell is off', async () => {
@@ -470,7 +472,7 @@ describe('AgentBehaviorForm', () => {
       within(screen.getByRole('group', { name: 'Network' })).getByRole('button', { name });
     const withPolicy = (networkAccess: NetworkPolicy): AgentDetail => ({
       ...REVIEWER,
-      execution: { ...REVIEWER.execution, sandbox: { networkAccess, sessionBus: 'allow' } },
+      execution: { ...REVIEWER.execution, sandbox: { networkAccess, sessionBus: 'allow', allowedSockets: [] } },
     });
 
     it('saves each mode and keeps the lists across modes', async () => {

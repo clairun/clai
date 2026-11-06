@@ -18,6 +18,8 @@ export interface AccessDraft {
   askFirst: string[];
   web: boolean;
   sessionBus: boolean;
+  /** Not edited here yet; carried so a save keeps it. */
+  allowedSockets: string[];
   /** Null only when the backend defaults could not be loaded; saving then lets the backend pick. */
   networkAccess: NetworkPolicy | null;
 }

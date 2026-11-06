@@ -222,6 +222,7 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
     append_runtime_file_binds(&mut args, in_flatpak);
     append_workspace_and_grants(&mut args, command);
     append_socket_dir_masks(&mut args, command);
+    append_allowed_socket_binds(&mut args, command, in_flatpak);
 
     for (key, value) in command.profile.env.iter() {
         args.push(os("--setenv"));
@@ -254,26 +255,34 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
     args.push(os("--chdir"));
     args.push(command.cwd.as_os_str().to_os_string());
     args.push(os("--"));
-    let allow_unix = bus.iter().flat_map(|path| [os("--allow-unix"), os(path)]);
+    if helper.is_some() {
+        append_helper_entry(&mut args, command, bus.as_deref());
+    }
+    args.extend(command.argv.iter().cloned());
+
+    Ok(args)
+}
+
+/// The helper's mode and the sockets it lets the command reach: the
+/// session bus when bound and the agent's allowed sockets.
+fn append_helper_entry(args: &mut Vec<OsString>, command: &SandboxCommand, bus: Option<&Path>) {
+    args.push(os(BOX_HELPER));
     if let SandboxNetworkMode::Proxied(_) = command.profile.network {
         args.extend([
-            os(BOX_HELPER),
             os("bridge"),
             os("--socket"),
             os(BOX_SOCKET),
             os("--http"),
             os(BOX_PROXY_PORT.to_string()),
         ]);
-        args.extend(allow_unix);
-        args.push(os("--"));
-    } else if helper.is_some() {
-        args.extend([os(BOX_HELPER), os("run")]);
-        args.extend(allow_unix);
-        args.push(os("--"));
+    } else {
+        args.push(os("run"));
     }
-    args.extend(command.argv.iter().cloned());
-
-    Ok(args)
+    let allowed = command.profile.sockets.allowed.iter().map(PathBuf::as_path);
+    for path in bus.into_iter().chain(allowed) {
+        args.extend([os("--allow-unix"), os(path)]);
+    }
+    args.push(os("--"));
 }
 
 /// The helper that starts the command: the Allowlist bridge, which cannot
@@ -318,6 +327,27 @@ fn append_socket_dir_masks(args: &mut Vec<OsString>, command: &SandboxCommand) {
         {
             args.extend([os("--tmpfs"), os(&dir)]);
         }
+    }
+}
+
+/// The host sockets the agent may connect to, each bound at its own path
+/// after the grants and the socket directory masks, so neither hides it.
+fn append_allowed_socket_binds(
+    args: &mut Vec<OsString>,
+    command: &SandboxCommand,
+    in_flatpak: bool,
+) {
+    for socket in &command.profile.sockets.allowed {
+        for dir in private_parent_dirs_for(socket) {
+            args.extend([os("--dir"), dir.into_os_string()]);
+        }
+        // Under Flatpak the path was resolved in the app's view of the host.
+        let bind = if in_flatpak {
+            "--ro-bind-try"
+        } else {
+            "--ro-bind"
+        };
+        args.extend([os(bind), os(socket), os(socket)]);
     }
 }
 
@@ -1514,6 +1544,7 @@ mod tests {
             command.profile.sockets = SocketPolicy {
                 helper,
                 kernel_confines: false,
+                allowed: Vec::new(),
             };
             assert_eq!(
                 masks(&command),
@@ -1579,6 +1610,7 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
             profile.sockets = SocketPolicy {
                 helper,
                 kernel_confines: true,
+                allowed: Vec::new(),
             };
             SandboxCommand {
                 argv: vec![
@@ -1605,6 +1637,127 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
         let open = tempfile::tempdir().unwrap();
         let unconfined = run_or_skip(run_with(None, open.path())).await.unwrap();
         assert_eq!(unconfined.stdout.trim(), "ok ok ok", "{unconfined:?}");
+    }
+
+    #[test]
+    fn an_allowed_socket_is_bound_after_the_masks_and_allowed_by_the_helper() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let workspace = home.join(".clai/workspaces/ws");
+        std::fs::create_dir_all(home.join(".docker/run")).unwrap();
+        std::fs::create_dir_all(&workspace).unwrap();
+        let socket = home.join(".docker/run/docker.sock");
+        let mut command = sample_command();
+        command.cwd = workspace.clone();
+        command.profile.filesystem = super::super::filesystem::EffectiveFilesystemPolicy::compile(
+            &workspace,
+            &[SandboxPathGrant {
+                host_path: home.clone(),
+                access: SandboxPathAccess::ReadOnly,
+            }],
+            Some(&home),
+        )
+        .unwrap();
+        command.profile.sockets = SocketPolicy {
+            helper: Some(PathBuf::from("/opt/h")),
+            kernel_confines: false,
+            allowed: vec![socket.clone()],
+        };
+        let args = rendered(&bwrap_args(&command).unwrap());
+        let socket = socket.to_string_lossy().into_owned();
+        let mask = args
+            .windows(2)
+            .position(|w| w[0] == "--tmpfs" && w[1].ends_with(".docker/run"))
+            .expect("the directory is masked without Landlock");
+        let bind = args
+            .windows(3)
+            .position(|w| w == ["--ro-bind", socket.as_str(), socket.as_str()])
+            .unwrap_or_else(|| panic!("{args:?}"));
+        assert!(bind > mask, "the socket is bound over the mask: {args:?}");
+        let start = args
+            .windows(2)
+            .position(|w| w == ["--", BOX_HELPER])
+            .unwrap_or_else(|| panic!("{args:?}"));
+        assert_eq!(
+            args[start + 2..start + 6],
+            ["run", "--allow-unix", socket.as_str(), "--"],
+            "{args:?}"
+        );
+    }
+
+    /// A listed socket is reachable whether a grant shows it or not; an
+    /// unlisted one under a grant is refused and one outside every grant is
+    /// not there.
+    #[tokio::test]
+    async fn only_allowed_sockets_outside_the_sandbox_are_reachable() {
+        let Some(helper) = built_helper() else {
+            return;
+        };
+        if super::super::landlock_abi() < 9 {
+            eprintln!("skipped: this kernel cannot confine pathname sockets");
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let granted = tempfile::tempdir().unwrap();
+        let hidden = tempfile::tempdir().unwrap();
+        let path =
+            |dir: &tempfile::TempDir, name: &str| dir.path().canonicalize().unwrap().join(name);
+        let sockets = [
+            path(&granted, "listed.sock"),
+            path(&granted, "other.sock"),
+            path(&hidden, "listed.sock"),
+            path(&hidden, "other.sock"),
+        ];
+        let _listeners: Vec<_> = sockets
+            .iter()
+            .map(|socket| std::os::unix::net::UnixListener::bind(socket).unwrap())
+            .collect();
+        let script = r#"import socket, sys
+def reach(address):
+    try:
+        socket.socket(socket.AF_UNIX).connect(address)
+        return "ok"
+    except OSError as error:
+        return type(error).__name__
+print(*[reach(address) for address in sys.argv[1:]])
+"#;
+        let mut profile = SandboxProfile::for_test(
+            workspace.path().to_path_buf(),
+            vec![SandboxPathGrant {
+                host_path: granted.path().to_path_buf(),
+                access: SandboxPathAccess::ReadOnly,
+            }],
+            SandboxNetworkMode::Disabled,
+            SandboxSessionBusMode::Deny,
+            SandboxEnv::filtered_from_iter(
+                [("PATH", "/usr/bin:/bin")],
+                workspace.path(),
+                SandboxSessionBusMode::Deny,
+            ),
+            None,
+        );
+        profile.sockets = SocketPolicy {
+            helper: Some(helper),
+            kernel_confines: true,
+            allowed: vec![sockets[0].clone(), sockets[2].clone()],
+        };
+        let mut argv = vec![os("python3"), os("-c"), os(script)];
+        argv.extend(sockets.iter().map(os));
+        let command = SandboxCommand {
+            argv,
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms: 20_000,
+            max_output_chars: 2_000,
+            profile,
+        };
+        let Some(output) = run_or_skip(command).await else {
+            return;
+        };
+        assert_eq!(
+            output.stdout.trim(),
+            "ok PermissionError ok FileNotFoundError",
+            "{output:?}"
+        );
     }
 
     /// The helper `cargo test` builds next to the test binary; `cargo test

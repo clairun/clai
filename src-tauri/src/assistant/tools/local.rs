@@ -17,7 +17,7 @@ use crate::assistant::network::matcher::{canonical_host, parse_entry, HostDecisi
 use crate::assistant::network::run_state::{RefusedTargets, RunNetwork};
 use crate::assistant::sandbox::{
     run_command, ProxyEndpoint, SandboxCommand, SandboxCommandOutput, SandboxEnv,
-    SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode,
+    SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode, SocketPolicy,
 };
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
@@ -166,6 +166,8 @@ async fn execute_bash_exec(
         }
     })?;
 
+    let sockets = profile.sockets.clone();
+
     if params.command.trim().is_empty() {
         return Err("Shell command cannot be empty".to_string());
     }
@@ -222,7 +224,7 @@ async fn execute_bash_exec(
             context.note_warning();
         }
     });
-    bash_exec_outcome(output, &refused, timeout_ms, explicit_timeout)
+    bash_exec_outcome(output, &refused, &sockets, timeout_ms, explicit_timeout)
 }
 
 /// Runs the command, in Allowlist behind a network proxy session of its
@@ -269,14 +271,20 @@ const REFUSED_HINT: &str = "CLAI's network proxy refused these hosts: they are n
                             `net_request_access` for a host the task needs; do not look for a \
                             way around the proxy.";
 
+const SOCKET_HINT: &str = "The sandbox kept the command from reaching these Unix sockets of \
+                           this computer. Do not look for a way around the sandbox: if the task \
+                           needs one, tell the user, who can allow it for this agent in its Local \
+                           access settings.";
+
 fn bash_exec_outcome(
     output: Result<SandboxCommandOutput, String>,
     refused: &RefusedTargets,
+    sockets: &SocketPolicy,
     timeout_ms: u64,
     explicit_timeout: bool,
 ) -> Result<serde_json::Value, String> {
     match output {
-        Ok(output) => Ok(bash_exec_result(&output, refused)),
+        Ok(output) => Ok(bash_exec_result(&output, refused, sockets)),
         Err(error) => {
             let error = augment_timeout_error(error, timeout_ms, explicit_timeout);
             if refused.is_empty() {
@@ -295,8 +303,13 @@ fn bash_exec_outcome(
 }
 
 /// Many clients hide the proxy's 403 body (curl prints only “CONNECT tunnel
-/// failed, response 403”), so the result itself names the refused hosts.
-fn bash_exec_result(output: &SandboxCommandOutput, refused: &RefusedTargets) -> serde_json::Value {
+/// failed, response 403”), so the result itself names the refused hosts, and
+/// the host sockets the command could not reach.
+fn bash_exec_result(
+    output: &SandboxCommandOutput,
+    refused: &RefusedTargets,
+    sockets: &SocketPolicy,
+) -> serde_json::Value {
     let mut result = serde_json::json!({
         "cwd": agent_path_string(&output.cwd),
         "exitCode": output.exit_code,
@@ -313,7 +326,62 @@ fn bash_exec_result(output: &SandboxCommandOutput, refused: &RefusedTargets) -> 
             result["network"]["refusedMore"] = refused.more.into();
         }
     }
+    let unreachable = unreachable_sockets(output, sockets);
+    if !unreachable.is_empty() {
+        result["sockets"] = serde_json::json!({
+            "unreachable": unreachable,
+            "hint": SOCKET_HINT,
+        });
+    }
     result
+}
+
+/// Host Unix sockets a failed command could not reach, read from its output:
+/// a path on a line that says "no such file or directory" (the socket is not
+/// bound into the sandbox) or, where Landlock confines sockets, "permission
+/// denied", when that path is a socket on the host and not an allowed one.
+#[cfg(target_os = "linux")]
+fn unreachable_sockets(output: &SandboxCommandOutput, sockets: &SocketPolicy) -> Vec<String> {
+    use std::os::unix::fs::FileTypeExt;
+    const MAX_SOCKETS: usize = 5;
+    let mut found: Vec<String> = Vec::new();
+    if output.success {
+        return found;
+    }
+    for line in output.stderr.lines().chain(output.stdout.lines()) {
+        let lower = line.to_ascii_lowercase();
+        if !(lower.contains("no such file or directory")
+            || sockets.confined() && lower.contains("permission denied"))
+        {
+            continue;
+        }
+        for word in line.split(|c: char| c.is_whitespace() || "\"'(),;".contains(c)) {
+            let path = word.strip_prefix("unix://").unwrap_or(word);
+            let path = path.trim_end_matches([':', '.']);
+            if !path.starts_with('/') || found.iter().any(|known| known == path) {
+                continue;
+            }
+            let Ok(resolved) = fs::canonicalize(path) else {
+                continue;
+            };
+            let is_socket = resolved
+                .metadata()
+                .is_ok_and(|meta| meta.file_type().is_socket());
+            if is_socket && !sockets.allowed.contains(&resolved) {
+                found.push(path.to_string());
+                if found.len() == MAX_SOCKETS {
+                    return found;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Only the Linux sandbox keeps sockets out; elsewhere nothing to report.
+#[cfg(not(target_os = "linux"))]
+fn unreachable_sockets(_output: &SandboxCommandOutput, _sockets: &SocketPolicy) -> Vec<String> {
+    Vec::new()
 }
 
 /// Turn a bare sandbox timeout into an actionable error the model can recover
@@ -400,8 +468,17 @@ fn sandbox_profile(
         .home
         .as_deref()
         .unwrap_or(&filesystem.workspace_root);
+    // Resolved for each command. A run-scoped list (a future "allow this
+    // socket" card) would be merged into the saved one here, as
+    // `filesystem_policy` merges `session_grants_snapshot`.
     #[cfg(target_os = "linux")]
-    let sockets = crate::assistant::sandbox::socket_policy();
+    let sockets = SocketPolicy {
+        allowed: crate::assistant::sandbox::resolve_allowed_sockets(
+            &context.run_context.execution.sandbox.allowed_sockets,
+            filesystem.home.as_deref(),
+        ),
+        ..crate::assistant::sandbox::socket_policy()
+    };
     #[cfg(not(target_os = "linux"))]
     let sockets = Default::default();
     Ok(SandboxProfile {
@@ -2603,13 +2680,15 @@ mod tests {
     fn a_failed_command_still_names_the_hosts_the_proxy_refused() {
         let mut refused = RefusedTargets::default();
         let timed_out = || Err("Command timed out after 2000 ms".to_string());
-        let error = bash_exec_outcome(timed_out(), &refused, 2_000, true).unwrap_err();
+        let error = bash_exec_outcome(timed_out(), &refused, &SocketPolicy::default(), 2_000, true)
+            .unwrap_err();
         assert!(!error.contains("Network allowlist refused"), "{error}");
 
         refused.add("example.org:443".to_string());
         refused.add("pypi.org:443".to_string());
         refused.more = 2;
-        let error = bash_exec_outcome(timed_out(), &refused, 2_000, true).unwrap_err();
+        let error = bash_exec_outcome(timed_out(), &refused, &SocketPolicy::default(), 2_000, true)
+            .unwrap_err();
         let (timeout, network) = error.split_once('\n').unwrap();
         assert!(
             timeout.contains("re-run with a higher `timeoutMs`"),
@@ -2630,12 +2709,16 @@ mod tests {
             stdout: String::new(),
             stderr: "curl: (56) CONNECT tunnel failed, response 403".to_string(),
         };
-        assert!(bash_exec_result(&output, &RefusedTargets::default())
-            .get("network")
-            .is_none());
+        assert!(bash_exec_result(
+            &output,
+            &RefusedTargets::default(),
+            &SocketPolicy::default()
+        )
+        .get("network")
+        .is_none());
         let mut refused = RefusedTargets::default();
         refused.add("example.org:443".to_string());
-        let result = bash_exec_result(&output, &refused);
+        let result = bash_exec_result(&output, &refused, &SocketPolicy::default());
         assert_eq!(
             result["network"]["refused"],
             serde_json::json!(["example.org:443"])
@@ -2647,9 +2730,77 @@ mod tests {
 
         refused.more = 3;
         assert_eq!(
-            bash_exec_result(&output, &refused)["network"]["refusedMore"],
+            bash_exec_result(&output, &refused, &SocketPolicy::default())["network"]["refusedMore"],
             3
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_result_names_the_host_sockets_a_failed_command_could_not_reach() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().canonicalize().unwrap().join("docker.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let file = temp.path().join("plain.sock");
+        fs::write(&file, "").unwrap();
+        let path = socket.display().to_string();
+        let output = |success: bool, stderr: &str| SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(if success { 0 } else { 1 }),
+            success,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        };
+        let unreachable = |output: &SandboxCommandOutput, sockets: &SocketPolicy| {
+            bash_exec_result(output, &RefusedTargets::default(), sockets)
+                .get("sockets")
+                .map(|sockets| sockets["unreachable"].clone())
+        };
+        let confined = SocketPolicy {
+            helper: Some(PathBuf::from("/opt/h")),
+            kernel_confines: true,
+            allowed: Vec::new(),
+        };
+        let denied = output(
+            false,
+            &format!(
+                "permission denied while trying to connect to the Docker daemon socket at \
+                 unix://{path}: dial unix {path}: connect: permission denied\nopen {}: \
+                 permission denied",
+                file.display()
+            ),
+        );
+        assert_eq!(
+            unreachable(&denied, &confined),
+            Some(serde_json::json!([path]))
+        );
+        let result = bash_exec_result(&denied, &RefusedTargets::default(), &confined);
+        assert!(result["sockets"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("allow it for this agent"));
+
+        // Without Landlock a refusal comes from the host's permissions.
+        let unconfined = SocketPolicy {
+            kernel_confines: false,
+            ..confined.clone()
+        };
+        assert_eq!(unreachable(&denied, &unconfined), None);
+        // A socket not bound into the sandbox is named either way.
+        let missing = output(
+            false,
+            &format!("dial unix {path}: connect: no such file or directory"),
+        );
+        assert_eq!(
+            unreachable(&missing, &unconfined),
+            Some(serde_json::json!([path]))
+        );
+        let allowed = SocketPolicy {
+            allowed: vec![socket.clone()],
+            ..confined.clone()
+        };
+        assert_eq!(unreachable(&denied, &allowed), None);
+        assert_eq!(unreachable(&output(true, &denied.stderr), &confined), None);
     }
 
     #[test]
@@ -2679,6 +2830,36 @@ mod tests {
             .starts_with("Sandboxed shell is unavailable: network helper not found"));
         let macos = status_for(Some(SandboxBackend::Seatbelt));
         assert!(profile(NetworkMode::Allowlist, &macos).is_err());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_shell_profile_carries_the_agents_allowed_sockets_that_exist() {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
+        let workspace = tempdir().unwrap();
+        let sockets = tempdir().unwrap();
+        let socket = sockets.path().canonicalize().unwrap().join("agent.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let mut context = context_with_grants(workspace.path(), Vec::new());
+        let mut execution = context.run_context.execution.clone();
+        execution.sandbox.network_access = network(NetworkMode::Off);
+        execution.sandbox.allowed_sockets = vec![
+            socket.display().to_string(),
+            sockets.path().join("gone.sock").display().to_string(),
+        ];
+        context.run_context = std::sync::Arc::new(RunContext {
+            execution,
+            ..(*context.run_context).clone()
+        });
+        let filesystem = filesystem_policy(&context).unwrap();
+        let profile = sandbox_profile(
+            &context,
+            workspace.path().to_path_buf(),
+            filesystem,
+            &status_for(Some(SandboxBackend::Bubblewrap)),
+        )
+        .unwrap();
+        assert_eq!(profile.sockets.allowed, [socket]);
     }
 
     // ------------------------------------------------------------------

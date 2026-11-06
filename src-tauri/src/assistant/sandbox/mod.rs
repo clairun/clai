@@ -84,8 +84,45 @@ pub(crate) fn socket_policy() -> SocketPolicy {
         .get_or_init(|| SocketPolicy {
             helper: helper::locate().ok(),
             kernel_confines: landlock_abi() >= 9,
+            allowed: Vec::new(),
         })
         .clone()
+}
+
+/// The agent's allowed sockets that are sockets now, as the host names them:
+/// `~/` expanded with `home` and symlinks resolved (`/var/run` is `/run`).
+/// Any other entry is skipped with a log note: a socket that is missing
+/// at launch is a stopped service, not a broken config.
+#[cfg(target_os = "linux")]
+pub(crate) fn resolve_allowed_sockets(
+    entries: &[String],
+    home: Option<&std::path::Path>,
+) -> Vec<std::path::PathBuf> {
+    let mut sockets = Vec::new();
+    for entry in entries {
+        match host_socket(entry, home) {
+            Ok(path) if !sockets.contains(&path) => sockets.push(path),
+            Ok(_) => {}
+            Err(reason) => tracing::warn!("Allowed socket {entry} skipped: {reason}"),
+        }
+    }
+    sockets
+}
+
+#[cfg(target_os = "linux")]
+fn host_socket(entry: &str, home: Option<&std::path::Path>) -> Result<std::path::PathBuf, String> {
+    use std::os::unix::fs::FileTypeExt;
+    let path = match (entry.strip_prefix("~/"), home) {
+        (Some(rest), Some(home)) => home.join(rest),
+        (Some(_), None) => return Err("the home directory is unknown".to_string()),
+        (None, _) => std::path::PathBuf::from(entry),
+    };
+    let path = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
+    let meta = path.metadata().map_err(|error| error.to_string())?;
+    if !meta.file_type().is_socket() {
+        return Err("it is not a socket".to_string());
+    }
+    Ok(path)
 }
 
 #[cfg(target_os = "linux")]
@@ -223,12 +260,34 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn allowed_sockets_resolve_to_the_host_socket_and_skip_the_rest() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let run = home.join("run");
+        std::fs::create_dir(&run).unwrap();
+        let socket = run.join("docker.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::os::unix::fs::symlink(&run, home.join("var-run")).unwrap();
+        std::fs::write(home.join("file.sock"), "").unwrap();
+        let entries = [
+            "~/var-run/docker.sock".to_string(),
+            socket.to_string_lossy().into_owned(),
+            "~/file.sock".to_string(),
+            "~/missing.sock".to_string(),
+        ];
+        assert_eq!(resolve_allowed_sockets(&entries, Some(&home)), [socket]);
+        assert!(resolve_allowed_sockets(&entries[..1], None).is_empty());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn socket_isolation_names_what_is_missing() {
         let helper = Some(std::path::PathBuf::from("/opt/clai/clai-sandbox-helper"));
         let reason = |helper: Option<std::path::PathBuf>, kernel_confines| {
             socket_isolation_reason(&SocketPolicy {
                 helper,
                 kernel_confines,
+                allowed: Vec::new(),
             })
         };
         assert_eq!(reason(helper.clone(), true), None);

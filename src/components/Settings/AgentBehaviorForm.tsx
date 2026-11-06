@@ -110,6 +110,7 @@ const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessD
   web: execution.web?.enabled || false,
   sessionBus: (execution.sandbox?.sessionBus || 'allow') === 'allow',
   networkAccess: execution.sandbox?.networkAccess ?? null,
+  allowedSockets: execution.sandbox?.allowedSockets ?? [],
 });
 
 // Without a policy the backend applies this PC's default, so only
@@ -119,6 +120,7 @@ type SandboxDraft = Omit<ExecutionSandboxConfig, 'networkAccess'> & Partial<Pick
 const executionFrom = (access: AccessDraft): ExecutionCapabilityConfig => {
   const sandbox: SandboxDraft = {
     sessionBus: access.sessionBus ? 'allow' : 'deny',
+    allowedSockets: access.allowedSockets,
     ...(access.networkAccess ? { networkAccess: access.networkAccess } : {}),
   };
   return {

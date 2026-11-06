@@ -134,7 +134,13 @@ providerId: string | null, apiKey: string | null, authMode: AuthMode | null, bas
 
 export type ExecutionCapabilityConfig = { sandbox: ExecutionSandboxConfig, filesystem: FilesystemCapabilityConfig, shell: ShellCapabilityConfig, web: WebCapabilityConfig, };
 
-export type ExecutionSandboxConfig = { networkAccess: NetworkPolicy, sessionBus: SandboxSessionBusConfig, };
+export type ExecutionSandboxConfig = { networkAccess: NetworkPolicy, sessionBus: SandboxSessionBusConfig, 
+/**
+ * Unix sockets outside the sandbox the shell may connect to, each an
+ * absolute or `~/` path to the socket file. Read by the Linux sandbox
+ * only, which otherwise confines a command to sockets it created.
+ */
+allowedSockets: Array<string>, };
 
 /**
  * Why a `failed` task failed; set exactly when the status is `failed`.

@@ -53,6 +53,9 @@ pub struct SocketPolicy {
     /// Whether the kernel lets the helper confine pathname sockets (Landlock
     /// ABI 9). Without it CLAI hides known socket directories instead.
     pub kernel_confines: bool,
+    /// Host sockets the agent may connect to, resolved: bound into the
+    /// sandbox at the same path and allowed by Landlock.
+    pub allowed: Vec<PathBuf>,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

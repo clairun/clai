@@ -198,7 +198,7 @@ fn create_main_agent(
     // before saving. Trust the request's execution verbatim — if the user
     // cleared all path grants on purpose, we honor that.
     let mut execution = request.execution;
-    execution.sandbox.network_access.canonicalize()?;
+    execution.sandbox.canonicalize()?;
 
     let now = now_millis();
     let agent = WorkspaceAgent {
@@ -253,7 +253,7 @@ fn update_main_agent(
     state: &AppState,
     mut request: WorkspaceAgentUpdateRequest,
 ) -> Result<WorkspaceAgentDetail, WorkspaceAgentUpdateError> {
-    request.execution.sandbox.network_access.canonicalize()?;
+    request.execution.sandbox.canonicalize()?;
     let app_config = app_config(state)?;
     let now = now_millis();
     let agent_id = request.agent_id.clone();

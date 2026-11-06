@@ -41,7 +41,7 @@ const MAIN: AgentDetail = {
   selectedMcpServerIds: [],
   providerConnectionIds: ['conn-a'],
   execution: {
-    sandbox: { networkAccess: { mode: 'host_network', allowDomains: [], denyDomains: [] }, sessionBus: 'allow' },
+    sandbox: { networkAccess: { mode: 'host_network', allowDomains: [], denyDomains: [] }, sessionBus: 'allow', allowedSockets: [] },
     filesystem: { extraPaths: [] },
     shell: { mode: 'restricted', askFirstCommandPrefixes: ['git push'] },
     web: { enabled: true },
