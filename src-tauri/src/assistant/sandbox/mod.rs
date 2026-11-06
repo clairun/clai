@@ -21,8 +21,8 @@ mod macos_seatbelt;
 mod unsupported;
 
 pub use profile::{
-    ProxyEndpoint, SandboxEnv, SandboxNetworkMode, SandboxPathAccess, SandboxProfile,
-    SandboxSessionBusMode, SessionBusProxy, SocketPolicy,
+    AllowedSocket, ProxyEndpoint, SandboxEnv, SandboxNetworkMode, SandboxPathAccess,
+    SandboxProfile, SandboxSessionBusMode, SessionBusProxy, SocketPolicy,
 };
 pub use runner::{run_command, SandboxCommand, SandboxCommandOutput};
 
@@ -99,19 +99,19 @@ pub(crate) fn socket_policy() -> SocketPolicy {
         .clone()
 }
 
-/// The agent's allowed sockets that are sockets now, as the host names them:
-/// `~/` expanded with `home` and symlinks resolved (`/var/run` is `/run`).
+/// The agent's allowed sockets that are sockets now: `~/` expanded with
+/// `home`, and the host path with symlinks resolved (`/var/run` is `/run`).
 /// Any other entry is skipped with a log note: a socket that is missing
 /// at launch is a stopped service, not a broken config.
 #[cfg(target_os = "linux")]
 pub(crate) fn resolve_allowed_sockets(
     entries: &[String],
     home: Option<&std::path::Path>,
-) -> Vec<std::path::PathBuf> {
+) -> Vec<AllowedSocket> {
     let mut sockets = Vec::new();
     for entry in entries {
         match host_socket(entry, home) {
-            Ok(path) if !sockets.contains(&path) => sockets.push(path),
+            Ok(socket) if !sockets.contains(&socket) => sockets.push(socket),
             Ok(_) => {}
             Err(reason) => tracing::warn!("Allowed socket {entry} skipped: {reason}"),
         }
@@ -120,19 +120,19 @@ pub(crate) fn resolve_allowed_sockets(
 }
 
 #[cfg(target_os = "linux")]
-fn host_socket(entry: &str, home: Option<&std::path::Path>) -> Result<std::path::PathBuf, String> {
+fn host_socket(entry: &str, home: Option<&std::path::Path>) -> Result<AllowedSocket, String> {
     use std::os::unix::fs::FileTypeExt;
     let path = match (entry.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => home.join(rest),
         (Some(_), None) => return Err("the home directory is unknown".to_string()),
         (None, _) => std::path::PathBuf::from(entry),
     };
-    let path = std::fs::canonicalize(path).map_err(|error| error.to_string())?;
-    let meta = path.metadata().map_err(|error| error.to_string())?;
+    let host = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
+    let meta = host.metadata().map_err(|error| error.to_string())?;
     if !meta.file_type().is_socket() {
         return Err("it is not a socket".to_string());
     }
-    Ok(path)
+    Ok(AllowedSocket { path, host })
 }
 
 #[cfg(target_os = "linux")]
@@ -297,7 +297,19 @@ mod tests {
             "~/file.sock".to_string(),
             "~/missing.sock".to_string(),
         ];
-        assert_eq!(resolve_allowed_sockets(&entries, Some(&home)), [socket]);
+        assert_eq!(
+            resolve_allowed_sockets(&entries, Some(&home)),
+            [
+                AllowedSocket {
+                    path: home.join("var-run/docker.sock"),
+                    host: socket.clone(),
+                },
+                AllowedSocket {
+                    path: socket.clone(),
+                    host: socket,
+                },
+            ]
+        );
         assert!(resolve_allowed_sockets(&entries[..1], None).is_empty());
     }
 

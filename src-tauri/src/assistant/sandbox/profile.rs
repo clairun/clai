@@ -66,9 +66,19 @@ pub struct SocketPolicy {
     /// Whether the kernel lets the helper confine pathname sockets (Landlock
     /// ABI 9). Without it CLAI hides known socket directories instead.
     pub kernel_confines: bool,
-    /// Host sockets the agent may connect to, resolved: bound into the
-    /// sandbox at the same path and allowed by Landlock.
-    pub allowed: Vec<PathBuf>,
+    /// Host sockets the agent may connect to: bound into the sandbox and
+    /// allowed by Landlock.
+    pub allowed: Vec<AllowedSocket>,
+}
+
+/// A host socket the agent may connect to, bound at `host`, where it
+/// resolves, and at `path`, as the agent named it: `/var/run/docker.sock`
+/// is `/run/docker.sock` on the host, and the sandbox has no `/var`.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AllowedSocket {
+    pub path: PathBuf,
+    pub host: PathBuf,
 }
 
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]

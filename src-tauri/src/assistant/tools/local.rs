@@ -382,7 +382,7 @@ fn unreachable_sockets(output: &SandboxCommandOutput, sockets: &SocketPolicy) ->
             let is_socket = resolved
                 .metadata()
                 .is_ok_and(|meta| meta.file_type().is_socket());
-            if is_socket && !sockets.allowed.contains(&resolved) {
+            if is_socket && !sockets.allowed.iter().any(|socket| socket.host == resolved) {
                 found.push(path.to_string());
                 if found.len() == MAX_SOCKETS {
                     return found;
@@ -2831,7 +2831,10 @@ mod tests {
             Some(serde_json::json!([path]))
         );
         let allowed = SocketPolicy {
-            allowed: vec![socket.clone()],
+            allowed: vec![crate::assistant::sandbox::AllowedSocket {
+                path: socket.clone(),
+                host: socket.clone(),
+            }],
             ..confined.clone()
         };
         assert_eq!(unreachable(&denied, &allowed), None);
@@ -2894,7 +2897,13 @@ mod tests {
             &status_for(Some(SandboxBackend::Bubblewrap)),
         )
         .unwrap();
-        assert_eq!(profile.sockets.allowed, [socket]);
+        assert_eq!(
+            profile.sockets.allowed,
+            [crate::assistant::sandbox::AllowedSocket {
+                path: socket.clone(),
+                host: socket,
+            }]
+        );
     }
 
     // ------------------------------------------------------------------

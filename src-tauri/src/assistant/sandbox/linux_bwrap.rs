@@ -278,7 +278,13 @@ fn append_helper_entry(args: &mut Vec<OsString>, command: &SandboxCommand, bus: 
     } else {
         args.push(os("run"));
     }
-    let allowed = command.profile.sockets.allowed.iter().map(PathBuf::as_path);
+    // One rule per socket: Landlock allows the file, under either name.
+    let allowed = command
+        .profile
+        .sockets
+        .allowed
+        .iter()
+        .map(|socket| socket.host.as_path());
     for path in bus.into_iter().chain(allowed) {
         args.extend([os("--allow-unix"), os(path)]);
     }
@@ -330,24 +336,29 @@ fn append_socket_dir_masks(args: &mut Vec<OsString>, command: &SandboxCommand) {
     }
 }
 
-/// The host sockets the agent may connect to, each bound at its own path
-/// after the grants and the socket directory masks, so neither hides it.
+/// The host sockets the agent may connect to, bound at the host path and at
+/// the path the agent named, after the grants and the socket directory
+/// masks, so neither hides them.
 fn append_allowed_socket_binds(
     args: &mut Vec<OsString>,
     command: &SandboxCommand,
     in_flatpak: bool,
 ) {
     for socket in &command.profile.sockets.allowed {
-        for dir in private_parent_dirs_for(socket) {
-            args.extend([os("--dir"), dir.into_os_string()]);
+        let names = std::iter::once(&socket.host)
+            .chain(Some(&socket.path).filter(|path| **path != socket.host));
+        for name in names {
+            for dir in private_parent_dirs_for(name) {
+                args.extend([os("--dir"), dir.into_os_string()]);
+            }
+            // Under Flatpak the path was resolved in the app's view of the host.
+            let bind = if in_flatpak {
+                "--ro-bind-try"
+            } else {
+                "--ro-bind"
+            };
+            args.extend([os(bind), os(&socket.host), os(name)]);
         }
-        // Under Flatpak the path was resolved in the app's view of the host.
-        let bind = if in_flatpak {
-            "--ro-bind-try"
-        } else {
-            "--ro-bind"
-        };
-        args.extend([os(bind), os(socket), os(socket)]);
     }
 }
 
@@ -858,7 +869,9 @@ fn os(value: impl AsRef<OsStr>) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::sandbox::{SandboxEnv, SandboxPathGrant, SandboxProfile, SocketPolicy};
+    use crate::assistant::sandbox::{
+        AllowedSocket, SandboxEnv, SandboxPathGrant, SandboxProfile, SocketPolicy,
+    };
 
     fn sample_command() -> SandboxCommand {
         let workspace = std::env::temp_dir();
@@ -1721,29 +1734,35 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
             Some(&home),
         )
         .unwrap();
+        let host = PathBuf::from("/run/user/1000/docker.sock");
         command.profile.sockets = SocketPolicy {
             helper: Some(PathBuf::from("/opt/h")),
             kernel_confines: false,
-            allowed: vec![socket.clone()],
+            allowed: vec![AllowedSocket {
+                path: socket.clone(),
+                host: host.clone(),
+            }],
         };
         let args = rendered(&bwrap_args(&command).unwrap());
-        let socket = socket.to_string_lossy().into_owned();
+        let (socket, host) = (socket.to_string_lossy(), host.to_string_lossy());
         let mask = args
             .windows(2)
             .position(|w| w[0] == "--tmpfs" && w[1].ends_with(".docker/run"))
             .expect("the directory is masked without Landlock");
-        let bind = args
-            .windows(3)
-            .position(|w| w == ["--ro-bind", socket.as_str(), socket.as_str()])
-            .unwrap_or_else(|| panic!("{args:?}"));
-        assert!(bind > mask, "the socket is bound over the mask: {args:?}");
+        let bound = |name: &str| {
+            args.windows(3)
+                .position(|w| w == ["--ro-bind", &*host, name])
+                .unwrap_or_else(|| panic!("{name}: {args:?}"))
+        };
+        bound(&host);
+        assert!(bound(&socket) > mask, "bound over the mask: {args:?}");
         let start = args
             .windows(2)
             .position(|w| w == ["--", BOX_HELPER])
             .unwrap_or_else(|| panic!("{args:?}"));
         assert_eq!(
             args[start + 2..start + 6],
-            ["run", "--allow-unix", socket.as_str(), "--"],
+            ["run", "--allow-unix", &*host, "--"],
             "{args:?}"
         );
     }
@@ -1799,13 +1818,27 @@ print(*[reach(address) for address in sys.argv[1:]])
             ),
             None,
         );
+        // The hidden listed socket is named through a symlinked directory,
+        // as /var/run names /run.
+        let links = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(hidden.path(), links.path().join("run")).unwrap();
+        let named = links.path().join("run/listed.sock");
         profile.sockets = SocketPolicy {
             helper: Some(helper),
             kernel_confines: true,
-            allowed: vec![sockets[0].clone(), sockets[2].clone()],
+            allowed: vec![
+                AllowedSocket {
+                    path: sockets[0].clone(),
+                    host: sockets[0].clone(),
+                },
+                AllowedSocket {
+                    path: named.clone(),
+                    host: sockets[2].clone(),
+                },
+            ],
         };
         let mut argv = vec![os("python3"), os("-c"), os(script)];
-        argv.extend(sockets.iter().map(os));
+        argv.extend(sockets.iter().chain([&named]).map(os));
         let command = SandboxCommand {
             argv,
             cwd: workspace.path().to_path_buf(),
@@ -1818,7 +1851,7 @@ print(*[reach(address) for address in sys.argv[1:]])
         };
         assert_eq!(
             output.stdout.trim(),
-            "ok PermissionError ok FileNotFoundError",
+            "ok PermissionError ok FileNotFoundError ok",
             "{output:?}"
         );
     }
