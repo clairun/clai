@@ -9,6 +9,7 @@ import type {
   FilesystemPathGrant, GrantOrigin, NetworkMode, NetworkPolicy, SandboxSessionBusConfig, SandboxStatus, ShellAccessMode,
 } from '../../generated/bindings';
 import type { SandboxStatusState } from '../../hooks/useSandboxStatus';
+import { containerEngineWarning } from '../../permissions/containerEngineSocket';
 import { unicodeHost } from '../../permissions/hostNames';
 import { PathGrantEditor, PrefixListEditor, Switch } from './ListEditors';
 import form from './SettingsForm.module.css';
@@ -374,7 +375,7 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
 }) => {
   const headingId = useId();
   const shellHint = SHELL_MODES.find((m) => m.mode === draft.shellMode)?.hint;
-  // The bus is what the Linux sandbox enforces.
+  // The bus and the socket rule are what the Linux sandbox enforces.
   const linux = sandbox.status?.backend === 'bubblewrap' ? sandbox.status : null;
 
   return (
@@ -392,14 +393,26 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
           <p className={form.hint}>
             Every new agent starts with <code className={form.code}>$HOME</code> read-only. Remove it to isolate the agent.
           </p>
+          {linux && (
+            <p className={form.hint}>
+              A Unix socket, such as Docker’s, is reachable only when granted by its exact path, not through its folder.
+            </p>
+          )}
           <PathGrantEditor
             grants={draft.grants}
             onChange={(grants) => onChange({ grants })}
             make={(path, access) => ({ path, access, origin: null })}
             describe={grantOrigin}
+            warning={(grant) => containerEngineWarning(grant.path)}
             disabled={disabled}
             label="Path grants"
           />
+          {linux && !linux.socketIsolationAvailable && (
+            <p className={form.hint}>
+              Socket isolation is unavailable here: {linux.socketIsolationUnavailableReason ?? 'not supported'}. A socket
+              inside a granted folder can still be reachable.
+            </p>
+          )}
           {draft.networkAccess ? (
             <NetworkSection
               policy={draft.networkAccess}

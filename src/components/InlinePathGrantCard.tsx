@@ -1,4 +1,5 @@
 import { useState, type ReactNode, type Ref } from 'react';
+import { containerEngineWarning } from '../permissions/containerEngineSocket';
 import { listPendingPathGrantRequests, submitPathGrantDecision } from '../permissions/pathGrantsClient';
 import type {
   FilesystemPathAccess,
@@ -127,6 +128,7 @@ export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathG
 
   const sensitive = isSensitivePath(card.path);
   const overlyBroad = isOverlyBroadPath(card.path);
+  const containerEngine = containerEngineWarning(card.path);
 
   return (
     <article
@@ -243,7 +245,7 @@ export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathG
             </>
           )}
 
-          {(sensitive || overlyBroad) && (
+          {(sensitive || overlyBroad || containerEngine) && (
             <div className={styles.warningStack}>
               {overlyBroad && (
                 <div className={`${styles.warning} ${styles.warningCritical}`}>
@@ -251,7 +253,11 @@ export const PathGrantCard = ({ req, speaker, requester, onDecided, ref }: PathG
                   system to the agent. Consider narrowing to a specific subdirectory.
                 </div>
               )}
-              {sensitive && !overlyBroad && (
+              {containerEngine && (
+                <div className={`${styles.warning} ${styles.warningCritical}`}>⚠ {containerEngine}</div>
+              )}
+              {/* ~/.docker holds credentials, but the socket under it is the bigger risk. */}
+              {sensitive && !overlyBroad && !containerEngine && (
                 <div className={`${styles.warning} ${styles.warningCaution}`}>
                   ⚠ This path typically holds credentials or secrets (e.g. SSH keys,
                   cloud tokens). With network enabled, anything readable here can be

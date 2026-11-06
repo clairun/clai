@@ -575,6 +575,70 @@ describe('AgentBehaviorForm', () => {
       });
     });
 
+    describe('socket grants', () => {
+      const openAccess = async () => {
+        await screen.findByDisplayValue('Reviewer');
+        await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
+      };
+      const warning = /^Granting a Docker, Podman or containerd socket gives this agent full control of this computer/;
+      const grantItem = (path: string) => within(screen.getByRole('list', { name: 'Path grants' }))
+        .getAllByRole('listitem').find((item) => item.textContent?.startsWith(path))!;
+      const addPath = async (path: string) => {
+        await userEvent.type(screen.getByRole('textbox', { name: 'New path for path grants' }), `${path}{Enter}`);
+      };
+
+      it('warns under a container engine socket in Paths and still saves it', async () => {
+        const { ref } = renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        const sockets = ['/var/run/docker.sock', '/run/user/1000/podman/podman.sock', '/run/containerd/containerd.sock'];
+        for (const path of [...sockets, '/srv/data']) await addPath(path);
+
+        for (const path of sockets) {
+          expect(within(grantItem(path)).getByText(warning)).toHaveClass(formStyles.hintWarning!);
+        }
+        for (const path of ['/home/u', '/srv/data']) {
+          expect(within(grantItem(path)).queryByText(warning)).toBeNull();
+        }
+        expect(screen.getAllByText(warning)).toHaveLength(3);
+
+        expect(await submit(ref)).toEqual({ ok: true });
+        expect(sentUpdate().execution.filesystem.extraPaths.map((grant) => grant.path))
+          .toEqual(['/home/u', ...sockets, '/srv/data']);
+      });
+
+      it('says a socket needs its exact path, and when this kernel cannot isolate sockets', async () => {
+        const help = /^A Unix socket, such as Docker’s, is reachable only when granted by its exact path/;
+        const first = renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        expect(await screen.findByText(help)).toBeInTheDocument();
+        expect(screen.queryByText(/Socket isolation is unavailable/)).toBeNull();
+        first.unmount();
+
+        api.getSandboxStatus.mockResolvedValue({
+          ...LINUX,
+          socketIsolationAvailable: false,
+          socketIsolationUnavailableReason: 'This Linux kernel cannot confine Unix sockets (it needs Landlock ABI 9)',
+        });
+        resetSandboxStatusForTests();
+        const second = renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        expect(await screen.findByText(
+          'Socket isolation is unavailable here: This Linux kernel cannot confine Unix sockets (it needs Landlock ABI 9). '
+            + 'A socket inside a granted folder can still be reachable.',
+        )).toHaveClass(formStyles.hint!);
+        second.unmount();
+
+        // Only the Linux sandbox has the exact-path rule.
+        api.getSandboxStatus.mockResolvedValue(MACOS);
+        resetSandboxStatusForTests();
+        renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        await waitFor(() => expect(screen.queryByText(/Checking what this PC supports/)).toBeNull());
+        expect(screen.queryByText(help)).toBeNull();
+        expect(screen.queryByText(/Socket isolation is unavailable/)).toBeNull();
+      });
+    });
+
     it('hides the ask-first list when the shell is off', async () => {
       renderForm({ agentId: 'agent-1' });
       await screen.findByDisplayValue('Reviewer');
