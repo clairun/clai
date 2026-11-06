@@ -74,17 +74,26 @@ pub fn status() -> SandboxStatus {
     } else {
         None
     };
-    let mut status = status_for(backend);
-    #[cfg(target_os = "linux")]
-    {
-        let sockets = socket_policy();
-        status.socket_isolation_available = sockets.confined();
-        status.socket_isolation_unavailable_reason = socket_isolation_reason(&sockets);
-        let bus_filter = bus_proxy::unavailable_reason();
-        status.session_bus_filter_available = bus_filter.is_none();
-        status.session_bus_filter_unavailable_reason =
-            bus_filter.map(profile::keyring_only_unavailable_note);
+    with_host_checks(status_for(backend))
+}
+
+/// What this PC lets the Linux sandbox confine, beyond its backend.
+#[cfg(target_os = "linux")]
+fn with_host_checks(status: SandboxStatus) -> SandboxStatus {
+    let sockets = socket_policy();
+    let bus_filter = bus_proxy::unavailable_reason();
+    SandboxStatus {
+        socket_isolation_available: sockets.confined(),
+        socket_isolation_unavailable_reason: socket_isolation_reason(&sockets),
+        session_bus_filter_available: bus_filter.is_none(),
+        session_bus_filter_unavailable_reason: bus_filter
+            .map(profile::keyring_only_unavailable_note),
+        ..status
     }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn with_host_checks(status: SandboxStatus) -> SandboxStatus {
     status
 }
 
