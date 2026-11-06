@@ -104,8 +104,8 @@ pub struct SocketPolicy {
 }
 
 /// A host socket the agent may connect to, bound at `host`, where it
-/// resolves, and at `path`, as its grant names it: `/var/run/docker.sock`
-/// is `/run/docker.sock` on the host, and the sandbox has no `/var`.
+/// resolves, and at `path`, as its grant names it, unless the sandbox link
+/// `/var/run` to `/run` already makes them one file.
 #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AllowedSocket {

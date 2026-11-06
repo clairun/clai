@@ -150,6 +150,11 @@ fn looks_like_bwrap_setup_failure(output: &SandboxCommandOutput) -> bool {
 }
 
 pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, String> {
+    bwrap_args_with(command, host_var_run_is_run())
+}
+
+/// [`bwrap_args`], told whether the host has `/var/run` as a link to `/run`.
+fn bwrap_args_with(command: &SandboxCommand, var_run_link: bool) -> Result<Vec<OsString>, String> {
     validate_profile_paths(command)?;
     let in_flatpak = crate::providers::is_flatpak();
 
@@ -218,11 +223,26 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
         os("/sys"),
     ]);
 
+    // Before any mount: once a mount has made `/var/run` a directory, bwrap
+    // cannot put the link there. A name only, `/run` holds what the mounts
+    // below put there. `../run`, not `/run`: while bwrap sets the sandbox
+    // up, an absolute target names its own root, not the sandbox one, so a
+    // mount through the link would miss. `/run` exists so such a mount (a
+    // bus path under `/var/run`) finds its parent.
+    if var_run_link {
+        args.extend([
+            os("--dir"),
+            os("/run"),
+            os("--symlink"),
+            os("../run"),
+            os(VAR_RUN),
+        ]);
+    }
     append_tmp_mount(&mut args, command);
     append_runtime_file_binds(&mut args, in_flatpak);
     append_workspace_and_grants(&mut args, command);
     append_socket_masks(&mut args, command);
-    append_allowed_socket_binds(&mut args, command);
+    append_allowed_socket_binds(&mut args, command, var_run_link);
 
     for (key, value) in command.profile.env.iter() {
         args.push(os("--setenv"));
@@ -391,21 +411,52 @@ fn sockets_under(dir: &Path) -> Vec<PathBuf> {
 /// The host sockets the agent may connect to, bound at the host path and at
 /// the path its grant names, after the grants and the socket masks, so
 /// neither hides them. A name under a system bind (`/etc`, `/usr`) is
-/// already there and cannot take a mount point. `--ro-bind-try`: a socket
-/// that went away since it was resolved (a restarted service) leaves the
-/// command without it instead of failing it.
-fn append_allowed_socket_binds(args: &mut Vec<OsString>, command: &SandboxCommand) {
+/// already there and cannot take a mount point. With the `/var/run` link a
+/// name under it is bound at `/run`, the same file, so `/var/run/docker.sock`
+/// and `/run/docker.sock` take one mount and none goes through the link.
+/// `--ro-bind-try`: a socket that went away since it was resolved (a
+/// restarted service) leaves the command without it instead of failing it.
+fn append_allowed_socket_binds(
+    args: &mut Vec<OsString>,
+    command: &SandboxCommand,
+    var_run_link: bool,
+) {
+    let in_sandbox = |name: &Path| match name.strip_prefix(VAR_RUN) {
+        Ok(rest) if var_run_link => Path::new("/run").join(rest),
+        _ => name.to_path_buf(),
+    };
     for socket in &command.profile.sockets.allowed {
-        let names = std::iter::once(&socket.host)
-            .chain(Some(&socket.path).filter(|path| **path != socket.host))
+        let host = in_sandbox(&socket.host);
+        let path = in_sandbox(&socket.path);
+        let names = std::iter::once(host.clone())
+            .chain(Some(path).filter(|path| *path != host))
             .filter(|name| !path_is_covered_by_system_bind(name));
         for name in names {
-            for dir in private_parent_dirs_for(name) {
+            for dir in private_parent_dirs_for(&name) {
                 args.extend([os("--dir"), dir.into_os_string()]);
             }
             args.extend([os("--ro-bind-try"), os(&socket.host), os(name)]);
         }
     }
+}
+
+const VAR_RUN: &str = "/var/run";
+
+/// Whether the host has `/var/run` as a link to `/run`, as current Linux
+/// systems do. The sandbox then gets the same link, so the path a tool uses
+/// by default (`/var/run/docker.sock`) names what is bound under `/run`.
+/// Otherwise `/var/run` is left out as before: a real directory there holds
+/// other files, which only a grant may show.
+fn host_var_run_is_run() -> bool {
+    is_link_to(Path::new(VAR_RUN), Path::new("/run"))
+}
+
+fn is_link_to(link: &Path, target: &Path) -> bool {
+    std::fs::symlink_metadata(link).is_ok_and(|meta| meta.file_type().is_symlink())
+        && matches!(
+            (std::fs::canonicalize(link), std::fs::canonicalize(target)),
+            (Ok(link), Ok(target)) if link == target
+        )
 }
 
 /// Allowlist: the proxy socket, the helper and the ssh configuration, and
@@ -1960,6 +2011,78 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
         );
     }
 
+    /// In every network mode `/var/run` is made a link to `/run` before
+    /// anything is mounted under `/run` or `/var`, so nothing can make it a
+    /// directory first (bwrap would refuse the link), and a socket granted
+    /// by a name under it is bound once, at `/run`: no mount goes through the
+    /// link. Without the link on the host, `/var/run` is bound as before.
+    #[test]
+    fn var_run_is_a_link_to_run_made_before_anything_under_it() {
+        let modes = [
+            SandboxNetworkMode::Disabled,
+            SandboxNetworkMode::Host,
+            proxied(Path::new("/c/.clai-net")),
+        ];
+        for network in modes {
+            let mut command = sample_command();
+            command.profile.network = network;
+            command.profile.sockets.allowed = vec![AllowedSocket {
+                path: PathBuf::from("/var/run/docker.sock"),
+                host: PathBuf::from("/run/docker.sock"),
+            }];
+            let args = rendered(&bwrap_args_with(&command, true).unwrap());
+            let link = args
+                .windows(5)
+                .position(|w| w == ["--dir", "/run", "--symlink", "../run", "/var/run"])
+                .unwrap_or_else(|| panic!("{args:?}"));
+            let early = args[..link]
+                .iter()
+                .find(|arg| arg.starts_with("/run") || arg.starts_with("/var"));
+            assert_eq!(early, None, "{args:?}");
+            assert!(
+                !args.iter().any(|arg| arg.starts_with("/var/run/")),
+                "{args:?}"
+            );
+            let bind = ["--ro-bind-try", "/run/docker.sock", "/run/docker.sock"];
+            assert_eq!(
+                args.windows(3).filter(|w| *w == bind).count(),
+                1,
+                "{args:?}"
+            );
+
+            let args = rendered(&bwrap_args_with(&command, false).unwrap());
+            assert!(!args.iter().any(|arg| arg == "--symlink"), "{args:?}");
+            for name in ["/run/docker.sock", "/var/run/docker.sock"] {
+                assert!(
+                    args.windows(3)
+                        .any(|w| w == ["--ro-bind-try", "/run/docker.sock", name]),
+                    "{args:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_symlink_that_leads_to_run_counts_as_the_var_run_link() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (run, var, other) = (root.join("run"), root.join("var"), root.join("other"));
+        for dir in [&run, &var, &other] {
+            std::fs::create_dir(dir).unwrap();
+        }
+        let link = |name: &str, target: &Path| {
+            let path = var.join(name);
+            std::os::unix::fs::symlink(target, &path).unwrap();
+            path
+        };
+        assert!(is_link_to(&link("relative", Path::new("../run")), &run));
+        assert!(is_link_to(&link("absolute", &run), &run));
+        assert!(!is_link_to(&link("elsewhere", &other), &run));
+        assert!(!is_link_to(&link("dangling", &root.join("gone")), &run));
+        assert!(!is_link_to(&run, &run), "a directory is not the link");
+        assert!(!is_link_to(&var.join("missing"), &run));
+    }
+
     /// Connects to each socket it is given, then tries to remove, move and
     /// replace the first one, and connects to it again.
     const SWAP_SCRIPT: &str = r#"import socket, subprocess, sys
@@ -2080,6 +2203,58 @@ print(*out)
             .file_type()
             .is_socket());
         assert!(!alone.path().join("granted.sock.moved").exists());
+    }
+
+    /// Connects to the socket it is given, then prints where `/var/run`
+    /// leads and what it lists.
+    const VAR_RUN_SCRIPT: &str = r#"import os, socket, sys
+socket.socket(socket.AF_UNIX).connect(sys.argv[1])
+print(os.readlink("/var/run"), *sorted(os.listdir("/var/run")))
+"#;
+
+    /// On a host with `/var/run` a link to `/run`: in the sandbox
+    /// `/var/run` is the same link, it lists only what the mounts put under
+    /// `/run`, and a socket granted by a name under it connects. bwrap
+    /// refuses the link if a mount made `/var/run` a directory first.
+    #[tokio::test]
+    async fn var_run_names_run_and_reaches_a_socket_granted_there() {
+        if !host_var_run_is_run() {
+            crate::assistant::sandbox::skip_without_bwrap("the host has no /var/run link to /run");
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let sockets = tempfile::tempdir().unwrap();
+        let host = sockets.path().canonicalize().unwrap().join("s.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&host).unwrap();
+        let file = format!("clai-test-{}.sock", std::process::id());
+        let name = Path::new(VAR_RUN).join(&file);
+        let mut command = network_command(workspace.path(), SandboxNetworkMode::Disabled, "");
+        command.argv = vec![os("python3"), os("-c"), os(VAR_RUN_SCRIPT), os(&name)];
+        command.profile.sockets.allowed = vec![AllowedSocket { path: name, host }];
+        let args = rendered(&bwrap_args(&command).unwrap());
+        let end = args.iter().position(|arg| arg == "--").unwrap();
+        let under_run: std::collections::BTreeSet<String> = args[..end]
+            .iter()
+            .filter_map(|arg| {
+                let rest = Path::new(arg).strip_prefix("/run").ok()?;
+                Some(
+                    rest.components()
+                        .next()?
+                        .as_os_str()
+                        .to_string_lossy()
+                        .into_owned(),
+                )
+            })
+            .collect();
+        assert!(under_run.contains(&file), "{args:?}");
+        let Some(output) = run_or_skip(command).await else {
+            return;
+        };
+        let expected = std::iter::once("../run".to_string())
+            .chain(under_run)
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert_eq!(output.stdout.trim(), expected, "{output:?}");
     }
 
     /// Keyring only, end to end: through the proxy CLAI starts, a command in
