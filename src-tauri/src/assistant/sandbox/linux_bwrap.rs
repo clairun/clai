@@ -1425,8 +1425,8 @@ mod tests {
             .position(|w| w == ["--", BOX_HELPER])
             .unwrap_or_else(|| panic!("{args:?}"));
         assert_eq!(
-            args[start + 2..start + 5],
-            ["run", "--allow-unix", bus.as_str()]
+            args[start + 2..start + 6],
+            ["run", "--host-abstract-unix", "--allow-unix", bus.as_str()]
         );
     }
 
