@@ -491,13 +491,14 @@ pub enum SandboxSessionBusConfig {
     /// through an `xdg-dbus-proxy` that CLAI runs for each command: `gh`,
     /// `git-credential-libsecret` and `secret-tool` work, other desktop
     /// services are not there. Without the proxy (not installed, or the
-    /// Flatpak build) the bus is unfiltered, as in `Full`, and the sandbox
-    /// status says why.
+    /// Flatpak build) there is no bus, never the whole one, and the sandbox
+    /// status and each command result say why. Also what an agent saved
+    /// before the modes gets, whose switch was on or missing: the whole bus
+    /// it had reached services that start programs outside the sandbox.
+    #[default]
     KeyringOnly,
     /// The whole bus, unfiltered: any desktop service, including ones that
-    /// start programs outside the sandbox. What every agent had before the
-    /// modes, so a config that names none is `Full`.
-    #[default]
+    /// start programs outside the sandbox. Only when the user chooses it.
     Full,
 }
 
@@ -643,9 +644,11 @@ impl<'de> Deserialize<'de> for ExecutionSandboxConfig {
             network_access: stored.network_access.unwrap_or_else(|| {
                 network_access_from_legacy(stored.network, allowlist_available_here())
             }),
+            // Without a mode the agent was saved before the modes: its bus
+            // becomes keyring only, unless it was off.
             session_bus: stored.session_bus_mode.unwrap_or(match stored.session_bus {
                 Some(LegacySessionBus::Deny) => SandboxSessionBusConfig::Deny,
-                Some(LegacySessionBus::Allow) | None => SandboxSessionBusConfig::Full,
+                Some(LegacySessionBus::Allow) | None => SandboxSessionBusConfig::KeyringOnly,
             }),
             allowed_sockets: stored.allowed_sockets,
         })
@@ -1403,14 +1406,19 @@ mod tests {
         }
     }
 
+    /// q1: an agent saved before the modes with the bus on, or without the
+    /// field, moves to keyring only; one saved with a mode keeps it, Full
+    /// included.
     #[test]
-    fn a_stored_bus_mode_wins_and_without_one_only_a_legacy_deny_is_not_full() {
+    fn a_stored_bus_mode_wins_and_without_one_the_bus_is_keyring_only() {
         let read = |json: serde_json::Value| sandbox_json(json).session_bus;
         let network = serde_json::json!({ "mode": "off" });
         for (legacy, mode, expected) in [
-            (None, None, SandboxSessionBusConfig::Full),
-            (Some("allow"), None, SandboxSessionBusConfig::Full),
+            (None, None, SandboxSessionBusConfig::KeyringOnly),
+            (Some("allow"), None, SandboxSessionBusConfig::KeyringOnly),
             (Some("deny"), None, SandboxSessionBusConfig::Deny),
+            (Some("allow"), Some("full"), SandboxSessionBusConfig::Full),
+            (Some("deny"), Some("full"), SandboxSessionBusConfig::Full),
             (
                 Some("allow"),
                 Some("keyring_only"),
@@ -1459,9 +1467,10 @@ mod tests {
             SandboxSessionBusConfig::for_new_agent(false),
             SandboxSessionBusConfig::Deny
         );
+        // A config without a sandbox section loads as keyring only too.
         assert_eq!(
             ExecutionSandboxConfig::default().session_bus,
-            SandboxSessionBusConfig::Full
+            SandboxSessionBusConfig::KeyringOnly
         );
     }
 
