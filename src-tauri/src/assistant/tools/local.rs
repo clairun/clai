@@ -629,6 +629,10 @@ fn keyring_proxy(workspace_root: &Path) -> Result<Option<SessionBusProxy>, Strin
 
 /// No session bus to filter: macOS and Windows have none.
 #[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "shares the Linux signature so the call site has no cfg"
+)]
 fn keyring_proxy(_workspace_root: &Path) -> Result<Option<SessionBusProxy>, String> {
     Ok(None)
 }

@@ -324,7 +324,7 @@ mod tests {
         use std::os::unix::thread::JoinHandleExt;
         extern "C" fn ignore(_: libc::c_int) {}
         // SAFETY: a handler that does nothing, for a signal no other test uses.
-        unsafe { libc::signal(libc::SIGUSR2, ignore as libc::sighandler_t) };
+        unsafe { libc::signal(libc::SIGUSR2, ignore as *const () as libc::sighandler_t) };
         let (alive, write) = pipe().unwrap();
         let waiter = std::thread::spawn(move || wait_ready(&alive, 5_000));
         std::thread::sleep(std::time::Duration::from_millis(100));

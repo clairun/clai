@@ -21,9 +21,12 @@ mod macos_seatbelt;
 mod unsupported;
 
 pub use profile::{
-    keyring_only_unavailable_note, AllowedSocket, ProxyEndpoint, SandboxEnv, SandboxNetworkMode,
+    keyring_only_unavailable_note, ProxyEndpoint, SandboxEnv, SandboxNetworkMode,
     SandboxPathAccess, SandboxProfile, SandboxSessionBusMode, SessionBusProxy, SocketPolicy,
 };
+// Only the Linux sandbox binds granted sockets.
+#[cfg(target_os = "linux")]
+pub use profile::AllowedSocket;
 pub use runner::{run_command, SandboxCommand, SandboxCommandOutput};
 
 use serde::Serialize;
