@@ -221,7 +221,7 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
     append_tmp_mount(&mut args, command);
     append_runtime_file_binds(&mut args, in_flatpak);
     append_workspace_and_grants(&mut args, command);
-    append_socket_dir_masks(&mut args, command);
+    append_socket_masks(&mut args, command);
     append_allowed_socket_binds(&mut args, command, in_flatpak);
 
     for (key, value) in command.profile.env.iter() {
@@ -317,10 +317,20 @@ const SOCKET_DIRS: &[&str] = &[
     ".gnupg",
 ];
 
+/// How deep into a [`SOCKET_DIRS`] entry sockets are looked for: lima keeps
+/// them in `~/.lima/<instance>/sock/`.
+const SOCKET_SCAN_DEPTH: usize = 3;
+/// At most this many entries are looked at per directory, so a huge tree
+/// cannot slow every command down.
+const SOCKET_SCAN_ENTRIES: usize = 512;
+
 /// Without Landlock a socket under a grant stays connectable, read-only or
-/// not, so hide the directories in [`SOCKET_DIRS`] that a grant exposes. Best
-/// effort: sockets elsewhere stay reachable.
-fn append_socket_dir_masks(args: &mut Vec<OsString>, command: &SandboxCommand) {
+/// not, so cover each socket a grant exposes in [`SOCKET_DIRS`] with
+/// `/dev/null`. Only the sockets: the directories and their other files stay
+/// as the grants show them, so `gpg --verify` still reads `~/.gnupg` and
+/// `limactl list` still reads `~/.lima`. An allowed socket is bound later
+/// and wins. Best effort: sockets elsewhere stay reachable.
+fn append_socket_masks(args: &mut Vec<OsString>, command: &SandboxCommand) {
     let profile = &command.profile;
     if profile.sockets.confined() {
         return;
@@ -329,14 +339,44 @@ fn append_socket_dir_masks(args: &mut Vec<OsString>, command: &SandboxCommand) {
         return;
     };
     for dir in SOCKET_DIRS.iter().map(|dir| home.join(dir)) {
-        if dir.is_dir()
-            && profile
+        for socket in sockets_under(&dir) {
+            if profile
                 .filesystem
-                .covers(&dir, crate::config::FilesystemPathAccess::ReadOnly)
-        {
-            args.extend([os("--tmpfs"), os(&dir)]);
+                .covers(&socket, crate::config::FilesystemPathAccess::ReadOnly)
+            {
+                args.extend([os("--ro-bind"), os("/dev/null"), os(&socket)]);
+            }
         }
     }
+}
+
+/// The sockets in `dir` and its subdirectories, [`SOCKET_SCAN_DEPTH`] deep,
+/// without following symlinks.
+fn sockets_under(dir: &Path) -> Vec<PathBuf> {
+    use std::os::unix::fs::FileTypeExt;
+    let mut sockets = Vec::new();
+    let mut pending = vec![(dir.to_path_buf(), 1)];
+    let mut seen = 0;
+    while let Some((dir, depth)) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            seen += 1;
+            if seen > SOCKET_SCAN_ENTRIES {
+                return sockets;
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_socket() {
+                sockets.push(entry.path());
+            } else if kind.is_dir() && depth < SOCKET_SCAN_DEPTH {
+                pending.push((entry.path(), depth + 1));
+            }
+        }
+    }
+    sockets
 }
 
 /// The host sockets the agent may connect to, bound at the host path and at
@@ -1597,40 +1637,72 @@ mod tests {
         }
     }
 
-    #[test]
-    fn without_landlock_socket_dirs_a_grant_exposes_are_hidden() {
+    /// A home with gpg and lima data next to their sockets, as on a desktop.
+    fn home_with_socket_dirs() -> (
+        tempfile::TempDir,
+        PathBuf,
+        Vec<std::os::unix::net::UnixListener>,
+    ) {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
-        let workspace = home.join(".clai/workspaces/ws");
-        for dir in [".cache/ibus", ".gnupg", ".config"] {
+        for dir in [
+            ".gnupg",
+            ".lima/default/sock",
+            ".config",
+            ".clai/workspaces/ws",
+        ] {
             std::fs::create_dir_all(home.join(dir)).unwrap();
         }
-        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(home.join(".gnupg/pubring.kbx"), "keys").unwrap();
+        let listeners = [
+            ".gnupg/S.gpg-agent",
+            ".lima/default/sock/ssh.sock",
+            ".config/app.sock",
+        ]
+        .map(|socket| std::os::unix::net::UnixListener::bind(home.join(socket)).unwrap());
+        (temp, home, listeners.into())
+    }
+
+    #[test]
+    fn without_landlock_only_the_sockets_a_grant_exposes_are_hidden() {
+        let (_temp, home, _listeners) = home_with_socket_dirs();
+        let workspace = home.join(".clai/workspaces/ws");
         let mut command = sample_command();
         command.cwd = workspace.clone();
-        command.profile.filesystem = super::super::filesystem::EffectiveFilesystemPolicy::compile(
-            &workspace,
-            &[SandboxPathGrant {
-                host_path: home.clone(),
-                access: SandboxPathAccess::ReadOnly,
-            }],
-            Some(&home),
-        )
-        .unwrap();
-        let masks = |command: &SandboxCommand| {
-            let args = rendered(&bwrap_args(command).unwrap());
-            let home_bind = args
-                .windows(2)
-                .position(|w| w[0] == "--ro-bind-try" && Path::new(&w[1]) == home)
-                .unwrap();
-            args.windows(2)
-                .enumerate()
-                .filter(|(_, w)| w[0] == "--tmpfs" && Path::new(&w[1]).starts_with(&home))
-                .inspect(|(index, _)| assert!(*index > home_bind, "masks follow the grant"))
-                .map(|(_, w)| w[1].clone())
-                .filter(|path| !path.ends_with("workspaces"))
-                .collect::<Vec<_>>()
+        let grant = |path: &Path| {
+            super::super::filesystem::EffectiveFilesystemPolicy::compile(
+                &workspace,
+                &[SandboxPathGrant {
+                    host_path: path.to_path_buf(),
+                    access: SandboxPathAccess::ReadOnly,
+                }],
+                Some(&home),
+            )
+            .unwrap()
         };
+        let masks = |command: &SandboxCommand, granted: &Path| {
+            let args = rendered(&bwrap_args(command).unwrap());
+            let bind = args
+                .windows(2)
+                .position(|w| w[0] == "--ro-bind-try" && Path::new(&w[1]) == granted)
+                .unwrap();
+            assert!(
+                !args.windows(2).any(|w| w[0] == "--tmpfs"
+                    && Path::new(&w[1]).starts_with(&home)
+                    && !w[1].ends_with("workspaces")),
+                "no directory is hidden: {args:?}"
+            );
+            let mut masks: Vec<String> = args
+                .windows(3)
+                .enumerate()
+                .filter(|(_, w)| w[0] == "--ro-bind" && w[1] == "/dev/null")
+                .inspect(|(index, _)| assert!(*index > bind, "masks follow the grant"))
+                .map(|(_, w)| w[2].clone())
+                .collect();
+            masks.sort();
+            masks
+        };
+        let socket = |path: &str| home.join(path).to_string_lossy().into_owned();
         for helper in [None, Some(PathBuf::from("/opt/h"))] {
             command.profile.sockets = SocketPolicy {
                 helper,
@@ -1638,13 +1710,73 @@ mod tests {
                 allowed: Vec::new(),
                 skipped: Vec::new(),
             };
+            command.profile.filesystem = grant(&home);
             assert_eq!(
-                masks(&command),
-                [".cache/ibus", ".gnupg"].map(|dir| home.join(dir).to_string_lossy().into_owned())
+                masks(&command, &home),
+                [
+                    socket(".gnupg/S.gpg-agent"),
+                    socket(".lima/default/sock/ssh.sock")
+                ]
+            );
+            // A grant on the directory itself keeps its files, not its socket.
+            command.profile.filesystem = grant(&home.join(".gnupg"));
+            assert_eq!(
+                masks(&command, &home.join(".gnupg")),
+                [socket(".gnupg/S.gpg-agent")]
             );
         }
         command.profile.sockets.kernel_confines = true;
-        assert_eq!(masks(&command), Vec::<String>::new());
+        assert_eq!(masks(&command, &home.join(".gnupg")), Vec::<String>::new());
+    }
+
+    /// M3: on a kernel without Landlock ABI 9 a granted `~/.gnupg` stays
+    /// readable, so `gpg --verify` works, while its agent socket does not
+    /// connect.
+    #[tokio::test]
+    async fn without_landlock_a_granted_socket_dir_stays_readable() {
+        let (_temp, home, _listeners) = home_with_socket_dirs();
+        let workspace = home.join(".clai/workspaces/ws");
+        let gnupg = home.join(".gnupg");
+        let mut profile = SandboxProfile::for_test(
+            workspace.clone(),
+            vec![SandboxPathGrant {
+                host_path: gnupg.clone(),
+                access: SandboxPathAccess::ReadOnly,
+            }],
+            SandboxNetworkMode::Disabled,
+            SandboxSessionBusMode::Deny,
+            SandboxEnv::filtered_from_iter(
+                [("PATH", "/usr/bin:/bin")],
+                &home,
+                SandboxSessionBusMode::Deny,
+            ),
+            None,
+        );
+        profile.sockets.kernel_confines = false;
+        let script = r#"import socket, sys
+def reach(address):
+    try:
+        socket.socket(socket.AF_UNIX).connect(address)
+        return "ok"
+    except OSError as error:
+        return type(error).__name__
+print(open(sys.argv[1] + "/pubring.kbx").read(), reach(sys.argv[1] + "/S.gpg-agent"))
+"#;
+        let command = SandboxCommand {
+            argv: vec![os("python3"), os("-c"), os(script), os(&gnupg)],
+            cwd: workspace,
+            timeout_ms: 20_000,
+            max_output_chars: 2_000,
+            profile,
+        };
+        let Some(output) = run_or_skip(command).await else {
+            return;
+        };
+        assert_eq!(
+            output.stdout.trim(),
+            "keys ConnectionRefusedError",
+            "{output:?}"
+        );
     }
 
     /// E2/E3: in Host network, with a read grant on a directory that holds a
@@ -1741,6 +1873,7 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
         std::fs::create_dir_all(home.join(".docker/run")).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = home.join(".docker/run/docker.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         let mut command = sample_command();
         command.cwd = workspace.clone();
         command.profile.filesystem = super::super::filesystem::EffectiveFilesystemPolicy::compile(
@@ -1765,9 +1898,9 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
         let args = rendered(&bwrap_args(&command).unwrap());
         let (socket, host) = (socket.to_string_lossy(), host.to_string_lossy());
         let mask = args
-            .windows(2)
-            .position(|w| w[0] == "--tmpfs" && w[1].ends_with(".docker/run"))
-            .expect("the directory is masked without Landlock");
+            .windows(3)
+            .position(|w| w == ["--ro-bind", "/dev/null", &*socket])
+            .expect("the socket is masked without Landlock");
         let bound = |name: &str| {
             args.windows(3)
                 .position(|w| w == ["--ro-bind", &*host, name])
