@@ -1032,7 +1032,7 @@ async fn execute_fs_request_grant(
         canonicalize_requested_path(&params.path, crate::paths::real_home().as_deref())?;
     let canonical_str = agent_path_string(&canonical);
 
-    // If the path is already covered (by extra_paths, the preset, or an
+    // If the path is already granted (by extra_paths, the preset, or an
     // earlier session grant), short-circuit — no user prompt, just say yes.
     // This keeps repeated requests cheap and avoids modal spam when the LLM
     // forgets it already has the grant.
@@ -1046,7 +1046,7 @@ async fn execute_fs_request_grant(
              agents write only under their own `.clai/memory/`"
         ));
     }
-    if filesystem.covers(&canonical, params.access) {
+    if already_granted(&filesystem, &canonical, params.access) {
         return Ok(serde_json::json!({
             "granted": true,
             "path": canonical_str,
@@ -1101,6 +1101,29 @@ async fn execute_fs_request_grant(
             }))
         }
     }
+}
+
+/// Whether the agent's grants answer a request for `path`. On Linux a
+/// socket needs a grant on itself: a folder grant shows the socket, but
+/// commands cannot connect to it.
+fn already_granted(
+    filesystem: &EffectiveFilesystemPolicy,
+    path: &Path,
+    access: FilesystemPathAccess,
+) -> bool {
+    filesystem.covers(path, access)
+        && (!is_socket(path) || filesystem.path_grants.iter().any(|g| g.host_path == path))
+}
+
+#[cfg(target_os = "linux")]
+fn is_socket(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    fs::metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_socket(_path: &Path) -> bool {
+    false
 }
 
 /// Turn the agent's requested path into the identity the compiled policy
@@ -3282,6 +3305,31 @@ mod tests {
         let sockets = sockets_for(workspace.path(), Vec::new(), run_only);
         assert_eq!(sockets.allowed.len(), 1, "{sockets:?}");
         assert_eq!(sockets.allowed[0].host, socket);
+    }
+
+    /// The hint sends the agent to `fs_request_grant` for a socket; a folder
+    /// grant over it must not answer that request without a card.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_under_a_granted_folder_still_needs_its_own_grant() {
+        let workspace = tempdir().unwrap();
+        let (dir, socket, _listener) = listening_socket();
+        let file = dir.path().canonicalize().unwrap().join("notes.txt");
+        fs::write(&file, "").unwrap();
+        let read = FilesystemPathAccess::ReadOnly;
+        let context = context_with_grants(workspace.path(), vec![grant_on(dir.path(), read)]);
+        let filesystem = filesystem_policy(&context).unwrap();
+        assert!(already_granted(&filesystem, &file, read));
+        assert!(!already_granted(&filesystem, &socket, read));
+
+        context.add_session_grant(grant_on(&socket, read));
+        let filesystem = filesystem_policy(&context).unwrap();
+        assert!(already_granted(&filesystem, &socket, read));
+        assert!(!already_granted(
+            &filesystem,
+            &socket,
+            FilesystemPathAccess::ReadWrite
+        ));
     }
 
     /// H2: a directory grant shows a socket in it, but does not let a
