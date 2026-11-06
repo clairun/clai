@@ -102,7 +102,16 @@ describe('AppRoutes', () => {
     vi.unstubAllGlobals();
   });
 
-  it('opens on the fleet page on first launch', () => {
+  it('opens the workspaces page on first launch', () => {
+    renderAt('/');
+    expect(screen.getByTestId('fleet-layout')).toContainElement(screen.getByTestId('fleet-index'));
+    expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/workspace$/);
+    expect(screen.queryByTestId('fleet-page')).not.toBeInTheDocument();
+  });
+
+  it('reopens on the fleet when the fleet was the last view', () => {
+    visit('/fleet');
+
     renderAt('/');
     expect(screen.getByTestId('fleet-page')).toBeInTheDocument();
   });
@@ -187,10 +196,10 @@ describe('AppRoutes', () => {
   });
 
   it('replaces the redirected entry so Back leaves the app instead of looping', () => {
-    // Without `replace`, `/` pushes `/fleet`; Back then returns to `/`, which
-    // redirects forward again and the user can never navigate out.
+    // Without `replace`, `/` pushes `/workspace`; Back then returns to `/`,
+    // which redirects forward again and the user can never navigate out.
     renderEntries(['/somewhere', '/']);
-    expect(screen.getByTestId('pathname')).toHaveTextContent('/fleet');
+    expect(screen.getByTestId('pathname')).toHaveTextContent(/^\/workspace$/);
 
     fireEvent.click(screen.getByText('back'));
     expect(screen.getByTestId('pathname')).toHaveTextContent('/somewhere');

@@ -10,15 +10,17 @@ import { listWorkspaces } from './workspace/client';
 import FleetPage from './pages/FleetPage';
 
 // The app opens where the user last was: the Fleet (`/fleet`) or a workspace
-// (`/workspace/:id`). A remembered workspace that no longer exists, or nothing
-// remembered yet, opens the Fleet. The Fleet shows one card per recently
-// active workspace, no rail. The workspaces page is a master-detail view:
+// (`/workspace/:id`). A remembered workspace that no longer exists opens the
+// Fleet; nothing remembered yet (first launch) opens the workspaces page,
+// whose conversation is easier to start with. The Fleet shows one card per
+// recently active workspace, no rail. The workspaces page is a master-detail view:
 // `FleetLayout` renders the persistent workspace rail plus an `<Outlet>`.
 // `/workspace` auto-selects the most-recent workspace (FleetIndex), and
 // `/workspace/:id` renders the full Workspace view in the same shell, so
 // the rail stays mounted across navigations.
 const LAST_VIEW_KEY = 'clai.lastView';
 const FLEET_PATH = '/fleet';
+const WORKSPACES_PATH = '/workspace';
 const WORKSPACE_PATH = '/workspace/:workspaceId';
 
 const RememberView = () => {
@@ -28,7 +30,7 @@ const RememberView = () => {
     try {
       localStorage.setItem(LAST_VIEW_KEY, pathname);
     } catch {
-      // Not remembered; the next launch opens the Fleet.
+      // Not remembered; the next launch opens the workspaces page.
     }
   }, [pathname]);
   return null;
@@ -64,7 +66,7 @@ const StartView = () => {
   return workspaceId ? (
     <ReopenWorkspace workspaceId={workspaceId} />
   ) : (
-    <Navigate to={FLEET_PATH} replace />
+    <Navigate to={lastView ? FLEET_PATH : WORKSPACES_PATH} replace />
   );
 };
 
@@ -76,7 +78,7 @@ const AppRoutes = () => (
         <Route path="/" element={<StartView />} />
         <Route path={FLEET_PATH} element={<FleetPage />} />
         <Route element={<FleetLayout />}>
-          <Route path="/workspace" element={<FleetIndex />} />
+          <Route path={WORKSPACES_PATH} element={<FleetIndex />} />
           <Route path={WORKSPACE_PATH} element={<Workspace />} />
         </Route>
         <Route path="*" element={<NotFound />} />
