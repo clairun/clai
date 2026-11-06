@@ -94,6 +94,9 @@ pub struct SocketPolicy {
     /// Host sockets the agent may connect to: bound into the sandbox and
     /// allowed by Landlock.
     pub allowed: Vec<AllowedSocket>,
+    /// Allowed sockets refused for this command, each with the reason,
+    /// worded for the user.
+    pub skipped: Vec<String>,
 }
 
 /// A host socket the agent may connect to, bound at `host`, where it

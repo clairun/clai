@@ -398,6 +398,9 @@ fn bash_exec_result(
             "hint": SOCKET_HINT,
         });
     }
+    if !sockets.skipped.is_empty() {
+        result["allowedSocketsSkipped"] = serde_json::json!(sockets.skipped);
+    }
     if let Some(reason) = session_bus_unavailable {
         result["sessionBus"] = keyring_only_unavailable_note(reason).into();
     }
@@ -540,12 +543,17 @@ fn sandbox_profile(
     // socket" card) would be merged into the saved one here, as
     // `filesystem_policy` merges `session_grants_snapshot`.
     #[cfg(target_os = "linux")]
-    let sockets = SocketPolicy {
-        allowed: crate::assistant::sandbox::resolve_allowed_sockets(
+    let sockets = {
+        let (allowed, skipped) = crate::assistant::sandbox::resolve_allowed_sockets(
             &context.run_context.execution.sandbox.allowed_sockets,
             filesystem.home.as_deref(),
-        ),
-        ..crate::assistant::sandbox::socket_policy()
+            &|path| filesystem.covers(path, FilesystemPathAccess::ReadWrite),
+        );
+        SocketPolicy {
+            allowed,
+            skipped,
+            ..crate::assistant::sandbox::socket_policy()
+        }
     };
     #[cfg(not(target_os = "linux"))]
     let sockets = Default::default();
@@ -2882,6 +2890,7 @@ mod tests {
             helper: Some(PathBuf::from("/opt/h")),
             kernel_confines: true,
             allowed: Vec::new(),
+            skipped: Vec::new(),
         };
         let denied = output(
             false,
@@ -3124,9 +3133,12 @@ mod tests {
         let mut context = context_with_grants(workspace.path(), Vec::new());
         let mut execution = context.run_context.execution.clone();
         execution.sandbox.network_access = network(NetworkMode::Off);
+        let in_workspace = workspace.path().canonicalize().unwrap().join("dev.sock");
+        let _dev = std::os::unix::net::UnixListener::bind(&in_workspace).unwrap();
         execution.sandbox.allowed_sockets = vec![
             socket.display().to_string(),
             sockets.path().join("gone.sock").display().to_string(),
+            in_workspace.display().to_string(),
         ];
         context.run_context = std::sync::Arc::new(RunContext {
             execution,
@@ -3146,6 +3158,22 @@ mod tests {
                 path: socket.clone(),
                 host: socket,
             }]
+        );
+        // The workspace is writable: a command could swap the socket for a
+        // link to another one, so it is refused and the result says so.
+        assert_eq!(profile.sockets.skipped.len(), 1, "{:?}", profile.sockets);
+        let output = SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(0),
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let result = bash_exec_result(&output, &RefusedTargets::default(), &profile.sockets, None);
+        let skipped = result["allowedSocketsSkipped"][0].as_str().unwrap();
+        assert!(
+            skipped.starts_with(&in_workspace.display().to_string()),
+            "{skipped}"
         );
     }
 

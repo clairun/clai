@@ -1636,6 +1636,7 @@ mod tests {
                 helper,
                 kernel_confines: false,
                 allowed: Vec::new(),
+                skipped: Vec::new(),
             };
             assert_eq!(
                 masks(&command),
@@ -1703,6 +1704,7 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
                 helper,
                 kernel_confines: true,
                 allowed: Vec::new(),
+                skipped: Vec::new(),
             };
             SandboxCommand {
                 argv: vec![
@@ -1758,6 +1760,7 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
                 path: socket.clone(),
                 host: host.clone(),
             }],
+            skipped: Vec::new(),
         };
         let args = rendered(&bwrap_args(&command).unwrap());
         let (socket, host) = (socket.to_string_lossy(), host.to_string_lossy());
@@ -1852,6 +1855,7 @@ print(*[reach(address) for address in sys.argv[1:]])
                     host: sockets[2].clone(),
                 },
             ],
+            skipped: Vec::new(),
         };
         let mut argv = vec![os("python3"), os("-c"), os(script)];
         argv.extend(sockets.iter().chain([&named]).map(os));
@@ -1906,6 +1910,7 @@ print(*[reach(address) for address in sys.argv[1:]])
             helper: Some(helper),
             kernel_confines: super::super::landlock_abi() >= 9,
             allowed: Vec::new(),
+            skipped: Vec::new(),
         };
         profile.session_bus_proxy = Some(plan);
         let script = "for name in org.freedesktop.secrets org.example.Spawner; do \

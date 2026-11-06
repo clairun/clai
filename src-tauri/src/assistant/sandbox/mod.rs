@@ -106,6 +106,7 @@ pub(crate) fn socket_policy() -> SocketPolicy {
             helper: helper::locate().ok(),
             kernel_confines: landlock_abi() >= 9,
             allowed: Vec::new(),
+            skipped: Vec::new(),
         })
         .clone()
 }
@@ -113,37 +114,123 @@ pub(crate) fn socket_policy() -> SocketPolicy {
 /// The agent's allowed sockets that are sockets now: `~/` expanded with
 /// `home`, and the host path with symlinks resolved (`/var/run` is `/run`).
 /// Any other entry is skipped with a log note: a socket that is missing
-/// at launch is a stopped service, not a broken config.
+/// at launch is a stopped service, not a broken config. An entry refused
+/// because its path passes where the sandbox can write (`writable`) is also
+/// returned, with the reason, for the command's result.
 #[cfg(target_os = "linux")]
 pub(crate) fn resolve_allowed_sockets(
     entries: &[String],
     home: Option<&std::path::Path>,
-) -> Vec<AllowedSocket> {
-    let mut sockets = Vec::new();
+    writable: &dyn Fn(&std::path::Path) -> bool,
+) -> (Vec<AllowedSocket>, Vec<String>) {
+    let (mut sockets, mut refused) = (Vec::new(), Vec::new());
     for entry in entries {
-        match host_socket(entry, home) {
+        match host_socket(entry, home, writable) {
             Ok(socket) if !sockets.contains(&socket) => sockets.push(socket),
             Ok(_) => {}
-            Err(reason) => tracing::warn!("Allowed socket {entry} skipped: {reason}"),
+            Err(SocketSkip::Absent(reason)) => {
+                tracing::warn!("Allowed socket {entry} skipped: {reason}");
+            }
+            Err(SocketSkip::Refused(reason)) => {
+                tracing::warn!("Allowed socket {entry} refused: {reason}");
+                refused.push(format!("{entry}: {reason}"));
+            }
         }
     }
-    sockets
+    (sockets, refused)
+}
+
+/// Why an allowed socket is left out of a command.
+#[cfg(target_os = "linux")]
+enum SocketSkip {
+    /// Not there now, or not a socket.
+    Absent(String),
+    /// Not safe to hand over, whatever is there.
+    Refused(String),
 }
 
 #[cfg(target_os = "linux")]
-fn host_socket(entry: &str, home: Option<&std::path::Path>) -> Result<AllowedSocket, String> {
+fn host_socket(
+    entry: &str,
+    home: Option<&std::path::Path>,
+    writable: &dyn Fn(&std::path::Path) -> bool,
+) -> Result<AllowedSocket, SocketSkip> {
     use std::os::unix::fs::FileTypeExt;
+    let absent = |reason: String| SocketSkip::Absent(reason);
     let path = match (entry.strip_prefix("~/"), home) {
         (Some(rest), Some(home)) => home.join(rest),
-        (Some(_), None) => return Err("the home directory is unknown".to_string()),
+        (Some(_), None) => return Err(absent("the home directory is unknown".to_string())),
         (None, _) => std::path::PathBuf::from(entry),
     };
-    let host = std::fs::canonicalize(&path).map_err(|error| error.to_string())?;
-    let meta = host.metadata().map_err(|error| error.to_string())?;
+    let host = resolve_unwritable(&path, writable)?;
+    let meta = host.metadata().map_err(|error| absent(error.to_string()))?;
     if !meta.file_type().is_socket() {
-        return Err("it is not a socket".to_string());
+        return Err(absent("it is not a socket".to_string()));
     }
     Ok(AllowedSocket { path, host })
+}
+
+/// The host path `path` names, resolved as `canonicalize` does, but refused
+/// when anything on the way (a directory, a symlink or the socket itself)
+/// lies where the sandbox can write: a command could put a link there to
+/// the session bus or the systemd manager, and the next command would be
+/// handed that.
+#[cfg(target_os = "linux")]
+fn resolve_unwritable(
+    path: &std::path::Path,
+    writable: &dyn Fn(&std::path::Path) -> bool,
+) -> Result<std::path::PathBuf, SocketSkip> {
+    use std::ffi::OsString;
+    use std::path::{Component, Path, PathBuf};
+    const MAX_LINKS: usize = 40;
+    fn push_reversed(pending: &mut Vec<OsString>, path: &Path) {
+        let parts = path.components().filter_map(|part| match part {
+            Component::Normal(name) => Some(name.to_os_string()),
+            Component::ParentDir => Some(OsString::from("..")),
+            Component::RootDir | Component::CurDir | Component::Prefix(_) => None,
+        });
+        let parts: Vec<OsString> = parts.collect();
+        pending.extend(parts.into_iter().rev());
+    }
+    if !path.is_absolute() {
+        return Err(SocketSkip::Refused(
+            "it is not an absolute path".to_string(),
+        ));
+    }
+    let mut resolved = PathBuf::from("/");
+    let mut pending = Vec::new();
+    push_reversed(&mut pending, path);
+    let mut links = 0;
+    while let Some(part) = pending.pop() {
+        if part == ".." {
+            resolved.pop();
+            continue;
+        }
+        let next = resolved.join(&part);
+        if writable(&next) {
+            return Err(SocketSkip::Refused(format!(
+                "sandboxed commands can write at {}, so a command could swap it for a link \
+                 to another socket",
+                next.display()
+            )));
+        }
+        let absent = |error: std::io::Error| SocketSkip::Absent(error.to_string());
+        let metadata = std::fs::symlink_metadata(&next).map_err(absent)?;
+        if !metadata.file_type().is_symlink() {
+            resolved = next;
+            continue;
+        }
+        links += 1;
+        if links > MAX_LINKS {
+            return Err(SocketSkip::Absent("too many symbolic links".to_string()));
+        }
+        let target = std::fs::read_link(&next).map_err(absent)?;
+        if target.is_absolute() {
+            resolved = PathBuf::from("/");
+        }
+        push_reversed(&mut pending, &target);
+    }
+    Ok(resolved)
 }
 
 #[cfg(target_os = "linux")]
@@ -308,20 +395,72 @@ mod tests {
             "~/file.sock".to_string(),
             "~/missing.sock".to_string(),
         ];
+        let nowhere = |_: &std::path::Path| false;
         assert_eq!(
-            resolve_allowed_sockets(&entries, Some(&home)),
-            [
-                AllowedSocket {
-                    path: home.join("var-run/docker.sock"),
-                    host: socket.clone(),
-                },
-                AllowedSocket {
-                    path: socket.clone(),
-                    host: socket,
-                },
-            ]
+            resolve_allowed_sockets(&entries, Some(&home), &nowhere),
+            (
+                vec![
+                    AllowedSocket {
+                        path: home.join("var-run/docker.sock"),
+                        host: socket.clone(),
+                    },
+                    AllowedSocket {
+                        path: socket.clone(),
+                        host: socket,
+                    },
+                ],
+                Vec::<String>::new()
+            )
         );
-        assert!(resolve_allowed_sockets(&entries[..1], None).is_empty());
+        assert!(resolve_allowed_sockets(&entries[..1], None, &nowhere)
+            .0
+            .is_empty());
+    }
+
+    /// M2: a command can write in the workspace, so a socket named there,
+    /// or reached through a link there, is refused: the command could make
+    /// it a link to the session bus or the systemd manager.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_allowed_socket_reached_through_a_writable_place_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let (workspace, outside) = (root.join("ws"), root.join("outside"));
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        // The host socket a planted link would lead to.
+        let bus = outside.join("bus");
+        let _listener = std::os::unix::net::UnixListener::bind(&bus).unwrap();
+        // In the workspace: a link where a dev server socket was.
+        std::os::unix::fs::symlink(&bus, workspace.join("dev.sock")).unwrap();
+        // Outside: a link that leads into the workspace, then to the bus.
+        std::os::unix::fs::symlink(workspace.join("dev.sock"), outside.join("via.sock")).unwrap();
+        // Outside: a directory link, as /var/run, straight to the socket.
+        std::os::unix::fs::symlink(&outside, root.join("run")).unwrap();
+        let writable = |path: &std::path::Path| path.starts_with(&workspace);
+        let named = |path: &std::path::Path| path.to_string_lossy().into_owned();
+        let entries = [
+            named(&workspace.join("dev.sock")),
+            named(&outside.join("via.sock")),
+            named(&root.join("run/bus")),
+        ];
+        let (allowed, refused) = resolve_allowed_sockets(&entries, None, &writable);
+        assert_eq!(
+            allowed,
+            [AllowedSocket {
+                path: root.join("run/bus"),
+                host: bus.clone(),
+            }]
+        );
+        assert_eq!(refused.len(), 2, "{refused:?}");
+        assert!(refused[0].starts_with(&entries[0]), "{refused:?}");
+        assert!(refused[1].starts_with(&entries[1]), "{refused:?}");
+        assert!(refused[1].contains("can write"), "{refused:?}");
+
+        // Without the writable check both links would hand over the bus.
+        let (allowed, _) = resolve_allowed_sockets(&entries[..2], None, &|_| false);
+        assert!(allowed.iter().all(|socket| socket.host == bus));
+        assert_eq!(allowed.len(), 2);
     }
 
     #[cfg(target_os = "linux")]
@@ -333,6 +472,7 @@ mod tests {
                 helper,
                 kernel_confines,
                 allowed: Vec::new(),
+                skipped: Vec::new(),
             })
         };
         assert_eq!(reason(helper.clone(), true), None);
