@@ -516,7 +516,8 @@ impl SandboxSessionBusConfig {
 
 /// `sessionBus` as saved before the modes. Still written, derived from the
 /// mode, so an older build loads the agent: `KeyringOnly` reads there as
-/// `allow`, the closest it has.
+/// `deny`, which fails safe; tools there ask for a token instead of getting
+/// the whole bus.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 enum LegacySessionBus {
@@ -626,9 +627,10 @@ impl Serialize for ExecutionSandboxConfig {
             network_access: Some(self.network_access.clone()),
             session_bus: Some(match self.session_bus {
                 SandboxSessionBusConfig::Deny => LegacySessionBus::Deny,
-                SandboxSessionBusConfig::KeyringOnly | SandboxSessionBusConfig::Full => {
-                    LegacySessionBus::Allow
+                SandboxSessionBusConfig::Deny | SandboxSessionBusConfig::KeyringOnly => {
+                    LegacySessionBus::Deny
                 }
+                SandboxSessionBusConfig::Full => LegacySessionBus::Allow,
             }),
             session_bus_mode: Some(self.session_bus),
             allowed_sockets: self.allowed_sockets.clone(),
@@ -1441,11 +1443,7 @@ mod tests {
     fn saving_writes_the_bus_mode_and_the_closest_legacy_switch() {
         for (mode, json_mode, legacy) in [
             (SandboxSessionBusConfig::Deny, "deny", "deny"),
-            (
-                SandboxSessionBusConfig::KeyringOnly,
-                "keyring_only",
-                "allow",
-            ),
+            (SandboxSessionBusConfig::KeyringOnly, "keyring_only", "deny"),
             (SandboxSessionBusConfig::Full, "full", "allow"),
         ] {
             let mut config = policy(NetworkMode::Off);
@@ -1658,13 +1656,23 @@ mod tests {
         Disabled,
     }
 
+    /// q2: an older build reads keyring only as no bus, and Full as the bus.
     #[test]
-    fn an_older_build_reads_a_keyring_only_bus_as_allowed() {
-        let mut config = policy(NetworkMode::Off);
-        config.session_bus = SandboxSessionBusConfig::KeyringOnly;
-        let previous: PreviousSandboxConfig =
-            serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
-        assert_eq!(previous.session_bus, PreviousSessionBus::Allow);
+    fn an_older_build_reads_a_keyring_only_bus_as_off() {
+        for (mode, expected) in [
+            (
+                SandboxSessionBusConfig::KeyringOnly,
+                PreviousSessionBus::Deny,
+            ),
+            (SandboxSessionBusConfig::Deny, PreviousSessionBus::Deny),
+            (SandboxSessionBusConfig::Full, PreviousSessionBus::Allow),
+        ] {
+            let mut config = policy(NetworkMode::Off);
+            config.session_bus = mode;
+            let previous: PreviousSandboxConfig =
+                serde_json::from_value(serde_json::to_value(config).unwrap()).unwrap();
+            assert_eq!(previous.session_bus, expected, "{mode:?}");
+        }
     }
 
     #[test]
