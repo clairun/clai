@@ -98,6 +98,18 @@ const DEFAULT_ASK_FIRST = [
 
 const clean = (items: string[] = []): string[] => items.map((item) => item.trim()).filter(Boolean);
 
+// The bus mode as the backend reads a stored agent (`ExecutionSandboxConfig`
+// deserialize, config/types.rs): one saved before the modes has only the
+// legacy `sessionBus` switch and gets keyring only unless that was off. A
+// draft without the backend defaults has no sandbox at all: no bus.
+const storedBusMode = (
+  sandbox: (Partial<ExecutionSandboxConfig> & { sessionBus?: string }) | undefined,
+): SandboxSessionBusConfig => {
+  if (!sandbox) return 'deny';
+  if (sandbox.sessionBusMode) return sandbox.sessionBusMode;
+  return sandbox.sessionBus === 'deny' ? 'deny' : 'keyring_only';
+};
+
 const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessDraft => ({
   grants: (execution.filesystem?.extraPaths || [])
     .map((grant: FilesystemPathGrant) => ({
@@ -109,8 +121,7 @@ const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessD
   shellMode: execution.shell?.mode || 'off',
   askFirst: clean(execution.shell?.askFirstCommandPrefixes || DEFAULT_ASK_FIRST),
   web: execution.web?.enabled || false,
-  sessionBus: (execution.sandbox?.sessionBusMode ?? 'deny') !== 'deny',
-  sessionBusMode: execution.sandbox?.sessionBusMode ?? 'deny',
+  sessionBusMode: storedBusMode(execution.sandbox),
   networkAccess: execution.sandbox?.networkAccess ?? null,
   allowedSockets: execution.sandbox?.allowedSockets ?? [],
 });
@@ -119,15 +130,9 @@ const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessD
 // `networkAccess` may be missing.
 type SandboxDraft = Omit<ExecutionSandboxConfig, 'networkAccess'> & Partial<Pick<ExecutionSandboxConfig, 'networkAccess'>>;
 
-// Turning the switch on from off gives the keyring only.
-const busModeFrom = ({ sessionBus, sessionBusMode }: AccessDraft): SandboxSessionBusConfig => {
-  if (!sessionBus) return 'deny';
-  return sessionBusMode === 'deny' ? 'keyring_only' : sessionBusMode;
-};
-
 const executionFrom = (access: AccessDraft): ExecutionCapabilityConfig => {
   const sandbox: SandboxDraft = {
-    sessionBusMode: busModeFrom(access),
+    sessionBusMode: access.sessionBusMode,
     allowedSockets: access.allowedSockets,
     ...(access.networkAccess ? { networkAccess: access.networkAccess } : {}),
   };

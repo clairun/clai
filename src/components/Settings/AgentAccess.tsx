@@ -1,6 +1,6 @@
 /**
- * What an agent may do on this machine: path grants, network, shell, web
- * and the session bus. The overview shows it as one summary line; the full editor
+ * What an agent may do on this machine: path grants, network, shell, web,
+ * the session bus and the Unix sockets outside the sandbox. The overview shows it as one summary line; the full editor
  * is a drill-in view with paths and network on the left and the shell on the right.
  */
 
@@ -19,11 +19,7 @@ export interface AccessDraft {
   shellMode: ShellAccessMode;
   askFirst: string[];
   web: boolean;
-  /** The session bus switch: off is `deny`, on keeps `sessionBusMode`. */
-  sessionBus: boolean;
-  /** The saved bus mode; a three-way control can replace the switch. */
   sessionBusMode: SandboxSessionBusConfig;
-  /** Not edited here yet; carried so a save keeps it. */
   allowedSockets: string[];
   /** Null only when the backend defaults could not be loaded; saving then lets the backend pick. */
   networkAccess: NetworkPolicy | null;
@@ -64,6 +60,27 @@ const NETWORK_MODES: { mode: NetworkMode; label: string; hint: string }[] = [
     hint: 'Reaches any host, including services on this computer and your local network.',
   },
 ];
+
+const BUS_MODES: { mode: SandboxSessionBusConfig; label: string; hint: string }[] = [
+  {
+    mode: 'deny',
+    label: 'Off',
+    hint: 'No desktop services. Tools that read the keyring, such as gh, ask for a token instead.',
+  },
+  {
+    mode: 'keyring_only',
+    label: 'Keyring only',
+    hint: 'Only the system keyring, so gh, git-credential-libsecret and secret-tool work. Nothing else on your desktop is reachable.',
+  },
+  {
+    mode: 'full',
+    label: 'Full',
+    hint: 'Every desktop service, unfiltered, including ones that can start programs outside the sandbox. Use only for agents you trust.',
+  },
+];
+
+// A container engine runs containers as root, outside the network mode.
+const CONTAINER_ENGINE_SOCKET = /(docker|podman|containerd)\.sock$/;
 
 const INVALID_CHARACTERS = 'Use only letters, digits, hyphens and dots.';
 
@@ -167,12 +184,13 @@ export const accessSummary = (draft: AccessDraft, sandbox: SandboxStatus | null 
   networkSummary(draft.networkAccess, sandbox),
   draft.web ? 'Web on' : 'Web off',
   busSummary(draft, sandbox),
+  ...(draft.allowedSockets.length ? [plural(draft.allowedSockets.length, 'socket')] : []),
 ];
 
 /** Which bus the agent gets: only Full is the whole bus, and keyring only
  * where it cannot be filtered is no bus at all. */
 const busSummary = (draft: AccessDraft, sandbox: SandboxStatus | null): string => {
-  if (!draft.sessionBus) return 'Bus off';
+  if (draft.sessionBusMode === 'deny') return 'Bus off';
   if (draft.sessionBusMode === 'full') return 'Bus: full';
   if (sandbox && !sandbox.sessionBusFilterAvailable) return 'Bus off (keyring only unavailable here)';
   return 'Bus: keyring only';
@@ -304,6 +322,89 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
   );
 };
 
+/** Linux only: how much of the desktop session bus the shell reaches. */
+const SessionBusSection = ({ mode, status, onChange, disabled, headingId }: {
+  mode: SandboxSessionBusConfig;
+  status: SandboxStatus;
+  onChange: (mode: SandboxSessionBusConfig) => void;
+  disabled?: boolean;
+  headingId: string;
+}) => {
+  const hint = BUS_MODES.find((m) => m.mode === mode)?.hint;
+  const hintId = `${headingId}-hint`;
+  const reasonId = `${headingId}-reason`;
+  // The backend reason is a whole sentence: why, and that Full is the way out.
+  const unfiltered = mode === 'keyring_only' && !status.sessionBusFilterAvailable;
+  return (
+    <>
+      <h4 className={styles.subheading} id={headingId}>Session bus</h4>
+      <div
+        className={form.segmented}
+        role="group"
+        aria-labelledby={headingId}
+        aria-describedby={unfiltered ? `${hintId} ${reasonId}` : hintId}
+      >
+        {BUS_MODES.map(({ mode: option, label }) => (
+          <button
+            key={option}
+            type="button"
+            className={form.segment}
+            aria-pressed={mode === option}
+            onClick={() => onChange(option)}
+            disabled={disabled}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+      <p className={mode === 'full' ? form.hintWarning : form.hint} id={hintId}>{hint}</p>
+      {unfiltered && (
+        <p className={form.hintWarning} id={reasonId}>
+          {status.sessionBusFilterUnavailableReason ?? 'Keyring only is not available here, so this agent gets no session bus.'}
+        </p>
+      )}
+    </>
+  );
+};
+
+/** Linux only: Unix sockets outside the sandbox, such as Docker's. */
+const AllowedSocketsSection = ({ sockets, status, onChange, disabled, headingId }: {
+  sockets: string[];
+  status: SandboxStatus;
+  onChange: (sockets: string[]) => void;
+  disabled?: boolean;
+  headingId: string;
+}) => (
+  <div className={styles.prefixList} role="group" aria-labelledby={headingId}>
+    <h4 className={styles.subheading} id={headingId}>Allowed sockets</h4>
+    <p className={form.hint}>
+      Unix sockets outside the sandbox the shell may connect to, such as Docker or Podman. Name one socket file
+      per entry; <code className={form.code}>~/</code> works. A socket that is not there when a command starts is skipped.
+    </p>
+    <PrefixListEditor
+      items={sockets}
+      onChange={onChange}
+      disabled={disabled}
+      label="Allowed sockets"
+      placeholder="/run/docker.sock"
+      // Saving checks the path and names a refused entry.
+      parse={(raw) => raw.trim()}
+    />
+    {sockets.some((socket) => CONTAINER_ENGINE_SOCKET.test(socket)) && (
+      <p className={form.hintWarning}>
+        Allowing a Docker, Podman or containerd socket gives this agent full control of this computer: it can start
+        a container that mounts any folder with root rights. Containers also do not follow this agent's network mode.
+      </p>
+    )}
+    {!status.socketIsolationAvailable && (
+      <p className={form.hint}>
+        Socket isolation is unavailable here: {status.socketIsolationUnavailableReason ?? 'not supported'}. Other
+        sockets that a path grant exposes stay reachable.
+      </p>
+    )}
+  </div>
+);
+
 /** `sandbox` is the form's own lookup, so Retry here updates the overview too. */
 export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onBack, context }: {
   draft: AccessDraft;
@@ -316,6 +417,8 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
 }) => {
   const headingId = useId();
   const shellHint = SHELL_MODES.find((m) => m.mode === draft.shellMode)?.hint;
+  // The bus and the sockets are what the Linux sandbox enforces.
+  const linux = sandbox.status?.backend === 'bubblewrap' ? sandbox.status : null;
 
   return (
     <section className={`${form.panel} ${form.panelFill}`}>
@@ -393,17 +496,27 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
             </div>
           )}
 
+          {linux && (
+            <>
+              <SessionBusSection
+                mode={draft.sessionBusMode}
+                status={linux}
+                onChange={(sessionBusMode) => onChange({ sessionBusMode })}
+                disabled={disabled}
+                headingId={`${headingId}-bus`}
+              />
+              <AllowedSocketsSection
+                sockets={draft.allowedSockets}
+                status={linux}
+                onChange={(allowedSockets) => onChange({ allowedSockets })}
+                disabled={disabled}
+                headingId={`${headingId}-sockets`}
+              />
+            </>
+          )}
+
           <div className={styles.switches}>
             <Switch label="Web access" hint="Fetch pages and search the web." checked={draft.web} onChange={(web) => onChange({ web })} disabled={disabled} />
-            <Switch
-              label="Session D-Bus"
-              hint={draft.sessionBusMode === 'full'
-                ? 'Every desktop service on your session bus, unfiltered, including ones that can start programs outside the sandbox.'
-                : 'Only your keyring (libsecret), so tools such as gh or git can use it; nothing else on your desktop.'}
-              checked={draft.sessionBus}
-              onChange={(sessionBus) => onChange({ sessionBus })}
-              disabled={disabled}
-            />
           </div>
         </div>
       </div>
