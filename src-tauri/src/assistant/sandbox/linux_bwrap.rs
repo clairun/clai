@@ -1789,8 +1789,7 @@ print(open(sys.argv[1] + "/pubring.kbx").read(), reach(sys.argv[1] + "/S.gpg-age
         let Some(helper) = built_helper() else {
             return;
         };
-        if super::super::landlock_abi() < 9 {
-            eprintln!("skipped: this kernel cannot confine pathname sockets");
+        if super::super::skip_below_landlock(9) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
@@ -1927,8 +1926,7 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
         let Some(helper) = built_helper() else {
             return;
         };
-        if super::super::landlock_abi() < 9 {
-            eprintln!("skipped: this kernel cannot confine pathname sockets");
+        if super::super::skip_below_landlock(9) {
             return;
         }
         let workspace = tempfile::tempdir().unwrap();

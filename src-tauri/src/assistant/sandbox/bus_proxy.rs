@@ -74,10 +74,7 @@ impl BusProxy {
         let write_fd = write.as_raw_fd();
         let mut command = Command::new(binary);
         command
-            .arg(format!("--fd={write_fd}"))
-            .arg(format!("unix:path={}", plan.bus.display()))
-            .arg(&plan.socket)
-            .args(["--filter".to_string(), format!("--talk={KEYRING}")])
+            .args(proxy_args(write_fd, plan))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -141,6 +138,20 @@ impl Drop for BusProxy {
     }
 }
 
+/// The proxy's arguments: it reports on `write_fd`, and with `--filter`
+/// forwards only calls to the keyring; everything else on the bus is hidden.
+fn proxy_args(write_fd: i32, plan: &SessionBusProxy) -> Vec<std::ffi::OsString> {
+    let mut address = std::ffi::OsString::from("unix:path=");
+    address.push(&plan.bus);
+    vec![
+        format!("--fd={write_fd}").into(),
+        address,
+        plan.socket.clone().into(),
+        "--filter".into(),
+        format!("--talk={KEYRING}").into(),
+    ]
+}
+
 fn pipe() -> Result<(File, OwnedFd), String> {
     let mut fds = [0; 2];
     // SAFETY: pipe2 fills both descriptors on success.
@@ -187,7 +198,7 @@ GLib.MainLoop().run()
         /// GObject is missing.
         pub(crate) fn start() -> Option<Self> {
             if super::unavailable_reason().is_some() {
-                eprintln!("skipped: xdg-dbus-proxy is not available");
+                skip_without_bus_proxy("xdg-dbus-proxy is not available");
                 return None;
             }
             let dir = tempfile::tempdir().unwrap();
@@ -199,7 +210,7 @@ GLib.MainLoop().run()
                 .stdout(Stdio::piped())
                 .spawn()
             else {
-                eprintln!("skipped: dbus-daemon is not available");
+                skip_without_bus_proxy("dbus-daemon is not available");
                 return None;
             };
             let mut line = String::new();
@@ -230,11 +241,22 @@ GLib.MainLoop().run()
                 _dir: dir,
             };
             if line.trim() != "ready" {
-                eprintln!("skipped: Python GObject is not available");
+                skip_without_bus_proxy("Python GObject is not available");
                 return None;
             }
             Some(bus)
         }
+    }
+
+    /// A test that needs the bus proxy tools calls this where one is missing.
+    /// It skips, unless `CLAI_REQUIRE_BUS_PROXY` is set, as in CI, which
+    /// installs them.
+    pub(crate) fn skip_without_bus_proxy(reason: &str) {
+        assert!(
+            std::env::var_os("CLAI_REQUIRE_BUS_PROXY").is_none(),
+            "CLAI_REQUIRE_BUS_PROXY is set, but this test cannot run: {reason}"
+        );
+        eprintln!("skipped: {reason}");
     }
 
     impl Drop for TestBus {
@@ -314,8 +336,27 @@ mod tests {
     }
 
     #[test]
+    fn the_proxy_filters_the_bus_down_to_the_keyring() {
+        let plan = SessionBusProxy {
+            socket: PathBuf::from("/c/.clai-net/bus-1.sock"),
+            bus: PathBuf::from("/run/user/1000/bus"),
+        };
+        assert_eq!(
+            proxy_args(7, &plan),
+            [
+                "--fd=7",
+                "unix:path=/run/user/1000/bus",
+                "/c/.clai-net/bus-1.sock",
+                "--filter",
+                "--talk=org.freedesktop.secrets",
+            ]
+        );
+    }
+
+    #[test]
     fn a_proxy_that_cannot_listen_fails_to_start() {
-        if unavailable_reason().is_some() {
+        if let Some(reason) = unavailable_reason() {
+            super::test_bus::skip_without_bus_proxy(reason);
             return;
         }
         let plan = SessionBusProxy {

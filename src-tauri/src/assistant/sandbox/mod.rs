@@ -322,6 +322,27 @@ pub(crate) fn skip_without_bwrap(reason: &str) {
     eprintln!("skipped: {reason}");
 }
 
+/// A test that needs Landlock ABI `needed` calls this, and returns when it
+/// says to skip on an older kernel. It never skips when
+/// `CLAI_REQUIRE_LANDLOCK_ABI` is `needed` or more: the test fails instead.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn skip_below_landlock(needed: i64) -> bool {
+    let abi = landlock_abi();
+    if abi >= needed {
+        return false;
+    }
+    let required = std::env::var("CLAI_REQUIRE_LANDLOCK_ABI")
+        .ok()
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(0);
+    assert!(
+        required < needed,
+        "CLAI_REQUIRE_LANDLOCK_ABI is {required}, but this kernel has Landlock ABI {abi}"
+    );
+    eprintln!("skipped: this test needs Landlock ABI {needed}; the kernel has {abi}");
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

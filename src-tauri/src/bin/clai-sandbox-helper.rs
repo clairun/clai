@@ -80,23 +80,11 @@ mod linux {
                 return 2;
             }
         };
-        let scope_abstract = !matches!(
-            mode,
-            Mode::Run {
-                host_abstract_unix: true,
-                ..
-            }
-        );
-        let allowed = match &mode {
-            Mode::Run { allow_unix, .. } => allow_unix.clone(),
-            Mode::Bridge {
-                socket, allow_unix, ..
-            } => std::iter::once(socket.clone())
-                .chain(allow_unix.iter().cloned())
-                .collect(),
-            Mode::Connect { .. } => Vec::new(),
-        };
-        if !matches!(mode, Mode::Connect { .. }) {
+        if let Some(confinement) = confinement(&mode) {
+            let Confinement {
+                allowed,
+                scope_abstract,
+            } = confinement;
             if let Err(error) = landlock::confine_unix_sockets(&allowed, scope_abstract) {
                 eprintln!("clai-sandbox-helper: cannot confine Unix sockets: {error}");
                 return 125;
@@ -111,6 +99,38 @@ mod linux {
                 ..
             } => bridge(socket, http_port, &argv),
             Mode::Connect { proxy, host, port } => connect(&proxy, &host, port),
+        }
+    }
+
+    /// The Landlock domain a mode starts its command in.
+    #[derive(Debug, PartialEq, Eq)]
+    pub(crate) struct Confinement {
+        /// The sockets made outside the sandbox the command may reach.
+        allowed: Vec<PathBuf>,
+        /// Whether host abstract sockets are refused too.
+        scope_abstract: bool,
+    }
+
+    /// Every mode that starts a command confines it; `connect` starts none.
+    pub(crate) fn confinement(mode: &Mode) -> Option<Confinement> {
+        match mode {
+            Mode::Run {
+                allow_unix,
+                host_abstract_unix,
+                ..
+            } => Some(Confinement {
+                allowed: allow_unix.clone(),
+                scope_abstract: !host_abstract_unix,
+            }),
+            Mode::Bridge {
+                socket, allow_unix, ..
+            } => Some(Confinement {
+                allowed: std::iter::once(socket.clone())
+                    .chain(allow_unix.iter().cloned())
+                    .collect(),
+                scope_abstract: true,
+            }),
+            Mode::Connect { .. } => None,
         }
     }
 
@@ -535,6 +555,15 @@ mod linux {
             #[test]
             fn a_confined_thread_reaches_only_allowed_sockets() {
                 let abi = abi();
+                let required = std::env::var("CLAI_REQUIRE_LANDLOCK_ABI")
+                    .ok()
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .unwrap_or(0);
+                // This test checks what ABI 6 and ABI 9 add.
+                assert!(
+                    abi >= required.min(9),
+                    "CLAI_REQUIRE_LANDLOCK_ABI is {required}, but this kernel has Landlock ABI {abi}"
+                );
                 let dir = tempfile::tempdir().unwrap();
                 let allowed = dir.path().join("allowed.sock");
                 let other = dir.path().join("other.sock");
@@ -695,6 +724,50 @@ mod linux {
             ] {
                 assert!(parse(args(bad)).is_err(), "{bad:?}");
             }
+        }
+
+        #[test]
+        fn every_mode_that_starts_a_command_confines_it() {
+            let confined = |argv: &[&str]| confinement(&parse(args(argv)).unwrap());
+            assert_eq!(
+                confined(&["run", "--allow-unix", "/a.sock", "--", "sh"]),
+                Some(Confinement {
+                    allowed: vec![PathBuf::from("/a.sock")],
+                    scope_abstract: true,
+                })
+            );
+            assert_eq!(
+                confined(&["run", "--host-abstract-unix", "--", "sh"]),
+                Some(Confinement {
+                    allowed: Vec::new(),
+                    scope_abstract: false,
+                })
+            );
+            let bridge = [
+                "bridge",
+                "--socket",
+                "/run/clai/net.sock",
+                "--http",
+                "3128",
+                "--allow-unix",
+                "/b.sock",
+                "--",
+                "sh",
+            ];
+            assert_eq!(
+                confined(&bridge),
+                Some(Confinement {
+                    allowed: vec![
+                        PathBuf::from("/run/clai/net.sock"),
+                        PathBuf::from("/b.sock")
+                    ],
+                    scope_abstract: true,
+                })
+            );
+            assert_eq!(
+                confined(&["connect", "--proxy", "127.0.0.1:3128", "github.com", "22"]),
+                None
+            );
         }
 
         #[test]
