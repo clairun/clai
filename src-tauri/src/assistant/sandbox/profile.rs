@@ -39,6 +39,19 @@ pub struct SandboxProfile {
     /// backend must fall back to an ephemeral per-command temp dir.
     pub scratch_tmp: Option<PathBuf>,
     pub sockets: SocketPolicy,
+    /// With [`SandboxSessionBusMode::Allow`]: the keyring-only proxy to bind
+    /// in place of the session bus. `None` binds the bus itself.
+    pub session_bus_proxy: Option<SessionBusProxy>,
+}
+
+/// The socket of the filtering proxy CLAI runs for one command (see
+/// `bus_proxy`), and the session bus socket it stands in for: the sandbox
+/// sees the proxy at the bus path.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionBusProxy {
+    pub socket: PathBuf,
+    pub bus: PathBuf,
 }
 
 /// How the Linux sandbox confines Unix sockets: `clai-sandbox-helper` starts
@@ -228,6 +241,7 @@ impl SandboxProfile {
             env,
             scratch_tmp,
             sockets: SocketPolicy::default(),
+            session_bus_proxy: None,
         }
     }
 }

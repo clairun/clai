@@ -1,5 +1,7 @@
 //! OS-backed local execution sandboxing.
 
+#[cfg(target_os = "linux")]
+pub mod bus_proxy;
 pub mod filesystem;
 #[cfg(target_os = "linux")]
 pub mod helper;
@@ -20,7 +22,7 @@ mod unsupported;
 
 pub use profile::{
     ProxyEndpoint, SandboxEnv, SandboxNetworkMode, SandboxPathAccess, SandboxProfile,
-    SandboxSessionBusMode, SocketPolicy,
+    SandboxSessionBusMode, SessionBusProxy, SocketPolicy,
 };
 pub use runner::{run_command, SandboxCommand, SandboxCommandOutput};
 
@@ -56,6 +58,11 @@ pub struct SandboxStatus {
     pub socket_isolation_available: bool,
     /// Why socket isolation is unavailable, worded for the user.
     pub socket_isolation_unavailable_reason: Option<String>,
+    /// Whether the keyring-only session bus is filtered here. Without it an
+    /// agent set to keyring only gets the whole, unfiltered bus.
+    pub session_bus_filter_available: bool,
+    /// Why the session bus cannot be filtered, worded for the user.
+    pub session_bus_filter_unavailable_reason: Option<String>,
 }
 
 pub fn status() -> SandboxStatus {
@@ -72,6 +79,9 @@ pub fn status() -> SandboxStatus {
         let sockets = socket_policy();
         status.socket_isolation_available = sockets.confined();
         status.socket_isolation_unavailable_reason = socket_isolation_reason(&sockets);
+        let bus_filter = bus_proxy::unavailable_reason();
+        status.session_bus_filter_available = bus_filter.is_none();
+        status.session_bus_filter_unavailable_reason = bus_filter.map(str::to_string);
     }
     status
 }
@@ -167,6 +177,8 @@ pub(crate) fn status_for(backend: Option<SandboxBackend>) -> SandboxStatus {
         allowlist_unavailable_reason: allowlist_unavailable_reason.map(str::to_string),
         socket_isolation_available: allowlist_available,
         socket_isolation_unavailable_reason: allowlist_unavailable_reason.map(str::to_string),
+        session_bus_filter_available: allowlist_available,
+        session_bus_filter_unavailable_reason: allowlist_unavailable_reason.map(str::to_string),
     }
 }
 
@@ -247,6 +259,8 @@ mod tests {
             SandboxStatus {
                 socket_isolation_available: true,
                 socket_isolation_unavailable_reason: None,
+                session_bus_filter_available: true,
+                session_bus_filter_unavailable_reason: None,
                 ..status.clone()
             },
             status_for(Some(SandboxBackend::Bubblewrap))
@@ -255,6 +269,14 @@ mod tests {
         assert_eq!(
             status.socket_isolation_unavailable_reason.is_none(),
             sockets.confined()
+        );
+        assert_eq!(
+            status.session_bus_filter_unavailable_reason.as_deref(),
+            bus_proxy::unavailable_reason()
+        );
+        assert_eq!(
+            status.session_bus_filter_available,
+            bus_proxy::unavailable_reason().is_none()
         );
     }
 
@@ -309,6 +331,8 @@ mod tests {
                 "allowlistUnavailableReason": "Not available on macOS yet",
                 "socketIsolationAvailable": false,
                 "socketIsolationUnavailableReason": "Not available on macOS yet",
+                "sessionBusFilterAvailable": false,
+                "sessionBusFilterUnavailableReason": "Not available on macOS yet",
             })
         );
     }

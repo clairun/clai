@@ -5,7 +5,9 @@
  */
 
 import React, { useId } from 'react';
-import type { FilesystemPathGrant, GrantOrigin, NetworkMode, NetworkPolicy, SandboxStatus, ShellAccessMode } from '../../generated/bindings';
+import type {
+  FilesystemPathGrant, GrantOrigin, NetworkMode, NetworkPolicy, SandboxSessionBusConfig, SandboxStatus, ShellAccessMode,
+} from '../../generated/bindings';
 import type { SandboxStatusState } from '../../hooks/useSandboxStatus';
 import { unicodeHost } from '../../permissions/hostNames';
 import { PathGrantEditor, PrefixListEditor, Switch } from './ListEditors';
@@ -17,7 +19,10 @@ export interface AccessDraft {
   shellMode: ShellAccessMode;
   askFirst: string[];
   web: boolean;
+  /** The session bus switch: off is `deny`, on keeps `sessionBusMode`. */
   sessionBus: boolean;
+  /** The saved bus mode; a three-way control can replace the switch. */
+  sessionBusMode: SandboxSessionBusConfig;
   /** Not edited here yet; carried so a save keeps it. */
   allowedSockets: string[];
   /** Null only when the backend defaults could not be loaded; saving then lets the backend pick. */

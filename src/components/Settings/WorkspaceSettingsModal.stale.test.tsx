@@ -41,7 +41,7 @@ const MAIN: AgentDetail = {
   selectedMcpServerIds: [],
   providerConnectionIds: ['conn-a'],
   execution: {
-    sandbox: { networkAccess: { mode: 'host_network', allowDomains: [], denyDomains: [] }, sessionBus: 'allow', allowedSockets: [] },
+    sandbox: { networkAccess: { mode: 'host_network', allowDomains: [], denyDomains: [] }, sessionBusMode: 'full', allowedSockets: [] },
     filesystem: { extraPaths: [] },
     shell: { mode: 'restricted', askFirstCommandPrefixes: ['git push'] },
     web: { enabled: true },
@@ -69,6 +69,7 @@ describe('WorkspaceSettingsModal: a Main save refused as stale', () => {
     api.getSandboxStatus.mockReset().mockResolvedValue({
       available: true, backend: 'bubblewrap', allowlistAvailable: true, allowlistUnavailableReason: null,
       socketIsolationAvailable: true, socketIsolationUnavailableReason: null,
+      sessionBusFilterAvailable: true, sessionBusFilterUnavailableReason: null,
     });
     resetSandboxStatusForTests();
   });

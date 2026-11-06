@@ -8,7 +8,7 @@ use super::helper::{BOX_HELPER, BOX_PROXY_PORT, BOX_SOCKET};
 use super::runner::{prepare_stdio, run_spawned_child};
 use super::{
     SandboxCommand, SandboxCommandOutput, SandboxNetworkMode, SandboxPathAccess,
-    SandboxSessionBusMode,
+    SandboxSessionBusMode, SessionBusProxy,
 };
 
 const BWRAP_BIN: &str = "bwrap";
@@ -564,6 +564,9 @@ fn append_session_bus_bind(
     if !matches!(command.profile.session_bus, SandboxSessionBusMode::Allow) {
         return None;
     }
+    if let Some(proxy) = &command.profile.session_bus_proxy {
+        return Some(append_bus_proxy_bind(args, proxy));
+    }
     let bus_path = resolve_session_bus_socket(in_flatpak);
     if bus_path.is_none()
         && !matches!(command.profile.network, SandboxNetworkMode::Host)
@@ -618,10 +621,29 @@ fn append_session_bus_bind(
     Some(bus_path)
 }
 
+/// Keyring only: the proxy's socket where the session bus is, and the
+/// address that names it, whatever the host's address says besides.
+fn append_bus_proxy_bind(args: &mut Vec<OsString>, proxy: &SessionBusProxy) -> PathBuf {
+    for dir in private_parent_dirs_for(&proxy.bus) {
+        args.extend([os("--dir"), dir.into_os_string()]);
+    }
+    let mut address = OsString::from("unix:path=");
+    address.push(&proxy.bus);
+    args.extend([
+        os("--ro-bind"),
+        os(&proxy.socket),
+        os(&proxy.bus),
+        os("--setenv"),
+        os("DBUS_SESSION_BUS_ADDRESS"),
+        address,
+    ]);
+    proxy.bus.clone()
+}
+
 /// Locate the host's D-Bus session bus socket on the filesystem. Returns
 /// None if the bus is abstract-socket-only (no file to bind) or simply
 /// absent on this host.
-fn resolve_session_bus_socket(in_flatpak: bool) -> Option<PathBuf> {
+pub(super) fn resolve_session_bus_socket(in_flatpak: bool) -> Option<PathBuf> {
     if in_flatpak {
         // Inside Flatpak, DBUS_SESSION_BUS_ADDRESS points at the
         // xdg-dbus-proxy socket (`unix:path=/run/flatpak/bus`) and
@@ -1352,6 +1374,47 @@ mod tests {
     }
 
     #[test]
+    fn keyring_only_binds_the_proxy_at_the_bus_path_and_not_the_bus() {
+        let temp = tempfile::tempdir().unwrap();
+        let bus = temp.path().join("bus");
+        let host_bus = temp.path().join("host-bus");
+        std::fs::write(&host_bus, "").unwrap();
+        let mut command = sample_command();
+        command.profile.session_bus = SandboxSessionBusMode::Allow;
+        command.profile.sockets.helper = Some(PathBuf::from("/opt/h"));
+        command.profile.session_bus_proxy = Some(SessionBusProxy {
+            socket: PathBuf::from("/c/.clai-net/bus-1.sock"),
+            bus: bus.clone(),
+        });
+        let args = rendered(&with_dbus_env(
+            Some(&format!("unix:path={}", host_bus.display())),
+            None,
+            || bwrap_args(&command).unwrap(),
+        ));
+        let bus = bus.to_string_lossy().into_owned();
+        assert!(
+            args.windows(3)
+                .any(|w| w == ["--ro-bind", "/c/.clai-net/bus-1.sock", bus.as_str()]),
+            "{args:?}"
+        );
+        let address = format!("unix:path={bus}");
+        assert!(
+            args.windows(3)
+                .any(|w| w == ["--setenv", "DBUS_SESSION_BUS_ADDRESS", address.as_str()]),
+            "{args:?}"
+        );
+        assert!(!args.iter().any(|arg| arg.contains("host-bus")), "{args:?}");
+        let start = args
+            .windows(2)
+            .position(|w| w == ["--", BOX_HELPER])
+            .unwrap_or_else(|| panic!("{args:?}"));
+        assert_eq!(
+            args[start + 2..start + 5],
+            ["run", "--allow-unix", bus.as_str()]
+        );
+    }
+
+    #[test]
     fn disabled_network_uses_unshare_net_instead_of_share_net() {
         let mut command = sample_command();
         command.profile.network = SandboxNetworkMode::Disabled;
@@ -1756,6 +1819,69 @@ print(*[reach(address) for address in sys.argv[1:]])
         assert_eq!(
             output.stdout.trim(),
             "ok PermissionError ok FileNotFoundError",
+            "{output:?}"
+        );
+    }
+
+    /// Keyring only, end to end: through the proxy CLAI starts, a command in
+    /// the sandbox reaches the keyring name and not another name on the bus.
+    #[tokio::test]
+    async fn keyring_only_reaches_the_keyring_and_no_other_bus_name() {
+        use super::super::bus_proxy::{test_bus::TestBus, BusProxy};
+        let Some(helper) = built_helper() else {
+            return;
+        };
+        let Some(bus) = TestBus::start() else {
+            return;
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let plan = SessionBusProxy {
+            socket: dir.path().join("proxy.sock"),
+            bus: bus.socket.clone(),
+        };
+        let _proxy = BusProxy::start(&plan).unwrap();
+        let workspace = tempfile::tempdir().unwrap();
+        let mut profile = SandboxProfile::for_test(
+            workspace.path().to_path_buf(),
+            Vec::new(),
+            SandboxNetworkMode::Disabled,
+            SandboxSessionBusMode::Allow,
+            SandboxEnv::filtered_from_iter(
+                [("PATH", "/usr/bin:/bin")],
+                workspace.path(),
+                SandboxSessionBusMode::Allow,
+            ),
+            None,
+        );
+        profile.sockets = SocketPolicy {
+            helper: Some(helper),
+            kernel_confines: super::super::landlock_abi() >= 9,
+            allowed: Vec::new(),
+        };
+        profile.session_bus_proxy = Some(plan);
+        let script = "for name in org.freedesktop.secrets org.example.Spawner; do \
+                      gdbus call --session --dest \"$name\" --object-path /t \
+                      --method org.example.T.Ping 2>&1 | head -c 200; echo; done";
+        let command = SandboxCommand {
+            argv: vec![os("/bin/sh"), os("-c"), os(script)],
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms: 20_000,
+            max_output_chars: 2_000,
+            profile,
+        };
+        let Some(output) = run_or_skip(command).await else {
+            return;
+        };
+        let lines: Vec<&str> = output
+            .stdout
+            .lines()
+            .filter(|line| !line.is_empty())
+            .collect();
+        assert_eq!(lines.first(), Some(&"('pong',)"), "{output:?}");
+        assert!(
+            lines
+                .get(1)
+                .is_some_and(|line| line.contains("ServiceUnknown")),
             "{output:?}"
         );
     }
@@ -3298,6 +3424,7 @@ else:
                 session_bus: SandboxSessionBusMode::Deny,
                 scratch_tmp: None,
                 sockets: Default::default(),
+                session_bus_proxy: None,
             },
         };
         let output = match run(command).await {

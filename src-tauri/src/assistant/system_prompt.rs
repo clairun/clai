@@ -451,10 +451,7 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
         prompt.push_str(allowlist);
     }
     if cfg!(target_os = "linux")
-        && matches!(
-            context.execution.sandbox.session_bus,
-            crate::config::SandboxSessionBusConfig::Allow
-        )
+        && context.execution.sandbox.session_bus != crate::config::SandboxSessionBusConfig::Deny
     {
         prompt.push_str(
             "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n",
@@ -560,7 +557,8 @@ fn sandbox_prompt(
     match backend {
         Some(SandboxBackend::Bubblewrap) => {
             let bus = match session_bus {
-                crate::config::SandboxSessionBusConfig::Allow => "session bus available",
+                crate::config::SandboxSessionBusConfig::Full => "session bus available",
+                crate::config::SandboxSessionBusConfig::KeyringOnly => "session bus: keyring only",
                 crate::config::SandboxSessionBusConfig::Deny => "session bus blocked",
             };
             let in_allowlist = network.mode == NetworkMode::Allowlist;

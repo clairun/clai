@@ -17,7 +17,7 @@ use crate::assistant::network::matcher::{canonical_host, parse_entry, HostDecisi
 use crate::assistant::network::run_state::{RefusedTargets, RunNetwork};
 use crate::assistant::sandbox::{
     run_command, ProxyEndpoint, SandboxCommand, SandboxCommandOutput, SandboxEnv,
-    SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode, SocketPolicy,
+    SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode, SessionBusProxy, SocketPolicy,
 };
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
@@ -228,7 +228,8 @@ async fn execute_bash_exec(
 }
 
 /// Runs the command, in Allowlist behind a network proxy session of its
-/// own. Also returns the `host:port` targets the proxy refused, when the
+/// own, and with the keyring-only bus behind a bus proxy of its own. Also
+/// returns the `host:port` targets the network proxy refused, when the
 /// command failed or timed out too: a client that kept retrying a refused
 /// host is a likely cause.
 #[cfg(target_os = "linux")]
@@ -237,6 +238,20 @@ async fn run_with_network(
     run_network: &std::sync::Arc<RunNetwork>,
 ) -> (Result<SandboxCommandOutput, String>, RefusedTargets) {
     use crate::assistant::network::{connect::HostConnector, proxy::ProxySession};
+    use crate::assistant::sandbox::bus_proxy::BusProxy;
+    let _bus_proxy = match command
+        .profile
+        .session_bus_proxy
+        .as_ref()
+        .map(BusProxy::start)
+    {
+        Some(Err(error)) => {
+            let error =
+                format!("Sandboxed shell is unavailable: the keyring proxy did not start: {error}");
+            return (Err(error), RefusedTargets::default());
+        }
+        started => started.and_then(Result::ok),
+    };
     let session = match &command.profile.network {
         SandboxNetworkMode::Proxied(endpoint) => match ProxySession::start(
             &endpoint.socket,
@@ -457,10 +472,16 @@ fn sandbox_profile(
         || proxy_endpoint(&workspace_root),
     )?;
 
-    let session_bus = match context.run_context.execution.sandbox.session_bus {
+    let bus_config = context.run_context.execution.sandbox.session_bus;
+    let session_bus = match bus_config {
         SandboxSessionBusConfig::Deny => SandboxSessionBusMode::Deny,
-        SandboxSessionBusConfig::Allow => SandboxSessionBusMode::Allow,
+        SandboxSessionBusConfig::KeyringOnly | SandboxSessionBusConfig::Full => {
+            SandboxSessionBusMode::Allow
+        }
     };
+    let session_bus_proxy = (bus_config == SandboxSessionBusConfig::KeyringOnly)
+        .then(|| keyring_proxy(&workspace_root))
+        .flatten();
 
     let scratch_tmp = crate::assistant::sandbox::session_scratch(&workspace_root);
 
@@ -488,7 +509,21 @@ fn sandbox_profile(
         session_bus,
         scratch_tmp,
         sockets,
+        session_bus_proxy,
     })
+}
+
+/// The keyring-only bus proxy for a command. Where the bus cannot be
+/// filtered (see `SandboxStatus::session_bus_filter_available`) there is
+/// none and the agent gets the whole bus.
+#[cfg(target_os = "linux")]
+fn keyring_proxy(workspace_root: &Path) -> Option<SessionBusProxy> {
+    crate::assistant::sandbox::bus_proxy::plan(workspace_root)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn keyring_proxy(_workspace_root: &Path) -> Option<SessionBusProxy> {
+    None
 }
 
 /// The shell's network for a mode. A stored Allowlist where the sandbox

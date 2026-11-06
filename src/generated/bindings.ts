@@ -134,7 +134,7 @@ providerId: string | null, apiKey: string | null, authMode: AuthMode | null, bas
 
 export type ExecutionCapabilityConfig = { sandbox: ExecutionSandboxConfig, filesystem: FilesystemCapabilityConfig, shell: ShellCapabilityConfig, web: WebCapabilityConfig, };
 
-export type ExecutionSandboxConfig = { networkAccess: NetworkPolicy, sessionBus: SandboxSessionBusConfig, 
+export type ExecutionSandboxConfig = { networkAccess: NetworkPolicy, sessionBusMode: SandboxSessionBusConfig, 
 /**
  * Unix sockets outside the sandbox the shell may connect to, each an
  * absolute or `~/` path to the socket file. Read by the Linux sandbox
@@ -520,23 +520,11 @@ export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "w
 export type SandboxBackend = "bubblewrap" | "seatbelt";
 
 /**
- * Whether the agent's sandbox can reach the user's session D-Bus.
- *
- * `Allow` (the default) exposes the user's D-Bus session bus socket
- * (`$XDG_RUNTIME_DIR/bus`) inside the sandbox and lets
- * `DBUS_SESSION_BUS_ADDRESS` + `XDG_RUNTIME_DIR` through the env filter.
- * This enables every CLI that talks to libsecret / `gnome-keyring-daemon`
- * over D-Bus — most importantly `gh`, but also `git-credential-libsecret`,
- * `secret-tool`, password managers, and so on. It matches Codex's
- * "agent acts as me on my desktop" reach while CLAI's path-grant flow
- * keeps file access narrow.
- *
- * `Deny` strips the bus socket bind and the corresponding env vars.
- * Use for high-isolation agents — running untrusted code, agents that
- * don't need any host integration, or workspaces where you specifically
- * want keyring contents kept out of reach.
+ * How much of the user's session D-Bus the agent's Linux sandbox reaches.
+ * Libraries find the bus through `DBUS_SESSION_BUS_ADDRESS` and
+ * `XDG_RUNTIME_DIR`, which pass the env filter in every mode but `Deny`.
  */
-export type SandboxSessionBusConfig = "deny" | "allow";
+export type SandboxSessionBusConfig = "deny" | "keyring_only" | "full";
 
 /**
  * What the sandbox can enforce on this PC; the settings UI reads it to
@@ -566,7 +554,16 @@ socketIsolationAvailable: boolean,
 /**
  * Why socket isolation is unavailable, worded for the user.
  */
-socketIsolationUnavailableReason: string | null, };
+socketIsolationUnavailableReason: string | null, 
+/**
+ * Whether the keyring-only session bus is filtered here. Without it an
+ * agent set to keyring only gets the whole, unfiltered bus.
+ */
+sessionBusFilterAvailable: boolean, 
+/**
+ * Why the session bus cannot be filtered, worded for the user.
+ */
+sessionBusFilterUnavailableReason: string | null, };
 
 /**
  * Discriminated union describing *how* the manager's next run is

@@ -24,6 +24,7 @@ import type {
   ExecutionCapabilityConfig,
   ExecutionSandboxConfig,
   FilesystemPathGrant,
+  SandboxSessionBusConfig,
   ProviderConnection,
 } from '../../generated/bindings';
 import { openGlobalSettings } from '../../utils/globalSettings';
@@ -108,7 +109,8 @@ const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessD
   shellMode: execution.shell?.mode || 'off',
   askFirst: clean(execution.shell?.askFirstCommandPrefixes || DEFAULT_ASK_FIRST),
   web: execution.web?.enabled || false,
-  sessionBus: (execution.sandbox?.sessionBus || 'allow') === 'allow',
+  sessionBus: (execution.sandbox?.sessionBusMode ?? 'deny') !== 'deny',
+  sessionBusMode: execution.sandbox?.sessionBusMode ?? 'deny',
   networkAccess: execution.sandbox?.networkAccess ?? null,
   allowedSockets: execution.sandbox?.allowedSockets ?? [],
 });
@@ -117,9 +119,15 @@ const accessFrom = (execution: Partial<ExecutionCapabilityConfig> = {}): AccessD
 // `networkAccess` may be missing.
 type SandboxDraft = Omit<ExecutionSandboxConfig, 'networkAccess'> & Partial<Pick<ExecutionSandboxConfig, 'networkAccess'>>;
 
+// Turning the switch on from off gives the keyring only.
+const busModeFrom = ({ sessionBus, sessionBusMode }: AccessDraft): SandboxSessionBusConfig => {
+  if (!sessionBus) return 'deny';
+  return sessionBusMode === 'deny' ? 'keyring_only' : sessionBusMode;
+};
+
 const executionFrom = (access: AccessDraft): ExecutionCapabilityConfig => {
   const sandbox: SandboxDraft = {
-    sessionBus: access.sessionBus ? 'allow' : 'deny',
+    sessionBusMode: busModeFrom(access),
     allowedSockets: access.allowedSockets,
     ...(access.networkAccess ? { networkAccess: access.networkAccess } : {}),
   };

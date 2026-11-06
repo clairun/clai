@@ -27,10 +27,36 @@ const NETWORK_DIR: &str = ".clai-net";
 /// proxy session, the helper, and the shared ssh configuration.
 pub fn endpoint(workspace_root: &Path) -> Result<ProxyEndpoint, String> {
     let helper = locate()?;
-    let home = std::env::var_os("HOME")
+    prepare_endpoint(workspace_root, &process_home(workspace_root), helper)
+}
+
+/// A socket path of its own for one command's session bus proxy, beside its
+/// network proxy socket; `None` when the workspace is outside the home
+/// directory or the directory cannot be made.
+pub(crate) fn bus_socket(workspace_root: &Path) -> Option<PathBuf> {
+    let dir = private_dir(workspace_root, &process_home(workspace_root))?.ok()?;
+    let id = uuid::Uuid::new_v4().simple().to_string();
+    Some(dir.join(format!("bus-{}.sock", &id[..12])))
+}
+
+fn process_home(workspace_root: &Path) -> PathBuf {
+    std::env::var_os("HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|| workspace_root.to_path_buf());
-    prepare_endpoint(workspace_root, &home, helper)
+        .unwrap_or_else(|| workspace_root.to_path_buf())
+}
+
+/// [`NETWORK_DIR`] for the workspace, made private if missing; `None` when
+/// the workspace is outside the home directory.
+fn private_dir(workspace_root: &Path, home: &Path) -> Option<Result<PathBuf, String>> {
+    let dir = super::profile::workspace_mask(workspace_root, Some(home))?.join(NETWORK_DIR);
+    let made = std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir);
+    Some(
+        made.map(|()| dir.clone())
+            .map_err(|error| format!("cannot prepare {}: {error}", dir.display())),
+    )
 }
 
 fn prepare_endpoint(
@@ -38,24 +64,19 @@ fn prepare_endpoint(
     home: &Path,
     helper: PathBuf,
 ) -> Result<ProxyEndpoint, String> {
-    let container =
-        super::profile::workspace_mask(workspace_root, Some(home)).ok_or_else(|| {
+    let dir = private_dir(workspace_root, home)
+        .ok_or_else(|| {
             "Sandboxed shell is unavailable: the Allowlist network mode needs the workspace inside \
          the home directory; choose Off or Host network in the agent's Local access settings."
                 .to_string()
-        })?;
-    let dir = container.join(NETWORK_DIR);
+        })?
+        .map_err(|error| format!("Sandboxed shell is unavailable: {error}"))?;
     let unavailable = |error: std::io::Error| {
         format!(
             "Sandboxed shell is unavailable: cannot prepare {}: {error}",
             dir.display()
         )
     };
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&dir)
-        .map_err(unavailable)?;
     let ssh_config = dir.join("ssh_config");
     let id = uuid::Uuid::new_v4().simple().to_string();
     write_ssh_config(&ssh_config, &id).map_err(unavailable)?;
@@ -126,7 +147,7 @@ fn not_found(detail: &str) -> String {
     format!("Sandboxed shell is unavailable: network helper not found ({detail})")
 }
 
-fn is_runnable(path: &Path) -> bool {
+pub(super) fn is_runnable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
     std::fs::metadata(path)
         .is_ok_and(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)

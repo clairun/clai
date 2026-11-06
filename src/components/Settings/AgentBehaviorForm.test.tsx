@@ -47,14 +47,17 @@ const NETWORK: NetworkPolicy = { mode: 'host_network', allowDomains: ['github.co
 const LINUX: SandboxStatus = {
   available: true, backend: 'bubblewrap', allowlistAvailable: true, allowlistUnavailableReason: null,
   socketIsolationAvailable: true, socketIsolationUnavailableReason: null,
+  sessionBusFilterAvailable: true, sessionBusFilterUnavailableReason: null,
 };
 const MACOS: SandboxStatus = {
   available: true, backend: 'seatbelt', allowlistAvailable: false, allowlistUnavailableReason: 'Not available on macOS yet',
   socketIsolationAvailable: false, socketIsolationUnavailableReason: 'Not available on macOS yet',
+  sessionBusFilterAvailable: false, sessionBusFilterUnavailableReason: 'Not available on macOS yet',
 };
 const NO_SANDBOX: SandboxStatus = {
   available: false, backend: null, allowlistAvailable: false, allowlistUnavailableReason: 'Not available on this PC',
   socketIsolationAvailable: false, socketIsolationUnavailableReason: 'Not available on this PC',
+  sessionBusFilterAvailable: false, sessionBusFilterUnavailableReason: 'Not available on this PC',
 };
 
 const REVIEWER: AgentDetail = {
@@ -67,7 +70,7 @@ const REVIEWER: AgentDetail = {
   selectedMcpServerIds: ['srv-a'],
   providerConnectionIds: ['conn-a'],
   execution: {
-    sandbox: { networkAccess: NETWORK, sessionBus: 'allow', allowedSockets: ['/run/docker.sock'] },
+    sandbox: { networkAccess: NETWORK, sessionBusMode: 'full', allowedSockets: ['/run/docker.sock'] },
     filesystem: { extraPaths: [HOME_GRANT] },
     shell: {
       mode: 'restricted',
@@ -109,7 +112,7 @@ const sentUpdate = () => api.workspaceUpdateAgent.mock.calls.at(-1)![0] as {
     filesystem: { extraPaths: FilesystemPathGrant[] };
     shell: { mode: string; askFirstCommandPrefixes: string[] };
     web: { enabled: boolean };
-    sandbox: { sessionBus: string; networkAccess: NetworkPolicy; allowedSockets: string[] };
+    sandbox: { sessionBusMode: string; networkAccess: NetworkPolicy; allowedSockets: string[] };
   };
 };
 
@@ -152,7 +155,7 @@ describe('AgentBehaviorForm', () => {
       selectedMcpServerIds: ['srv-a'],
       providerConnectionIds: ['conn-a'],
       execution: {
-        sandbox: { networkAccess: NETWORK, sessionBus: 'allow', allowedSockets: ['/run/docker.sock'] },
+        sandbox: { networkAccess: NETWORK, sessionBusMode: 'full', allowedSockets: ['/run/docker.sock'] },
         filesystem: { extraPaths: [HOME_GRANT] },
         shell: {
           mode: 'restricted',
@@ -209,8 +212,9 @@ describe('AgentBehaviorForm', () => {
       };
     };
     expect(request.name).toBe('Scout');
-    // The defaults carried no network policy, so the backend picks this PC's.
-    expect(request.execution.sandbox).toEqual({ sessionBus: 'allow', allowedSockets: [] });
+    // The defaults carried no network policy, so the backend picks this PC's,
+    // and no bus mode, so the agent gets no bus.
+    expect(request.execution.sandbox).toEqual({ sessionBusMode: 'deny', allowedSockets: [] });
     expect(request.providerConnectionIds).toEqual(['conn-b']);
     expect(request.execution.filesystem.extraPaths).toEqual([HOME_GRANT]);
     expect(request.execution.shell.mode).toBe('off');
@@ -445,9 +449,34 @@ describe('AgentBehaviorForm', () => {
         askFirstCommandPrefixes: ['git push'],
       });
       expect(execution.web.enabled).toBe(false);
-      expect(execution.sandbox.sessionBus).toBe('deny');
+      expect(execution.sandbox.sessionBusMode).toBe('deny');
       // Not edited in the form yet, but a save keeps it.
       expect(execution.sandbox.allowedSockets).toEqual(['/run/docker.sock']);
+    });
+
+    it('turns the bus on as keyring only and keeps a saved mode otherwise', async () => {
+      const withBus = (sessionBusMode: 'deny' | 'keyring_only') => ({
+        ...REVIEWER,
+        execution: {
+          ...REVIEWER.execution,
+          sandbox: { networkAccess: NETWORK, sessionBusMode, allowedSockets: ['/run/docker.sock'] },
+        },
+      });
+      api.workspaceGetAgent.mockResolvedValue(withBus('deny'));
+      const { ref, unmount } = renderForm({ agentId: 'agent-1' });
+      await screen.findByDisplayValue('Reviewer');
+      await userEvent.click(screen.getByRole('button', { name: 'Edit local access' }));
+      await userEvent.click(screen.getByRole('switch', { name: 'Session D-Bus' }));
+      await submit(ref);
+      expect(sentUpdate().execution.sandbox.sessionBusMode).toBe('keyring_only');
+      unmount();
+
+      api.workspaceGetAgent.mockResolvedValue(withBus('keyring_only'));
+      const second = renderForm({ agentId: 'agent-1' });
+      await screen.findByDisplayValue('Reviewer');
+      await userEvent.type(screen.getByLabelText('Instructions'), ' again');
+      await submit(second.ref);
+      expect(sentUpdate().execution.sandbox.sessionBusMode).toBe('keyring_only');
     });
 
     it('hides the ask-first list when the shell is off', async () => {
@@ -472,7 +501,7 @@ describe('AgentBehaviorForm', () => {
       within(screen.getByRole('group', { name: 'Network' })).getByRole('button', { name });
     const withPolicy = (networkAccess: NetworkPolicy): AgentDetail => ({
       ...REVIEWER,
-      execution: { ...REVIEWER.execution, sandbox: { networkAccess, sessionBus: 'allow', allowedSockets: [] } },
+      execution: { ...REVIEWER.execution, sandbox: { networkAccess, sessionBusMode: 'full', allowedSockets: [] } },
     });
 
     it('saves each mode and keeps the lists across modes', async () => {
