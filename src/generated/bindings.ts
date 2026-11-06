@@ -557,11 +557,12 @@ socketIsolationAvailable: boolean,
 socketIsolationUnavailableReason: string | null, 
 /**
  * Whether the keyring-only session bus is filtered here. Without it an
- * agent set to keyring only gets the whole, unfiltered bus.
+ * agent set to keyring only gets no bus, never the whole one.
  */
 sessionBusFilterAvailable: boolean, 
 /**
- * Why the session bus cannot be filtered, worded for the user.
+ * Why the session bus cannot be filtered and how to give an agent the
+ * whole bus instead, worded for the user.
  */
 sessionBusFilterUnavailableReason: string | null, };
 
