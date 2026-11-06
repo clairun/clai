@@ -1777,8 +1777,8 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
             .position(|w| w == ["--", BOX_HELPER])
             .unwrap_or_else(|| panic!("{args:?}"));
         assert_eq!(
-            args[start + 2..start + 6],
-            ["run", "--allow-unix", &*host, "--"],
+            args[start + 2..start + 7],
+            ["run", "--host-abstract-unix", "--allow-unix", &*host, "--"],
             "{args:?}"
         );
     }
