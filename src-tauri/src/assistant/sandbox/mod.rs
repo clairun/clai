@@ -125,74 +125,65 @@ fn socket_hint_places(home: Option<&std::path::Path>) -> Vec<std::path::PathBuf>
     runtime.into_iter().chain(home_dirs).collect()
 }
 
-/// The agent's allowed sockets that are sockets now: `~/` expanded with
-/// `home`, and the host path with symlinks resolved (`/var/run` is `/run`).
-/// Any other entry is skipped with a log note: a socket that is missing
-/// at launch is a stopped service, not a broken config. An entry refused
-/// because its path passes where the sandbox can write (`writable`) is also
-/// returned, with the reason, for the command's result.
+/// The path grants that name a Unix socket now: the sockets a command may
+/// connect to. Only a grant on the socket itself counts, read-only as much
+/// as read-write, since connecting ignores a read-only mount; a socket under
+/// a granted directory stays unreachable. Each is bound at the path the
+/// grant names and at its host path, with symlinks resolved (`/var/run` is
+/// `/run`). A grant refused because its path passes through a directory the
+/// sandbox can write (`writable`) is returned with the reason, for the
+/// command's result.
 #[cfg(target_os = "linux")]
-pub(crate) fn resolve_allowed_sockets(
-    entries: &[String],
-    home: Option<&std::path::Path>,
+pub(crate) fn granted_sockets(
+    grants: &[std::path::PathBuf],
     writable: &dyn Fn(&std::path::Path) -> bool,
 ) -> (Vec<AllowedSocket>, Vec<String>) {
+    use std::os::unix::fs::FileTypeExt;
     let (mut sockets, mut refused) = (Vec::new(), Vec::new());
-    for entry in entries {
-        match host_socket(entry, home, writable) {
-            Ok(socket) if !sockets.contains(&socket) => sockets.push(socket),
-            Ok(_) => {}
-            Err(SocketSkip::Absent(reason)) => {
-                tracing::warn!("Allowed socket {entry} skipped: {reason}");
+    for path in grants {
+        if !std::fs::metadata(path).is_ok_and(|meta| meta.file_type().is_socket()) {
+            continue;
+        }
+        match resolve_unwritable(path, writable) {
+            Ok(host) => {
+                let socket = AllowedSocket {
+                    path: path.clone(),
+                    host,
+                };
+                if !sockets.contains(&socket) {
+                    sockets.push(socket);
+                }
             }
+            // Gone since it was looked at: a service that stopped.
+            Err(SocketSkip::Absent) => {}
             Err(SocketSkip::Refused(reason)) => {
-                tracing::warn!("Allowed socket {entry} refused: {reason}");
-                refused.push(format!("{entry}: {reason}"));
+                let refusal = format!("{}: {reason}", path.display());
+                if !refused.contains(&refusal) {
+                    tracing::warn!("Socket grant refused: {refusal}");
+                    refused.push(refusal);
+                }
             }
         }
     }
     (sockets, refused)
 }
 
-/// Why an allowed socket is left out of a command.
+/// Why a socket grant is left out of a command.
 #[cfg(target_os = "linux")]
 enum SocketSkip {
-    /// Not there now, or not a socket.
-    Absent(String),
+    /// Not there now.
+    Absent,
     /// Not safe to hand over, whatever is there.
     Refused(String),
 }
 
-#[cfg(target_os = "linux")]
-fn host_socket(
-    entry: &str,
-    home: Option<&std::path::Path>,
-    writable: &dyn Fn(&std::path::Path) -> bool,
-) -> Result<AllowedSocket, SocketSkip> {
-    use std::os::unix::fs::FileTypeExt;
-    let absent = |reason: String| SocketSkip::Absent(reason);
-    // Saving checks entries; a hand-edited config is checked here.
-    let entry =
-        crate::config::types::allowed_socket_entry(entry, home).map_err(SocketSkip::Refused)?;
-    let entry = entry.as_str();
-    let path = match (entry.strip_prefix("~/"), home) {
-        (Some(rest), Some(home)) => home.join(rest),
-        (Some(_), None) => return Err(absent("the home directory is unknown".to_string())),
-        (None, _) => std::path::PathBuf::from(entry),
-    };
-    let host = resolve_unwritable(&path, writable)?;
-    let meta = host.metadata().map_err(|error| absent(error.to_string()))?;
-    if !meta.file_type().is_socket() {
-        return Err(absent("it is not a socket".to_string()));
-    }
-    Ok(AllowedSocket { path, host })
-}
-
 /// The host path `path` names, resolved as `canonicalize` does, but refused
-/// when anything on the way (a directory, a symlink or the socket itself)
-/// lies where the sandbox can write: a command could put a link there to
-/// the session bus or the systemd manager, and the next command would be
-/// handed that.
+/// when a name on the way, a symlink's target included, lies in a directory
+/// the sandbox can write: a command could put a link there to the session
+/// bus or the systemd manager, and the next command would be handed that.
+/// A granted name in a directory the sandbox cannot write is a mount point
+/// in the sandbox, so a command cannot remove it or rename over it (EBUSY),
+/// even with a read-write grant on the socket itself.
 #[cfg(target_os = "linux")]
 fn resolve_unwritable(
     path: &std::path::Path,
@@ -225,14 +216,15 @@ fn resolve_unwritable(
             continue;
         }
         let next = resolved.join(&part);
-        if writable(&next) {
+        if writable(&resolved) {
             return Err(SocketSkip::Refused(format!(
-                "sandboxed commands can write at {}, so a command could swap it for a link \
+                "sandboxed commands can write at {}, so a command could swap {} for a link \
                  to another socket",
+                resolved.display(),
                 next.display()
             )));
         }
-        let absent = |error: std::io::Error| SocketSkip::Absent(error.to_string());
+        let absent = |_: std::io::Error| SocketSkip::Absent;
         let metadata = std::fs::symlink_metadata(&next).map_err(absent)?;
         if !metadata.file_type().is_symlink() {
             resolved = next;
@@ -240,7 +232,7 @@ fn resolve_unwritable(
         }
         links += 1;
         if links > MAX_LINKS {
-            return Err(SocketSkip::Absent("too many symbolic links".to_string()));
+            return Err(SocketSkip::Absent);
         }
         let target = std::fs::read_link(&next).map_err(absent)?;
         if target.is_absolute() {
@@ -419,7 +411,7 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn allowed_sockets_resolve_to_the_host_socket_and_skip_the_rest() {
+    fn only_grants_on_a_socket_count_resolved_to_the_host_socket() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
         let run = home.join("run");
@@ -428,15 +420,18 @@ mod tests {
         let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
         std::os::unix::fs::symlink(&run, home.join("var-run")).unwrap();
         std::fs::write(home.join("file.sock"), "").unwrap();
-        let entries = [
-            "~/var-run/docker.sock".to_string(),
-            socket.to_string_lossy().into_owned(),
-            "~/file.sock".to_string(),
-            "~/missing.sock".to_string(),
+        let grants = [
+            home.join("var-run/docker.sock"),
+            socket.clone(),
+            socket.clone(),
+            home.join("file.sock"),
+            home.join("missing.sock"),
+            // A directory grant: the socket in it does not count.
+            run.clone(),
         ];
         let nowhere = |_: &std::path::Path| false;
         assert_eq!(
-            resolve_allowed_sockets(&entries, Some(&home), &nowhere),
+            granted_sockets(&grants, &nowhere),
             (
                 vec![
                     AllowedSocket {
@@ -451,9 +446,6 @@ mod tests {
                 Vec::<String>::new()
             )
         );
-        assert!(resolve_allowed_sockets(&entries[..1], None, &nowhere)
-            .0
-            .is_empty());
     }
 
     /// M2: a command can write in the workspace, so a socket named there,
@@ -461,7 +453,7 @@ mod tests {
     /// it a link to the session bus or the systemd manager.
     #[cfg(target_os = "linux")]
     #[test]
-    fn an_allowed_socket_reached_through_a_writable_place_is_refused() {
+    fn a_socket_grant_reached_through_a_writable_directory_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let (workspace, outside) = (root.join("ws"), root.join("outside"));
@@ -477,13 +469,12 @@ mod tests {
         // Outside: a directory link, as /var/run, straight to the socket.
         std::os::unix::fs::symlink(&outside, root.join("run")).unwrap();
         let writable = |path: &std::path::Path| path.starts_with(&workspace);
-        let named = |path: &std::path::Path| path.to_string_lossy().into_owned();
-        let entries = [
-            named(&workspace.join("dev.sock")),
-            named(&outside.join("via.sock")),
-            named(&root.join("run/bus")),
+        let grants = [
+            workspace.join("dev.sock"),
+            outside.join("via.sock"),
+            root.join("run/bus"),
         ];
-        let (allowed, refused) = resolve_allowed_sockets(&entries, None, &writable);
+        let (allowed, refused) = granted_sockets(&grants, &writable);
         assert_eq!(
             allowed,
             [AllowedSocket {
@@ -492,28 +483,48 @@ mod tests {
             }]
         );
         assert_eq!(refused.len(), 2, "{refused:?}");
-        assert!(refused[0].starts_with(&entries[0]), "{refused:?}");
-        assert!(refused[1].starts_with(&entries[1]), "{refused:?}");
-        assert!(refused[1].contains("can write"), "{refused:?}");
+        for (grant, refusal) in grants.iter().zip(&refused) {
+            assert!(refusal.starts_with(&*grant.to_string_lossy()), "{refusal}");
+            assert!(refusal.contains("can write at"), "{refusal}");
+        }
 
         // Without the writable check both links would hand over the bus.
-        let (allowed, _) = resolve_allowed_sockets(&entries[..2], None, &|_| false);
+        let (allowed, _) = granted_sockets(&grants[..2], &|_| false);
         assert!(allowed.iter().all(|socket| socket.host == bus));
         assert_eq!(allowed.len(), 2);
     }
 
-    /// m6: a hand-edited entry the settings would refuse is refused before
-    /// each command too, not resolved against CLAI's own working directory.
+    /// The narrowed M2: only a writable directory on the way makes a
+    /// redirect possible. A read-write grant on the socket itself does not,
+    /// as the granted name is a mount point in the sandbox.
     #[cfg(target_os = "linux")]
     #[test]
-    fn a_hand_edited_entry_is_checked_before_each_command() {
-        let entries = ["docker.sock", "/run/../tmp/x.sock", "/run/*.sock"].map(String::from);
-        let (allowed, refused) = resolve_allowed_sockets(&entries, None, &|_| false);
+    fn a_writable_socket_counts_and_a_writable_directory_on_the_way_does_not() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let dir = root.join("real");
+        std::fs::create_dir(&dir).unwrap();
+        let socket = dir.join("docker.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        std::os::unix::fs::symlink(&dir, root.join("link")).unwrap();
+        let only = |writable: &std::path::Path| {
+            let writable = writable.to_path_buf();
+            move |path: &std::path::Path| path == writable
+        };
+
+        let (allowed, refused) = granted_sockets(std::slice::from_ref(&socket), &only(&socket));
+        assert_eq!(allowed.len(), 1, "{refused:?}");
+
+        let (allowed, refused) = granted_sockets(std::slice::from_ref(&socket), &only(&dir));
         assert!(allowed.is_empty());
-        assert_eq!(refused.len(), 3, "{refused:?}");
-        for (entry, refusal) in entries.iter().zip(&refused) {
-            assert!(refusal.starts_with(entry.as_str()), "{refusal}");
-        }
+        assert!(
+            refused[0].contains(&format!("can write at {}", dir.display())),
+            "{refused:?}"
+        );
+        // The directory that holds a symlink on the way counts too.
+        let (allowed, refused) = granted_sockets(&[root.join("link/docker.sock")], &only(&root));
+        assert!(allowed.is_empty());
+        assert_eq!(refused.len(), 1);
     }
 
     #[cfg(target_os = "linux")]

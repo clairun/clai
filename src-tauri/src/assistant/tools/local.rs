@@ -328,8 +328,9 @@ const REFUSED_HINT: &str = "CLAI's network proxy refused these hosts: they are n
 
 const SOCKET_HINT: &str = "The sandbox kept the command from reaching these Unix sockets of \
                            this computer. Do not look for a way around the sandbox: if the task \
-                           needs one, ask the user to add its path to Allowed sockets in this \
-                           agent's Local access settings.";
+                           needs one, call `fs_request_grant` with the exact socket path, not \
+                           its folder. A Docker, Podman or containerd socket gives control of \
+                           the whole computer, so say in the reason why the task needs it.";
 
 fn bash_exec_outcome(
     output: Result<SandboxCommandOutput, String>,
@@ -399,7 +400,7 @@ fn bash_exec_result(
         });
     }
     if !sockets.skipped.is_empty() {
-        result["allowedSocketsSkipped"] = serde_json::json!(sockets.skipped);
+        result["socketGrantsSkipped"] = serde_json::json!(sockets.skipped);
     }
     if let Some(reason) = session_bus_unavailable {
         result["sessionBus"] = keyring_only_unavailable_note(reason).into();
@@ -508,13 +509,18 @@ fn augment_timeout_error(error: String, timeout_ms: u64, explicit_timeout: bool)
 
 fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesystemPolicy, String> {
     let workspace = ensure_workspace_root(context)?;
-    let mut grants = context.run_context.execution.filesystem.extra_paths.clone();
-    grants.extend(context.session_grants_snapshot());
     EffectiveFilesystemPolicy::from_config(
         &workspace,
-        &grants,
+        &path_grants(context),
         crate::paths::real_home().as_deref(),
     )
+}
+
+/// The agent's saved path grants and those approved for this run only.
+fn path_grants(context: &ToolExecutionContext) -> Vec<FilesystemPathGrant> {
+    let mut grants = context.run_context.execution.filesystem.extra_paths.clone();
+    grants.extend(context.session_grants_snapshot());
+    grants
 }
 
 fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, String> {
@@ -559,16 +565,19 @@ fn sandbox_profile(
         .home
         .as_deref()
         .unwrap_or(&filesystem.workspace_root);
-    // Resolved for each command. A run-scoped list (a future "allow this
-    // socket" card) would be merged into the saved one here, as
-    // `filesystem_policy` merges `session_grants_snapshot`.
+    // Looked up for each command: a socket that appears, or a grant approved
+    // during the run, counts from the next command on.
     #[cfg(target_os = "linux")]
     let sockets = {
-        let (allowed, skipped) = crate::assistant::sandbox::resolve_allowed_sockets(
-            &context.run_context.execution.sandbox.allowed_sockets,
-            filesystem.home.as_deref(),
-            &|path| filesystem.covers(path, FilesystemPathAccess::ReadWrite),
-        );
+        let grants: Vec<PathBuf> = path_grants(context)
+            .iter()
+            .filter_map(|grant| {
+                crate::assistant::sandbox::filesystem::resolve_configured_path(&grant.path).ok()
+            })
+            .collect();
+        let (allowed, skipped) = crate::assistant::sandbox::granted_sockets(&grants, &|path| {
+            filesystem.covers(path, FilesystemPathAccess::ReadWrite)
+        });
         SocketPolicy {
             allowed,
             skipped,
@@ -2885,6 +2894,14 @@ mod tests {
         );
     }
 
+    /// The hint leads to the folder-access card, for the socket itself.
+    #[test]
+    fn the_socket_hint_asks_for_a_grant_on_the_socket_and_says_why() {
+        assert!(SOCKET_HINT.contains("call `fs_request_grant` with the exact socket path"));
+        assert!(SOCKET_HINT.contains("not its folder"));
+        assert!(SOCKET_HINT.contains("A Docker, Podman or containerd socket gives control"));
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn a_result_names_the_host_sockets_a_failed_command_could_not_reach() {
@@ -2927,10 +2944,7 @@ mod tests {
             Some(serde_json::json!([path]))
         );
         let result = bash_exec_result(&denied, &RefusedTargets::default(), &confined, None);
-        assert!(result["sockets"]["hint"]
-            .as_str()
-            .unwrap()
-            .contains("add its path to Allowed sockets in this agent's Local access"));
+        assert_eq!(result["sockets"]["hint"], SOCKET_HINT);
 
         // Without Landlock a refusal comes from the host's permissions.
         let unconfined = SocketPolicy {
@@ -3185,46 +3199,132 @@ mod tests {
         assert_eq!(output.stdout.trim(), "none", "{output:?}");
     }
 
+    /// The sockets a shell profile hands over for these saved and run-only
+    /// grants.
     #[cfg(target_os = "linux")]
-    #[test]
-    fn the_shell_profile_carries_the_agents_allowed_sockets_that_exist() {
+    fn sockets_for(
+        workspace: &Path,
+        saved: Vec<FilesystemPathGrant>,
+        run_only: Vec<FilesystemPathGrant>,
+    ) -> SocketPolicy {
         use crate::assistant::sandbox::{status_for, SandboxBackend};
-        let workspace = tempdir().unwrap();
-        let sockets = tempdir().unwrap();
-        let socket = sockets.path().canonicalize().unwrap().join("agent.sock");
-        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
-        let mut context = context_with_grants(workspace.path(), Vec::new());
+        let mut context = context_with_grants(workspace, saved);
         let mut execution = context.run_context.execution.clone();
         execution.sandbox.network_access = network(NetworkMode::Off);
-        let in_workspace = workspace.path().canonicalize().unwrap().join("dev.sock");
-        let _dev = std::os::unix::net::UnixListener::bind(&in_workspace).unwrap();
-        execution.sandbox.allowed_sockets = vec![
-            socket.display().to_string(),
-            sockets.path().join("gone.sock").display().to_string(),
-            in_workspace.display().to_string(),
-        ];
         context.run_context = std::sync::Arc::new(RunContext {
             execution,
             ..(*context.run_context).clone()
         });
+        for grant in run_only {
+            context.add_session_grant(grant);
+        }
         let filesystem = filesystem_policy(&context).unwrap();
-        let profile = sandbox_profile(
+        sandbox_profile(
             &context,
-            workspace.path().to_path_buf(),
+            workspace.to_path_buf(),
             filesystem,
             &status_for(Some(SandboxBackend::Bubblewrap)),
         )
-        .unwrap();
-        assert_eq!(
-            profile.sockets.allowed,
-            [crate::assistant::sandbox::AllowedSocket {
-                path: socket.clone(),
-                host: socket,
-            }]
+        .unwrap()
+        .sockets
+    }
+
+    #[cfg(target_os = "linux")]
+    fn grant_on(path: &Path, access: FilesystemPathAccess) -> FilesystemPathGrant {
+        FilesystemPathGrant {
+            path: path.display().to_string(),
+            access,
+            origin: None,
+        }
+    }
+
+    /// A socket and the directory that holds it, outside the workspace.
+    #[cfg(target_os = "linux")]
+    fn listening_socket() -> (tempfile::TempDir, PathBuf, std::os::unix::net::UnixListener) {
+        let dir = tempdir().unwrap();
+        let socket = dir.path().canonicalize().unwrap().join("docker.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        (dir, socket, listener)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exact_grant_on_a_socket_lets_commands_connect_read_only_or_read_write() {
+        let workspace = tempdir().unwrap();
+        let (_dir, socket, _listener) = listening_socket();
+        for access in [
+            FilesystemPathAccess::ReadWrite,
+            FilesystemPathAccess::ReadOnly,
+        ] {
+            let sockets = sockets_for(
+                workspace.path(),
+                vec![grant_on(&socket, access)],
+                Vec::new(),
+            );
+            assert_eq!(
+                sockets.allowed,
+                [crate::assistant::sandbox::AllowedSocket {
+                    path: socket.clone(),
+                    host: socket.clone(),
+                }],
+                "{access:?}: {sockets:?}"
+            );
+            assert!(sockets.skipped.is_empty(), "{access:?}: {sockets:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_grant_on_a_socket_for_this_run_only_counts() {
+        let workspace = tempdir().unwrap();
+        let (_dir, socket, _listener) = listening_socket();
+        let run_only = vec![grant_on(&socket, FilesystemPathAccess::ReadOnly)];
+        let sockets = sockets_for(workspace.path(), Vec::new(), run_only);
+        assert_eq!(sockets.allowed.len(), 1, "{sockets:?}");
+        assert_eq!(sockets.allowed[0].host, socket);
+    }
+
+    /// H2: a directory grant shows a socket in it, but does not let a
+    /// command connect to it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_under_a_granted_directory_stays_unreachable() {
+        let workspace = tempdir().unwrap();
+        let (dir, _socket, _listener) = listening_socket();
+        for access in [
+            FilesystemPathAccess::ReadOnly,
+            FilesystemPathAccess::ReadWrite,
+        ] {
+            let sockets = sockets_for(
+                workspace.path(),
+                vec![grant_on(dir.path(), access)],
+                Vec::new(),
+            );
+            assert!(sockets.allowed.is_empty(), "{access:?}: {sockets:?}");
+            assert!(sockets.skipped.is_empty(), "{access:?}: {sockets:?}");
+        }
+    }
+
+    /// M2: in a directory the sandbox can write, a command could swap the
+    /// socket for a link to another one, so its grant is refused and the
+    /// result says why: under a read-write directory grant, or in the
+    /// workspace.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_grant_in_a_writable_directory_is_refused_and_the_result_says_why() {
+        let workspace = tempdir().unwrap();
+        let (dir, socket, _listener) = listening_socket();
+        let in_workspace = workspace.path().canonicalize().unwrap().join("dev.sock");
+        let _dev = std::os::unix::net::UnixListener::bind(&in_workspace).unwrap();
+        let sockets = sockets_for(
+            workspace.path(),
+            vec![
+                grant_on(dir.path(), FilesystemPathAccess::ReadWrite),
+                grant_on(&socket, FilesystemPathAccess::ReadWrite),
+            ],
+            vec![grant_on(&in_workspace, FilesystemPathAccess::ReadOnly)],
         );
-        // The workspace is writable: a command could swap the socket for a
-        // link to another one, so it is refused and the result says so.
-        assert_eq!(profile.sockets.skipped.len(), 1, "{:?}", profile.sockets);
+        assert!(sockets.allowed.is_empty(), "{sockets:?}");
         let output = SandboxCommandOutput {
             cwd: PathBuf::from("/w"),
             exit_code: Some(0),
@@ -3232,12 +3332,24 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         };
-        let result = bash_exec_result(&output, &RefusedTargets::default(), &profile.sockets, None);
-        let skipped = result["allowedSocketsSkipped"][0].as_str().unwrap();
-        assert!(
-            skipped.starts_with(&in_workspace.display().to_string()),
-            "{skipped}"
-        );
+        let result = bash_exec_result(&output, &RefusedTargets::default(), &sockets, None);
+        let skipped = result["socketGrantsSkipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        let dir = dir.path().canonicalize().unwrap();
+        for (refusal, (path, writable)) in skipped.iter().zip([
+            (&socket, dir.as_path()),
+            (&in_workspace, in_workspace.parent().unwrap()),
+        ]) {
+            let refusal = refusal.as_str().unwrap();
+            assert!(
+                refusal.starts_with(&path.display().to_string()),
+                "{refusal}"
+            );
+            assert!(
+                refusal.contains(&format!("can write at {}", writable.display())),
+                "{refusal}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

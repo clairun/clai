@@ -264,7 +264,7 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
 }
 
 /// The helper's mode and the sockets it lets the command reach: the
-/// session bus when bound and the agent's allowed sockets. In Host network
+/// session bus when bound and the agent's socket grants. In Host network
 /// host abstract sockets (X11, for one) stay reachable: that mode reaches
 /// every host service on localhost, so refusing them guards nothing and
 /// leaves the user no way to grant them.
@@ -328,8 +328,9 @@ const SOCKET_SCAN_ENTRIES: usize = 512;
 /// not, so cover each socket a grant exposes in [`SOCKET_DIRS`] with
 /// `/dev/null`. Only the sockets: the directories and their other files stay
 /// as the grants show them, so `gpg --verify` still reads `~/.gnupg` and
-/// `limactl list` still reads `~/.lima`. An allowed socket is bound later
-/// and wins. Best effort: sockets elsewhere stay reachable.
+/// `limactl list` still reads `~/.lima`. A socket the agent has a grant on
+/// is left as it is, and bound again later. Best effort: sockets elsewhere
+/// stay reachable.
 fn append_socket_masks(args: &mut Vec<OsString>, command: &SandboxCommand) {
     let profile = &command.profile;
     if profile.sockets.confined() {
@@ -338,11 +339,19 @@ fn append_socket_masks(args: &mut Vec<OsString>, command: &SandboxCommand) {
     let Some(home) = &profile.filesystem.home else {
         return;
     };
+    let granted = |socket: &Path| {
+        profile
+            .sockets
+            .allowed
+            .iter()
+            .any(|allowed| allowed.path == socket || allowed.host == socket)
+    };
     for dir in SOCKET_DIRS.iter().map(|dir| home.join(dir)) {
         for socket in sockets_under(&dir) {
-            if profile
-                .filesystem
-                .covers(&socket, crate::config::FilesystemPathAccess::ReadOnly)
+            if !granted(&socket)
+                && profile
+                    .filesystem
+                    .covers(&socket, crate::config::FilesystemPathAccess::ReadOnly)
             {
                 args.extend([os("--ro-bind"), os("/dev/null"), os(&socket)]);
             }
@@ -380,7 +389,7 @@ fn sockets_under(dir: &Path) -> Vec<PathBuf> {
 }
 
 /// The host sockets the agent may connect to, bound at the host path and at
-/// the path the agent named, after the grants and the socket masks, so
+/// the path its grant names, after the grants and the socket masks, so
 /// neither hides them. A name under a system bind (`/etc`, `/usr`) is
 /// already there and cannot take a mount point. `--ro-bind-try`: a socket
 /// that went away since it was resolved (a restarted service) leaves the
@@ -1860,42 +1869,58 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
         assert_eq!(unconfined.stdout.trim(), "ok ok ok", "{unconfined:?}");
     }
 
+    /// Without Landlock an exact grant on a socket in a usual socket place
+    /// is not covered with `/dev/null`, unlike a socket next to it that only
+    /// a directory grant shows, and the helper allows it.
     #[test]
-    fn an_allowed_socket_is_bound_after_the_masks_and_allowed_by_the_helper() {
+    fn without_landlock_an_exact_socket_grant_is_not_masked() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
         let workspace = home.join(".clai/workspaces/ws");
         std::fs::create_dir_all(home.join(".docker/run")).unwrap();
         std::fs::create_dir_all(&workspace).unwrap();
         let socket = home.join(".docker/run/docker.sock");
-        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let other = home.join(".docker/run/other.sock");
+        let _listeners =
+            [&socket, &other].map(|path| std::os::unix::net::UnixListener::bind(path).unwrap());
         let mut command = sample_command();
         command.cwd = workspace.clone();
+        let grants = [
+            (&home, SandboxPathAccess::ReadOnly),
+            (&socket, SandboxPathAccess::ReadOnly),
+        ]
+        .map(|(path, access)| SandboxPathGrant {
+            host_path: path.clone(),
+            access,
+        });
         command.profile.filesystem = super::super::filesystem::EffectiveFilesystemPolicy::compile(
             &workspace,
-            &[SandboxPathGrant {
-                host_path: home.clone(),
-                access: SandboxPathAccess::ReadOnly,
-            }],
+            &grants,
             Some(&home),
         )
         .unwrap();
-        let host = PathBuf::from("/run/user/1000/docker.sock");
+        let filesystem = &command.profile.filesystem;
+        let (mut allowed, skipped) =
+            super::super::granted_sockets(&[home.clone(), socket.clone()], &|path| {
+                filesystem.covers(path, crate::config::FilesystemPathAccess::ReadWrite)
+            });
+        assert_eq!(
+            allowed,
+            [AllowedSocket {
+                path: socket.clone(),
+                host: socket.clone(),
+            }]
+        );
+        // m4: a name under a system bind gets no bind of its own.
+        allowed.push(AllowedSocket {
+            path: PathBuf::from("/etc/app/app.sock"),
+            host: PathBuf::from("/etc/app/app.sock"),
+        });
         command.profile.sockets = SocketPolicy {
             helper: Some(PathBuf::from("/opt/h")),
             kernel_confines: false,
-            allowed: vec![
-                AllowedSocket {
-                    path: socket.clone(),
-                    host: host.clone(),
-                },
-                // m4: a name under a system bind gets no bind of its own.
-                AllowedSocket {
-                    path: PathBuf::from("/etc/app/app.sock"),
-                    host: PathBuf::from("/etc/app/app.sock"),
-                },
-            ],
-            skipped: Vec::new(),
+            allowed,
+            skipped,
             hint_places: Vec::new(),
         };
         let args = rendered(&bwrap_args(&command).unwrap());
@@ -1904,18 +1929,18 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
                 && !args.windows(2).any(|w| w == ["--allow-unix", arg.as_str()])),
             "{args:?}"
         );
-        let (socket, host) = (socket.to_string_lossy(), host.to_string_lossy());
-        let mask = args
-            .windows(3)
-            .position(|w| w == ["--ro-bind", "/dev/null", &*socket])
-            .expect("the socket is masked without Landlock");
-        let bound = |name: &str| {
+        let (socket, other) = (socket.to_string_lossy(), other.to_string_lossy());
+        let masked = |path: &str| {
             args.windows(3)
-                .position(|w| w == ["--ro-bind-try", &*host, name])
-                .unwrap_or_else(|| panic!("{name}: {args:?}"))
+                .any(|w| w == ["--ro-bind", "/dev/null", path])
         };
-        bound(&host);
-        assert!(bound(&socket) > mask, "bound over the mask: {args:?}");
+        assert!(masked(&other), "the ungranted socket is masked: {args:?}");
+        assert!(!masked(&socket), "the granted socket is not: {args:?}");
+        assert!(
+            args.windows(3)
+                .any(|w| w == ["--ro-bind-try", &*socket, &*socket]),
+            "{args:?}"
+        );
         let start = args
             .windows(2)
             .position(|w| w == ["--", BOX_HELPER])
@@ -1926,7 +1951,7 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
                 "run",
                 "--host-abstract-unix",
                 "--allow-unix",
-                &*host,
+                &*socket,
                 "--allow-unix",
                 "/etc/app/app.sock",
                 "--"
@@ -1935,11 +1960,34 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
         );
     }
 
-    /// A listed socket is reachable whether a grant shows it or not; an
-    /// unlisted one under a grant is refused and one outside every grant is
-    /// not there.
+    /// Connects to each socket it is given, then tries to remove, move and
+    /// replace the first one, and connects to it again.
+    const SWAP_SCRIPT: &str = r#"import socket, subprocess, sys
+def reach(address):
+    try:
+        socket.socket(socket.AF_UNIX).connect(address)
+        return "ok"
+    except OSError as error:
+        return type(error).__name__
+granted, other, named, lone = sys.argv[1:]
+out = [reach(granted), reach(other), reach(named), reach(lone)]
+for argv in (["rm", "-f", granted], ["mv", granted, granted + ".moved"], ["ln", "-sf", "/dev/null", granted]):
+    run = subprocess.run(argv, capture_output=True, text=True)
+    busy = run.returncode != 0 and "busy" in run.stderr.lower()
+    out.append(argv[0] + (":busy" if busy else f":{run.returncode}:{run.stderr.strip()}"))
+out.append(reach(granted))
+print(*out)
+"#;
+
+    /// Through the grants alone: a socket granted exactly connects, also by
+    /// a name through a symlinked directory (as /var/run names /run), while
+    /// a socket under a granted directory does not, and one outside every
+    /// grant is not there. The granted name is a mount point in the sandbox,
+    /// in a directory the sandbox can write (its private /tmp), so `rm`, `mv`
+    /// and `ln -sf` on it fail with EBUSY and the socket stays reachable:
+    /// what lets a read-write grant on a socket pass the redirect check.
     #[tokio::test]
-    async fn only_allowed_sockets_outside_the_sandbox_are_reachable() {
+    async fn an_exact_socket_grant_connects_and_cannot_be_swapped() {
         let Some(helper) = built_helper() else {
             return;
         };
@@ -1947,35 +1995,39 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
             return;
         }
         let workspace = tempfile::tempdir().unwrap();
-        let granted = tempfile::tempdir().unwrap();
+        let shared = tempfile::tempdir().unwrap();
+        let alone = tempfile::tempdir().unwrap();
         let hidden = tempfile::tempdir().unwrap();
         let path =
             |dir: &tempfile::TempDir, name: &str| dir.path().canonicalize().unwrap().join(name);
-        let sockets = [
-            path(&granted, "listed.sock"),
-            path(&granted, "other.sock"),
-            path(&hidden, "listed.sock"),
-            path(&hidden, "other.sock"),
+        let (granted, other, via, lone) = (
+            path(&alone, "granted.sock"),
+            path(&shared, "other.sock"),
+            path(&hidden, "via.sock"),
+            path(&hidden, "lone.sock"),
+        );
+        let _listeners = [&granted, &other, &via, &lone]
+            .map(|socket| std::os::unix::net::UnixListener::bind(socket).unwrap());
+        let links = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(hidden.path(), links.path().join("run")).unwrap();
+        let named = links.path().join("run/via.sock");
+        let grants = [
+            (
+                shared.path().canonicalize().unwrap(),
+                SandboxPathAccess::ReadOnly,
+            ),
+            (granted.clone(), SandboxPathAccess::ReadWrite),
+            (named.clone(), SandboxPathAccess::ReadOnly),
         ];
-        let _listeners: Vec<_> = sockets
-            .iter()
-            .map(|socket| std::os::unix::net::UnixListener::bind(socket).unwrap())
-            .collect();
-        let script = r#"import socket, sys
-def reach(address):
-    try:
-        socket.socket(socket.AF_UNIX).connect(address)
-        return "ok"
-    except OSError as error:
-        return type(error).__name__
-print(*[reach(address) for address in sys.argv[1:]])
-"#;
         let mut profile = SandboxProfile::for_test(
             workspace.path().to_path_buf(),
-            vec![SandboxPathGrant {
-                host_path: granted.path().to_path_buf(),
-                access: SandboxPathAccess::ReadOnly,
-            }],
+            grants
+                .iter()
+                .map(|(path, access)| SandboxPathGrant {
+                    host_path: path.clone(),
+                    access: *access,
+                })
+                .collect(),
             SandboxNetworkMode::Disabled,
             SandboxSessionBusMode::Deny,
             SandboxEnv::filtered_from_iter(
@@ -1985,31 +2037,30 @@ print(*[reach(address) for address in sys.argv[1:]])
             ),
             None,
         );
-        // The hidden listed socket is named through a symlinked directory,
-        // as /var/run names /run.
-        let links = tempfile::tempdir().unwrap();
-        std::os::unix::fs::symlink(hidden.path(), links.path().join("run")).unwrap();
-        let named = links.path().join("run/listed.sock");
+        let names: Vec<PathBuf> = grants.iter().map(|(path, _)| path.clone()).collect();
+        let (allowed, skipped) = super::super::granted_sockets(&names, &|path| {
+            profile
+                .filesystem
+                .covers(path, crate::config::FilesystemPathAccess::ReadWrite)
+        });
+        assert_eq!(allowed.len(), 2, "{allowed:?} {skipped:?}");
         profile.sockets = SocketPolicy {
             helper: Some(helper),
             kernel_confines: true,
-            allowed: vec![
-                AllowedSocket {
-                    path: sockets[0].clone(),
-                    host: sockets[0].clone(),
-                },
-                AllowedSocket {
-                    path: named.clone(),
-                    host: sockets[2].clone(),
-                },
-            ],
-            skipped: Vec::new(),
+            allowed,
+            skipped,
             hint_places: Vec::new(),
         };
-        let mut argv = vec![os("python3"), os("-c"), os(script)];
-        argv.extend(sockets.iter().chain([&named]).map(os));
         let command = SandboxCommand {
-            argv,
+            argv: vec![
+                os("python3"),
+                os("-c"),
+                os(SWAP_SCRIPT),
+                os(&granted),
+                os(&other),
+                os(&named),
+                os(&lone),
+            ],
             cwd: workspace.path().to_path_buf(),
             timeout_ms: 20_000,
             max_output_chars: 2_000,
@@ -2020,9 +2071,15 @@ print(*[reach(address) for address in sys.argv[1:]])
         };
         assert_eq!(
             output.stdout.trim(),
-            "ok PermissionError ok FileNotFoundError ok",
+            "ok PermissionError ok FileNotFoundError rm:busy mv:busy ln:busy ok",
             "{output:?}"
         );
+        use std::os::unix::fs::FileTypeExt;
+        assert!(std::fs::symlink_metadata(&granted)
+            .unwrap()
+            .file_type()
+            .is_socket());
+        assert!(!alone.path().join("granted.sock.moved").exists());
     }
 
     /// Keyring only, end to end: through the proxy CLAI starts, a command in

@@ -8,7 +8,6 @@ const DRAFT: AccessDraft = {
   askFirst: [],
   web: true,
   sessionBusMode: 'keyring_only',
-  allowedSockets: [],
   networkAccess: null,
 };
 
@@ -37,9 +36,4 @@ describe('accessSummary', () => {
     expect(bus({ sessionBusMode: 'deny' }, unfiltered)).toBe('Bus off');
   });
 
-  it('counts the allowed sockets only when there are some', () => {
-    expect(summary({ allowedSockets: [] })).not.toContainEqual(expect.stringMatching(/socket/));
-    expect(summary({ allowedSockets: ['/run/docker.sock'] })).toContain('1 socket');
-    expect(summary({ allowedSockets: ['/run/docker.sock', '~/.ssh/agent.sock'] })).toContain('2 sockets');
-  });
 });

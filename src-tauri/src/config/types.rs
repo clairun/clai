@@ -531,10 +531,6 @@ pub struct ExecutionSandboxConfig {
     pub network_access: NetworkPolicy,
     #[ts(rename = "sessionBusMode")]
     pub session_bus: SandboxSessionBusConfig,
-    /// Unix sockets outside the sandbox the shell may connect to, each an
-    /// absolute or `~/` path to the socket file. Read by the Linux sandbox
-    /// only, which otherwise confines a command to sockets it created.
-    pub allowed_sockets: Vec<String>,
 }
 
 impl Default for ExecutionSandboxConfig {
@@ -542,27 +538,15 @@ impl Default for ExecutionSandboxConfig {
         Self {
             network_access: network_access_from_legacy(None, allowlist_available_here()),
             session_bus: SandboxSessionBusConfig::default(),
-            allowed_sockets: Vec::new(),
         }
     }
 }
 
 impl ExecutionSandboxConfig {
     /// Checks and rewrites what the user entered; every save of an agent's
-    /// settings calls this. See [`NetworkPolicy::canonicalize`] for the host
-    /// lists; an allowed socket must name one socket file.
+    /// settings calls this. See [`NetworkPolicy::canonicalize`].
     pub fn canonicalize(&mut self) -> Result<(), String> {
-        self.network_access.canonicalize()?;
-        let home = paths::real_home();
-        let mut sockets: Vec<String> = Vec::new();
-        for entry in &self.allowed_sockets {
-            let entry = allowed_socket_entry(entry, home.as_deref())?;
-            if !sockets.contains(&entry) {
-                sockets.push(entry);
-            }
-        }
-        self.allowed_sockets = sockets;
-        Ok(())
+        self.network_access.canonicalize()
     }
 
     fn legacy_network(&self) -> SandboxNetworkConfig {
@@ -578,6 +562,8 @@ impl ExecutionSandboxConfig {
 /// an older build reads. A config without `networkAccess` gets one from
 /// `network` (see [`network_access_from_legacy`]); one without
 /// `sessionBusMode` gets `Deny` from `sessionBus: deny` and `Full` otherwise.
+/// Other fields are ignored, such as the `allowedSockets` of unreleased
+/// builds: a socket is granted with a path grant now.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct StoredExecutionSandboxConfig {
@@ -589,35 +575,6 @@ struct StoredExecutionSandboxConfig {
     session_bus: Option<LegacySessionBus>,
     #[serde(default)]
     session_bus_mode: Option<SandboxSessionBusConfig>,
-    #[serde(default)]
-    allowed_sockets: Vec<String>,
-}
-
-/// An allowed socket as saved, and as checked again before each command
-/// for a hand-edited config: trimmed, absolute or under `~/`, without a
-/// wildcard, `.` or `..`, and not a directory. A path that does not exist
-/// yet is kept: a socket appears when its service starts.
-pub(crate) fn allowed_socket_entry(
-    entry: &str,
-    home: Option<&std::path::Path>,
-) -> Result<String, String> {
-    let entry = entry.trim();
-    let refuse = |reason: &str| Err(format!("Allowed sockets: `{entry}` {reason}."));
-    if entry.contains(['*', '?', '[']) {
-        return refuse("has a wildcard; name one socket file");
-    }
-    if entry.split('/').any(|part| part == "." || part == "..") {
-        return refuse("has a . or .. part; name the socket by its full path");
-    }
-    let path = match entry.strip_prefix("~/") {
-        Some(rest) => home.map(|home| home.join(rest)),
-        None if entry.starts_with('/') => Some(PathBuf::from(entry)),
-        None => return refuse("is not an absolute or ~/ path"),
-    };
-    if entry.ends_with('/') || path.is_some_and(|path| path.is_dir()) {
-        return refuse("is a directory; name the socket file in it");
-    }
-    Ok(entry.to_string())
 }
 
 impl Serialize for ExecutionSandboxConfig {
@@ -632,7 +589,6 @@ impl Serialize for ExecutionSandboxConfig {
                 SandboxSessionBusConfig::Full => LegacySessionBus::Allow,
             }),
             session_bus_mode: Some(self.session_bus),
-            allowed_sockets: self.allowed_sockets.clone(),
         }
         .serialize(serializer)
     }
@@ -651,7 +607,6 @@ impl<'de> Deserialize<'de> for ExecutionSandboxConfig {
                 Some(LegacySessionBus::Deny) => SandboxSessionBusConfig::Deny,
                 Some(LegacySessionBus::Allow) | None => SandboxSessionBusConfig::KeyringOnly,
             }),
-            allowed_sockets: stored.allowed_sockets,
         })
     }
 }
@@ -1386,7 +1341,6 @@ mod tests {
                     deny_domains: Vec::new(),
                 },
                 session_bus: SandboxSessionBusConfig::Deny,
-                allowed_sockets: Vec::new(),
             }
         );
         // Lists missing from a hand-written policy are the defaults.
@@ -1403,7 +1357,6 @@ mod tests {
                 deny_domains: vec!["bad.example.org".to_string()],
             },
             session_bus: SandboxSessionBusConfig::Full,
-            allowed_sockets: Vec::new(),
         }
     }
 
@@ -1471,71 +1424,20 @@ mod tests {
         );
     }
 
+    /// Unreleased builds saved `allowedSockets`; such a config still loads,
+    /// and the field is gone once it is saved again.
     #[test]
-    fn allowed_sockets_round_trip_and_default_to_none() {
+    fn a_stored_allowed_sockets_list_is_ignored() {
         let mut json = serde_json::to_value(policy(NetworkMode::Off)).unwrap();
-        assert_eq!(json["allowedSockets"], serde_json::json!([]));
-        json.as_object_mut().unwrap().remove("allowedSockets");
-        assert_eq!(sandbox_json(json), policy(NetworkMode::Off));
-
-        let mut config = policy(NetworkMode::Off);
-        config.allowed_sockets = vec!["/run/docker.sock".to_string()];
-        let json = serde_json::to_value(&config).unwrap();
-        assert_eq!(
-            json["allowedSockets"],
-            serde_json::json!(["/run/docker.sock"])
-        );
-        assert_eq!(sandbox_json(json), config);
+        json["allowedSockets"] = serde_json::json!(["/run/docker.sock"]);
+        let config = sandbox_json(json);
+        assert_eq!(config, policy(NetworkMode::Off));
+        let saved = serde_json::to_value(&config).unwrap();
+        assert!(saved.get("allowedSockets").is_none(), "{saved}");
     }
 
     #[test]
-    fn an_allowed_socket_names_one_socket_file() {
-        let home = tempfile::tempdir().unwrap();
-        std::fs::create_dir(home.path().join(".docker")).unwrap();
-        let entry = |entry: &str| allowed_socket_entry(entry, Some(home.path()));
-        assert_eq!(
-            entry(" /run/docker.sock "),
-            Ok("/run/docker.sock".to_string())
-        );
-        assert_eq!(
-            entry("~/.docker/run/docker.sock"),
-            Ok("~/.docker/run/docker.sock".to_string())
-        );
-        for (bad, reason) in [
-            ("/run/user/1000/*.sock", "wildcard"),
-            ("/run/podman/podman.so?k", "wildcard"),
-            ("docker.sock", "absolute or ~/"),
-            ("~", "absolute or ~/"),
-            ("~other/x.sock", "absolute or ~/"),
-            ("/run/", "directory"),
-            ("~/.docker", "directory"),
-            ("/run/../tmp/x.sock", ". or .."),
-            ("/run/./docker.sock", ". or .."),
-            ("~/../other/x.sock", ". or .."),
-        ] {
-            let error = entry(bad).unwrap_err();
-            assert!(
-                error.starts_with(&format!("Allowed sockets: `{bad}`")),
-                "{error}"
-            );
-            assert!(error.contains(reason), "{bad}: {error}");
-        }
-        assert!(allowed_socket_entry("/", None)
-            .unwrap_err()
-            .contains("directory"));
-    }
-
-    #[test]
-    fn saving_dedupes_allowed_sockets_and_checks_the_host_lists() {
-        let mut config = policy(NetworkMode::Off);
-        config.allowed_sockets = ["/run/docker.sock", " /run/docker.sock", "/tmp/x.sock"]
-            .map(String::from)
-            .to_vec();
-        assert_eq!(config.canonicalize(), Ok(()));
-        assert_eq!(config.allowed_sockets, ["/run/docker.sock", "/tmp/x.sock"]);
-        config.allowed_sockets.push("relative.sock".to_string());
-        assert!(config.canonicalize().unwrap_err().contains("relative.sock"));
-
+    fn saving_checks_the_host_lists() {
         let mut config = policy(NetworkMode::Allowlist);
         config.network_access.allow_domains.push("*.*".to_string());
         assert!(config

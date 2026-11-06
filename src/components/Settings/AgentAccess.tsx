@@ -1,6 +1,6 @@
 /**
- * What an agent may do on this machine: path grants, network, shell, web,
- * the session bus and the Unix sockets outside the sandbox. The overview shows it as one summary line; the full editor
+ * What an agent may do on this machine: path grants, network, shell, web
+ * and the session bus. The overview shows it as one summary line; the full editor
  * is a drill-in view with paths and network on the left and the shell on the right.
  */
 
@@ -20,7 +20,6 @@ export interface AccessDraft {
   askFirst: string[];
   web: boolean;
   sessionBusMode: SandboxSessionBusConfig;
-  allowedSockets: string[];
   /** Null only when the backend defaults could not be loaded; saving then lets the backend pick. */
   networkAccess: NetworkPolicy | null;
 }
@@ -78,9 +77,6 @@ const BUS_MODES: { mode: SandboxSessionBusConfig; label: string; hint: string }[
     hint: 'Every desktop service, unfiltered, including ones that can start programs outside the sandbox. Use only for agents you trust.',
   },
 ];
-
-// A container engine runs containers as root, outside the network mode.
-const CONTAINER_ENGINE_SOCKET = /(docker|podman|containerd)\.sock$/;
 
 const INVALID_CHARACTERS = 'Use only letters, digits, hyphens and dots.';
 
@@ -184,7 +180,6 @@ export const accessSummary = (draft: AccessDraft, sandbox: SandboxStatus | null 
   networkSummary(draft.networkAccess, sandbox),
   draft.web ? 'Web on' : 'Web off',
   busSummary(draft, sandbox),
-  ...(draft.allowedSockets.length ? [plural(draft.allowedSockets.length, 'socket')] : []),
 ];
 
 /** Which bus the agent gets: only Full is the whole bus, and keyring only
@@ -367,44 +362,6 @@ const SessionBusSection = ({ mode, status, onChange, disabled, headingId }: {
   );
 };
 
-/** Linux only: Unix sockets outside the sandbox, such as Docker's. */
-const AllowedSocketsSection = ({ sockets, status, onChange, disabled, headingId }: {
-  sockets: string[];
-  status: SandboxStatus;
-  onChange: (sockets: string[]) => void;
-  disabled?: boolean;
-  headingId: string;
-}) => (
-  <div className={styles.prefixList} role="group" aria-labelledby={headingId}>
-    <h4 className={styles.subheading} id={headingId}>Allowed sockets</h4>
-    <p className={form.hint}>
-      Unix sockets outside the sandbox the shell may connect to, such as Docker or Podman. Name one socket file
-      per entry; <code className={form.code}>~/</code> works. A socket that is not there when a command starts is skipped.
-    </p>
-    <PrefixListEditor
-      items={sockets}
-      onChange={onChange}
-      disabled={disabled}
-      label="Allowed sockets"
-      placeholder="/run/docker.sock"
-      // Saving checks the path and names a refused entry.
-      parse={(raw) => raw.trim()}
-    />
-    {sockets.some((socket) => CONTAINER_ENGINE_SOCKET.test(socket)) && (
-      <p className={form.hintWarning}>
-        Allowing a Docker, Podman or containerd socket gives this agent full control of this computer: it can start
-        a container that mounts any folder with root rights. Containers also do not follow this agent's network mode.
-      </p>
-    )}
-    {!status.socketIsolationAvailable && (
-      <p className={form.hint}>
-        Socket isolation is unavailable here: {status.socketIsolationUnavailableReason ?? 'not supported'}. Other
-        sockets that a path grant exposes stay reachable.
-      </p>
-    )}
-  </div>
-);
-
 /** `sandbox` is the form's own lookup, so Retry here updates the overview too. */
 export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onBack, context }: {
   draft: AccessDraft;
@@ -417,7 +374,7 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
 }) => {
   const headingId = useId();
   const shellHint = SHELL_MODES.find((m) => m.mode === draft.shellMode)?.hint;
-  // The bus and the sockets are what the Linux sandbox enforces.
+  // The bus is what the Linux sandbox enforces.
   const linux = sandbox.status?.backend === 'bubblewrap' ? sandbox.status : null;
 
   return (
@@ -497,22 +454,13 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
           )}
 
           {linux && (
-            <>
-              <SessionBusSection
-                mode={draft.sessionBusMode}
-                status={linux}
-                onChange={(sessionBusMode) => onChange({ sessionBusMode })}
-                disabled={disabled}
-                headingId={`${headingId}-bus`}
-              />
-              <AllowedSocketsSection
-                sockets={draft.allowedSockets}
-                status={linux}
-                onChange={(allowedSockets) => onChange({ allowedSockets })}
-                disabled={disabled}
-                headingId={`${headingId}-sockets`}
-              />
-            </>
+            <SessionBusSection
+              mode={draft.sessionBusMode}
+              status={linux}
+              onChange={(sessionBusMode) => onChange({ sessionBusMode })}
+              disabled={disabled}
+              headingId={`${headingId}-bus`}
+            />
           )}
 
           <div className={styles.switches}>
