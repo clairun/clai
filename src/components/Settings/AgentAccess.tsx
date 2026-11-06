@@ -466,6 +466,8 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
             </div>
           )}
 
+          <Switch label="Web access" hint="Fetch pages and search the web." checked={draft.web} onChange={(web) => onChange({ web })} disabled={disabled} />
+
           {linux && (
             <SessionBusSection
               mode={draft.sessionBusMode}
@@ -475,10 +477,6 @@ export const AccessView = ({ draft, sandbox, onChange, disabled, headingRef, onB
               headingId={`${headingId}-bus`}
             />
           )}
-
-          <div className={styles.switches}>
-            <Switch label="Web access" hint="Fetch pages and search the web." checked={draft.web} onChange={(web) => onChange({ web })} disabled={disabled} />
-          </div>
         </div>
       </div>
     </section>

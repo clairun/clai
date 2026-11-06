@@ -511,7 +511,7 @@ describe('AgentBehaviorForm', () => {
         expect(sentUpdate().execution.sandbox.sessionBusMode).toBe('full');
       });
 
-      it('shows the bus only for the Linux sandbox, and a save keeps it either way', async () => {
+      it('shows the bus only for the Linux sandbox, below Web access, and a save keeps it either way', async () => {
         for (const status of [MACOS, NO_SANDBOX]) {
           api.getSandboxStatus.mockResolvedValue(status);
           resetSandboxStatusForTests();
@@ -519,6 +519,7 @@ describe('AgentBehaviorForm', () => {
           await openAccess();
           await waitFor(() => expect(screen.queryByText(/Checking what this PC supports/)).toBeNull());
           expect(screen.queryByRole('group', { name: 'Session bus' })).toBeNull();
+          expect(screen.getByRole('switch', { name: 'Web access' })).toBeInTheDocument();
           await submit(ref);
           expect(sentUpdate().execution.sandbox).toMatchObject({ sessionBusMode: 'full' });
           unmount();
@@ -528,7 +529,10 @@ describe('AgentBehaviorForm', () => {
         resetSandboxStatusForTests();
         renderForm({ agentId: 'agent-1' });
         await openAccess();
-        expect(await screen.findByRole('group', { name: 'Session bus' })).toBeInTheDocument();
+        const bus = await screen.findByRole('group', { name: 'Session bus' });
+        // Web access sits above the bus, not pinned below it where it scrolls out of view.
+        expect(screen.getByRole('switch', { name: 'Web access' }).compareDocumentPosition(bus))
+          .toBe(Node.DOCUMENT_POSITION_FOLLOWING);
       });
 
       it('keeps the bus mode exactly across a save and a reload', async () => {
