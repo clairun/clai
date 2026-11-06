@@ -20,7 +20,7 @@ mod unsupported;
 
 pub use profile::{
     ProxyEndpoint, SandboxEnv, SandboxNetworkMode, SandboxPathAccess, SandboxProfile,
-    SandboxSessionBusMode,
+    SandboxSessionBusMode, SocketPolicy,
 };
 pub use runner::{run_command, SandboxCommand, SandboxCommandOutput};
 
@@ -49,6 +49,13 @@ pub struct SandboxStatus {
     pub allowlist_available: bool,
     /// Why Allowlist is unavailable, worded for the user.
     pub allowlist_unavailable_reason: Option<String>,
+    /// Whether shell commands reach only the Unix sockets CLAI binds on
+    /// purpose. Without it a socket under a path grant (a desktop input
+    /// method, Docker, an ssh or gpg agent) is a way out of the sandbox, and
+    /// CLAI only hides the directories where such sockets usually live.
+    pub socket_isolation_available: bool,
+    /// Why socket isolation is unavailable, worded for the user.
+    pub socket_isolation_unavailable_reason: Option<String>,
 }
 
 pub fn status() -> SandboxStatus {
@@ -59,7 +66,55 @@ pub fn status() -> SandboxStatus {
     } else {
         None
     };
-    status_for(backend)
+    let mut status = status_for(backend);
+    #[cfg(target_os = "linux")]
+    {
+        let sockets = socket_policy();
+        status.socket_isolation_available = sockets.confined();
+        status.socket_isolation_unavailable_reason = socket_isolation_reason(&sockets);
+    }
+    status
+}
+
+/// The helper and what the kernel lets it confine, looked up once.
+#[cfg(target_os = "linux")]
+pub(crate) fn socket_policy() -> SocketPolicy {
+    static POLICY: std::sync::OnceLock<SocketPolicy> = std::sync::OnceLock::new();
+    POLICY
+        .get_or_init(|| SocketPolicy {
+            helper: helper::locate().ok(),
+            kernel_confines: landlock_abi() >= 9,
+        })
+        .clone()
+}
+
+#[cfg(target_os = "linux")]
+fn socket_isolation_reason(sockets: &SocketPolicy) -> Option<String> {
+    if sockets.helper.is_none() {
+        Some("The sandbox helper is not installed".to_string())
+    } else if !sockets.kernel_confines {
+        Some("This Linux kernel cannot confine Unix sockets (it needs Landlock ABI 9)".to_string())
+    } else {
+        None
+    }
+}
+
+/// The kernel's Landlock ABI version, 0 without Landlock. The helper asks
+/// the same in the sandbox; under Flatpak this process may be refused the
+/// call while the host is not, so it can only under-report.
+#[cfg(target_os = "linux")]
+fn landlock_abi() -> i64 {
+    // SAFETY: with no attribute and size 0 the call only reports the version
+    // (LANDLOCK_CREATE_RULESET_VERSION).
+    let version = unsafe {
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
+            std::ptr::null::<u8>(),
+            0_usize,
+            1_u32,
+        )
+    };
+    version.max(0)
 }
 
 pub(crate) fn status_for(backend: Option<SandboxBackend>) -> SandboxStatus {
@@ -73,6 +128,8 @@ pub(crate) fn status_for(backend: Option<SandboxBackend>) -> SandboxStatus {
         backend,
         allowlist_available,
         allowlist_unavailable_reason: allowlist_unavailable_reason.map(str::to_string),
+        socket_isolation_available: allowlist_available,
+        socket_isolation_unavailable_reason: allowlist_unavailable_reason.map(str::to_string),
     }
 }
 
@@ -147,7 +204,38 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[test]
     fn status_on_linux_is_bubblewrap_with_allowlist() {
-        assert_eq!(status(), status_for(Some(SandboxBackend::Bubblewrap)));
+        let status = status();
+        let sockets = socket_policy();
+        assert_eq!(
+            SandboxStatus {
+                socket_isolation_available: true,
+                socket_isolation_unavailable_reason: None,
+                ..status.clone()
+            },
+            status_for(Some(SandboxBackend::Bubblewrap))
+        );
+        assert_eq!(status.socket_isolation_available, sockets.confined());
+        assert_eq!(
+            status.socket_isolation_unavailable_reason.is_none(),
+            sockets.confined()
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn socket_isolation_names_what_is_missing() {
+        let helper = Some(std::path::PathBuf::from("/opt/clai/clai-sandbox-helper"));
+        let reason = |helper: Option<std::path::PathBuf>, kernel_confines| {
+            socket_isolation_reason(&SocketPolicy {
+                helper,
+                kernel_confines,
+            })
+        };
+        assert_eq!(reason(helper.clone(), true), None);
+        assert!(reason(helper, false).unwrap().contains("Landlock ABI 9"));
+        assert!(reason(None, true)
+            .unwrap()
+            .contains("helper is not installed"));
     }
 
     #[test]
@@ -160,6 +248,8 @@ mod tests {
                 "backend": "seatbelt",
                 "allowlistAvailable": false,
                 "allowlistUnavailableReason": "Not available on macOS yet",
+                "socketIsolationAvailable": false,
+                "socketIsolationUnavailableReason": "Not available on macOS yet",
             })
         );
     }

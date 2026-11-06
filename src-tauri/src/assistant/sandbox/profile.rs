@@ -38,6 +38,28 @@ pub struct SandboxProfile {
     /// [`super::scratch`]. `None` means scratch space was unavailable and the
     /// backend must fall back to an ephemeral per-command temp dir.
     pub scratch_tmp: Option<PathBuf>,
+    pub sockets: SocketPolicy,
+}
+
+/// How the Linux sandbox confines Unix sockets: `clai-sandbox-helper` starts
+/// every command and applies Landlock, so a command reaches only the sockets
+/// CLAI binds on purpose, not any other socket a grant makes visible.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SocketPolicy {
+    /// The helper as the sandbox's bwrap sees it; `None` when it is not
+    /// installed here.
+    pub helper: Option<PathBuf>,
+    /// Whether the kernel lets the helper confine pathname sockets (Landlock
+    /// ABI 9). Without it CLAI hides known socket directories instead.
+    pub kernel_confines: bool,
+}
+
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+impl SocketPolicy {
+    pub fn confined(&self) -> bool {
+        self.helper.is_some() && self.kernel_confines
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -202,6 +224,7 @@ impl SandboxProfile {
             session_bus,
             env,
             scratch_tmp,
+            sockets: SocketPolicy::default(),
         }
     }
 }

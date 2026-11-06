@@ -400,12 +400,17 @@ fn sandbox_profile(
         .home
         .as_deref()
         .unwrap_or(&filesystem.workspace_root);
+    #[cfg(target_os = "linux")]
+    let sockets = crate::assistant::sandbox::socket_policy();
+    #[cfg(not(target_os = "linux"))]
+    let sockets = Default::default();
     Ok(SandboxProfile {
         env: SandboxEnv::filtered_from_current(env_home, session_bus),
         filesystem,
         network,
         session_bus,
         scratch_tmp,
+        sockets,
     })
 }
 

@@ -221,6 +221,7 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
     append_tmp_mount(&mut args, command);
     append_runtime_file_binds(&mut args, in_flatpak);
     append_workspace_and_grants(&mut args, command);
+    append_socket_dir_masks(&mut args, command);
 
     for (key, value) in command.profile.env.iter() {
         args.push(os("--setenv"));
@@ -229,19 +230,31 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
     }
 
     append_tmp_env(&mut args, command);
-    // After the grants, so no grant can cover the proxy's files, and after
-    // the profile env, which drops the host's own proxy variables.
+    // After the grants, so no grant can cover the proxy's or the helper's
+    // files, and after the profile env, which drops the host's own proxy
+    // variables.
+    let helper = box_helper(command);
+    if let Some(helper) = helper {
+        args.extend([
+            os("--dir"),
+            os("/run/clai"),
+            os("--ro-bind"),
+            os(helper),
+            os(BOX_HELPER),
+        ]);
+    }
     append_proxy_binds_and_env(&mut args, &command.profile.network);
 
     // Emitted AFTER the profile env loop: inside Flatpak this overrides the
     // passed-through DBUS_SESSION_BUS_ADDRESS (which names the proxy socket we
     // intentionally don't bind) with the host bus path we do bind. --setenv is
     // last-writer-wins, so ordering matters.
-    append_session_bus_bind(&mut args, command, in_flatpak);
+    let bus = append_session_bus_bind(&mut args, command, in_flatpak);
 
     args.push(os("--chdir"));
     args.push(command.cwd.as_os_str().to_os_string());
     args.push(os("--"));
+    let allow_unix = bus.iter().flat_map(|path| [os("--allow-unix"), os(path)]);
     if let SandboxNetworkMode::Proxied(_) = command.profile.network {
         args.extend([
             os(BOX_HELPER),
@@ -250,12 +263,62 @@ pub(crate) fn bwrap_args(command: &SandboxCommand) -> Result<Vec<OsString>, Stri
             os(BOX_SOCKET),
             os("--http"),
             os(BOX_PROXY_PORT.to_string()),
-            os("--"),
         ]);
+        args.extend(allow_unix);
+        args.push(os("--"));
+    } else if helper.is_some() {
+        args.extend([os(BOX_HELPER), os("run")]);
+        args.extend(allow_unix);
+        args.push(os("--"));
     }
     args.extend(command.argv.iter().cloned());
 
     Ok(args)
+}
+
+/// The helper that starts the command: the Allowlist bridge, which cannot
+/// run without it, or the one that confines Unix sockets in Off and Host.
+fn box_helper(command: &SandboxCommand) -> Option<&Path> {
+    match &command.profile.network {
+        SandboxNetworkMode::Proxied(endpoint) => Some(&endpoint.helper),
+        _ => command.profile.sockets.helper.as_deref(),
+    }
+}
+
+/// Where host sockets usually live under the home directory: the input
+/// method bus, Docker Desktop, 1Password, colima, lima, Rancher Desktop and
+/// gpg-agent without a runtime directory.
+const SOCKET_DIRS: &[&str] = &[
+    ".cache/ibus",
+    ".docker/desktop",
+    ".docker/run",
+    ".1password",
+    ".colima",
+    ".lima",
+    ".rd",
+    ".gnupg",
+];
+
+/// Without Landlock a socket under a grant stays connectable, read-only or
+/// not, so hide the directories in [`SOCKET_DIRS`] that a grant exposes. Best
+/// effort: sockets elsewhere stay reachable.
+fn append_socket_dir_masks(args: &mut Vec<OsString>, command: &SandboxCommand) {
+    let profile = &command.profile;
+    if profile.sockets.confined() {
+        return;
+    }
+    let Some(home) = &profile.filesystem.home else {
+        return;
+    };
+    for dir in SOCKET_DIRS.iter().map(|dir| home.join(dir)) {
+        if dir.is_dir()
+            && profile
+                .filesystem
+                .covers(&dir, crate::config::FilesystemPathAccess::ReadOnly)
+        {
+            args.extend([os("--tmpfs"), os(&dir)]);
+        }
+    }
 }
 
 /// Allowlist: the proxy socket, the helper and the ssh configuration, and
@@ -267,14 +330,9 @@ fn append_proxy_binds_and_env(args: &mut Vec<OsString>, network: &SandboxNetwork
         return;
     };
     args.extend([
-        os("--dir"),
-        os("/run/clai"),
         os("--bind"),
         os(&endpoint.socket),
         os(BOX_SOCKET),
-        os("--ro-bind"),
-        os(&endpoint.helper),
-        os(BOX_HELPER),
         os("--ro-bind"),
         os(&endpoint.ssh_config),
         os("/etc/ssh/ssh_config"),
@@ -468,9 +526,13 @@ fn append_runtime_file_binds(args: &mut Vec<OsString>, in_flatpak: bool) {
 /// `workspace_requestUserInput`. This makes the toggle meaningful only
 /// where a session bus actually exists — desktop Linux — and a graceful
 /// no-op everywhere else (headless servers, containers, WSL).
-fn append_session_bus_bind(args: &mut Vec<OsString>, command: &SandboxCommand, in_flatpak: bool) {
+fn append_session_bus_bind(
+    args: &mut Vec<OsString>,
+    command: &SandboxCommand,
+    in_flatpak: bool,
+) -> Option<PathBuf> {
     if !matches!(command.profile.session_bus, SandboxSessionBusMode::Allow) {
-        return;
+        return None;
     }
     let bus_path = resolve_session_bus_socket(in_flatpak);
     if bus_path.is_none()
@@ -491,7 +553,7 @@ fn append_session_bus_bind(args: &mut Vec<OsString>, command: &SandboxCommand, i
              at $XDG_RUNTIME_DIR/bus). libsecret-using tools will fail; the toggle is \
              a no-op here."
         );
-        return;
+        return None;
     };
     for dir in private_parent_dirs_for(&bus_path) {
         args.push(os("--dir"));
@@ -523,6 +585,7 @@ fn append_session_bus_bind(args: &mut Vec<OsString>, command: &SandboxCommand, i
         args.push(os("DBUS_SESSION_BUS_ADDRESS"));
         args.push(addr);
     }
+    Some(bus_path)
 }
 
 /// Locate the host's D-Bus session bus socket on the filesystem. Returns
@@ -743,7 +806,7 @@ fn os(value: impl AsRef<OsStr>) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::sandbox::{SandboxEnv, SandboxPathGrant, SandboxProfile};
+    use crate::assistant::sandbox::{SandboxEnv, SandboxPathGrant, SandboxProfile, SocketPolicy};
 
     fn sample_command() -> SandboxCommand {
         let workspace = std::env::temp_dir();
@@ -1361,6 +1424,187 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn every_mode_starts_the_command_through_the_helper_which_allows_the_bus() {
+        let temp = tempfile::tempdir().unwrap();
+        let bus = temp.path().join("bus");
+        std::fs::write(&bus, "").unwrap();
+        let bus = bus.to_string_lossy().into_owned();
+        for network in [
+            SandboxNetworkMode::Disabled,
+            SandboxNetworkMode::Host,
+            proxied(Path::new("/c/.clai-net")),
+        ] {
+            let mut command = sample_command();
+            command.profile.network = network.clone();
+            command.profile.session_bus = SandboxSessionBusMode::Allow;
+            command.profile.sockets.helper = Some(PathBuf::from("/opt/clai/clai-sandbox-helper"));
+            let args = rendered(&with_dbus_env(
+                Some(&format!("unix:path={bus}")),
+                None,
+                || bwrap_args(&command).unwrap(),
+            ));
+            let start = args
+                .windows(2)
+                .position(|w| w == ["--", "/run/clai/helper"])
+                .unwrap_or_else(|| panic!("{network:?}: {args:?}"));
+            let entry: Vec<&str> = args[start + 2..].iter().map(String::as_str).collect();
+            let expected: Vec<&str> = match network {
+                SandboxNetworkMode::Proxied(_) => vec![
+                    "bridge",
+                    "--socket",
+                    "/run/clai/net.sock",
+                    "--http",
+                    "3128",
+                    "--allow-unix",
+                    &bus,
+                    "--",
+                    "/bin/sh",
+                    "-lc",
+                    "pwd",
+                ],
+                _ => vec!["run", "--allow-unix", &bus, "--", "/bin/sh", "-lc", "pwd"],
+            };
+            assert_eq!(entry, expected, "{network:?}");
+            let helper_binds: Vec<&[String]> = args
+                .windows(3)
+                .filter(|w| w[0] == "--ro-bind" && w[2] == "/run/clai/helper")
+                .collect();
+            assert_eq!(helper_binds.len(), 1, "{network:?}: {args:?}");
+        }
+    }
+
+    #[test]
+    fn without_landlock_socket_dirs_a_grant_exposes_are_hidden() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let workspace = home.join(".clai/workspaces/ws");
+        for dir in [".cache/ibus", ".gnupg", ".config"] {
+            std::fs::create_dir_all(home.join(dir)).unwrap();
+        }
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut command = sample_command();
+        command.cwd = workspace.clone();
+        command.profile.filesystem = super::super::filesystem::EffectiveFilesystemPolicy::compile(
+            &workspace,
+            &[SandboxPathGrant {
+                host_path: home.clone(),
+                access: SandboxPathAccess::ReadOnly,
+            }],
+            Some(&home),
+        )
+        .unwrap();
+        let masks = |command: &SandboxCommand| {
+            let args = rendered(&bwrap_args(command).unwrap());
+            let home_bind = args
+                .windows(2)
+                .position(|w| w[0] == "--ro-bind-try" && Path::new(&w[1]) == home)
+                .unwrap();
+            args.windows(2)
+                .enumerate()
+                .filter(|(_, w)| w[0] == "--tmpfs" && Path::new(&w[1]).starts_with(&home))
+                .inspect(|(index, _)| assert!(*index > home_bind, "masks follow the grant"))
+                .map(|(_, w)| w[1].clone())
+                .filter(|path| !path.ends_with("workspaces"))
+                .collect::<Vec<_>>()
+        };
+        for helper in [None, Some(PathBuf::from("/opt/h"))] {
+            command.profile.sockets = SocketPolicy {
+                helper,
+                kernel_confines: false,
+            };
+            assert_eq!(
+                masks(&command),
+                [".cache/ibus", ".gnupg"].map(|dir| home.join(dir).to_string_lossy().into_owned())
+            );
+        }
+        command.profile.sockets.kernel_confines = true;
+        assert_eq!(masks(&command), Vec::<String>::new());
+    }
+
+    /// E2/E3: in Host network, with a read grant on a directory that holds a
+    /// host socket, the confined command reaches neither that socket nor a
+    /// host abstract socket, but its own sockets and cross-directory renames
+    /// still work. Without the helper both host sockets are reachable.
+    #[tokio::test]
+    async fn the_helper_confines_unix_sockets_to_those_made_in_the_sandbox() {
+        let Some(helper) = built_helper() else {
+            return;
+        };
+        if super::super::landlock_abi() < 9 {
+            eprintln!("skipped: this kernel cannot confine pathname sockets");
+            return;
+        }
+        let workspace = tempfile::tempdir().unwrap();
+        let host_dir = tempfile::tempdir().unwrap();
+        let host_socket = host_dir.path().join("host.sock");
+        let _host = std::os::unix::net::UnixListener::bind(&host_socket).unwrap();
+        let name = format!("clai-test-{}", uuid::Uuid::new_v4().simple());
+        let address = <std::os::unix::net::SocketAddr as std::os::linux::net::SocketAddrExt>::from_abstract_name(name.as_bytes()).unwrap();
+        let _abstract = std::os::unix::net::UnixListener::bind_addr(&address).unwrap();
+        let script = r#"import os, socket, sys
+def reach(address):
+    try:
+        socket.socket(socket.AF_UNIX).connect(address)
+        return "ok"
+    except OSError as error:
+        return type(error).__name__
+own = socket.socket(socket.AF_UNIX)
+own.bind("/tmp/own.sock")
+own.listen(1)
+os.makedirs("a")
+os.makedirs("b")
+open("a/f", "w").close()
+os.rename("a/f", "b/f")
+print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
+"#;
+        let run_with = |helper: Option<PathBuf>, workspace: &Path| {
+            let mut profile = SandboxProfile::for_test(
+                workspace.to_path_buf(),
+                vec![SandboxPathGrant {
+                    host_path: host_dir.path().to_path_buf(),
+                    access: SandboxPathAccess::ReadOnly,
+                }],
+                SandboxNetworkMode::Host,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace,
+                    SandboxSessionBusMode::Deny,
+                ),
+                None,
+            );
+            profile.sockets = SocketPolicy {
+                helper,
+                kernel_confines: true,
+            };
+            SandboxCommand {
+                argv: vec![
+                    os("python3"),
+                    os("-c"),
+                    os(script),
+                    os(&host_socket),
+                    os(&name),
+                ],
+                cwd: workspace.to_path_buf(),
+                timeout_ms: 20_000,
+                max_output_chars: 2_000,
+                profile,
+            }
+        };
+        let Some(confined) = run_or_skip(run_with(Some(helper), workspace.path())).await else {
+            return;
+        };
+        assert_eq!(
+            confined.stdout.trim(),
+            "PermissionError PermissionError ok",
+            "{confined:?}"
+        );
+        let open = tempfile::tempdir().unwrap();
+        let unconfined = run_or_skip(run_with(None, open.path())).await.unwrap();
+        assert_eq!(unconfined.stdout.trim(), "ok ok ok", "{unconfined:?}");
     }
 
     /// The helper `cargo test` builds next to the test binary; `cargo test
@@ -2900,6 +3144,7 @@ else:
                 network: SandboxNetworkMode::Disabled,
                 session_bus: SandboxSessionBusMode::Deny,
                 scratch_tmp: None,
+                sockets: Default::default(),
             },
         };
         let output = match run(command).await {

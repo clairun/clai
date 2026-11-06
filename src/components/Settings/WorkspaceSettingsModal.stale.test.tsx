@@ -68,6 +68,7 @@ describe('WorkspaceSettingsModal: a Main save refused as stale', () => {
     api.workspaceUpdateAgent.mockReset();
     api.getSandboxStatus.mockReset().mockResolvedValue({
       available: true, backend: 'bubblewrap', allowlistAvailable: true, allowlistUnavailableReason: null,
+      socketIsolationAvailable: true, socketIsolationUnavailableReason: null,
     });
     resetSandboxStatusForTests();
   });

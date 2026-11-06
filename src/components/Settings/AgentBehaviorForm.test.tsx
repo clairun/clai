@@ -44,12 +44,17 @@ const HOME_GRANT: FilesystemPathGrant = { path: '/home/u', access: 'read_only', 
 // A stored policy the form must save back unchanged.
 const NETWORK: NetworkPolicy = { mode: 'host_network', allowDomains: ['github.com', '*.example.org'], denyDomains: ['bad.example.org'] };
 
-const LINUX: SandboxStatus = { available: true, backend: 'bubblewrap', allowlistAvailable: true, allowlistUnavailableReason: null };
+const LINUX: SandboxStatus = {
+  available: true, backend: 'bubblewrap', allowlistAvailable: true, allowlistUnavailableReason: null,
+  socketIsolationAvailable: true, socketIsolationUnavailableReason: null,
+};
 const MACOS: SandboxStatus = {
   available: true, backend: 'seatbelt', allowlistAvailable: false, allowlistUnavailableReason: 'Not available on macOS yet',
+  socketIsolationAvailable: false, socketIsolationUnavailableReason: 'Not available on macOS yet',
 };
 const NO_SANDBOX: SandboxStatus = {
   available: false, backend: null, allowlistAvailable: false, allowlistUnavailableReason: 'Not available on this PC',
+  socketIsolationAvailable: false, socketIsolationUnavailableReason: 'Not available on this PC',
 };
 
 const REVIEWER: AgentDetail = {

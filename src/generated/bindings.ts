@@ -549,7 +549,18 @@ allowlistAvailable: boolean,
 /**
  * Why Allowlist is unavailable, worded for the user.
  */
-allowlistUnavailableReason: string | null, };
+allowlistUnavailableReason: string | null, 
+/**
+ * Whether shell commands reach only the Unix sockets CLAI binds on
+ * purpose. Without it a socket under a path grant (a desktop input
+ * method, Docker, an ssh or gpg agent) is a way out of the sandbox, and
+ * CLAI only hides the directories where such sockets usually live.
+ */
+socketIsolationAvailable: boolean, 
+/**
+ * Why socket isolation is unavailable, worded for the user.
+ */
+socketIsolationUnavailableReason: string | null, };
 
 /**
  * Discriminated union describing *how* the manager's next run is
