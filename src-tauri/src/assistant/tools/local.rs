@@ -411,11 +411,15 @@ fn bash_exec_result(
 /// a path on a line that says "no such file or directory" (the socket is not
 /// bound into the sandbox) or, where Landlock confines sockets, "permission
 /// denied", when that path is a socket on the host and not an allowed one.
+/// Only paths in `sockets.hint_places` are looked up, at most
+/// `MAX_LOOKUPS` per result: the command chooses what it prints.
 #[cfg(target_os = "linux")]
 fn unreachable_sockets(output: &SandboxCommandOutput, sockets: &SocketPolicy) -> Vec<String> {
     use std::os::unix::fs::FileTypeExt;
     const MAX_SOCKETS: usize = 5;
+    const MAX_LOOKUPS: usize = 16;
     let mut found: Vec<String> = Vec::new();
+    let mut lookups = 0;
     if output.success {
         return found;
     }
@@ -429,12 +433,28 @@ fn unreachable_sockets(output: &SandboxCommandOutput, sockets: &SocketPolicy) ->
         for word in line.split(|c: char| c.is_whitespace() || "\"'(),;".contains(c)) {
             let path = word.strip_prefix("unix://").unwrap_or(word);
             let path = path.trim_end_matches([':', '.']);
-            if !path.starts_with('/') || found.iter().any(|known| known == path) {
+            let in_place = Path::new(path).is_absolute()
+                && sockets
+                    .hint_places
+                    .iter()
+                    .any(|place| Path::new(path).starts_with(place));
+            if !in_place || found.iter().any(|known| known == path) {
                 continue;
+            }
+            lookups += 1;
+            if lookups > MAX_LOOKUPS {
+                return found;
             }
             let Ok(resolved) = fs::canonicalize(path) else {
                 continue;
             };
+            if !sockets
+                .hint_places
+                .iter()
+                .any(|place| resolved.starts_with(place))
+            {
+                continue;
+            }
             let is_socket = resolved
                 .metadata()
                 .is_ok_and(|meta| meta.file_type().is_socket());
@@ -2891,6 +2911,7 @@ mod tests {
             kernel_confines: true,
             allowed: Vec::new(),
             skipped: Vec::new(),
+            hint_places: vec![temp.path().canonicalize().unwrap()],
         };
         let denied = output(
             false,
@@ -2935,6 +2956,48 @@ mod tests {
         };
         assert_eq!(unreachable(&denied, &allowed), None);
         assert_eq!(unreachable(&output(true, &denied.stderr), &confined), None);
+
+        // m3: a path outside the usual socket places is never looked up, so
+        // a command cannot probe the host by printing paths.
+        let elsewhere = tempdir().unwrap();
+        let hidden = elsewhere.path().canonicalize().unwrap().join("hidden.sock");
+        let _hidden = std::os::unix::net::UnixListener::bind(&hidden).unwrap();
+        let probe = |path: String| output(false, &format!("{path}: no such file or directory"));
+        assert_eq!(
+            unreachable(&probe(hidden.display().to_string()), &confined),
+            None
+        );
+        // Nor is one that only seems to be in such a place.
+        let dotdot = format!(
+            "{}/../{}",
+            temp.path().canonicalize().unwrap().display(),
+            hidden
+                .strip_prefix(elsewhere.path().parent().unwrap().canonicalize().unwrap())
+                .unwrap()
+                .display()
+        );
+        assert_eq!(unreachable(&probe(dotdot), &confined), None);
+        // At most 16 lookups per result: a socket after 16 other paths is
+        // not named.
+        let mut many: String = (0..16)
+            .map(|index| {
+                format!(
+                    "{}/missing-{index}: no such file or directory\n",
+                    temp.path().display()
+                )
+            })
+            .collect();
+        many.push_str(&missing.stderr);
+        assert_eq!(unreachable(&output(false, &many), &unconfined), None);
+        // Paths elsewhere are not even looked up, so they use none of them.
+        let mut elsewhere_paths: String = (0..16)
+            .map(|index| format!("/elsewhere/missing-{index}: no such file or directory\n"))
+            .collect();
+        elsewhere_paths.push_str(&missing.stderr);
+        assert_eq!(
+            unreachable(&output(false, &elsewhere_paths), &unconfined),
+            Some(serde_json::json!([path]))
+        );
     }
 
     #[test]

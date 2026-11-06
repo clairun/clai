@@ -107,8 +107,22 @@ pub(crate) fn socket_policy() -> SocketPolicy {
             kernel_confines: landlock_abi() >= 9,
             allowed: Vec::new(),
             skipped: Vec::new(),
+            hint_places: socket_hint_places(crate::paths::real_home().as_deref()),
         })
         .clone()
+}
+
+/// Where the hint for unreachable sockets may look on the host: the system
+/// and user runtime directories and the usual socket directories under
+/// home. Not any path a command prints, which would let it learn what is
+/// on the host outside its grants.
+#[cfg(target_os = "linux")]
+fn socket_hint_places(home: Option<&std::path::Path>) -> Vec<std::path::PathBuf> {
+    let runtime = ["/run", "/var/run"].map(std::path::PathBuf::from);
+    let home_dirs = home
+        .into_iter()
+        .flat_map(|home| linux_bwrap::SOCKET_DIRS.iter().map(|dir| home.join(dir)));
+    runtime.into_iter().chain(home_dirs).collect()
 }
 
 /// The agent's allowed sockets that are sockets now: `~/` expanded with
@@ -486,6 +500,24 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn the_socket_hint_looks_only_where_sockets_usually_live() {
+        use std::path::PathBuf;
+        let places = socket_hint_places(Some(std::path::Path::new("/home/u")));
+        for place in ["/run", "/var/run", "/home/u/.docker/run", "/home/u/.gnupg"] {
+            assert!(
+                places.contains(&PathBuf::from(place)),
+                "{place}: {places:?}"
+            );
+        }
+        assert!(!places.contains(&PathBuf::from("/home/u")));
+        assert_eq!(
+            socket_hint_places(None),
+            [PathBuf::from("/run"), PathBuf::from("/var/run")]
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn socket_isolation_names_what_is_missing() {
         let helper = Some(std::path::PathBuf::from("/opt/clai/clai-sandbox-helper"));
         let reason = |helper: Option<std::path::PathBuf>, kernel_confines| {
@@ -494,6 +526,7 @@ mod tests {
                 kernel_confines,
                 allowed: Vec::new(),
                 skipped: Vec::new(),
+                hint_places: Vec::new(),
             })
         };
         assert_eq!(reason(helper.clone(), true), None);

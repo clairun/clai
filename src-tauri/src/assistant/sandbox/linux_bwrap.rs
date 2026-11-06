@@ -306,7 +306,7 @@ fn box_helper(command: &SandboxCommand) -> Option<&Path> {
 /// Where host sockets usually live under the home directory: the input
 /// method bus, Docker Desktop, 1Password, colima, lima, Rancher Desktop and
 /// gpg-agent without a runtime directory.
-const SOCKET_DIRS: &[&str] = &[
+pub(super) const SOCKET_DIRS: &[&str] = &[
     ".cache/ibus",
     ".docker/desktop",
     ".docker/run",
@@ -1709,6 +1709,7 @@ mod tests {
                 kernel_confines: false,
                 allowed: Vec::new(),
                 skipped: Vec::new(),
+                hint_places: Vec::new(),
             };
             command.profile.filesystem = grant(&home);
             assert_eq!(
@@ -1836,6 +1837,7 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
                 kernel_confines: true,
                 allowed: Vec::new(),
                 skipped: Vec::new(),
+                hint_places: Vec::new(),
             };
             SandboxCommand {
                 argv: vec![
@@ -1893,6 +1895,7 @@ print(reach(sys.argv[1]), reach(chr(0) + sys.argv[2]), reach("/tmp/own.sock"))
                 host: host.clone(),
             }],
             skipped: Vec::new(),
+            hint_places: Vec::new(),
         };
         let args = rendered(&bwrap_args(&command).unwrap());
         let (socket, host) = (socket.to_string_lossy(), host.to_string_lossy());
@@ -1987,6 +1990,7 @@ print(*[reach(address) for address in sys.argv[1:]])
                 },
             ],
             skipped: Vec::new(),
+            hint_places: Vec::new(),
         };
         let mut argv = vec![os("python3"), os("-c"), os(script)];
         argv.extend(sockets.iter().chain([&named]).map(os));
@@ -2042,6 +2046,7 @@ print(*[reach(address) for address in sys.argv[1:]])
             kernel_confines: super::super::landlock_abi() >= 9,
             allowed: Vec::new(),
             skipped: Vec::new(),
+            hint_places: Vec::new(),
         };
         profile.session_bus_proxy = Some(plan);
         let script = "for name in org.freedesktop.secrets org.example.Spawner; do \

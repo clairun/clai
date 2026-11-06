@@ -97,6 +97,9 @@ pub struct SocketPolicy {
     /// Allowed sockets refused for this command, each with the reason,
     /// worded for the user.
     pub skipped: Vec<String>,
+    /// Where on the host a failed command's output may name a socket the
+    /// result points out; other paths are never looked up.
+    pub hint_places: Vec<PathBuf>,
 }
 
 /// A host socket the agent may connect to, bound at `host`, where it
