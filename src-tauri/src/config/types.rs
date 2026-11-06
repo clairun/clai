@@ -626,7 +626,6 @@ impl Serialize for ExecutionSandboxConfig {
             network: Some(self.legacy_network()),
             network_access: Some(self.network_access.clone()),
             session_bus: Some(match self.session_bus {
-                SandboxSessionBusConfig::Deny => LegacySessionBus::Deny,
                 SandboxSessionBusConfig::Deny | SandboxSessionBusConfig::KeyringOnly => {
                     LegacySessionBus::Deny
                 }
