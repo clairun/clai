@@ -486,7 +486,7 @@ fn persist_grant_to_agent(
             access,
             origin,
         );
-        agent.updated_at = now;
+        agent.touch(now);
         config.updated_at = now;
         Ok(())
     })?;

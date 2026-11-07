@@ -1,0 +1,277 @@
+import type { ReactNode } from 'react';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import type { NetworkAccessRequest, WorkspaceAgentResponse } from '../generated/bindings';
+import { rosterAgent } from './AssistantChat/messageSender';
+
+const mockInvoke = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
+const listenHandlers = vi.hoisted(() => ({}) as Record<string, (event: { payload: unknown }) => void>);
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn((name: string, handler: (event: { payload: unknown }) => void) => {
+    listenHandlers[name] = handler;
+    return Promise.resolve(() => {});
+  }),
+}));
+
+import InlineNetworkAccessCard, { NetworkAccessCard } from './InlineNetworkAccessCard';
+
+const request = (overrides: Partial<NetworkAccessRequest> = {}): NetworkAccessRequest => ({
+  requestId: 'net-1',
+  workspaceId: 'ws-1',
+  agentId: 'agent-1',
+  agentName: null,
+  host: 'mirror.example.org',
+  port: 443,
+  reason: 'Download a test fixture.',
+  runHosts: [
+    { host: 'github.com', port: 443, allowed: true },
+    { host: 'mirror.example.org', port: 443, allowed: false },
+  ],
+  suggestedWildcard: '*.example.org',
+  persistsToSharedAgent: false,
+  alsoAffectsWorkspaces: [],
+  ...overrides,
+});
+
+const requester = rosterAgent('wa-rust', [
+  {
+    id: 'wa-rust',
+    workspaceId: 'ws-1',
+    agentDefinitionId: 'def-rust',
+    displayName: 'Rust Architect',
+    enabled: true,
+    isDefault: false,
+    agentName: null,
+    agentDescription: null,
+    providerConnectionIds: [],
+    skillIds: [],
+    selectedMcpServerIds: [],
+    execution: {},
+    avatar: null,
+    createdAt: 1n,
+    updatedAt: 1n,
+  } as unknown as WorkspaceAgentResponse,
+]);
+
+afterEach(() => {
+  mockInvoke.mockReset();
+});
+
+const submitted = () =>
+  mockInvoke.mock.calls.filter(([cmd]) => cmd === 'submit_network_access_decision').map(([, args]) => args);
+
+describe('NetworkAccessCard', () => {
+  it('shows the host, the reason and what this run reached', () => {
+    render(<NetworkAccessCard req={request()} />);
+    expect(screen.getByText('Network access requested')).toBeInTheDocument();
+    expect(screen.getByText('mirror.example.org:443')).toBeInTheDocument();
+    expect(screen.getByText('not in allowed hosts')).toBeInTheDocument();
+    expect(screen.getByText('Download a test fixture.')).toBeInTheDocument();
+    const runLine = screen.getByText(/^This run:/);
+    expect(runLine).toHaveTextContent('This run: github.com ✓ · mirror.example.org ✕');
+    expect(within(runLine).getByRole('img', { name: 'allowed' })).toBeInTheDocument();
+    expect(within(runLine).getByRole('img', { name: 'refused' })).toBeInTheDocument();
+  });
+
+  it('reads an IDN host in Unicode, shows its ASCII form, and sends the ASCII form', async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    const req = request({
+      host: 'mirror.xn--bcher-kva.example',
+      suggestedWildcard: '*.xn--bcher-kva.example',
+      runHosts: [{ host: 'xn--mnchen-3ya.de', port: 443, allowed: true }],
+    });
+    render(<NetworkAccessCard req={req} requester={requester} />);
+    expect(screen.getByText('mirror.bücher.example:443').tagName).toBe('CODE');
+    expect(screen.getByText('mirror.xn--bcher-kva.example')).toBeInTheDocument();
+    expect(screen.getByText(/^This run:/)).toHaveTextContent('This run: münchen.de ✓');
+    expect(screen.getByText(/add their entry/)).toHaveTextContent(/^“Always” and “Allow \*\.bücher\.example” add their entry/);
+    expect(screen.getByRole('button', { name: 'Always for Rust Architect' })).toHaveAttribute(
+      'title',
+      "Adds mirror.bücher.example to this agent's allowed hosts.",
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Allow *.bücher.example' }));
+    expect(submitted().at(-1)).toEqual({
+      requestId: 'net-1',
+      decision: { kind: 'allowAlways', entry: '*.xn--bcher-kva.example' },
+    });
+  });
+
+  it('brackets an IPv6 host so its port reads apart from it', () => {
+    render(<NetworkAccessCard req={request({ host: '2001:db8::1', port: 443, suggestedWildcard: null })} />);
+    expect(screen.getByText('[2001:db8::1]:443')).toBeInTheDocument();
+  });
+
+  it('names the first eight hosts of the run and counts the rest', () => {
+    const runHosts = Array.from({ length: 11 }, (_, i) => ({ host: `h${i}.example.org`, port: 443, allowed: i % 2 === 0 }));
+    render(<NetworkAccessCard req={request({ runHosts })} />);
+    const runLine = screen.getByText(/^This run:/);
+    expect(runLine).toHaveTextContent(/^This run: h0\.example\.org ✓ · .* · h7\.example\.org ✕ and 3 more$/);
+    expect(runLine).not.toHaveTextContent('h8.example.org');
+    expect(within(runLine).getAllByRole('img')).toHaveLength(8);
+  });
+
+  it('says the entry goes to the allowed hosts, as the settings call the list', () => {
+    render(<NetworkAccessCard req={request()} requester={requester} />);
+    expect(screen.getByRole('button', { name: 'Always for Rust Architect' })).toHaveAttribute(
+      'title',
+      "Adds mirror.example.org to this agent's allowed hosts.",
+    );
+    expect(screen.getByRole('button', { name: 'Allow *.example.org' })).toHaveAttribute(
+      'title',
+      "Adds *.example.org to this agent's allowed hosts: every host under it.",
+    );
+  });
+
+  it('sends each choice with its entry', async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    for (const [label, decision] of [
+      ['Allow this run', { kind: 'allowRun' }],
+      ['Always for Rust Architect', { kind: 'allowAlways', entry: 'mirror.example.org' }],
+      ['Allow *.example.org', { kind: 'allowAlways', entry: '*.example.org' }],
+    ] as const) {
+      const { unmount } = render(<NetworkAccessCard req={request()} requester={requester} />);
+      // A reason is for a denial only; the allows never carry it.
+      await user.type(screen.getByLabelText('Reason for denying (optional)'), 'typed anyway');
+      await user.click(screen.getByRole('button', { name: label }));
+      expect(submitted().at(-1)).toEqual({ requestId: 'net-1', decision });
+      unmount();
+    }
+  });
+
+  it('offers no wildcard when the host has no parent domain to widen to', () => {
+    render(<NetworkAccessCard req={request({ host: 'example.org', suggestedWildcard: null })} />);
+    expect(screen.queryByRole('button', { name: /^Allow \*\./ })).not.toBeInTheDocument();
+    expect(screen.getByText(/adds/)).toHaveTextContent(/Always. adds example\.org to this agent.s allowed hosts in this workspace only\./);
+  });
+
+  it('shows the reason field from the start, without taking focus', () => {
+    render(<NetworkAccessCard req={request()} />);
+    const reason = screen.getByLabelText('Reason for denying (optional)');
+    expect(reason).toBeVisible();
+    expect(reason).not.toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Deny' })).toHaveAccessibleDescription('Reason for denying (optional)');
+  });
+
+  it('denies in one click with the reason the user typed, trimmed, or none', async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    const { unmount } = render(<NetworkAccessCard req={request()} />);
+    await user.type(screen.getByLabelText('Reason for denying (optional)'), '  use the internal mirror ');
+    await user.click(screen.getByRole('button', { name: 'Deny' }));
+    expect(submitted()).toEqual([{ requestId: 'net-1', decision: { kind: 'deny', reason: 'use the internal mirror' } }]);
+    unmount();
+
+    render(<NetworkAccessCard req={request()} />);
+    await user.click(screen.getByRole('button', { name: 'Deny' }));
+    expect(submitted().at(-1)).toEqual({ requestId: 'net-1', decision: { kind: 'deny' } });
+    expect(submitted()).toHaveLength(2);
+  });
+
+  it('says where Always saves', () => {
+    const { unmount } = render(<NetworkAccessCard req={request()} workspaceName="clai" />);
+    expect(screen.getByText(/add their entry/)).toHaveTextContent(/to this agent.s allowed hosts in .clai. only\.$/);
+    unmount();
+
+    render(
+      <NetworkAccessCard
+        req={request({ persistsToSharedAgent: true, alsoAffectsWorkspaces: ['docs-site'] })}
+        workspaceName="clai"
+      />,
+    );
+    expect(screen.getByText(/add their entry/)).toHaveTextContent(
+      /shared agent.s allowed hosts in every workspace that has it, now and later\. Today that is .clai. and .docs-site.\./,
+    );
+  });
+
+  it.each([
+    ['agent', { agentId: null }],
+    ['workspace', { workspaceId: null }],
+  ])('offers this run only when there is no %s to save an entry on', (_, missing) => {
+    render(<NetworkAccessCard req={request(missing)} requester={requester} />);
+    expect(screen.getAllByRole('button').map((button) => button.textContent)).toEqual(['▾', 'Allow this run', 'Deny']);
+    expect(screen.getByText(/no agent to save/)).toHaveTextContent(
+      /^There is no agent to save an entry on, so the host can be allowed for this run only\.$/,
+    );
+  });
+
+  it('keeps a refused decision on the card so the user can answer again', async () => {
+    mockInvoke.mockRejectedValueOnce('not a narrow entry').mockResolvedValue(undefined);
+    const onDecided = vi.fn();
+    const user = userEvent.setup();
+    render(<NetworkAccessCard req={request()} onDecided={onDecided} />);
+    await user.click(screen.getByRole('button', { name: 'Allow *.example.org' }));
+    expect(await screen.findByRole('alert')).toHaveTextContent('not a narrow entry');
+    expect(onDecided).not.toHaveBeenCalled();
+    await user.click(screen.getByRole('button', { name: 'Allow this run' }));
+    expect(onDecided).toHaveBeenCalledWith('net-1');
+  });
+
+  it('shows a request answered elsewhere as resolved, with no live decisions', async () => {
+    mockInvoke.mockRejectedValue('No pending network access request `net-1` (already resolved or cleared)');
+    const onDecided = vi.fn();
+    const user = userEvent.setup();
+    render(<NetworkAccessCard req={request()} onDecided={onDecided} />);
+    await user.click(screen.getByRole('button', { name: 'Deny' }));
+    expect(await screen.findByRole('status')).toHaveTextContent('Already answered in another view, or its run has ended.');
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /^Allow|^Deny/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Dismiss' }));
+    expect(onDecided).toHaveBeenCalledWith('net-1');
+  });
+
+  it('speaks on the Fleet with short chips, and denies there in one click with no reason field', async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    render(<NetworkAccessCard req={request()} speaker={(prompt: ReactNode) => <div>{prompt}</div>} />);
+    expect(screen.queryByText('Network access requested')).not.toBeInTheDocument();
+    expect(screen.getByText('mirror.example.org:443')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'This run' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Always' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '*.example.org' })).toBeInTheDocument();
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
+    expect(submitted()).toEqual([{ requestId: 'net-1', decision: { kind: 'deny' } }]);
+  });
+});
+
+const fire = (name: string, payload: unknown) => act(() => listenHandlers[name]!({ payload }));
+
+describe('InlineNetworkAccessCard', () => {
+  it('shows a request from network-access://request and drops it on network-access://resolved', async () => {
+    mockInvoke.mockResolvedValue([]);
+    render(<InlineNetworkAccessCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['network-access://resolved']).toBeDefined());
+    fire('network-access://request', request());
+    expect(screen.getByRole('article', { name: 'Network access requested' })).toBeInTheDocument();
+    expect(screen.getByRole('status')).toHaveTextContent('An agent wants network access to mirror.example.org:443.');
+    fire('network-access://resolved', { requestId: 'net-1' });
+    expect(screen.queryByRole('article')).not.toBeInTheDocument();
+  });
+
+  it('drops the card once its decision is accepted', async () => {
+    mockInvoke.mockImplementation((cmd: string) =>
+      Promise.resolve(cmd === 'list_pending_network_access_requests' ? [request()] : undefined),
+    );
+    render(<InlineNetworkAccessCard workspaceId="ws-1" />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Allow this run' }));
+    await waitFor(() => expect(screen.queryByRole('article')).not.toBeInTheDocument());
+  });
+
+  it('shows the pending requests of its workspace', async () => {
+    mockInvoke.mockImplementation((cmd: string) =>
+      Promise.resolve(
+        cmd === 'list_pending_network_access_requests'
+          ? [request(), request({ requestId: 'net-2', host: 'cdn.example.com' })]
+          : undefined,
+      ),
+    );
+    render(<InlineNetworkAccessCard workspaceId="ws-1" />);
+    expect(await screen.findAllByRole('article', { name: 'Network access requested' })).toHaveLength(2);
+    expect(mockInvoke).toHaveBeenCalledWith('list_pending_network_access_requests', { workspaceId: 'ws-1' });
+  });
+});

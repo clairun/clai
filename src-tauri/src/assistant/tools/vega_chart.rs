@@ -610,6 +610,7 @@ mod tests {
             had_warnings: Default::default(),
             session_grants: Arc::new(Mutex::new(vec![])),
             run_removed_ask_first: Arc::new(Mutex::new(vec![])),
+            run_network: Default::default(),
         }
     }
 

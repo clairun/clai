@@ -1,10 +1,10 @@
 /**
- * Feeds approval and path-grant events into the Fleet store, app-wide.
+ * Feeds approval, path-grant and network access events into the Fleet store, app-wide.
  * Mounted once in MainLayout next to the assistant event listener.
  */
 import { useEffect } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import type { PathGrantRequest, PermissionRequest } from '../generated/bindings';
+import type { NetworkAccessRequest, PathGrantRequest, PermissionRequest } from '../generated/bindings';
 import { useFleetStore } from './fleetStore';
 
 export function useFleetAttentionFeed(): void {
@@ -23,6 +23,12 @@ export function useFleetAttentionFeed(): void {
       }),
       listen<{ requestId?: string }>('path-grants://resolved', (event) => {
         if (event.payload?.requestId) store().resolveRequest('grant', event.payload.requestId);
+      }),
+      listen<NetworkAccessRequest>('network-access://request', (event) => {
+        if (event.payload) store().applyRequest({ kind: 'network', request: event.payload });
+      }),
+      listen<{ requestId?: string }>('network-access://resolved', (event) => {
+        if (event.payload?.requestId) store().resolveRequest('network', event.payload.requestId);
       }),
     ];
     return () => {

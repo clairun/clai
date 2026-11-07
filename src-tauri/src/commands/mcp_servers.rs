@@ -64,7 +64,7 @@ fn drop_mcp_ref(agent: &mut crate::config::WorkspaceAgent, server_id: &str, now:
     if agent.selected_mcp_servers.len() == before {
         return false;
     }
-    agent.updated_at = now;
+    agent.touch(now);
     true
 }
 

@@ -35,7 +35,18 @@ jobs:
       - name: Install Linux dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf libsecret-1-dev bubblewrap
+          # The keyring-only session bus tests run xdg-dbus-proxy against a
+          # private dbus-daemon, with a Python GObject name owner and gdbus.
+          sudo apt-get install -y xdg-dbus-proxy dbus dbus-session-bus-common python3-gi libglib2.0-bin
+
+      # Ubuntu lets only AppArmor-profiled programs create unprivileged user
+      # namespaces, which bwrap needs; the sandbox tests below require it.
+      - name: Allow unprivileged user namespaces
+        run: |
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
 
       - name: Install npm dependencies
         run: npm ci
@@ -72,8 +83,20 @@ jobs:
         working-directory: src-tauri
         run: cargo fmt --check
 
+      # Socket confinement needs Landlock ABI 9 and abstract-socket scoping
+      # ABI 6; the tests check what this kernel offers and skip the rest.
+      # Set CLAI_REQUIRE_LANDLOCK_ABI on a runner whose kernel is known to
+      # have an ABI, so those skips fail instead.
+      - name: Landlock ABI
+        run: python3 -c "import ctypes; print(\"Landlock ABI\", ctypes.CDLL(None).syscall(444, None, 0, 1))"
+
       - name: Rust tests
         working-directory: src-tauri
+        # The tests that run real bwrap, or the session bus proxy, skip where
+        # they cannot run; here a skip fails the job instead.
+        env:
+          CLAI_REQUIRE_BWRAP: 1
+          CLAI_REQUIRE_BUS_PROXY: 1
         run: cargo test
 
       - name: Build Tauri app (debug, no bundle)

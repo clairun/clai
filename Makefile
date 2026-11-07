@@ -10,7 +10,8 @@ LATEST_TAG := $(shell git describe --tags --abbrev=0 2>/dev/null || echo "v0.0.0
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
 
-dev: ## Start development server
+dev: ## Start development server (builds the sandbox helper first)
+	cargo build --manifest-path src-tauri/Cargo.toml --bin clai-sandbox-helper
 	npm run tauri:dev
 
 build: ## Build the application

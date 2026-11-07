@@ -33,6 +33,7 @@ const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspac
   tasks: [],
   pendingPermissions: [],
   pendingPathGrants: [],
+  pendingNetworkRequests: [],
   pendingAsks: [],
   lastAssistantMessage: null,
   recentMessages: [],
@@ -891,10 +892,9 @@ describe('FleetPage', () => {
       expect(within(row).getAllByText('git push').length).toBeGreaterThan(0);
       expect(within(row).queryByRole('button', { name: 'Approve' })).not.toBeInTheDocument();
 
+      // One click on Deny answers it; the Fleet card has no reason field.
+      expect(within(row).queryByRole('textbox')).not.toBeInTheDocument();
       fireEvent.click(within(row).getByRole('button', { name: 'Deny' }));
-      // A denial is confirmed before it is sent, so nothing is submitted yet.
-      expect(mockInvoke).not.toHaveBeenCalledWith('submit_permission_decision', expect.anything());
-      fireEvent.click(within(row).getByRole('button', { name: 'Deny command' }));
       await waitFor(() =>
         expect(mockInvoke).toHaveBeenCalledWith('submit_permission_decision', {
           requestId: 'r1',

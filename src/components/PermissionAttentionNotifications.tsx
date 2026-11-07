@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useLocation, useNavigate } from 'react-router';
-import type { PathGrantRequest, PermissionRequest } from '../generated/bindings';
+import type { NetworkAccessRequest, PathGrantRequest, PermissionRequest } from '../generated/bindings';
+import { hostWithPort, unicodeHost } from '../permissions/hostNames';
 // Reuse the WorkspaceTaskNotifications stack styles so the global
 // notifications share visual language. The two surfaces are
 // conceptually the same: a toast in the upper-right corner that the
@@ -10,6 +11,13 @@ import styles from './WorkspaceTaskNotifications.module.css';
 
 const PERMISSION_REQUEST_EVENT = 'permissions://request';
 const PATH_GRANT_REQUEST_EVENT = 'path-grants://request';
+const NETWORK_ACCESS_REQUEST_EVENT = 'network-access://request';
+// The request left the queue (answered elsewhere, run ended): its toast goes.
+const RESOLVED_EVENTS = [
+  ['permissions://resolved', 'perm'],
+  ['path-grants://resolved', 'path'],
+  ['network-access://resolved', 'net'],
+] as const;
 const MAX_NOTIFICATIONS = 4;
 const AUTO_DISMISS_MS = 15000;
 
@@ -63,6 +71,20 @@ const buildPathGrantNotification = (
   };
 };
 
+const buildNetworkAccessNotification = (
+  request: NetworkAccessRequest,
+): NotificationItem | null => {
+  if (!request?.workspaceId || !request?.requestId) return null;
+  return {
+    id: `net:${request.requestId}`,
+    requestId: request.requestId,
+    workspaceId: request.workspaceId,
+    title: request.agentName || 'Agent',
+    badge: 'Network access',
+    body: `Needs network access to \`${truncate(hostWithPort(unicodeHost(request.host), request.port))}\``,
+  };
+};
+
 /**
  * Global notifier for cross-workspace permission and path-grant
  * requests. Mounted at MainLayout level so it catches events even when
@@ -77,6 +99,10 @@ const PermissionAttentionNotifications = () => {
   const location = useLocation();
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const timersRef = useRef(new Map<string, number>());
+  // Toasts already shown, so a request queued again (a failed “Always”
+  // save) or one the user dismissed is not toasted twice; cleared when the
+  // request resolves.
+  const shownRef = useRef(new Set<string>());
 
   // Derive the currently-open workspace id from the URL. We re-read it
   // through a ref so the effect that sets up listeners doesn't need to
@@ -105,17 +131,10 @@ const PermissionAttentionNotifications = () => {
       if (!item) return;
       // Same-workspace events are surfaced inline; don't double-notify.
       if (item.workspaceId === currentWorkspaceIdRef.current || onFleetRef.current) return;
+      if (shownRef.current.has(item.id)) return;
+      shownRef.current.add(item.id);
 
-      setNotifications((current) => {
-        // De-dupe by requestId in case the backend re-emits.
-        const filtered = current.filter((existing) => existing.id !== item.id);
-        return [item, ...filtered].slice(0, MAX_NOTIFICATIONS);
-      });
-
-      const existingTimer = timersRef.current.get(item.id);
-      if (existingTimer) {
-        window.clearTimeout(existingTimer);
-      }
+      setNotifications((current) => [item, ...current].slice(0, MAX_NOTIFICATIONS));
       timersRef.current.set(
         item.id,
         window.setTimeout(() => dismiss(item.id), AUTO_DISMISS_MS),
@@ -129,6 +148,7 @@ const PermissionAttentionNotifications = () => {
     // the timers this effect set up, even if the ref is later swapped out
     // (e.g. by switching to useState/useReducer).
     const timers = timersRef.current;
+    const shown = shownRef.current;
     const unlistenPromises = [
       listen<PermissionRequest>(PERMISSION_REQUEST_EVENT, (event) => {
         enqueue(buildPermissionNotification(event.payload));
@@ -136,6 +156,18 @@ const PermissionAttentionNotifications = () => {
       listen<PathGrantRequest>(PATH_GRANT_REQUEST_EVENT, (event) => {
         enqueue(buildPathGrantNotification(event.payload));
       }),
+      listen<NetworkAccessRequest>(NETWORK_ACCESS_REQUEST_EVENT, (event) => {
+        enqueue(buildNetworkAccessNotification(event.payload));
+      }),
+      ...RESOLVED_EVENTS.map(([name, prefix]) =>
+        listen<{ requestId?: string }>(name, (event) => {
+          const requestId = event.payload?.requestId;
+          if (!requestId) return;
+          const id = `${prefix}:${requestId}`;
+          shown.delete(id);
+          dismiss(id);
+        }),
+      ),
     ];
 
     return () => {
@@ -147,7 +179,7 @@ const PermissionAttentionNotifications = () => {
       }
       timers.clear();
     };
-  }, [enqueue]);
+  }, [enqueue, dismiss]);
 
   if (notifications.length === 0) return null;
 

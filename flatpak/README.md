@@ -83,6 +83,16 @@ two things, both through `flatpak-spawn --host`:
    clai runs the **host's** bwrap via `flatpak-spawn --host bwrap …`
    (`src-tauri/src/assistant/sandbox/linux_bwrap.rs`). The sandbox profile
    and its security boundary are unchanged — bwrap just executes host-side.
+3. **The network helper** — in the Allowlist network mode a command runs in
+   its own network namespace and reaches CLAI's network proxy through
+   `clai-sandbox-helper`, which the workflow copies next to `clai` in
+   `/app/bin`. bwrap runs on the host, so it binds the helper from the
+   installation's host path, the `app-path` in `/.flatpak-info` plus
+   `/bin/clai-sandbox-helper`, and the proxy's Unix socket from
+   `~/.clai/workspaces/.clai-net/`, which the host sees because the app holds
+   `--filesystem=home`. The helper uses only the C library, so it runs with
+   the host's libraries; the host's glibc must be at least as new as the one
+   the `.deb` was built with.
 
 Both require the Flatpak to hold **`--talk-name=org.freedesktop.Flatpak`**
 (the host-spawn portal). The host must also have `bwrap` installed for
@@ -118,6 +128,10 @@ flatpak install --user clai.flatpak && flatpak run run.clai.CLAI
 - [ ] `bash_exec` works: ask the agent to run a shell command and confirm
       it is NOT "Sandboxed shell is unavailable". This exercises
       `flatpak-spawn --host bwrap`.
+- [ ] In the Allowlist network mode `curl -sI https://github.com` works and
+      `curl -sI https://example.org` is refused with the host listed under
+      `network.refused`. This exercises the helper from the host `app-path`
+      and the proxy socket across the Flatpak boundary.
 - [ ] **Shared `~/.clai`**: `paths::clai_home()` and `expand_tilde()` now
       resolve the *real* host home under Flatpak (via
       `providers::get_home_dir()`, cached), so app config

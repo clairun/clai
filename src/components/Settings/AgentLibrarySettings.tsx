@@ -90,7 +90,12 @@ const AgentLibrarySettings = ({
     };
   }, [reload]);
 
-  const backToGallery = useCallback(() => setView({ kind: 'gallery', focusId: null }), []);
+  // Re-read on the way back, so an agent changed elsewhere (an Always on a
+  // network card, another window) opens again as it is now.
+  const backToGallery = useCallback(() => {
+    setView({ kind: 'gallery', focusId: null });
+    void reload();
+  }, [reload]);
 
   // Consume the deep link once per mount, as soon as the library has been read
   // — before that every id looks missing. An id the library does not have

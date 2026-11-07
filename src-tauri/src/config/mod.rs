@@ -12,7 +12,7 @@ pub use types::{
     first_enabled_connection, AgentConfig, AiProvider, AppConfig, ClaiConfig,
     ExecutionCapabilityConfig, FilesystemCapabilityConfig, FilesystemPathAccess,
     FilesystemPathGrant, GrantOrigin, McpEnvVar, McpServerAuth, McpServerConfig,
-    McpServerTransport, SandboxNetworkConfig, SandboxSessionBusConfig, ShellAccessMode,
+    McpServerTransport, NetworkMode, NetworkPolicy, SandboxSessionBusConfig, ShellAccessMode,
     SkillSourceConfig, SkillSourceKind,
 };
 pub use workspace_config::{WorkspaceAgent, WorkspaceConfig};

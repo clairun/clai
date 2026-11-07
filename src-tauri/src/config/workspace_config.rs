@@ -419,6 +419,10 @@ pub struct WorkspaceAgent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub avatar: Option<AgentAvatarRef>,
     pub created_at: i64,
+    /// Set by every write, through [`WorkspaceAgent::touch`]. The Main's
+    /// settings form saves only against the value it loaded, so a writer that
+    /// skipped it (an approval saved while the form is open) would be
+    /// silently overwritten.
     pub updated_at: i64,
 }
 
@@ -512,7 +516,7 @@ impl WorkspaceConfig {
         };
         if let Some(main) = self.main_agent.as_mut() {
             main.provider_connection_ids = vec![first.id.clone()];
-            main.updated_at = now;
+            main.touch(now);
         }
         self.updated_at = now;
     }
@@ -539,6 +543,11 @@ pub fn default_agent_execution() -> ExecutionCapabilityConfig {
     // commands on its ask-first list; the user can still set it back to off in
     // agent settings.
     execution.shell.mode = ShellAccessMode::Restricted;
+    // The keyring, so `gh` and git credentials work, where the bus can be
+    // filtered to it; otherwise no bus. Agents saved before keep theirs.
+    execution.sandbox.session_bus = super::SandboxSessionBusConfig::for_new_agent(
+        crate::assistant::sandbox::status().session_bus_filter_available,
+    );
     execution
 }
 
@@ -563,6 +572,13 @@ impl WorkspaceAgent {
             created_at: now,
             updated_at: now,
         }
+    }
+
+    /// Records a write at `now`. The value always grows, within one
+    /// millisecond or across a clock step back too, so a save against the
+    /// value a form loaded never misses a write made since.
+    pub fn touch(&mut self, now: i64) {
+        self.updated_at = now.max(self.updated_at + 1);
     }
 }
 
@@ -968,6 +984,20 @@ mod attach_provider_tests {
     }
 
     #[test]
+    fn touch_moves_updated_at_forward_within_one_millisecond_too() {
+        let mut agent = WorkspaceAgent::new_manager("mgr".to_string(), 5);
+        agent.touch(5);
+        let first = agent.updated_at;
+        agent.touch(5);
+        assert!(agent.updated_at > first, "same millisecond");
+        let second = agent.updated_at;
+        agent.touch(1);
+        assert!(agent.updated_at > second, "clock stepped back");
+        agent.touch(100);
+        assert_eq!(agent.updated_at, 100);
+    }
+
+    #[test]
     fn no_op_when_no_enabled_connections() {
         let mut config = workspace();
         config.attach_default_provider(&[connection("a", false)], 9);
@@ -992,6 +1022,17 @@ mod attach_provider_tests {
     }
 
     #[test]
+    fn new_agents_get_the_keyring_where_the_bus_can_be_filtered_and_no_bus_otherwise() {
+        let filtered = crate::assistant::sandbox::status().session_bus_filter_available;
+        let expected = if filtered {
+            crate::config::SandboxSessionBusConfig::KeyringOnly
+        } else {
+            crate::config::SandboxSessionBusConfig::Deny
+        };
+        assert_eq!(default_agent_execution().sandbox.session_bus, expected);
+    }
+
+    #[test]
     fn new_manager_defaults_to_restricted_shell_and_web_enabled() {
         let manager = WorkspaceAgent::new_manager("mgr".to_string(), 1);
         assert_eq!(manager.execution.shell.mode, ShellAccessMode::Restricted);
@@ -1000,6 +1041,54 @@ mod attach_provider_tests {
             manager.execution.shell.ask_first_command_prefixes,
             crate::config::types::default_ask_first_command_prefixes()
         );
+        let here = crate::config::types::allowlist_available_here();
+        assert_eq!(
+            manager.execution.sandbox.network_access,
+            crate::config::types::network_access_from_legacy(None, here)
+        );
+        assert_eq!(
+            default_agent_execution().sandbox.network_access,
+            manager.execution.sandbox.network_access
+        );
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            manager.execution.sandbox.network_access.mode,
+            crate::config::NetworkMode::Allowlist
+        );
+    }
+
+    #[test]
+    fn a_config_saved_before_network_access_migrates_and_saves_both_keys() {
+        let mut config =
+            WorkspaceConfig::new("ws".to_string(), "T".to_string(), 1, "main".to_string());
+        config.assignments.push(WorkspaceAssignment {
+            id: "assign-1".to_string(),
+            agent_definition_id: "def-1".to_string(),
+            enabled: true,
+            context: String::new(),
+            filesystem_grants: Vec::new(),
+            created_at: 3,
+            updated_at: 4,
+        });
+        let mut legacy = serde_json::to_value(&config).unwrap();
+        crate::config::types::to_pre_network_access_json(&mut legacy, "disabled");
+        assert!(!legacy.to_string().contains("networkAccess"));
+
+        let loaded: WorkspaceConfig = serde_json::from_value(legacy).unwrap();
+        let main = loaded.main_agent.as_ref().expect("the Main survives");
+        let policy = &main.execution.sandbox.network_access;
+        assert_eq!(policy.mode, crate::config::NetworkMode::Off);
+        assert_eq!(
+            policy.allow_domains.len(),
+            crate::assistant::network::default_lists::DEFAULT_ALLOW_DOMAINS.len()
+        );
+        assert_eq!(loaded.assignments.len(), 1);
+
+        let saved = serde_json::to_value(&loaded).unwrap();
+        let sandbox = &saved["mainAgent"]["execution"]["sandbox"];
+        assert_eq!(sandbox["network"], "disabled");
+        assert_eq!(sandbox["networkAccess"]["mode"], "off");
+        assert_eq!(saved["assignments"][0]["id"], "assign-1");
     }
 
     // -------------------------------------------------------------------

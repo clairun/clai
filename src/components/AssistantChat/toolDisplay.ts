@@ -190,6 +190,8 @@ export const summarizeToolCall = (toolName: string, params: unknown): ToolCallSu
       return { verb: 'Glob', arg: get('pattern') };
     case 'fs_request_grant':
       return { verb: 'Request access', arg: get('path') };
+    case 'net_request_access':
+      return { verb: 'Request network', arg: get('host') };
     case 'bash_exec':
       return { verb: 'Bash', arg: get('command') };
     case 'web_search':
@@ -333,7 +335,15 @@ export const toPreviewText = (
   if (name === 'bash_exec' && obj) {
     const stdout = typeof obj.stdout === 'string' ? obj.stdout : '';
     const stderr = typeof obj.stderr === 'string' ? obj.stderr : '';
-    const combined = [stdout.trimEnd(), stderr.trimEnd()].filter(Boolean).join('\n');
+    const network = asPayloadObject(obj.network);
+    const refused = Array.isArray(network?.refused)
+      ? network.refused.filter((target): target is string => typeof target === 'string')
+      : [];
+    const more = typeof network?.refusedMore === 'number' ? network.refusedMore : 0;
+    const refusedLine = refused.length
+      ? `Network allowlist refused: ${refused.join(', ')}${more > 0 ? ` and ${more} more` : ''}`
+      : '';
+    const combined = [stdout.trimEnd(), stderr.trimEnd(), refusedLine].filter(Boolean).join('\n');
     return combined || '(no output)';
   }
 

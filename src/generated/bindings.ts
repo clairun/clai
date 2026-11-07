@@ -134,7 +134,7 @@ providerId: string | null, apiKey: string | null, authMode: AuthMode | null, bas
 
 export type ExecutionCapabilityConfig = { sandbox: ExecutionSandboxConfig, filesystem: FilesystemCapabilityConfig, shell: ShellCapabilityConfig, web: WebCapabilityConfig, };
 
-export type ExecutionSandboxConfig = { network: SandboxNetworkConfig, sessionBus: SandboxSessionBusConfig, };
+export type ExecutionSandboxConfig = { networkAccess: NetworkPolicy, sessionBusMode: SandboxSessionBusConfig, };
 
 /**
  * Why a `failed` task failed; set exactly when the status is `failed`.
@@ -203,7 +203,7 @@ activeRunIds: Array<string>,
 /**
  * Unfinished tasks plus the most recently finished ones, newest first.
  */
-tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingAsks: Array<PendingAsk>, 
+tasks: Array<WorkspaceTaskResponse>, pendingPermissions: Array<PermissionRequest>, pendingPathGrants: Array<PathGrantRequest>, pendingNetworkRequests: Array<NetworkAccessRequest>, pendingAsks: Array<PendingAsk>, 
 /**
  * The main session's newest assistant reply with text.
  */
@@ -226,6 +226,11 @@ agents: Array<AgentRefSnapshot>, };
  * `None` (the historical shape) is treated as `Manual` by the UI.
  */
 export type GrantOrigin = { "kind": "manual" } | { "kind": "credentialsPreset" } | { "kind": "approval", reason: string, grantedAtUnixMs: bigint, };
+
+/**
+ * One host the run tried to reach, and whether it was let through.
+ */
+export type HostLogEntry = { host: string, port: number | null, allowed: boolean, };
 
 export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 
@@ -314,6 +319,51 @@ supportsImages: boolean, };
  * How to list models for the provider (quirk-as-data).
  */
 export type ModelsEndpointStyle = "standard" | "none" | { "open_ai_compatible": { url: string, } };
+
+/**
+ * The user's answer to a [`NetworkAccessRequest`].
+ */
+export type NetworkAccessDecision = { "kind": "allowRun" } | { "kind": "allowAlways", entry: string, } | { "kind": "deny", reason?: string, };
+
+export type NetworkAccessRequest = { requestId: string, workspaceId: string | null, agentId: string | null, agentName: string | null, 
+/**
+ * As the matcher compares it: lower case, punycode, an IPv6 address
+ * without brackets.
+ */
+host: string, port: number | null, reason: string, 
+/**
+ * The hosts the run tried so far, for the card's “This run” line.
+ */
+runHosts: Array<HostLogEntry>, 
+/**
+ * `*.` and the host's parent domain, when the card may offer it.
+ */
+suggestedWildcard: string | null, 
+/**
+ * True when “Always” edits a shared agent definition rather than this
+ * workspace's Main (see `PermissionRequest`).
+ */
+persistsToSharedAgent: boolean, 
+/**
+ * The other workspaces that “Always” reaches today.
+ */
+alsoAffectsWorkspaces: Array<string>, };
+
+/**
+ * How an agent's shell commands and web tools reach the network.
+ */
+export type NetworkMode = "off" | "allowlist" | "host_network";
+
+export type NetworkPolicy = { mode: NetworkMode, 
+/**
+ * Kept in every mode, so leaving Allowlist and coming back keeps the
+ * user's edits. Read only in Allowlist.
+ */
+allowDomains: Array<string>, 
+/**
+ * Checked before the allow list.
+ */
+denyDomains: Array<string>, };
 
 export type PathGrantAttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
@@ -458,26 +508,57 @@ export type RunStatus = "queued" | "running" | "waiting_for_tool" | "completed" 
 
 export type RunTrigger = "user_message" | "scheduled" | "manual_automation" | "workspace_task" | "signal_wake";
 
-export type SandboxNetworkConfig = "enabled" | "disabled";
+/**
+ * The OS mechanism that sandboxes shell commands on this PC.
+ */
+export type SandboxBackend = "bubblewrap" | "seatbelt";
 
 /**
- * Whether the agent's sandbox can reach the user's session D-Bus.
- *
- * `Allow` (the default) exposes the user's D-Bus session bus socket
- * (`$XDG_RUNTIME_DIR/bus`) inside the sandbox and lets
- * `DBUS_SESSION_BUS_ADDRESS` + `XDG_RUNTIME_DIR` through the env filter.
- * This enables every CLI that talks to libsecret / `gnome-keyring-daemon`
- * over D-Bus — most importantly `gh`, but also `git-credential-libsecret`,
- * `secret-tool`, password managers, and so on. It matches Codex's
- * "agent acts as me on my desktop" reach while CLAI's path-grant flow
- * keeps file access narrow.
- *
- * `Deny` strips the bus socket bind and the corresponding env vars.
- * Use for high-isolation agents — running untrusted code, agents that
- * don't need any host integration, or workspaces where you specifically
- * want keyring contents kept out of reach.
+ * How much of the user's session D-Bus the agent's Linux sandbox reaches.
+ * Libraries find the bus through `DBUS_SESSION_BUS_ADDRESS` and
+ * `XDG_RUNTIME_DIR`, which pass the env filter in every mode but `Deny`.
  */
-export type SandboxSessionBusConfig = "deny" | "allow";
+export type SandboxSessionBusConfig = "deny" | "keyring_only" | "full";
+
+/**
+ * What the sandbox can enforce on this PC; the settings UI reads it to
+ * enable or disable controls instead of naming platforms.
+ */
+export type SandboxStatus = { 
+/**
+ * Whether shell commands run sandboxed at all. Without a sandbox the
+ * network mode applies to the web tools only.
+ */
+available: boolean, backend: SandboxBackend | null, 
+/**
+ * Whether the Allowlist network mode can be enforced for shell commands.
+ */
+allowlistAvailable: boolean, 
+/**
+ * Why Allowlist is unavailable, worded for the user.
+ */
+allowlistUnavailableReason: string | null, 
+/**
+ * Whether shell commands reach only the Unix sockets CLAI binds on
+ * purpose. Without it a socket under a path grant (a desktop input
+ * method, Docker, an ssh or gpg agent) is a way out of the sandbox, and
+ * CLAI only hides the directories where such sockets usually live.
+ */
+socketIsolationAvailable: boolean, 
+/**
+ * Why socket isolation is unavailable, worded for the user.
+ */
+socketIsolationUnavailableReason: string | null, 
+/**
+ * Whether the keyring-only session bus is filtered here. Without it an
+ * agent set to keyring only gets no bus, never the whole one.
+ */
+sessionBusFilterAvailable: boolean, 
+/**
+ * Why the session bus cannot be filtered and how to give an agent the
+ * whole bus instead, worded for the user.
+ */
+sessionBusFilterUnavailableReason: string | null, };
 
 /**
  * Discriminated union describing *how* the manager's next run is
@@ -639,7 +720,18 @@ avatar?: AgentAvatarRef | null, createdAt: bigint, updatedAt: bigint, };
 
 export type WorkspaceAgentSummary = { id: string, displayName: string, isDefault: boolean, description?: string | null, };
 
-export type WorkspaceAgentUpdateRequest = { workspaceId: string, agentId: string, name: string, description: string, selectedSkillIds: Array<string>, selectedMcpServerIds: Array<string>, providerConnectionIds: Array<string>, execution: ExecutionCapabilityConfig, enabled: boolean, };
+/**
+ * Why saving the Main failed.
+ */
+export type WorkspaceAgentUpdateError = { "kind": "stale", message: string, } | { "kind": "failed", message: string, };
+
+export type WorkspaceAgentUpdateRequest = { workspaceId: string, agentId: string, name: string, description: string, selectedSkillIds: Array<string>, selectedMcpServerIds: Array<string>, providerConnectionIds: Array<string>, execution: ExecutionCapabilityConfig, enabled: boolean, 
+/**
+ * The agent's `updatedAt` when the form loaded it. The save is refused
+ * if anything wrote the agent since, so it cannot silently revert that
+ * write.
+ */
+expectedUpdatedAt: number, };
 
 export type WorkspaceDetails = { workspaceId: string, kind: string, title: string, agentId: string | null, assignedAgents: Array<WorkspaceAgentResponse>, tasks: Array<WorkspaceTaskResponse>, defaultWorkspaceAgentId: string | null, rootPath: string | null, providerConnectionIds: Array<string>, providerConnectionNames: Array<string>, selectedMcpServerIds: Array<string>, 
 /**

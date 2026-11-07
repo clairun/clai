@@ -82,6 +82,9 @@ pub struct ToolBinding {
     /// Ask-first rules removed by "Always allow" during the run, shared by
     /// every tool call the run makes through this binding.
     pub run_removed_ask_first: Arc<Mutex<Vec<String>>>,
+    /// The run's host lists, run allowances and host log, shared with the
+    /// host engine like the grants above.
+    pub run_network: Arc<crate::assistant::network::run_state::RunNetwork>,
 }
 
 impl LocalMcpRuntime {
@@ -396,6 +399,7 @@ async fn execute_bound_tool(
         had_warnings: binding.had_warnings.clone(),
         session_grants: binding.session_grants.clone(),
         run_removed_ask_first: binding.run_removed_ask_first.clone(),
+        run_network: binding.run_network.clone(),
     };
 
     tokio::select! {
@@ -566,6 +570,7 @@ mod tests {
             had_warnings: Default::default(),
             session_grants: Arc::new(Mutex::new(Vec::new())),
             run_removed_ask_first: Arc::new(Mutex::new(Vec::new())),
+            run_network: Default::default(),
         }
     }
 

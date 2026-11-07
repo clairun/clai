@@ -442,4 +442,22 @@ mod tests {
         assert_eq!(roster.len(), 1);
         assert_eq!(roster[0].agent.id, "assign-1");
     }
+
+    #[test]
+    fn a_definition_saved_before_network_access_migrates_on_this_pc() {
+        let mut legacy = serde_json::to_value(definition("def-1", "Reviewer")).unwrap();
+        crate::config::types::to_pre_network_access_json(&mut legacy, "enabled");
+        let loaded: AgentDefinition = serde_json::from_value(legacy).unwrap();
+        assert_eq!(
+            loaded.behavior.execution.sandbox.network_access,
+            crate::config::types::network_access_from_legacy(
+                Some(crate::config::types::SandboxNetworkConfig::Enabled),
+                crate::config::types::allowlist_available_here()
+            )
+        );
+        let saved = serde_json::to_value(&loaded).unwrap();
+        let sandbox = &saved["behavior"]["execution"]["sandbox"];
+        assert_eq!(sandbox["network"], "enabled");
+        assert!(sandbox["networkAccess"]["allowDomains"].is_array());
+    }
 }

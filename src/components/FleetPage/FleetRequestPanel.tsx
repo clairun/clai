@@ -6,6 +6,7 @@ import {
 } from '../Agents/agentIdentity';
 import AskUserPanel from '../AskUserPanel/AskUserPanel';
 import { ApprovalCard } from '../InlineApprovalCard';
+import { NetworkAccessCard } from '../InlineNetworkAccessCard';
 import { PathGrantCard } from '../InlinePathGrantCard';
 import type { FleetRequest } from '../../fleet/fleetModel';
 import type { FleetRequestScene } from '../../fleet/fleetCrew';
@@ -31,6 +32,8 @@ const RequestAnswer = ({
     <AskUserPanel ask={request.ask} speaker={speaker} />
   ) : request.kind === 'approval' ? (
     <ApprovalCard key={request.request.requestId} req={request.request} speaker={speaker} workspaceName={workspaceTitle} />
+  ) : request.kind === 'network' ? (
+    <NetworkAccessCard key={request.request.requestId} req={request.request} speaker={speaker} workspaceName={workspaceTitle} />
   ) : (
     <PathGrantCard key={request.request.requestId} req={request.request} speaker={speaker} />
   );

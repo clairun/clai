@@ -543,13 +543,19 @@ fn normalize_denial_reason(decision: &mut AskFirstDecision) -> Result<(), String
     else {
         return Ok(());
     };
+    let reason = normalize_reason(value)?;
+    *decision = AskFirstDecision::Deny { reason };
+    Ok(())
+}
+
+/// A denial reason as the agent receives it: trimmed, none when empty, at
+/// most 500 characters.
+pub(crate) fn normalize_reason(value: &str) -> Result<Option<String>, String> {
     let trimmed = value.trim();
     if trimmed.chars().count() > 500 {
         return Err("Denial reason must be at most 500 characters".to_string());
     }
-    let reason = (!trimmed.is_empty()).then(|| trimmed.to_string());
-    *decision = AskFirstDecision::Deny { reason };
-    Ok(())
+    Ok((!trimmed.is_empty()).then(|| trimmed.to_string()))
 }
 
 /// Removes `rules` from the agent's ask-first list, where the agent's
@@ -602,7 +608,7 @@ pub fn persist_always_allow(
         };
         if remove_ask_first_rules(agent, rules) {
             let now = chrono::Utc::now().timestamp_millis();
-            agent.updated_at = now;
+            agent.touch(now);
             config.updated_at = now;
         }
         Ok(())

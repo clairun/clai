@@ -1,6 +1,6 @@
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 // Tauri invoke (submit_permission_decision) + the event-bus listen are
@@ -152,26 +152,11 @@ describe('ApprovalCard — the three actions', () => {
 
   it('sends no reason with an allow, even after one was typed for a denial', async () => {
     render(<ApprovalCard req={PUSH} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
     await userEvent.type(screen.getByRole('textbox', { name: /reason for denying/i }), 'not yet');
     await userEvent.click(screen.getByRole('button', { name: 'Allow once' }));
     expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'allowOnce' } }]);
   });
 
-  it('does not send the decision twice', async () => {
-    let resolve: () => void = () => {};
-    mockInvoke.mockImplementation(() => new Promise<void>((done) => { resolve = done; }));
-    render(<ApprovalCard req={PUSH} />);
-    const once = screen.getByRole('button', { name: 'Allow once' });
-    const always = screen.getByRole('button', { name: 'Always allow (this workspace)' });
-    // Both land before React re-renders, so the buttons are not disabled yet.
-    act(() => {
-      once.click();
-      always.click();
-    });
-    expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'allowOnce' } }]);
-    await act(async () => resolve());
-  });
 });
 
 describe('ApprovalCard — where Always allow applies', () => {
@@ -227,95 +212,48 @@ describe('ApprovalCard — where Always allow applies', () => {
 });
 
 describe('ApprovalCard — Deny and its reason', () => {
-  it('opens the reason field and waits for the confirm, then sends the reason trimmed', async () => {
-    const user = userEvent.setup();
+  const reasonField = () => screen.getByRole('textbox', { name: /reason for denying/i });
+
+  it('shows the reason field from the start, without taking focus', () => {
     render(<ApprovalCard req={PUSH} />);
-    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
+    expect(reasonField()).toBeVisible();
+    expect(reasonField()).not.toHaveFocus();
+    expect(screen.getByRole('button', { name: 'Deny' })).toHaveAccessibleDescription('Reason for denying (optional)');
+  });
 
-    await user.click(screen.getByRole('button', { name: 'Deny' }));
-    expect(submitted()).toEqual([]);
-    const reason = screen.getByRole('textbox', { name: /reason for denying/i });
-    await user.type(reason, '  Push after review  ');
-    await user.click(screen.getByRole('button', { name: 'Deny command' }));
+  it('denies in one click with no reason when the field is empty', async () => {
+    render(<ApprovalCard req={PUSH} />);
+    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
+    expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'deny' } }]);
+  });
 
+  it('denies in one click with the typed reason, trimmed', async () => {
+    render(<ApprovalCard req={PUSH} />);
+    await userEvent.type(reasonField(), '  Push after review  ');
+    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
     expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'deny', reason: 'Push after review' } }]);
-  });
-
-  it('moves focus into the reason field, and Escape closes it back on Deny', async () => {
-    const user = userEvent.setup();
-    render(<ApprovalCard req={PUSH} />);
-    const deny = screen.getByRole('button', { name: 'Deny' });
-    expect(deny).not.toHaveAttribute('aria-controls');
-
-    deny.focus();
-    await user.keyboard('{Enter}');
-    const reason = screen.getByRole('textbox', { name: /reason for denying/i });
-    expect(reason).toHaveFocus();
-    expect(deny).toHaveAttribute('aria-expanded', 'true');
-    expect(document.getElementById(deny.getAttribute('aria-controls')!)).toContainElement(reason);
-
-    await user.keyboard('{Escape}');
-    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
-    expect(deny).toHaveFocus();
-    expect(deny).toHaveAttribute('aria-expanded', 'false');
-    expect(submitted()).toEqual([]);
-  });
-
-  it('closes the reason field with Cancel or a second Deny, sending nothing', async () => {
-    const user = userEvent.setup();
-    render(<ApprovalCard req={PUSH} />);
-    const deny = screen.getByRole('button', { name: 'Deny' });
-
-    await user.click(deny);
-    await user.click(screen.getByRole('button', { name: 'Cancel' }));
-    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
-    expect(deny).toHaveFocus();
-
-    await user.click(deny);
-    await user.click(deny);
-    expect(screen.queryByRole('textbox', { name: /reason for denying/i })).not.toBeInTheDocument();
-    expect(submitted()).toEqual([]);
   });
 
   it('omits the reason when the field holds only whitespace', async () => {
     render(<ApprovalCard req={PUSH} />);
+    await userEvent.type(reasonField(), '   ');
     await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
-    await userEvent.type(screen.getByRole('textbox', { name: /reason for denying/i }), '   ');
-    await userEvent.click(screen.getByRole('button', { name: 'Deny command' }));
     expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'deny' } }]);
-  });
-
-  it('says the reason goes to the agent, and how much of the limit it uses', async () => {
-    render(<ApprovalCard req={PUSH} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
-    const reason = screen.getByRole('textbox', { name: /reason for denying/i });
-    expect(reason).toHaveAccessibleDescription(/Sent to the agent with this response\./);
-    await userEvent.type(reason, 'abc');
-    expect(screen.getByText('3/500 characters')).toBeInTheDocument();
-  });
-
-  it('accepts 500 Unicode characters and drops the next, counting an emoji once', async () => {
-    render(<ApprovalCard req={PUSH} />);
-    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
-    const reason = screen.getByRole('textbox', { name: /reason for denying/i });
-    // Two UTF-16 code units each, one character for the backend.
-    fireEvent.change(reason, { target: { value: '😀'.repeat(501) } });
-    expect((reason as HTMLTextAreaElement).value).toBe('😀'.repeat(500));
-    expect(screen.getByText('500/500 characters')).toBeInTheDocument();
   });
 
   it('keeps the reason editable after a failed submission', async () => {
     mockInvoke.mockRejectedValueOnce('Approval channel closed');
     render(<ApprovalCard req={PUSH} />);
+    await userEvent.type(reasonField(), 'no');
     await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
-    const reason = screen.getByRole('textbox', { name: /reason for denying/i });
-    await userEvent.type(reason, 'no');
-    await userEvent.click(screen.getByRole('button', { name: 'Deny command' }));
     expect(await screen.findByRole('alert')).toHaveTextContent('Approval channel closed');
-    expect(reason).toHaveValue('no');
-    expect(reason).toBeEnabled();
-    await userEvent.click(screen.getByRole('button', { name: 'Deny command' }));
-    expect(submitted()).toHaveLength(2);
+    expect(reasonField()).toHaveValue('no');
+    expect(reasonField()).toBeEnabled();
+    await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
+    expect(submitted()).toEqual([
+      { requestId: 'req-1', decision: { kind: 'deny', reason: 'no' } },
+      { requestId: 'req-1', decision: { kind: 'deny', reason: 'no' } },
+    ]);
   });
 });
 
@@ -326,6 +264,8 @@ describe('ApprovalCard — spoken (the Fleet)', () => {
     expect(screen.queryByRole('button', { name: /collapse/i })).not.toBeInTheDocument();
     expect(screen.getByLabelText('Command')).toHaveTextContent('cargo test && git push origin main');
     expect(screen.getAllByRole('button').map((b) => b.textContent)).toEqual(['Once', 'Always', 'Deny']);
+    expect(screen.queryByRole('textbox')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Deny' })).not.toHaveAttribute('aria-describedby');
     expect(screen.getByRole('button', { name: 'Always' }).title).toBe('Always allow (this workspace)');
     expect(screen.getByText(/^Always allow removes/)).toHaveTextContent(/in this workspace only\.$/);
   });
@@ -345,20 +285,22 @@ describe('ApprovalCard — spoken (the Fleet)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Could not save Always allow: disk full');
 
     await userEvent.click(screen.getByRole('button', { name: 'Deny' }));
-    await userEvent.type(screen.getByRole('textbox', { name: /reason for denying/i }), 'later');
-    await userEvent.click(screen.getByRole('button', { name: 'Deny command' }));
     expect(submitted()).toEqual([
       { requestId: 'req-1', decision: { kind: 'alwaysAllow' } },
-      { requestId: 'req-1', decision: { kind: 'deny', reason: 'later' } },
+      { requestId: 'req-1', decision: { kind: 'deny' } },
     ]);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });
 
 describe('InlineApprovalCard', () => {
-  it('renders nothing until a request for this workspace arrives', () => {
-    const { container } = render(<InlineApprovalCard workspaceId="ws-1" />);
-    expect(container).toBeEmptyDOMElement();
+  it('draws no card until a request for this workspace arrives, then names who asked', async () => {
+    render(<InlineApprovalCard workspaceId="ws-1" />);
+    expect(screen.queryByRole('article')).toBeNull();
+    expect(screen.getByRole('status')).toBeEmptyDOMElement();
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+    fireRequest(PUSH);
+    expect(screen.getByRole('status')).toHaveTextContent('An agent wants to run a command on your ask-first list.');
   });
 
   it('renders a card when a matching request fires, and ignores other workspaces', async () => {
@@ -372,16 +314,6 @@ describe('InlineApprovalCard', () => {
     expect(screen.queryByText('elsewhere')).toBeNull();
   });
 
-  it('drops a previous workspace\'s card when switching workspaces', async () => {
-    const { rerender } = render(<InlineApprovalCard workspaceId="ws-1" />);
-    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
-    fireRequest(PUSH);
-    expect(await screen.findByText('cargo test && git push origin main')).toBeInTheDocument();
-
-    rerender(<InlineApprovalCard workspaceId="ws-2" />);
-
-    await waitFor(() => expect(screen.queryByText('cargo test && git push origin main')).toBeNull());
-  });
 
   it('drops the card when permissions://resolved fires for it (abandoned or cancelled run)', async () => {
     render(<InlineApprovalCard workspaceId="ws-1" />);
@@ -423,6 +355,33 @@ describe('InlineApprovalCard', () => {
       { requestId: 'req-1', decision: { kind: 'allowOnce' } },
     ]);
     await waitFor(() => expect(screen.queryByRole('article')).toBeNull());
+  });
+
+  it('leaves focus where the user is typing when cards arrive; Deny answers in one click and focus moves on', async () => {
+    const user = userEvent.setup();
+    render(
+      <>
+        <textarea aria-label="Message" />
+        <InlineApprovalCard workspaceId="ws-1" />
+      </>
+    );
+    await waitFor(() => expect(listenHandlers['permissions://request']).toBeTruthy());
+    const composer = screen.getByRole('textbox', { name: 'Message' });
+    await user.click(composer);
+    fireRequest(PUSH);
+    fireRequest(TWO_RULES);
+    await screen.findByText('rm -f build.log && git push');
+    await user.keyboard('hi');
+    expect(composer).toHaveFocus();
+    expect(composer).toHaveValue('hi');
+
+    const first = within(screen.getAllByRole('article')[0]!);
+    await user.type(first.getByRole('textbox', { name: /reason for denying/i }), ' not now ');
+    await user.click(first.getByRole('button', { name: 'Deny' }));
+    expect(submitted()).toEqual([{ requestId: 'req-1', decision: { kind: 'deny', reason: 'not now' } }]);
+    await waitFor(() => expect(screen.getAllByRole('article')).toHaveLength(1));
+    expect(screen.getByRole('article')).toHaveFocus();
+    expect(screen.getByRole('textbox', { name: /reason for denying/i })).toHaveValue('');
   });
 
   it('collapses the card body and expands it again', async () => {

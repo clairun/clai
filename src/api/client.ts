@@ -5,14 +5,17 @@ import type {
   McpCatalogEntry,
   McpOAuthStartResponse,
   McpServerResponse,
+  SandboxStatus,
   SkillCatalogResponse,
   SkillDefinition,
   SkillSourceResponse,
   StartMcpOAuthLoginRequest,
   WorkspaceAgentCreateRequest,
   WorkspaceAgentDetail,
+  WorkspaceAgentUpdateError,
   WorkspaceAgentUpdateRequest,
 } from '../generated/bindings';
+import { StaleAgentError } from './errors';
 
 /**
  * CLAI backend API client.
@@ -211,7 +214,9 @@ export const workspaceUpdateAgent = async (
   try {
     return await invoke('workspace_update_agent', { request });
   } catch (error) {
-    return handleApiError(error, 'Failed to update workspace agent');
+    const failure = error as Partial<WorkspaceAgentUpdateError> | null;
+    if (failure?.kind === 'stale') throw new StaleAgentError(failure.message ?? '');
+    return handleApiError(failure?.message ?? error, 'Failed to update workspace agent');
   }
 };
 
@@ -245,6 +250,15 @@ export const workspaceAgentDefaultExecution = async (): Promise<ExecutionCapabil
     return await invoke('workspace_agent_default_execution');
   } catch (error) {
     return handleApiError(error, 'Failed to load agent defaults');
+  }
+};
+
+/** What the sandbox can enforce on this PC; settings enable controls from it. */
+export const getSandboxStatus = async (): Promise<SandboxStatus> => {
+  try {
+    return await invoke('get_sandbox_status');
+  } catch (error) {
+    return handleApiError(error, 'Failed to load sandbox status');
   }
 };
 

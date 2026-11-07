@@ -10,7 +10,7 @@ use crate::assistant::tools::workspace_tasks::{
 };
 use crate::assistant::types::ToolDefinition;
 use crate::assistant::workspace_tasks_repo::MAX_TASK_DEPTH;
-use crate::config::ShellAccessMode;
+use crate::config::{ExecutionCapabilityConfig, NetworkMode, ShellAccessMode};
 
 /// Returns all tool definitions available to a run.
 pub fn available_tools(
@@ -47,9 +47,41 @@ pub fn available_tools(
         tools.push(web_fetch_def());
     }
 
+    let allowlist_available = crate::assistant::sandbox::status().allowlist_available;
+    if net_request_access_refusal(&context.execution, allowlist_available).is_none() {
+        tools.push(net_request_access_def());
+    }
+
     tools.extend(external_tools.iter().cloned());
 
     tools
+}
+
+/// Why `net_request_access` is not offered to an agent, or `None` when it
+/// is: only in Allowlist mode, where an allowlist can be enforced, and with
+/// the shell or the web tools on to use the host. The tool returns the
+/// reason when a stale tool list still has it.
+pub(crate) fn net_request_access_refusal(
+    execution: &ExecutionCapabilityConfig,
+    allowlist_available: bool,
+) -> Option<&'static str> {
+    match execution.sandbox.network_access.mode {
+        NetworkMode::Off => Some(
+            "Network access is off for this agent, so there is no allowlist to add a host to. The user can choose another network mode in the agent's Local access settings.",
+        ),
+        NetworkMode::HostNetwork => Some(
+            "This agent is in Host network mode and can already reach any host; there is nothing to request.",
+        ),
+        NetworkMode::Allowlist if !allowlist_available => Some(
+            "Network access requests are not available on this PC. The user can add the host in the agent's Local access settings.",
+        ),
+        NetworkMode::Allowlist
+            if matches!(execution.shell.mode, ShellAccessMode::Off) && !execution.web.enabled =>
+        {
+            Some("This agent has neither the shell nor the web tools, so it would not use network access.")
+        }
+        NetworkMode::Allowlist => None,
+    }
 }
 
 /// Compiled JSON-Schema validator for a built-in tool's declared
@@ -113,6 +145,7 @@ fn all_builtin_defs() -> Vec<ToolDefinition> {
         bash_exec_def(),
         web_search_def(),
         web_fetch_def(),
+        net_request_access_def(),
         history_query_def(),
         create_vega_chart_def(),
     ]
@@ -167,7 +200,7 @@ fn ask_user_def() -> ToolDefinition {
 fn fs_request_grant_def() -> ToolDefinition {
     ToolDefinition {
         name: "fs_request_grant".to_string(),
-        description: "Request the user's approval to extend this agent's filesystem grants. Use BEFORE attempting work that needs paths outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI). The requested path must already exist because the shell sandbox cannot bind a nonexistent target; to create a new path, request its existing parent directory. Request the narrowest path that satisfies the task. The user can approve (once or always), narrow the path, downgrade the access, or deny. If granted `once`, the access lasts the rest of this run. If granted `always`, the grant persists to agent settings. If the path is already covered by existing grants, the tool returns immediately without prompting.".to_string(),
+        description: "Request the user's approval to extend this agent's filesystem grants. Use BEFORE attempting work that needs paths outside your current grants (e.g. `~/.ssh` for `git push`, `~/.config/gh` for the `gh` CLI). The requested path must already exist because the shell sandbox cannot bind a nonexistent target; to create a new path, request its existing parent directory. Request the narrowest path that satisfies the task. The user can approve (once or always), narrow the path, downgrade the access, or deny. If granted `once`, the access lasts the rest of this run. If granted `always`, the grant persists to agent settings. If the path is already covered by existing grants, the tool returns immediately without prompting. A Unix socket (such as Docker's) is reachable only through a grant on the socket itself, never through its folder's.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
@@ -176,6 +209,23 @@ fn fs_request_grant_def() -> ToolDefinition {
                 "reason": { "type": "string", "description": "Brief explanation shown to the user in the approval modal. Be specific about why you need this path for the current task." }
             },
             "required": ["path", "access", "reason"],
+            "additionalProperties": false
+        }),
+    }
+}
+
+fn net_request_access_def() -> ToolDefinition {
+    ToolDefinition {
+        name: "net_request_access".to_string(),
+        description: "Ask the user to let this agent reach a host that is not on its network allowlist. Call it when a shell command or web_fetch is refused because the host is not on the allowlist, before retrying. Ask for the one host you need (no wildcard); the user can allow it for this run, add it (or its parent domain) to the agent's allowlist, or deny. A host in the agent's denied hosts cannot be requested. If the host is already allowed, the tool returns immediately without asking.".to_string(),
+        input_schema: serde_json::json!({
+            "type": "object",
+            "properties": {
+                "host": { "type": "string", "description": "Host name or IP address only, such as `mirror.example.org`: no scheme, path or port." },
+                "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Port you will connect to, shown to the user. Optional; an allowed host is allowed on every port." },
+                "reason": { "type": "string", "description": "Brief explanation shown to the user. Be specific about what you need the host for." }
+            },
+            "required": ["host", "reason"],
             "additionalProperties": false
         }),
     }
@@ -378,6 +428,47 @@ mod tests {
         assert!(!has_web(&context));
         context.execution.web.enabled = true;
         assert!(has_web(&context));
+    }
+
+    #[test]
+    fn net_request_access_is_offered_only_where_an_allowlist_can_widen() {
+        let mut execution = ExecutionCapabilityConfig::default();
+        execution.sandbox.network_access.mode = NetworkMode::Allowlist;
+        execution.shell.mode = ShellAccessMode::Restricted;
+        execution.web.enabled = false;
+        assert_eq!(net_request_access_refusal(&execution, true), None);
+        assert!(net_request_access_refusal(&execution, false).is_some());
+
+        execution.shell.mode = ShellAccessMode::Off;
+        assert!(net_request_access_refusal(&execution, true).is_some());
+        execution.web.enabled = true;
+        assert_eq!(net_request_access_refusal(&execution, true), None);
+
+        for mode in [NetworkMode::Off, NetworkMode::HostNetwork] {
+            execution.sandbox.network_access.mode = mode;
+            assert!(
+                net_request_access_refusal(&execution, true).is_some(),
+                "{mode:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_tool_list_follows_the_network_mode() {
+        let mut context = RunContext::default();
+        context.execution.web.enabled = true;
+        let offered = |context: &RunContext| {
+            available_tools(context, &[], false)
+                .iter()
+                .any(|tool| tool.name == "net_request_access")
+        };
+        context.execution.sandbox.network_access.mode = NetworkMode::Allowlist;
+        assert_eq!(
+            offered(&context),
+            crate::assistant::sandbox::status().allowlist_available
+        );
+        context.execution.sandbox.network_access.mode = NetworkMode::HostNetwork;
+        assert!(!offered(&context));
     }
 
     #[test]
