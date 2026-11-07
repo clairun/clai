@@ -21,7 +21,7 @@
 import React, { useCallback, useState } from 'react';
 import { useAvailableAppUpdate } from '../hooks/useAvailableAppUpdate';
 import { openGlobalSettings } from '../utils/globalSettings';
-import { installAppUpdate, updateErrorText } from '../utils/appUpdates';
+import { confirmRestartWithLiveRuns, installAppUpdate, updateErrorText } from '../utils/appUpdates';
 import styles from './AppUpdateBadge.module.css';
 
 const AppUpdateBadge = () => {
@@ -41,9 +41,10 @@ const AppUpdateBadge = () => {
   }
 
   const restartToInstall = useCallback(async () => {
-    setRestarting(true);
     setError('');
     try {
+      if (!(await confirmRestartWithLiveRuns())) return;
+      setRestarting(true);
       // Progress events are ignored on purpose: the package is already
       // downloaded, so this is an extract-and-relaunch, not a transfer. The
       // backend restarts the app on success, so a resolved promise is not

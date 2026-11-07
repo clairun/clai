@@ -59,7 +59,7 @@ pub use workspace_index::WorkspaceIndex;
 /// module's name signals intent at the use site.
 #[doc(hidden)]
 pub mod runtime {
-    pub use crate::assistant::runtime::{cancel_run, register_run, LiveRunKey};
+    pub use crate::assistant::runtime::{cancel_run, live_run_count, register_run, LiveRunKey};
 }
 
 /// Shared application state accessible from all commands.
@@ -396,6 +396,7 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_window_event(main_window::on_window_event)
         // Make our state available to all commands
         // Commands can access it via State<'_, AppState>
         .manage(state)
@@ -443,6 +444,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // App metadata
             commands::app_info::app_version_detail,
+            commands::app_info::app_live_run_count,
             // App update commands
             commands::app_updates::get_app_update_status,
             commands::app_updates::check_for_app_update,

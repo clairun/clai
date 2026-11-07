@@ -86,6 +86,11 @@ pub fn register_run(key: LiveRunKey, run_id: &str) -> RunRegistration {
     }
 }
 
+/// Number of live runs across all workspaces of this process.
+pub fn live_run_count() -> usize {
+    live_runs().lock().unwrap().len()
+}
+
 /// Cancels the session's live run, if any.
 pub fn cancel_session(key: &LiveRunKey) -> bool {
     let token = live_runs()

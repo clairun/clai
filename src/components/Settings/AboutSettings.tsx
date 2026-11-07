@@ -11,6 +11,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { AppUpdateCheckResult, AppUpdateStatus } from '../../generated/bindings';
 import {
   LATEST_RELEASE_URL,
+  confirmRestartWithLiveRuns,
   installAppUpdate,
   installEventText,
   updateErrorText,
@@ -82,10 +83,11 @@ const AboutSettings = () => {
   };
 
   const installUpdate = async () => {
-    setInstalling(true);
-    setInstallProgress('Starting download...');
     setUpdateError('');
     try {
+      if (!(await confirmRestartWithLiveRuns())) return;
+      setInstalling(true);
+      setInstallProgress('Starting download...');
       await installAppUpdate((event) => {
         setInstallProgress(installEventText(event));
       });

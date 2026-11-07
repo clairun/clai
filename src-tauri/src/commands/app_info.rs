@@ -14,6 +14,13 @@ pub fn app_version_detail() -> String {
     resolve_version_detail(option_env!("CLAI_GIT_DESCRIBE"), env!("CARGO_PKG_VERSION"))
 }
 
+/// Number of agent runs in progress in this process, which quitting or
+/// restarting the app interrupts.
+#[tauri::command]
+pub fn app_live_run_count() -> usize {
+    crate::assistant::runtime::live_run_count()
+}
+
 /// Pick the display version from the baked `git describe` value, falling back
 /// to the crate version. Split out from [`app_version_detail`] so the fallback
 /// rules are testable without recompiling to change the baked env var.
