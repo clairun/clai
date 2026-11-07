@@ -3130,10 +3130,16 @@ mod tests {
             SandboxSessionBusMode::Allow => assert!(profile.session_bus_proxy.is_some()),
             SandboxSessionBusMode::Deny => {
                 assert!(profile.session_bus_proxy.is_none());
-                assert!(!profile
+                let address: Vec<_> = profile
                     .env
                     .iter()
-                    .any(|(key, _)| key == "DBUS_SESSION_BUS_ADDRESS"));
+                    .filter(|(key, _)| *key == "DBUS_SESSION_BUS_ADDRESS")
+                    .map(|(_, value)| value)
+                    .collect();
+                assert_eq!(
+                    address,
+                    [crate::assistant::sandbox::profile::SESSION_BUS_OFF_ADDRESS]
+                );
             }
         }
     }
@@ -3223,7 +3229,11 @@ mod tests {
             }
             Err(error) => panic!("{error}"),
         };
-        assert_eq!(output.stdout.trim(), "none", "{output:?}");
+        assert_eq!(
+            output.stdout.trim(),
+            crate::assistant::sandbox::profile::SESSION_BUS_OFF_ADDRESS,
+            "{output:?}"
+        );
     }
 
     /// The sockets a shell profile hands over for these saved and run-only

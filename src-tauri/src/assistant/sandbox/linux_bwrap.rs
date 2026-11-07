@@ -5,6 +5,7 @@ use tokio::process::Command;
 
 use super::filesystem::normalize_path;
 use super::helper::{BOX_HELPER, BOX_PROXY_PORT, BOX_SOCKET};
+use super::profile::SESSION_BUS_OFF_ADDRESS;
 use super::runner::{prepare_stdio, run_spawned_child};
 use super::{
     SandboxCommand, SandboxCommandOutput, SandboxNetworkMode, SandboxPathAccess,
@@ -658,7 +659,8 @@ fn append_runtime_file_binds(args: &mut Vec<OsString>, in_flatpak: bool) {
 /// 3. As a fallback for cases where the env var is unset, try the
 ///    modern systemd convention `$XDG_RUNTIME_DIR/bus`.
 ///
-/// If none of those resolve, we log a warning and skip the bind; the
+/// If none of those resolve, we log a warning and skip the bind, and a
+/// command whose env names no bus gets [`SESSION_BUS_OFF_ADDRESS`]; the
 /// agent's libsecret-using tools will then fail with the same "no bus"
 /// error they would have without the toggle, and can escalate via
 /// `workspace_requestUserInput`. This makes the toggle meaningful only
@@ -694,6 +696,13 @@ fn append_session_bus_bind(
              at $XDG_RUNTIME_DIR/bus). libsecret-using tools will fail; the toggle is \
              a no-op here."
         );
+        if !command.profile.env.names_session_bus() {
+            args.extend([
+                os("--setenv"),
+                os("DBUS_SESSION_BUS_ADDRESS"),
+                os(SESSION_BUS_OFF_ADDRESS),
+            ]);
+        }
         return None;
     };
     for dir in private_parent_dirs_for(&bus_path) {
@@ -1480,6 +1489,56 @@ mod tests {
         assert!(
             !rendered.iter().any(|arg| arg == &bus_str),
             "session_bus Deny should never include the bus path in args; rendered: {rendered:?}"
+        );
+    }
+
+    /// Full on a host with no path-based bus: nothing is bound, and a
+    /// command whose env names no bus gets the off address instead of an
+    /// empty one, from which godbus would autolaunch a bus.
+    #[test]
+    fn full_without_a_host_bus_gets_the_off_address() {
+        let runtime = tempfile::tempdir().unwrap();
+        let mut command = sample_command();
+        command.profile.session_bus = SandboxSessionBusMode::Allow;
+        command.profile.env = SandboxEnv::filtered_from_iter(
+            [("PATH", "/usr/bin")],
+            &command.cwd,
+            SandboxSessionBusMode::Allow,
+        );
+        let args = rendered(&with_dbus_env(None, Some(runtime.path()), || {
+            bwrap_args(&command).unwrap()
+        }));
+        let setenvs: Vec<&[String]> = args
+            .windows(3)
+            .filter(|w| w[0] == "--setenv" && w[1] == "DBUS_SESSION_BUS_ADDRESS")
+            .collect();
+        assert_eq!(
+            setenvs,
+            [&[
+                "--setenv",
+                "DBUS_SESSION_BUS_ADDRESS",
+                SESSION_BUS_OFF_ADDRESS
+            ][..]],
+            "{args:?}"
+        );
+        let off_path = SESSION_BUS_OFF_ADDRESS.strip_prefix("unix:path=").unwrap();
+        assert!(!args.iter().any(|arg| arg == off_path), "{args:?}");
+
+        // An address the host does give, such as an abstract bus that a
+        // sandbox on the host network reaches, is left alone.
+        command.profile.env = SandboxEnv::filtered_from_iter(
+            [("DBUS_SESSION_BUS_ADDRESS", "unix:abstract=/tmp/dbus-x")],
+            &command.cwd,
+            SandboxSessionBusMode::Allow,
+        );
+        let args = rendered(&with_dbus_env(
+            Some("unix:abstract=/tmp/dbus-x"),
+            Some(runtime.path()),
+            || bwrap_args(&command).unwrap(),
+        ));
+        assert!(
+            !args.iter().any(|arg| arg == SESSION_BUS_OFF_ADDRESS),
+            "{args:?}"
         );
     }
 

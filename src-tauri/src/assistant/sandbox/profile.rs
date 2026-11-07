@@ -54,9 +54,7 @@ impl SandboxProfile {
         self.session_bus = SandboxSessionBusMode::Deny;
         self.session_bus_proxy = None;
         self.session_bus_unavailable = Some(reason);
-        self.env
-            .vars
-            .retain(|key, _| !ENV_SESSION_BUS_PASSTHROUGH.contains(&key.as_str()));
+        self.env.block_session_bus();
     }
 }
 
@@ -175,6 +173,12 @@ pub struct SandboxEnv {
 /// auth (gh, git-credential-libsecret, secret-tool) to work.
 const ENV_SESSION_BUS_PASSTHROUGH: &[&str] = &["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
 
+/// The session bus address of a command that gets no bus: a path the
+/// sandbox never creates or binds, so clients fail at once. Left empty,
+/// godbus (gh) autolaunches a private bus and then waits on
+/// `org.freedesktop.secrets` with no timeout.
+pub(crate) const SESSION_BUS_OFF_ADDRESS: &str = "unix:path=/run/clai/session-bus-off";
+
 impl SandboxEnv {
     pub fn filtered_from_current(home: &Path, session_bus: SandboxSessionBusMode) -> Self {
         Self::filtered_from_iter(std::env::vars(), home, session_bus)
@@ -209,7 +213,28 @@ impl SandboxEnv {
             .or_insert_with(|| DEFAULT_PATH.to_string());
         filtered.insert("HOME".to_string(), home.display().to_string());
 
-        Self { vars: filtered }
+        let mut env = Self { vars: filtered };
+        if !allow_session_bus {
+            env.block_session_bus();
+        }
+        env
+    }
+
+    fn block_session_bus(&mut self) {
+        self.vars
+            .retain(|key, _| !ENV_SESSION_BUS_PASSTHROUGH.contains(&key.as_str()));
+        self.vars.insert(
+            "DBUS_SESSION_BUS_ADDRESS".to_string(),
+            SESSION_BUS_OFF_ADDRESS.to_string(),
+        );
+    }
+
+    /// Whether the command is given a session bus address to dial.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn names_session_bus(&self) -> bool {
+        self.vars
+            .get("DBUS_SESSION_BUS_ADDRESS")
+            .is_some_and(|address| !address.is_empty())
     }
 
     // Read only by the Unix sandbox backends when applying the env to the
@@ -367,9 +392,60 @@ mod tests {
             SandboxSessionBusMode::Deny,
         );
 
-        assert_eq!(env.vars.len(), 2);
+        assert_eq!(env.vars.len(), 3);
         assert!(env.vars.contains_key("HOME"));
         assert!(env.vars.contains_key("PATH"));
+        assert_eq!(
+            env.vars.get("DBUS_SESSION_BUS_ADDRESS").map(String::as_str),
+            Some(SESSION_BUS_OFF_ADDRESS)
+        );
+
+        // No host bus at all: the command still gets the off address, so
+        // godbus does not autolaunch one.
+        let env = SandboxEnv::filtered_from_iter(
+            [("PATH", "/usr/bin")],
+            home,
+            SandboxSessionBusMode::Deny,
+        );
+        assert_eq!(
+            env.vars.get("DBUS_SESSION_BUS_ADDRESS").map(String::as_str),
+            Some(SESSION_BUS_OFF_ADDRESS)
+        );
+    }
+
+    /// Keyring only whose proxy cannot start: the host bus variables go and
+    /// the command gets the off address.
+    #[cfg(target_family = "unix")]
+    #[test]
+    fn dropping_the_session_bus_leaves_the_off_address() {
+        let workspace = tempfile::tempdir().unwrap();
+        let env = SandboxEnv::filtered_from_iter(
+            [
+                ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/run/user/1000/bus"),
+                ("XDG_RUNTIME_DIR", "/run/user/1000"),
+            ],
+            workspace.path(),
+            SandboxSessionBusMode::Allow,
+        );
+        let mut profile = SandboxProfile::for_test(
+            workspace.path().to_path_buf(),
+            Vec::new(),
+            SandboxNetworkMode::Disabled,
+            SandboxSessionBusMode::Allow,
+            env,
+            None,
+        );
+        profile.drop_session_bus("xdg-dbus-proxy is not installed".to_string());
+        assert_eq!(profile.session_bus, SandboxSessionBusMode::Deny);
+        assert_eq!(
+            profile
+                .env
+                .vars
+                .get("DBUS_SESSION_BUS_ADDRESS")
+                .map(String::as_str),
+            Some(SESSION_BUS_OFF_ADDRESS)
+        );
+        assert!(!profile.env.vars.contains_key("XDG_RUNTIME_DIR"));
     }
 
     #[test]
