@@ -1438,6 +1438,28 @@ describe('Workspace composer geometry', () => {
     await waitFor(() => expect(rootStyle.getPropertyValue('--chat-card-width')).toBe('360px'));
     expect(rootStyle.getPropertyValue('--chat-card-center')).toBe('280px');
   });
+
+  it('floors the published chat width at 420px when the visible strip is narrower', async () => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      }
+    );
+    // A 700px pane at x=100 with the drawer open beside the card: the card
+    // keeps its 420px and slides left, so only 340px of it is in the pane.
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      if (this.matches(`.${styles.workspaceMain}`)) return rectOf(100, 700);
+      if (this.matches(`.${styles.chatFirstContent}`)) return rectOf(20, 420);
+      return rectOf(0, 0);
+    });
+    renderWorkspace();
+
+    const rootStyle = document.documentElement.style;
+    await waitFor(() => expect(rootStyle.getPropertyValue('--chat-card-width')).toBe('420px'));
+    expect(rootStyle.getPropertyValue('--chat-card-center')).toBe('310px');
+  });
 });
 
 describe('Workspace task transcript', () => {

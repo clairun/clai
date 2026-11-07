@@ -371,13 +371,22 @@ describe('FleetLayout switch to the Fleet', () => {
 
 describe('FleetLayout rail in a narrow window', () => {
   const PREFERENCE_KEY = 'fleet.rail.collapsed';
-  // A window whose width the test sets; matchMedia reads it on every call
-  // and notifies its listeners on a resize, as the browser does.
-  const media = { narrow: false, listeners: new Set<() => void>() };
+  // A window whose width the test sets; matchMedia evaluates its width
+  // query against it on every call and notifies its listeners on a resize,
+  // as the browser does.
+  const WIDE = 900;
+  const NARROW = 899;
+  const media = { width: WIDE, listeners: new Set<() => void>() };
   const originalMatchMedia = window.matchMedia;
-  const resize = (narrow: boolean) =>
+  const matchesWidth = (query: string) => {
+    const match = /^\((max|min)-width: ([\d.]+)px\)$/.exec(query);
+    if (!match) throw new Error(`unsupported media query: ${query}`);
+    const limit = Number(match[2]);
+    return match[1] === 'max' ? media.width <= limit : media.width >= limit;
+  };
+  const resize = (width: number) =>
     act(() => {
-      media.narrow = narrow;
+      media.width = width;
       media.listeners.forEach((listener) => listener());
     });
   const railWidth = () => document.documentElement.style.getPropertyValue('--fleet-rail-width');
@@ -389,11 +398,11 @@ describe('FleetLayout rail in a narrow window', () => {
 
   beforeEach(() => {
     vi.stubGlobal('localStorage', memoryStorage());
-    media.narrow = false;
+    media.width = WIDE;
     media.listeners.clear();
     window.matchMedia = vi.fn((query: string) => ({
       get matches() {
-        return media.narrow;
+        return matchesWidth(query);
       },
       media: query,
       addEventListener: (_type: string, listener: () => void) => media.listeners.add(listener),
@@ -410,24 +419,24 @@ describe('FleetLayout rail in a narrow window', () => {
 
   it('collapses an expanded rail while narrow and restores it on widening, leaving the saved preference alone', async () => {
     localStorage.setItem(PREFERENCE_KEY, '0');
-    media.narrow = true;
+    media.width = NARROW;
     renderFleet();
 
     expect(await screen.findByRole('button', { name: 'Expand sidebar' })).toBeInTheDocument();
     expect(railWidth()).toBe('52px');
 
-    resize(false);
+    resize(WIDE);
     expect(screen.getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument();
     expect(railWidth()).toBe('248px');
 
-    resize(true);
+    resize(NARROW);
     expect(screen.getByRole('button', { name: 'Expand sidebar' })).toBeInTheDocument();
     expect(localStorage.getItem(PREFERENCE_KEY)).toBe('0');
   });
 
   it('expands the rail from its toggle while narrow without saving that, until the window widens', async () => {
     localStorage.setItem(PREFERENCE_KEY, '1');
-    media.narrow = true;
+    media.width = NARROW;
     renderFleet();
 
     await userEvent.click(await screen.findByRole('button', { name: 'Expand sidebar' }));
@@ -439,11 +448,20 @@ describe('FleetLayout rail in a narrow window', () => {
     // Expanded again, then widened: the saved (collapsed) preference wins,
     // and narrowing once more starts collapsed rather than expanded.
     await userEvent.click(screen.getByRole('button', { name: 'Expand sidebar' }));
-    resize(false);
+    resize(WIDE);
     expect(railWidth()).toBe('52px');
-    resize(true);
+    resize(NARROW);
     expect(railWidth()).toBe('52px');
     expect(localStorage.getItem(PREFERENCE_KEY)).toBe('1');
+  });
+
+  it('stops listening for window resizes once unmounted', async () => {
+    const { unmount } = renderFleet();
+    await screen.findByRole('button', { name: 'Collapse sidebar' });
+    expect(media.listeners.size).toBeGreaterThan(0);
+
+    unmount();
+    expect(media.listeners.size).toBe(0);
   });
 
   it('still saves the toggle in a wide window', async () => {
