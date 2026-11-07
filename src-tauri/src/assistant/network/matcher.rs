@@ -181,6 +181,90 @@ pub fn parse_entry(raw: &str) -> Result<HostEntry, &'static str> {
     Ok(entry(Host::Domain(domain)))
 }
 
+/// Parses a port on this computer, written `localhost:<port>`, or says why
+/// text that names this computer is not one. `127.0.0.1:<port>` and
+/// `[::1]:<port>` are accepted spellings of the same port: a grant is for
+/// the program on the port, whichever loopback address a client tries
+/// first. `Ok(None)` means the text does not name this computer, so it can
+/// only be a host entry ([`parse_entry`]).
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "net_request_access and the settings form will parse ports with it"
+    )
+)]
+pub fn parse_local_port(raw: &str) -> Result<Option<u16>, &'static str> {
+    let value = raw.trim().to_lowercase();
+    // `::1:5432` is itself a valid IPv6 address, so only brackets carry a port.
+    if value.rsplit_once(':').is_some_and(|(ip, _)| {
+        ip.parse::<Ipv6Addr>()
+            .is_ok_and(|ip| is_this_computer(ip.into()))
+    }) {
+        return Err("put the IPv6 address in brackets, as in [::1]:5432");
+    }
+    let (host, ipv6, port) = if value.parse::<Ipv6Addr>().is_ok() {
+        (value.as_str(), true, None)
+    } else if let Some((host, rest)) = value
+        .strip_prefix('[')
+        .and_then(|inner| inner.split_once(']'))
+    {
+        match rest.strip_prefix(':') {
+            Some(port) => (host, true, Some(port)),
+            None if rest.is_empty() => (host, true, None),
+            None => return Ok(None),
+        }
+    } else {
+        match value.split_once(':') {
+            Some((host, port)) => (host, false, Some(port)),
+            None => (value.as_str(), false, None),
+        }
+    };
+    let alias = if ipv6 {
+        host == "::1"
+    } else {
+        host == "localhost" || host == "127.0.0.1"
+    };
+    if !alias {
+        return if names_this_computer(host) {
+            Err("write this computer as localhost, as in localhost:5432")
+        } else {
+            Ok(None)
+        };
+    }
+    let port = port.unwrap_or_default();
+    if port.is_empty() {
+        return Err("add the port, as in localhost:5432");
+    }
+    if port.contains(['*', '-', ',']) {
+        return Err("allow one port at a time, without ranges or wildcards");
+    }
+    if !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(PORT_RANGE);
+    }
+    if port.len() > 1 && port.starts_with('0') {
+        return Err("write the port without leading zeros");
+    }
+    match port.parse() {
+        Ok(0) | Err(_) => Err(PORT_RANGE),
+        Ok(port) => Ok(Some(port)),
+    }
+}
+
+const PORT_RANGE: &str = "the port is a number from 1 to 65535";
+
+/// Any name or address that reaches this computer: `*.localhost`, all of
+/// 127.0.0.0/8, `::1` and the unspecified addresses, which connect locally.
+fn names_this_computer(host: &str) -> bool {
+    let name = host.strip_suffix('.').unwrap_or(host);
+    name == "localhost" || name.ends_with(".localhost") || host.parse().is_ok_and(is_this_computer)
+}
+
+fn is_this_computer(ip: IpAddr) -> bool {
+    let ip = ip.to_canonical();
+    ip.is_loopback() || ip.is_unspecified()
+}
+
 const INVALID_CHARACTERS: &str = "use only letters, digits, hyphens and dots";
 
 /// A last label that makes URL parsers read the name as IPv4 (WHATWG
@@ -576,6 +660,75 @@ mod tests {
         }
         for entry in cases.rejected {
             assert!(parse_entry(&entry).is_err(), "{entry:?}");
+        }
+    }
+
+    // Host entries must never parse as local ports, so the host cases run here too.
+    #[test]
+    fn local_ports_are_parsed_by_one_rule() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Cases {
+            accepted: Vec<HostCase>,
+            local_ports: LocalPorts,
+        }
+        #[derive(serde::Deserialize)]
+        struct HostCase {
+            entry: String,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct LocalPorts {
+            accepted: Vec<Accepted>,
+            rejected: Vec<String>,
+            not_local: Vec<String>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Accepted {
+            entry: String,
+            port: u16,
+        }
+        let cases: Cases = serde_json::from_str(include_str!(
+            "../../../../src/components/Settings/hostEntryCases.json"
+        ))
+        .expect("host entry cases");
+        let local = cases.local_ports;
+        for Accepted { entry, port } in local.accepted {
+            assert_eq!(parse_local_port(&entry), Ok(Some(port)), "{entry:?}");
+        }
+        for entry in local.rejected {
+            assert!(parse_local_port(&entry).is_err(), "{entry:?}");
+        }
+        let hosts = cases.accepted.into_iter().map(|case| case.entry);
+        for entry in local.not_local.into_iter().chain(hosts) {
+            assert_eq!(parse_local_port(&entry), Ok(None), "{entry:?}");
+        }
+    }
+
+    #[test]
+    fn local_port_errors_say_what_to_write() {
+        let no_port = "add the port, as in localhost:5432";
+        let range = "the port is a number from 1 to 65535";
+        let one_port = "allow one port at a time, without ranges or wildcards";
+        let use_localhost = "write this computer as localhost, as in localhost:5432";
+        for (entry, reason) in [
+            ("localhost", no_port),
+            ("[::1]:", no_port),
+            ("localhost:0", range),
+            ("localhost:65536", range),
+            ("localhost:05432", "write the port without leading zeros"),
+            ("localhost:1-9", one_port),
+            ("localhost:*", one_port),
+            (
+                "::1:5432",
+                "put the IPv6 address in brackets, as in [::1]:5432",
+            ),
+            ("127.0.0.2:80", use_localhost),
+            ("0.0.0.0:80", use_localhost),
+            ("*.localhost:80", use_localhost),
+            ("localhost.:80", use_localhost),
+        ] {
+            assert_eq!(parse_local_port(entry), Err(reason), "{entry:?}");
         }
     }
 
