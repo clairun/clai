@@ -31,6 +31,7 @@ mod assistant;
 mod commands;
 mod config;
 mod db;
+mod main_window;
 mod mcp;
 mod paths;
 mod providers;
@@ -383,7 +384,13 @@ pub fn run() {
 
     // Build and run the Tauri application
     tauri::Builder::default()
-        // Register Tauri plugins
+        // Register Tauri plugins. Single-instance goes first: a second launch
+        // must exit before any other setup runs, and above all before the
+        // setup hook opens the workspace databases, whose restart recovery
+        // would mark this instance's live runs failed and its tasks stopped.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            main_window::show_main_window(app);
+        }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
