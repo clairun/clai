@@ -51,6 +51,32 @@ pub fn close_action(keep_running: bool, can_hide: bool, live_runs: usize) -> Clo
     }
 }
 
+/// The OS families whose main window closes differently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Platform {
+    /// Clicking the Dock icon shows a hidden window again.
+    MacOs,
+    /// Linux and Windows, where nothing can show a hidden window yet.
+    Other,
+}
+
+impl Platform {
+    const CURRENT: Self = if cfg!(target_os = "macos") {
+        Self::MacOs
+    } else {
+        Self::Other
+    };
+}
+
+/// On macOS, closing the window hides it and CLAI keeps running in the Dock,
+/// as Mac apps do, so the live runs go on and there is nothing to ask.
+/// Elsewhere closing quits, asking first when runs are live.
+fn platform_close_action(platform: Platform, live_runs: usize) -> CloseAction {
+    let can_hide = platform == Platform::MacOs;
+    // Keep running by default wherever the window can come back.
+    close_action(can_hide, can_hide, live_runs)
+}
+
 /// What the main window does instead of closing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeepOpen {
@@ -100,9 +126,9 @@ impl QuitPrompt {
 
 static QUIT_PROMPT: QuitPrompt = QuitPrompt::new();
 
-/// Handles a close request on the main window: its close button, Alt+F4 or
-/// the window manager. macOS Cmd+Q and Dock Quit do not send one, so they
-/// quit without asking.
+/// Handles a close request on the main window: its close button, Cmd+W,
+/// Alt+F4 or the window manager. macOS Cmd+Q and Dock Quit do not send one,
+/// so they quit without asking.
 pub fn on_window_event(window: &Window, event: &WindowEvent) {
     let WindowEvent::CloseRequested { api, .. } = event else {
         return;
@@ -111,10 +137,8 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         return;
     }
     let live_runs = live_run_count();
-    // There is no setting yet, and nothing that could bring a hidden window
-    // back.
-    let Some(keep_open) = QUIT_PROMPT.on_close_requested(close_action(false, false, live_runs))
-    else {
+    let action = platform_close_action(Platform::CURRENT, live_runs);
+    let Some(keep_open) = QUIT_PROMPT.on_close_requested(action) else {
         return;
     };
     api.prevent_close();
@@ -181,6 +205,36 @@ mod tests {
                 "keep_running={keep_running} can_hide={can_hide} live_runs={live_runs}"
             );
         }
+    }
+
+    #[test]
+    fn macos_hides_and_other_platforms_quit_or_ask() {
+        use CloseAction::{Confirm, Hide, Quit};
+        use Platform::{MacOs, Other};
+        // (platform, live_runs, expected)
+        let cases = [
+            (MacOs, 0, Hide),
+            (MacOs, 2, Hide),
+            (Other, 0, Quit),
+            (Other, 1, Confirm),
+        ];
+        for (platform, live_runs, expected) in cases {
+            assert_eq!(
+                platform_close_action(platform, live_runs),
+                expected,
+                "platform={platform:?} live_runs={live_runs}"
+            );
+        }
+    }
+
+    #[test]
+    fn this_platform_hides_only_on_macos() {
+        let expected = if cfg!(target_os = "macos") {
+            CloseAction::Hide
+        } else {
+            CloseAction::Confirm
+        };
+        assert_eq!(platform_close_action(Platform::CURRENT, 1), expected);
     }
 
     #[test]

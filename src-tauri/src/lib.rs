@@ -544,6 +544,12 @@ pub fn run() {
             if let tauri::RunEvent::Exit = event {
                 app_handle.state::<AppState>().terminals.close_all();
             }
+            // A Dock icon click, which is how a window hidden on close comes
+            // back.
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                main_window::show_main_window(app_handle);
+            }
         });
 }
 
