@@ -5,13 +5,15 @@
 //! Everything comes from `/proc`, read through [`ProcSource`] so tests can
 //! describe a process table instead.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::CStr;
 use std::fs;
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::time::{Duration, Instant};
 
 /// `st` of a listening socket in `/proc/net/tcp`.
 const LISTEN: &str = "0A";
@@ -29,15 +31,28 @@ const NOBODY_UID: u32 = 65534;
 const MAX_PASSWD_BUF: usize = 1 << 20;
 /// The first read of `/proc/net/tcp`: about 400 sockets.
 const NET_TCP_CHUNK: usize = 64 * 1024;
+/// How long a user name, or its absence, is reused. The user database may be
+/// a network service (LDAP, sssd) that stalls each lookup. While it cannot
+/// be read, another user's listener is run-only, not `OtherUser`, so a
+/// saved grant for that user does not match it: the proxy refuses the port
+/// and the agent can ask again, for this run only.
+const NAME_TTL: Duration = Duration::from_secs(60);
 
 /// The loopback address the proxy dials.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Loopback {
     V4,
     V6,
 }
 
 impl Loopback {
+    pub fn ip(self) -> IpAddr {
+        match self {
+            Self::V4 => Ipv4Addr::LOCALHOST.into(),
+            Self::V6 => Ipv6Addr::LOCALHOST.into(),
+        }
+    }
+
     /// Whether a socket listening on `addr` accepts a connection to this
     /// address. A `::` socket counts for IPv4 too: /proc does not show
     /// `IPV6_V6ONLY`, and a dial to such a socket just fails.
@@ -123,11 +138,112 @@ pub struct Holder {
     pub cmdline: String,
 }
 
-/// Finds what listens on `port` at an address a dial to `dial` reaches.
-/// Blocks on `/proc` reads: a scan of every fd of this user when the port
-/// is held.
-pub fn inspect(port: u16, dial: Loopback) -> io::Result<Listener> {
-    lookup(&HostProc, port, dial)
+/// Finds what listens on a localhost port, for the network proxy; tests
+/// describe a listener instead. Both methods block on `/proc` reads.
+pub trait ListenerInspector: Send + Sync {
+    /// What listens on `port` at an address a dial to `dial` reaches, from a
+    /// scan of every fd of this user when the port is held. The only source
+    /// of a request card or a saved grant.
+    fn inspect(&self, port: u16, dial: Loopback) -> io::Result<Listener>;
+    /// Whether the process that the last [`inspect`](Self::inspect) of the
+    /// port found running one of `programs` still holds every socket there,
+    /// in the namespaces of CLAI and running the same file; `false` means
+    /// "inspect it". It reads only the socket table and that process, so it
+    /// does not see a second holder: that is acceptable to confirm a program
+    /// already allowed, which alone can share its sockets, and for nothing
+    /// else.
+    fn still_serves(&self, port: u16, dial: Loopback, programs: &[String]) -> bool;
+}
+
+/// The inspector of this computer, shared by every proxy session so its
+/// caches outlive one command.
+pub fn host_inspector() -> Arc<dyn ListenerInspector> {
+    static HOST: LazyLock<Arc<HostInspector>> = LazyLock::new(Arc::default);
+    HOST.clone()
+}
+
+#[derive(Default)]
+struct HostInspector {
+    proc: HostProc,
+    served: Served,
+}
+
+impl ListenerInspector for HostInspector {
+    fn inspect(&self, port: u16, dial: Loopback) -> io::Result<Listener> {
+        self.served.inspect(&self.proc, port, dial)
+    }
+
+    fn still_serves(&self, port: u16, dial: Loopback, programs: &[String]) -> bool {
+        self.served.still_serves(&self.proc, port, dial, programs)
+    }
+}
+
+/// Per port and dial, the sockets and the lowest-pid process that the last
+/// full scan found serving a program.
+#[derive(Default)]
+struct Served {
+    by_port: Mutex<HashMap<(u16, Loopback), ServedBy>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ServedBy {
+    sockets: Vec<u64>,
+    pid: u32,
+    exe: String,
+}
+
+impl Served {
+    fn inspect(&self, proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<Listener> {
+        let (listener, sockets) = scan(proc, port, dial)?;
+        let mut by_port = self.by_port.lock().unwrap_or_else(PoisonError::into_inner);
+        match &listener {
+            Listener::Program(program) => {
+                by_port.insert(
+                    (port, dial),
+                    ServedBy {
+                        sockets,
+                        pid: program.pid,
+                        exe: program.exe.clone(),
+                    },
+                );
+            }
+            _ => {
+                by_port.remove(&(port, dial));
+            }
+        }
+        Ok(listener)
+    }
+
+    fn still_serves(
+        &self,
+        proc: &impl ProcSource,
+        port: u16,
+        dial: Loopback,
+        programs: &[String],
+    ) -> bool {
+        let Some(served) = self
+            .by_port
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&(port, dial))
+            .cloned()
+        else {
+            return false;
+        };
+        if !programs.contains(&served.exe) {
+            return false;
+        }
+        let Ok(sockets) = listening(proc, port, dial) else {
+            return false;
+        };
+        let held = proc.socket_inodes(served.pid);
+        let clai_namespaces = proc.self_pid().and_then(|clai| proc.namespaces(clai));
+        inodes(&sockets) == served.sockets
+            && served.sockets.iter().all(|inode| held.contains(inode))
+            && clai_namespaces.is_some()
+            && proc.namespaces(served.pid) == clai_namespaces
+            && proc.runs(served.pid, Path::new(&served.exe))
+    }
 }
 
 /// A listening socket from `/proc/net/tcp` or `tcp6`.
@@ -190,12 +306,19 @@ trait ProcSource {
     fn cmdline(&self, pid: u32) -> String;
 }
 
-fn lookup(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<Listener> {
+/// The sockets listening on `port` at an address a dial to `dial` reaches.
+fn listening(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<Vec<Socket>> {
     let mut sockets = parse_proc_net(&proc.net_tcp(false)?);
     sockets.extend(parse_proc_net(&proc.net_tcp(true)?));
     sockets.retain(|socket| socket.port == port && dial.reaches(socket.addr));
+    Ok(sockets)
+}
+
+/// What listens on `port`, and the inodes of its sockets.
+fn scan(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<(Listener, Vec<u64>)> {
+    let sockets = listening(proc, port, dial)?;
     if sockets.is_empty() {
-        return Ok(Listener::Nothing);
+        return Ok((Listener::Nothing, Vec::new()));
     }
     let clai = proc
         .self_pid()
@@ -219,7 +342,7 @@ fn lookup(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<Liste
             continue;
         }
         if is_clai(proc, pid, clai) {
-            return Ok(Listener::Clai);
+            return Ok((Listener::Clai, inodes.iter().copied().collect()));
         }
         let (Some(namespaces), Some(exe)) = (proc.namespaces(pid), proc.exe(pid)) else {
             unreadable = true;
@@ -242,16 +365,12 @@ fn lookup(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<Liste
         });
     }
     // A holder that is exiting, or that CLAI may not inspect.
-    if unreadable {
-        return Ok(run_only(RunOnly::Unseen, &sockets, &seen));
-    }
-    Ok(classify(
-        proc,
-        &sockets,
-        &seen,
-        &seen_inodes,
-        &clai_namespaces,
-    ))
+    let listener = if unreadable {
+        run_only(RunOnly::Unseen, &sockets, &seen)
+    } else {
+        classify(proc, &sockets, &seen, &seen_inodes, &clai_namespaces)
+    };
+    Ok((listener, inodes.into_iter().collect()))
 }
 
 /// `seen` is sorted by pid and holds no CLAI process.
@@ -302,7 +421,8 @@ fn classify(
 
 /// The other user all `sockets` belong to, by uid and name. A saved grant
 /// names that uid, so it must be a user the user of CLAI does not control.
-/// Only the initial user namespace shows host uids: in one the user created
+/// Only a user namespace that maps every uid to the same uid outside, as the
+/// initial one does, shows host uids: in one the user created
 /// (a Flatpak, toolbox or rootless container) every uid is the user, one it
 /// runs containers as, or the overflow uid, and passwd and `/etc/subuid`
 /// describe the namespace, so no uid there counts. On the host, the uid must
@@ -340,8 +460,8 @@ fn subordinate(subuid: &str, user: Option<&str>, euid: u32, uid: u32) -> bool {
         .any(|range| range.contains(&u64::from(uid)))
 }
 
-/// Whether the text of `/proc/self/uid_map` maps every uid to itself, as
-/// only the initial user namespace does.
+/// Whether the text of `/proc/self/uid_map` maps every uid to the same uid
+/// outside, as the initial user namespace does.
 fn identity_uid_map(map: &str) -> bool {
     let mut lines = map.lines();
     lines
@@ -438,7 +558,68 @@ fn parse_addr(hex: &str) -> Option<IpAddr> {
     }
 }
 
-struct HostProc;
+#[derive(Default)]
+struct HostProc {
+    names: NameCache,
+}
+
+/// User names by uid, each looked up at most once per [`NAME_TTL`].
+#[derive(Default)]
+struct NameCache {
+    names: Mutex<HashMap<u32, (Instant, Option<String>)>>,
+}
+
+impl NameCache {
+    fn get(
+        &self,
+        uid: u32,
+        ttl: Duration,
+        look_up: impl FnOnce(u32) -> Option<String>,
+    ) -> Option<String> {
+        let lock = || self.names.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((at, name)) = lock().get(&uid) {
+            if at.elapsed() < ttl {
+                return name.clone();
+            }
+        }
+        // Not under the lock: one stalled lookup must not hold up the others.
+        let name = look_up(uid);
+        lock().insert(uid, (Instant::now(), name.clone()));
+        name
+    }
+}
+
+/// The name of user `uid` in the user database, from NSS.
+fn passwd_name(uid: u32) -> Option<String> {
+    let mut buf = vec![0u8; 1024];
+    loop {
+        // SAFETY: an all-zero passwd is valid: null pointers and zeros.
+        let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+        let mut found = std::ptr::null_mut();
+        // SAFETY: every pointer is valid for the call, and the buffer
+        // holds buf.len() bytes.
+        let error = unsafe {
+            libc::getpwuid_r(
+                uid,
+                &mut entry,
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                &mut found,
+            )
+        };
+        if error == libc::ERANGE && buf.len() < MAX_PASSWD_BUF {
+            buf.resize(buf.len() * 2, 0);
+            continue;
+        }
+        if error != 0 || found.is_null() || entry.pw_name.is_null() {
+            return None;
+        }
+        // SAFETY: pw_name is not null, and on success points to a C
+        // string inside buf.
+        let name = unsafe { CStr::from_ptr(entry.pw_name) };
+        return name.to_str().ok().map(str::to_owned);
+    }
+}
 
 impl ProcSource for HostProc {
     fn net_tcp(&self, v6: bool) -> io::Result<String> {
@@ -475,34 +656,7 @@ impl ProcSource for HostProc {
     }
 
     fn user_name(&self, uid: u32) -> Option<String> {
-        let mut buf = vec![0u8; 1024];
-        loop {
-            // SAFETY: an all-zero passwd is valid: null pointers and zeros.
-            let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
-            let mut found = std::ptr::null_mut();
-            // SAFETY: every pointer is valid for the call, and the buffer
-            // holds buf.len() bytes.
-            let error = unsafe {
-                libc::getpwuid_r(
-                    uid,
-                    &mut entry,
-                    buf.as_mut_ptr().cast(),
-                    buf.len(),
-                    &mut found,
-                )
-            };
-            if error == libc::ERANGE && buf.len() < MAX_PASSWD_BUF {
-                buf.resize(buf.len() * 2, 0);
-                continue;
-            }
-            if error != 0 || found.is_null() || entry.pw_name.is_null() {
-                return None;
-            }
-            // SAFETY: pw_name is not null, and on success points to a C
-            // string inside buf.
-            let name = unsafe { CStr::from_ptr(entry.pw_name) };
-            return name.to_str().ok().map(str::to_owned);
-        }
+        self.names.get(uid, NAME_TTL, passwd_name)
     }
 
     fn subuid(&self) -> String {
@@ -908,6 +1062,120 @@ mod tests {
             .holder(holder, parent(holder), SSH, &[11])
     }
 
+    fn lookup(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<Listener> {
+        scan(proc, port, dial).map(|(listener, _)| listener)
+    }
+
+    #[test]
+    fn a_scanned_program_is_confirmed_cheaply_until_anything_changes() {
+        let allowed = [SSH.to_string()];
+        let served = Served::default();
+        let fake = tunnel().holder(300, 1, SSH, &[11]);
+        assert!(!served.still_serves(&fake, PORT, Loopback::V4, &allowed));
+        assert_eq!(
+            served.inspect(&fake, PORT, Loopback::V4).unwrap(),
+            program(SSH, 300, "/usr/bin/ssh -N")
+        );
+        assert!(served.still_serves(&fake, PORT, Loopback::V4, &allowed));
+        for (name, port, dial, programs) in [
+            ("another dial", PORT, Loopback::V6, &allowed[..]),
+            ("another port", PORT + 1, Loopback::V4, &allowed[..]),
+            (
+                "a program not allowed",
+                PORT,
+                Loopback::V4,
+                &[PYTHON.to_string()][..],
+            ),
+            ("no program allowed", PORT, Loopback::V4, &[][..]),
+        ] {
+            assert!(!served.still_serves(&fake, port, dial, programs), "{name}");
+        }
+        for (name, changed) in [
+            (
+                "the listener restarted",
+                Fake::new()
+                    .listening("127.0.0.1", PORT, EUID, 12)
+                    .holder(300, 1, SSH, &[12]),
+            ),
+            (
+                "a second socket on the port",
+                tunnel()
+                    .listening("0.0.0.0", PORT, EUID, 12)
+                    .holder(300, 1, SSH, &[11, 12]),
+            ),
+            (
+                "the process closed the socket",
+                tunnel().holder(300, 1, SSH, &[]).holder(301, 1, SSH, &[11]),
+            ),
+            (
+                "the process runs another file",
+                tunnel()
+                    .holder(300, 1, SSH, &[11])
+                    .with(300, |p| p.runs.clear()),
+            ),
+            (
+                "the process entered another namespace",
+                tunnel()
+                    .holder(300, 1, SSH, &[11])
+                    .with(300, |p| p.namespaces = namespaces("pid:[1]", "mnt:[2]")),
+            ),
+            (
+                "its namespaces cannot be read",
+                tunnel()
+                    .holder(300, 1, SSH, &[11])
+                    .with(300, |p| p.hides_namespaces = true),
+            ),
+            ("nothing listens", Fake::new().holder(300, 1, SSH, &[])),
+        ] {
+            assert!(
+                !served.still_serves(&changed, PORT, Loopback::V4, &allowed),
+                "{name}"
+            );
+        }
+    }
+
+    /// A card comes from a full scan only, which sees what the cheap check
+    /// cannot, and forgets the program once it no longer finds one.
+    #[test]
+    fn a_full_scan_never_reuses_the_scanned_program() {
+        let allowed = [SSH.to_string()];
+        let served = Served::default();
+        served
+            .inspect(&tunnel().holder(300, 1, SSH, &[11]), PORT, Loopback::V4)
+            .unwrap();
+        let shared = tunnel()
+            .holder(300, 1, SSH, &[11])
+            .holder(400, CLAI, PYTHON, &[11]);
+        assert_eq!(
+            served.inspect(&shared, PORT, Loopback::V4).unwrap(),
+            Listener::Clai
+        );
+        assert!(!served.still_serves(&shared, PORT, Loopback::V4, &allowed));
+    }
+
+    #[test]
+    fn user_names_are_looked_up_once_per_ttl_found_or_not() {
+        let cache = NameCache::default();
+        let lookups = Cell::new(0);
+        let look_up = |uid: u32| {
+            lookups.set(lookups.get() + 1);
+            (uid == 26).then(|| "postgres".to_string())
+        };
+        for _ in 0..2 {
+            assert_eq!(
+                cache.get(26, NAME_TTL, look_up).as_deref(),
+                Some("postgres")
+            );
+            assert_eq!(cache.get(27, NAME_TTL, look_up), None);
+        }
+        assert_eq!(lookups.get(), 2);
+        assert_eq!(
+            cache.get(26, Duration::ZERO, look_up).as_deref(),
+            Some("postgres")
+        );
+        assert_eq!(lookups.get(), 3);
+    }
+
     fn assert_cases<const N: usize>(cases: [(&str, Fake, Listener); N]) {
         for (name, fake, expected) in cases {
             assert_eq!(
@@ -1271,14 +1539,17 @@ mod tests {
     #[test]
     fn clai_and_the_processes_it_starts_are_never_programs() {
         let (listener, port) = listen();
-        assert_eq!(inspect(port, Loopback::V4).unwrap(), Listener::Clai);
+        assert_eq!(
+            host_inspector().inspect(port, Loopback::V4).unwrap(),
+            Listener::Clai
+        );
         // Only the child holds the socket once the command is dropped.
         let mut child = Command::new("sleep")
             .arg("30")
             .stdout(Stdio::from(OwnedFd::from(listener)))
             .spawn()
             .unwrap();
-        let listener = inspect(port, Loopback::V4);
+        let listener = host_inspector().inspect(port, Loopback::V4);
         child.kill().unwrap();
         child.wait().unwrap();
         assert_eq!(listener.unwrap(), Listener::Clai);
@@ -1305,7 +1576,7 @@ mod tests {
             assert!(Instant::now() < deadline, "sleep did not start");
             std::thread::sleep(Duration::from_millis(10));
         }
-        let listener = inspect(port, Loopback::V4);
+        let listener = host_inspector().inspect(port, Loopback::V4);
         let exe = fs::read_link(format!("/proc/{pid}/exe")).unwrap();
         Command::new("kill").arg(pid.to_string()).status().unwrap();
         let Ok(Listener::Program(program)) = listener else {
@@ -1319,8 +1590,8 @@ mod tests {
 
     #[test]
     fn the_host_names_this_process_and_its_users() {
-        assert_eq!(HostProc.self_pid(), Some(std::process::id()));
-        assert_eq!(HostProc.user_name(0).as_deref(), Some("root"));
-        assert_eq!(HostProc.user_name(u32::MAX), None);
+        assert_eq!(HostProc::default().self_pid(), Some(std::process::id()));
+        assert_eq!(HostProc::default().user_name(0).as_deref(), Some("root"));
+        assert_eq!(HostProc::default().user_name(u32::MAX), None);
     }
 }

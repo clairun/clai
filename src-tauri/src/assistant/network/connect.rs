@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::net::TcpStream;
 
 use super::addr::is_proxy_forbidden_ip;
+use super::local_listener::Loopback;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -32,6 +33,20 @@ impl Connector for HostConnector {
         tokio::time::timeout(CONNECT_TIMEOUT, connect_checked(host, port))
             .await
             .unwrap_or_else(|_| Err(ConnectError::Failed("timed out".to_string())))
+    }
+}
+
+/// Opens a connection to a port on this computer, at the loopback address
+/// the listener there was checked for. The proxy calls it only once the run
+/// may reach what listens on the port.
+pub struct LocalConnector;
+
+impl LocalConnector {
+    pub async fn connect(&self, dial: Loopback, port: u16) -> Result<TcpStream, String> {
+        match tokio::time::timeout(CONNECT_TIMEOUT, TcpStream::connect((dial.ip(), port))).await {
+            Ok(connected) => connected.map_err(|error| error.to_string()),
+            Err(_) => Err("timed out".to_string()),
+        }
     }
 }
 

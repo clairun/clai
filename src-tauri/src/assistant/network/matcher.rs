@@ -261,6 +261,16 @@ pub fn parse_local_port(raw: &str) -> Result<Option<u16>, &'static str> {
 
 const PORT_RANGE: &str = "the port is a number from 1 to 65535";
 
+/// The names a client reaches a port on this computer by, as [`canonical_host`]
+/// writes them. The network proxy serves them from the run's local ports,
+/// and a deny entry for any of them refuses every local port.
+pub const LOCAL_NAMES: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+
+/// Whether `host`, canonical, is one of [`LOCAL_NAMES`].
+pub fn is_local_name(host: &str) -> bool {
+    LOCAL_NAMES.contains(&host)
+}
+
 /// Whether `host`, read as [`parse_entry`] reads it, is `localhost`, a
 /// `*.localhost` name or an address of this computer.
 fn names_this_computer(host: &str) -> bool {

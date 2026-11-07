@@ -284,6 +284,7 @@ async fn run_with_network(
             &endpoint.socket,
             std::sync::Arc::clone(run_network),
             std::sync::Arc::new(HostConnector),
+            crate::assistant::network::local_listener::host_inspector(),
         ) {
             Ok(session) => Some(session),
             Err(error) => {
@@ -1538,7 +1539,7 @@ async fn await_network_access_decision(
     // a CLI transport drop; the fresh one replaces it and its card.
     for stale in app_state
         .pending_network_requests
-        .take_superseded(&context.run_id, &request.host)
+        .take_superseded(&context.run_id, &request.host, request.port)
         .await
     {
         emit_network_access_resolved(&deps.app, &stale.request_id);

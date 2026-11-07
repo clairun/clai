@@ -2525,6 +2525,7 @@ print(os.readlink("/var/run"), *sorted(os.listdir("/var/run")))
             &endpoint.socket,
             std::sync::Arc::new(run_network),
             std::sync::Arc::new(Echo(echo_server().await)),
+            crate::assistant::network::local_listener::host_inspector(),
         )
         .unwrap();
         Some(Allowlisted {

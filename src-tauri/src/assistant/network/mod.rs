@@ -9,10 +9,6 @@ pub mod default_lists;
 #[cfg(target_os = "linux")]
 pub mod http;
 #[cfg(target_os = "linux")]
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "the network proxy does not call it yet")
-)]
 pub mod local_listener;
 pub mod matcher;
 #[cfg(target_os = "linux")]

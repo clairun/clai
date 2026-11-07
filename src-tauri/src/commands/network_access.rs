@@ -25,7 +25,9 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
-use crate::assistant::network::matcher::{approved_entry, parent_wildcard, parse_entry};
+use crate::assistant::network::matcher::{
+    approved_entry, is_local_name, parent_wildcard, parse_entry,
+};
 use crate::assistant::network::run_state::HostLogEntry;
 use crate::assistant::workspace_agents::workspace_agent_display_names;
 use crate::commands::permissions::{normalize_reason, shared_allowance_reach, AttentionUpdate};
@@ -272,15 +274,26 @@ impl PendingNetworkRequests {
         Some(inner.insert(entry))
     }
 
-    /// Removes every request of the same run for the same host, waking each
-    /// waiter with [`PendingNetworkOutcome::Superseded`]: the agent asked
-    /// again after a CLI transport drop orphaned the first request.
-    pub async fn take_superseded(&self, run_id: &str, host: &str) -> Vec<SupersededNetworkRequest> {
+    /// Removes every request of the same run for the same host, and for a
+    /// name of this computer the same port, waking each waiter with
+    /// [`PendingNetworkOutcome::Superseded`]: the agent asked again after a
+    /// CLI transport drop orphaned the first request.
+    pub async fn take_superseded(
+        &self,
+        run_id: &str,
+        host: &str,
+        port: Option<u16>,
+    ) -> Vec<SupersededNetworkRequest> {
+        let per_port = is_local_name(host);
         let mut inner = self.inner.lock().await;
         let ids: Vec<String> = inner
             .entries
             .iter()
-            .filter(|(_, entry)| entry.run_id == run_id && entry.request.host == host)
+            .filter(|(_, entry)| {
+                entry.run_id == run_id
+                    && entry.request.host == host
+                    && (!per_port || entry.request.port == port)
+            })
             .map(|(id, _)| id.clone())
             .collect();
         let mut taken = Vec::with_capacity(ids.len());
@@ -563,7 +576,10 @@ mod tests {
             .register(request(Some("ws"), None, "a.example.org"), "run-2".into())
             .await;
 
-        let taken = pending.take_superseded("run-1", "a.example.org").await;
+        // The port of a host does not matter.
+        let taken = pending
+            .take_superseded("run-1", "a.example.org", Some(80))
+            .await;
         assert_eq!(taken.len(), 1);
         assert_eq!(taken[0].request_id, stale.request_id);
         assert_eq!(taken[0].remaining, 2, "the other requests stay counted");
@@ -573,6 +589,26 @@ mod tests {
         ));
         assert!(pending.take(&other_host.request_id).await.is_some());
         assert_eq!(pending.list_for_workspace("ws").await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn take_superseded_keeps_other_ports_of_this_computer() {
+        let pending = PendingNetworkRequests::default();
+        let on_port = |port| NetworkAccessRequest {
+            port: Some(port),
+            ..request(Some("ws"), None, "localhost")
+        };
+        let stale = on_port(5432);
+        let other_port = on_port(6379);
+        let _ = pending.register(stale.clone(), "run-1".into()).await;
+        let _ = pending.register(other_port.clone(), "run-1".into()).await;
+
+        let taken = pending
+            .take_superseded("run-1", "localhost", Some(5432))
+            .await;
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].request_id, stale.request_id);
+        assert!(pending.take(&other_port.request_id).await.is_some());
     }
 
     #[tokio::test]
