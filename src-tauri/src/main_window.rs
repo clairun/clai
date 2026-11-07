@@ -51,9 +51,54 @@ pub fn close_action(keep_running: bool, can_hide: bool, live_runs: usize) -> Clo
     }
 }
 
-/// Set while the quit confirmation is on screen, so that another close
-/// request does not open a second one.
-static CONFIRM_OPEN: AtomicBool = AtomicBool::new(false);
+/// What the main window does instead of closing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeepOpen {
+    Hide,
+    /// Ask whether to quit.
+    Ask,
+    /// Nothing more: the question is already on screen.
+    Wait,
+}
+
+/// The quit question: at most one on screen, and closing again once it is
+/// answered asks again.
+struct QuitPrompt {
+    open: AtomicBool,
+}
+
+impl QuitPrompt {
+    const fn new() -> Self {
+        Self {
+            open: AtomicBool::new(false),
+        }
+    }
+
+    /// `None` lets the window close.
+    fn on_close_requested(&self, action: CloseAction) -> Option<KeepOpen> {
+        match action {
+            CloseAction::Quit => None,
+            CloseAction::Hide => Some(KeepOpen::Hide),
+            CloseAction::Confirm => {
+                if self.open.swap(true, Ordering::AcqRel) {
+                    Some(KeepOpen::Wait)
+                } else {
+                    Some(KeepOpen::Ask)
+                }
+            }
+        }
+    }
+
+    /// Takes the answer, calling `exit` if the user chose to quit.
+    fn on_answer(&self, quit: bool, exit: impl FnOnce()) {
+        self.open.store(false, Ordering::Release);
+        if quit {
+            exit();
+        }
+    }
+}
+
+static QUIT_PROMPT: QuitPrompt = QuitPrompt::new();
 
 /// Handles a close request on the main window: its close button, Alt+F4 or
 /// the window manager. macOS Cmd+Q and Dock Quit do not send one, so they
@@ -68,27 +113,25 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
     let live_runs = live_run_count();
     // There is no setting yet, and nothing that could bring a hidden window
     // back.
-    match close_action(false, false, live_runs) {
-        CloseAction::Quit => {}
-        CloseAction::Hide => {
-            api.prevent_close();
+    let Some(keep_open) = QUIT_PROMPT.on_close_requested(close_action(false, false, live_runs))
+    else {
+        return;
+    };
+    api.prevent_close();
+    match keep_open {
+        KeepOpen::Hide => {
             if let Err(e) = window.hide() {
                 tracing::warn!("Failed to hide the main window: {}", e);
             }
         }
-        CloseAction::Confirm => {
-            api.prevent_close();
-            confirm_quit(window, live_runs);
-        }
+        KeepOpen::Ask => ask_to_quit(window, live_runs),
+        KeepOpen::Wait => {}
     }
 }
 
-/// Asks whether to quit despite the live runs, and quits if so. Returns at
-/// once: the dialog runs off the event loop and answers through a callback.
-fn confirm_quit(window: &Window, live_runs: usize) {
-    if CONFIRM_OPEN.swap(true, Ordering::AcqRel) {
-        return;
-    }
+/// Asks whether to quit despite the live runs. Returns at once: the dialog
+/// runs off the event loop and answers through a callback.
+fn ask_to_quit(window: &Window, live_runs: usize) {
     let app = window.app_handle().clone();
     window
         .dialog()
@@ -100,12 +143,7 @@ fn confirm_quit(window: &Window, live_runs: usize) {
             "Cancel".to_string(),
         ))
         .parent(window)
-        .show(move |quit| {
-            CONFIRM_OPEN.store(false, Ordering::Release);
-            if quit {
-                app.exit(0);
-            }
-        });
+        .show(move |quit| QUIT_PROMPT.on_answer(quit, || app.exit(0)));
 }
 
 fn runs_in_progress(count: usize) -> String {
@@ -118,6 +156,8 @@ fn runs_in_progress(count: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::cell::Cell;
+
     use super::*;
 
     #[test]
@@ -141,6 +181,53 @@ mod tests {
                 "keep_running={keep_running} can_hide={can_hide} live_runs={live_runs}"
             );
         }
+    }
+
+    #[test]
+    fn close_request_keeps_the_window_open_unless_quitting() {
+        let prompt = QuitPrompt::new();
+        assert_eq!(prompt.on_close_requested(CloseAction::Quit), None);
+        assert_eq!(
+            prompt.on_close_requested(CloseAction::Hide),
+            Some(KeepOpen::Hide)
+        );
+        assert_eq!(
+            prompt.on_close_requested(CloseAction::Confirm),
+            Some(KeepOpen::Ask)
+        );
+        // Closing again while the question is up opens no second one.
+        assert_eq!(
+            prompt.on_close_requested(CloseAction::Confirm),
+            Some(KeepOpen::Wait)
+        );
+    }
+
+    #[test]
+    fn cancel_keeps_running_and_the_next_close_asks_again() {
+        let prompt = QuitPrompt::new();
+        assert_eq!(
+            prompt.on_close_requested(CloseAction::Confirm),
+            Some(KeepOpen::Ask)
+        );
+        let exited = Cell::new(false);
+        prompt.on_answer(false, || exited.set(true));
+        assert!(!exited.get());
+        assert_eq!(
+            prompt.on_close_requested(CloseAction::Confirm),
+            Some(KeepOpen::Ask)
+        );
+    }
+
+    #[test]
+    fn quit_anyway_exits() {
+        let prompt = QuitPrompt::new();
+        assert_eq!(
+            prompt.on_close_requested(CloseAction::Confirm),
+            Some(KeepOpen::Ask)
+        );
+        let exited = Cell::new(false);
+        prompt.on_answer(true, || exited.set(true));
+        assert!(exited.get());
     }
 
     #[test]
