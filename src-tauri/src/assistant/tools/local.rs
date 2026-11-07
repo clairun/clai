@@ -3,19 +3,26 @@ use crate::assistant::sandbox::filesystem::{
 };
 use futures::StreamExt;
 use std::fs;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use tokio::time::Duration;
 
+use crate::assistant::network::addr::{
+    is_blocked_web_fetch_hostname, reject_private_web_fetch_addrs, reject_private_web_fetch_ip,
+    strip_ipv6_url_brackets,
+};
+use crate::assistant::network::matcher::{canonical_host, parse_entry, HostDecision};
+use crate::assistant::network::run_state::{RefusedTargets, RunNetwork};
 use crate::assistant::sandbox::{
-    run_command, SandboxCommand, SandboxEnv, SandboxNetworkMode, SandboxProfile,
-    SandboxSessionBusMode,
+    keyring_only_unavailable_note, run_command, ProxyEndpoint, SandboxCommand,
+    SandboxCommandOutput, SandboxEnv, SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode,
+    SessionBusProxy, SocketPolicy,
 };
 use crate::config::{
-    ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin,
-    SandboxNetworkConfig, SandboxSessionBusConfig, ShellAccessMode,
+    ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
+    SandboxSessionBusConfig, ShellAccessMode,
 };
 
 use super::ToolExecutionContext;
@@ -62,6 +69,15 @@ struct FsRequestGrantParams {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct NetRequestAccessParams {
+    host: String,
+    #[serde(default)]
+    port: Option<u16>,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct WebSearchParams {
     query: String,
     #[serde(default)]
@@ -95,17 +111,30 @@ pub async fn execute_local_tool(
                 .map_err(|e| format!("Invalid fs_request_grant params: {}", e))?;
             execute_fs_request_grant(deps, context, params).await
         }
-        "web_search" => {
-            let params: WebSearchParams = serde_json::from_value(params)
-                .map_err(|e| format!("Invalid web_search params: {}", e))?;
-            execute_web_search(params).await
-        }
-        "web_fetch" => {
-            let params: WebFetchParams = serde_json::from_value(params)
-                .map_err(|e| format!("Invalid web_fetch params: {}", e))?;
-            execute_web_fetch(params).await
+        "web_search" | "web_fetch" => execute_web_tool(context, tool_name, params).await,
+        "net_request_access" => {
+            let params: NetRequestAccessParams = serde_json::from_value(params)
+                .map_err(|e| format!("Invalid net_request_access params: {}", e))?;
+            execute_net_request_access(deps, context, params).await
         }
         _ => Err(format!("Unknown local tool: {}", tool_name)),
+    }
+}
+
+async fn execute_web_tool(
+    context: &ToolExecutionContext,
+    tool_name: &str,
+    params: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let gate = web_gate(context)?;
+    if tool_name == "web_search" {
+        let params: WebSearchParams = serde_json::from_value(params)
+            .map_err(|e| format!("Invalid web_search params: {}", e))?;
+        execute_web_search(params).await
+    } else {
+        let params: WebFetchParams = serde_json::from_value(params)
+            .map_err(|e| format!("Invalid web_fetch params: {}", e))?;
+        execute_web_fetch(gate, params).await
     }
 }
 
@@ -124,6 +153,21 @@ async fn execute_bash_exec(
     let filesystem = filesystem_policy(context)?;
     let cwd = filesystem.authorize_cwd(params.cwd.as_deref().unwrap_or("."))?;
     let workspace_root = ensure_workspace_root(context)?;
+    // Before any ask-first card: a profile the sandbox cannot enforce fails
+    // here, so the user is never asked about a command that cannot run.
+    let profile = sandbox_profile(
+        context,
+        workspace_root,
+        filesystem,
+        &crate::assistant::sandbox::status(),
+    )
+    .inspect_err(|error| {
+        if error.starts_with("Sandboxed shell is unavailable") {
+            context.note_warning();
+        }
+    })?;
+
+    let sockets = profile.sockets.clone();
 
     if params.command.trim().is_empty() {
         return Err("Shell command cannot be empty".to_string());
@@ -160,15 +204,18 @@ async fn execute_bash_exec(
         }
     };
 
-    let output = run_command(SandboxCommand {
-        argv,
-        cwd,
-        timeout_ms,
-        max_output_chars: output_limit,
-        profile: sandbox_profile(context, workspace_root, filesystem),
-    })
-    .await
-    .inspect_err(|error| {
+    let run = run_with_network(
+        SandboxCommand {
+            argv,
+            cwd,
+            timeout_ms,
+            max_output_chars: output_limit,
+            profile,
+        },
+        &context.run_network,
+    )
+    .await;
+    let output = run.output.inspect_err(|error| {
         // Surface sandbox-availability failures (bwrap missing, kernel
         // refused namespaces, etc.) as a run warning so the run completes
         // with warnings rather than as a generic tool failure. The sandbox runner uses the
@@ -177,16 +224,256 @@ async fn execute_bash_exec(
         if error.starts_with("Sandboxed shell is unavailable") {
             context.note_warning();
         }
-    })
-    .map_err(|error| augment_timeout_error(error, timeout_ms, explicit_timeout))?;
+    });
+    let bus = run.session_bus_unavailable.as_deref();
+    bash_exec_outcome(
+        output,
+        &run.refused,
+        &sockets,
+        bus,
+        timeout_ms,
+        explicit_timeout,
+    )
+}
 
-    Ok(serde_json::json!({
+/// What a command run returned, and what the sandbox kept from it: the
+/// `host:port` targets the network proxy refused, kept when the command
+/// failed or timed out too (a client that kept retrying a refused host is a
+/// likely cause), and why a keyring-only agent got no session bus.
+struct NetworkRun {
+    output: Result<SandboxCommandOutput, String>,
+    refused: RefusedTargets,
+    session_bus_unavailable: Option<String>,
+}
+
+/// Runs the command, in Allowlist behind a network proxy session of its
+/// own, and with the keyring-only bus behind a bus proxy of its own. A bus
+/// proxy that does not start leaves the command with no bus, never the
+/// whole one.
+#[cfg(target_os = "linux")]
+async fn run_with_network(
+    mut command: SandboxCommand,
+    run_network: &std::sync::Arc<RunNetwork>,
+) -> NetworkRun {
+    use crate::assistant::network::{connect::HostConnector, proxy::ProxySession};
+    use crate::assistant::sandbox::bus_proxy::BusProxy;
+    // Starting waits for the proxy, and stopping waits for it to exit: both
+    // block, so neither runs on a runtime worker.
+    let bus_proxy = match command.profile.session_bus_proxy.clone() {
+        Some(plan) => match tokio::task::spawn_blocking(move || BusProxy::start(&plan)).await {
+            Ok(Ok(proxy)) => Some(proxy),
+            Ok(Err(error)) => {
+                command.profile.drop_session_bus(error);
+                None
+            }
+            Err(error) => {
+                command.profile.drop_session_bus(error.to_string());
+                None
+            }
+        },
+        None => None,
+    };
+    let session_bus_unavailable = command.profile.session_bus_unavailable.clone();
+    let stop_bus_proxy = || {
+        if let Some(proxy) = bus_proxy {
+            tokio::task::spawn_blocking(move || drop(proxy));
+        }
+    };
+    let session = match &command.profile.network {
+        SandboxNetworkMode::Proxied(endpoint) => match ProxySession::start(
+            &endpoint.socket,
+            std::sync::Arc::clone(run_network),
+            std::sync::Arc::new(HostConnector),
+        ) {
+            Ok(session) => Some(session),
+            Err(error) => {
+                stop_bus_proxy();
+                return NetworkRun {
+                    output: Err(format!(
+                        "Sandboxed shell is unavailable: the network proxy did not start: {error}"
+                    )),
+                    refused: RefusedTargets::default(),
+                    session_bus_unavailable,
+                };
+            }
+        },
+        _ => None,
+    };
+    let output = run_command(command).await;
+    stop_bus_proxy();
+    NetworkRun {
+        output,
+        refused: session.map(|session| session.refused()).unwrap_or_default(),
+        session_bus_unavailable,
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn run_with_network(
+    command: SandboxCommand,
+    _run_network: &std::sync::Arc<RunNetwork>,
+) -> NetworkRun {
+    let session_bus_unavailable = command.profile.session_bus_unavailable.clone();
+    NetworkRun {
+        output: run_command(command).await,
+        refused: RefusedTargets::default(),
+        session_bus_unavailable,
+    }
+}
+
+const REFUSED_HINT: &str = "CLAI's network proxy refused these hosts: they are not in this \
+                            agent's allowed hosts, or are in its denied hosts. Call \
+                            `net_request_access` for a host the task needs; do not look for a \
+                            way around the proxy.";
+
+const SOCKET_HINT: &str = "The sandbox kept the command from reaching these Unix sockets of \
+                           this computer. Do not look for a way around the sandbox: if the task \
+                           needs one, call `fs_request_grant` with the exact socket path, not \
+                           its folder. A Docker, Podman or containerd socket gives control of \
+                           the whole computer, so say in the reason why the task needs it.";
+
+fn bash_exec_outcome(
+    output: Result<SandboxCommandOutput, String>,
+    refused: &RefusedTargets,
+    sockets: &SocketPolicy,
+    session_bus_unavailable: Option<&str>,
+    timeout_ms: u64,
+    explicit_timeout: bool,
+) -> Result<serde_json::Value, String> {
+    match output {
+        Ok(output) => Ok(bash_exec_result(
+            &output,
+            refused,
+            sockets,
+            session_bus_unavailable,
+        )),
+        Err(error) => {
+            let mut error = augment_timeout_error(error, timeout_ms, explicit_timeout);
+            if let Some(reason) = session_bus_unavailable {
+                error = format!("{error}\n{}", keyring_only_unavailable_note(reason));
+            }
+            if refused.is_empty() {
+                return Err(error);
+            }
+            let more = match refused.more {
+                0 => String::new(),
+                more => format!(" and {more} more"),
+            };
+            Err(format!(
+                "{error}\nNetwork allowlist refused: {}{more}. {REFUSED_HINT}",
+                refused.targets.join(", ")
+            ))
+        }
+    }
+}
+
+/// Many clients hide the proxy's 403 body (curl prints only “CONNECT tunnel
+/// failed, response 403”), so the result itself names the refused hosts, and
+/// the host sockets the command could not reach.
+fn bash_exec_result(
+    output: &SandboxCommandOutput,
+    refused: &RefusedTargets,
+    sockets: &SocketPolicy,
+    session_bus_unavailable: Option<&str>,
+) -> serde_json::Value {
+    let mut result = serde_json::json!({
         "cwd": agent_path_string(&output.cwd),
         "exitCode": output.exit_code,
         "success": output.success,
         "stdout": output.stdout,
         "stderr": output.stderr
-    }))
+    });
+    if !refused.is_empty() {
+        result["network"] = serde_json::json!({
+            "refused": refused.targets,
+            "hint": REFUSED_HINT,
+        });
+        if refused.more > 0 {
+            result["network"]["refusedMore"] = refused.more.into();
+        }
+    }
+    let unreachable = unreachable_sockets(output, sockets);
+    if !unreachable.is_empty() {
+        result["sockets"] = serde_json::json!({
+            "unreachable": unreachable,
+            "hint": SOCKET_HINT,
+        });
+    }
+    if !sockets.skipped.is_empty() {
+        result["socketGrantsSkipped"] = serde_json::json!(sockets.skipped);
+    }
+    if let Some(reason) = session_bus_unavailable {
+        result["sessionBus"] = keyring_only_unavailable_note(reason).into();
+    }
+    result
+}
+
+/// Host Unix sockets a failed command could not reach, read from its output:
+/// a path on a line that says "no such file or directory" (the socket is not
+/// bound into the sandbox) or, where Landlock confines sockets, "permission
+/// denied", when that path is a socket on the host and not an allowed one.
+/// Only paths in `sockets.hint_places` are looked up, at most
+/// `MAX_LOOKUPS` per result: the command chooses what it prints.
+#[cfg(target_os = "linux")]
+fn unreachable_sockets(output: &SandboxCommandOutput, sockets: &SocketPolicy) -> Vec<String> {
+    use std::os::unix::fs::FileTypeExt;
+    const MAX_SOCKETS: usize = 5;
+    const MAX_LOOKUPS: usize = 16;
+    let mut found: Vec<String> = Vec::new();
+    let mut lookups = 0;
+    if output.success {
+        return found;
+    }
+    for line in output.stderr.lines().chain(output.stdout.lines()) {
+        let lower = line.to_ascii_lowercase();
+        if !(lower.contains("no such file or directory")
+            || sockets.confined() && lower.contains("permission denied"))
+        {
+            continue;
+        }
+        for word in line.split(|c: char| c.is_whitespace() || "\"'(),;".contains(c)) {
+            let path = word.strip_prefix("unix://").unwrap_or(word);
+            let path = path.trim_end_matches([':', '.']);
+            let in_place = Path::new(path).is_absolute()
+                && sockets
+                    .hint_places
+                    .iter()
+                    .any(|place| Path::new(path).starts_with(place));
+            if !in_place || found.iter().any(|known| known == path) {
+                continue;
+            }
+            lookups += 1;
+            if lookups > MAX_LOOKUPS {
+                return found;
+            }
+            let Ok(resolved) = fs::canonicalize(path) else {
+                continue;
+            };
+            if !sockets
+                .hint_places
+                .iter()
+                .any(|place| resolved.starts_with(place))
+            {
+                continue;
+            }
+            let is_socket = resolved
+                .metadata()
+                .is_ok_and(|meta| meta.file_type().is_socket());
+            if is_socket && !sockets.allowed.iter().any(|socket| socket.host == resolved) {
+                found.push(path.to_string());
+                if found.len() == MAX_SOCKETS {
+                    return found;
+                }
+            }
+        }
+    }
+    found
+}
+
+/// Only the Linux sandbox keeps sockets out; elsewhere nothing to report.
+#[cfg(not(target_os = "linux"))]
+fn unreachable_sockets(_output: &SandboxCommandOutput, _sockets: &SocketPolicy) -> Vec<String> {
+    Vec::new()
 }
 
 /// Turn a bare sandbox timeout into an actionable error the model can recover
@@ -222,13 +509,18 @@ fn augment_timeout_error(error: String, timeout_ms: u64, explicit_timeout: bool)
 
 fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesystemPolicy, String> {
     let workspace = ensure_workspace_root(context)?;
-    let mut grants = context.run_context.execution.filesystem.extra_paths.clone();
-    grants.extend(context.session_grants_snapshot());
     EffectiveFilesystemPolicy::from_config(
         &workspace,
-        &grants,
+        &path_grants(context),
         crate::paths::real_home().as_deref(),
     )
+}
+
+/// The agent's saved path grants and those approved for this run only.
+fn path_grants(context: &ToolExecutionContext) -> Vec<FilesystemPathGrant> {
+    let mut grants = context.run_context.execution.filesystem.extra_paths.clone();
+    grants.extend(context.session_grants_snapshot());
+    grants
 }
 
 fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, String> {
@@ -245,6 +537,7 @@ fn ensure_workspace_root(context: &ToolExecutionContext) -> Result<PathBuf, Stri
             e
         )
     })?;
+    crate::assistant::sandbox::filesystem::ensure_cli_project_config_dirs(&workspace_root);
 
     Ok(workspace_root)
 }
@@ -253,16 +546,18 @@ fn sandbox_profile(
     context: &ToolExecutionContext,
     workspace_root: PathBuf,
     filesystem: EffectiveFilesystemPolicy,
-) -> SandboxProfile {
-    let network = match context.run_context.execution.sandbox.network {
-        SandboxNetworkConfig::Enabled => SandboxNetworkMode::Host,
-        SandboxNetworkConfig::Disabled => SandboxNetworkMode::Disabled,
-    };
+    sandbox: &crate::assistant::sandbox::SandboxStatus,
+) -> Result<SandboxProfile, String> {
+    let network = sandbox_network(
+        context.run_context.execution.sandbox.network_access.mode,
+        sandbox,
+        || proxy_endpoint(&workspace_root),
+    )?;
 
-    let session_bus = match context.run_context.execution.sandbox.session_bus {
-        SandboxSessionBusConfig::Deny => SandboxSessionBusMode::Deny,
-        SandboxSessionBusConfig::Allow => SandboxSessionBusMode::Allow,
-    };
+    let (session_bus, session_bus_proxy, session_bus_unavailable) =
+        session_bus_for(context.run_context.execution.sandbox.session_bus, || {
+            keyring_proxy(&workspace_root)
+        });
 
     let scratch_tmp = crate::assistant::sandbox::session_scratch(&workspace_root);
 
@@ -270,13 +565,114 @@ fn sandbox_profile(
         .home
         .as_deref()
         .unwrap_or(&filesystem.workspace_root);
-    SandboxProfile {
+    // Looked up for each command: a socket that appears, or a grant approved
+    // during the run, counts from the next command on.
+    #[cfg(target_os = "linux")]
+    let sockets = {
+        let grants: Vec<PathBuf> = path_grants(context)
+            .iter()
+            .filter_map(|grant| {
+                crate::assistant::sandbox::filesystem::resolve_configured_path(&grant.path).ok()
+            })
+            .collect();
+        let (allowed, skipped) = crate::assistant::sandbox::granted_sockets(&grants, &|path| {
+            filesystem.covers(path, FilesystemPathAccess::ReadWrite)
+        });
+        SocketPolicy {
+            allowed,
+            skipped,
+            ..crate::assistant::sandbox::socket_policy()
+        }
+    };
+    #[cfg(not(target_os = "linux"))]
+    let sockets = Default::default();
+    Ok(SandboxProfile {
         env: SandboxEnv::filtered_from_current(env_home, session_bus),
         filesystem,
         network,
         session_bus,
         scratch_tmp,
+        sockets,
+        session_bus_proxy,
+        session_bus_unavailable,
+    })
+}
+
+/// The bus a command gets for the agent's setting. Only Full binds the
+/// real bus. Keyring only gets its proxy, or, where the bus cannot be
+/// filtered, no bus and the reason; `Ok(None)` from `plan` means the host
+/// has no bus to give.
+fn session_bus_for(
+    config: SandboxSessionBusConfig,
+    plan: impl FnOnce() -> Result<Option<SessionBusProxy>, String>,
+) -> (
+    SandboxSessionBusMode,
+    Option<SessionBusProxy>,
+    Option<String>,
+) {
+    match config {
+        SandboxSessionBusConfig::Deny => (SandboxSessionBusMode::Deny, None, None),
+        SandboxSessionBusConfig::Full => (SandboxSessionBusMode::Allow, None, None),
+        SandboxSessionBusConfig::KeyringOnly => match plan() {
+            Ok(Some(proxy)) => (SandboxSessionBusMode::Allow, Some(proxy), None),
+            Ok(None) => (SandboxSessionBusMode::Deny, None, None),
+            Err(reason) => (SandboxSessionBusMode::Deny, None, Some(reason)),
+        },
     }
+}
+
+/// The keyring-only bus proxy for a command (see `bus_proxy::plan`).
+#[cfg(target_os = "linux")]
+fn keyring_proxy(workspace_root: &Path) -> Result<Option<SessionBusProxy>, String> {
+    crate::assistant::sandbox::bus_proxy::plan(workspace_root)
+}
+
+/// No session bus to filter: macOS and Windows have none.
+#[cfg(not(target_os = "linux"))]
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "shares the Linux signature so the call site has no cfg"
+)]
+fn keyring_proxy(_workspace_root: &Path) -> Result<Option<SessionBusProxy>, String> {
+    Ok(None)
+}
+
+/// The shell's network for a mode. A stored Allowlist where the sandbox
+/// cannot enforce it (macOS for now, a hand-edited or copied config), or
+/// whose helper or files are missing here, is an error, never the host
+/// network.
+fn sandbox_network(
+    mode: NetworkMode,
+    sandbox: &crate::assistant::sandbox::SandboxStatus,
+    proxy_endpoint: impl FnOnce() -> Result<ProxyEndpoint, String>,
+) -> Result<SandboxNetworkMode, String> {
+    match mode {
+        NetworkMode::Off => Ok(SandboxNetworkMode::Disabled),
+        NetworkMode::HostNetwork => Ok(SandboxNetworkMode::Host),
+        NetworkMode::Allowlist if sandbox.allowlist_available => {
+            proxy_endpoint().map(SandboxNetworkMode::Proxied)
+        }
+        NetworkMode::Allowlist => Err(format!(
+            "Allowlist network mode: {}. Choose Off or Host network in the agent's Local access \
+             settings.",
+            sandbox
+                .allowlist_unavailable_reason
+                .as_deref()
+                .unwrap_or("not available with this sandbox")
+        )),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn proxy_endpoint(workspace_root: &Path) -> Result<ProxyEndpoint, String> {
+    crate::assistant::sandbox::helper::endpoint(workspace_root)
+}
+
+/// Only the Linux sandbox offers Allowlist; `sandbox_network` never asks
+/// for an endpoint elsewhere.
+#[cfg(not(target_os = "linux"))]
+fn proxy_endpoint(_workspace_root: &Path) -> Result<ProxyEndpoint, String> {
+    Err("Sandboxed shell is unavailable: Allowlist needs the Linux sandbox".to_string())
 }
 
 /// The tool error for a denied ask-first request: what was denied, the rule
@@ -640,12 +1036,21 @@ async fn execute_fs_request_grant(
         canonicalize_requested_path(&params.path, crate::paths::real_home().as_deref())?;
     let canonical_str = agent_path_string(&canonical);
 
-    // If the path is already covered (by extra_paths, the preset, or an
+    // If the path is already granted (by extra_paths, the preset, or an
     // earlier session grant), short-circuit — no user prompt, just say yes.
     // This keeps repeated requests cheap and avoids modal spam when the LLM
     // forgets it already has the grant.
     let filesystem = filesystem_policy(context)?;
-    if filesystem.covers(&canonical, params.access) {
+    if matches!(params.access, FilesystemPathAccess::ReadWrite)
+        && filesystem.is_read_only_state(&canonical)
+    {
+        return Err(format!(
+            "{canonical_str} is CLAI's own state or a provider CLI's project \
+             configuration, which the shell may only read; \
+             agents write only under their own `.clai/memory/`"
+        ));
+    }
+    if already_granted(&filesystem, &canonical, params.access) {
         return Ok(serde_json::json!({
             "granted": true,
             "path": canonical_str,
@@ -700,6 +1105,29 @@ async fn execute_fs_request_grant(
             }))
         }
     }
+}
+
+/// Whether the agent's grants answer a request for `path`. On Linux a
+/// socket needs a grant on itself: a folder grant shows the socket, but
+/// commands cannot connect to it.
+fn already_granted(
+    filesystem: &EffectiveFilesystemPolicy,
+    path: &Path,
+    access: FilesystemPathAccess,
+) -> bool {
+    filesystem.covers(path, access)
+        && (!is_socket(path) || filesystem.path_grants.iter().any(|g| g.host_path == path))
+}
+
+#[cfg(target_os = "linux")]
+fn is_socket(path: &Path) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    fs::metadata(path).is_ok_and(|meta| meta.file_type().is_socket())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_socket(_path: &Path) -> bool {
+    false
 }
 
 /// Turn the agent's requested path into the identity the compiled policy
@@ -897,19 +1325,312 @@ fn matches_prefix_literal(p: &str, command: &str) -> bool {
 // Web tools
 // =============================================================================
 
+/// Which hosts the web tools may reach for one agent. They run in this
+/// process, so they follow the mode on every PC, one without a sandbox too.
+#[derive(Debug, Clone, Copy)]
+enum WebGate<'a> {
+    /// Host network: any public host.
+    AnyHost,
+    /// Allowlist: only the hosts the run allows, on every redirect hop.
+    Allowlist(&'a RunNetwork),
+}
+
+fn web_gate(context: &ToolExecutionContext) -> Result<WebGate<'_>, String> {
+    web_access(
+        context.run_context.execution.sandbox.network_access.mode,
+        &context.run_network,
+    )
+}
+
+fn web_access(mode: NetworkMode, network: &RunNetwork) -> Result<WebGate<'_>, String> {
+    match mode {
+        NetworkMode::Off => Err("Network access is off for this agent".to_string()),
+        NetworkMode::Allowlist => Ok(WebGate::Allowlist(network)),
+        NetworkMode::HostNetwork => Ok(WebGate::AnyHost),
+    }
+}
+
+/// `host` as the URL carries it: lower case, punycode, IPv6 in brackets.
+/// In Allowlist the run's host log records the outcome.
+fn check_web_host(gate: WebGate<'_>, host: &str, port: Option<u16>) -> Result<(), String> {
+    let WebGate::Allowlist(network) = gate else {
+        return Ok(());
+    };
+    let decision = network.decide(host);
+    network.record(host, port, decision == HostDecision::Allowed);
+    match decision.refusal(
+        host,
+        crate::assistant::sandbox::status().allowlist_available,
+    ) {
+        None => Ok(()),
+        Some(refusal) => Err(refusal),
+    }
+}
+
+// =============================================================================
+// net_request_access
+// =============================================================================
+
+async fn execute_net_request_access(
+    deps: &crate::assistant::engine::AssistantDeps,
+    context: &ToolExecutionContext,
+    params: NetRequestAccessParams,
+) -> Result<serde_json::Value, String> {
+    use crate::commands::network_access::NetworkAccessRequest;
+    use tauri::Manager;
+
+    let host = requested_host(
+        &context.run_context.execution,
+        crate::assistant::sandbox::status().allowlist_available,
+        &context.run_network,
+        &params.host,
+    )?;
+    let Some(host) = host else {
+        return Ok(serde_json::json!({
+            "granted": true,
+            "host": canonical_host(&params.host),
+            "scope": "already-allowed",
+        }));
+    };
+
+    let request = NetworkAccessRequest::for_agent(
+        &deps.app.state::<crate::AppState>(),
+        Some(deps.workspace_id.clone()),
+        context.run_context.automation_id.clone(),
+        host.clone(),
+        params.port,
+        params.reason,
+        context.run_network.host_log(),
+    );
+    let decision = await_network_access_decision(deps, context, request).await?;
+    apply_network_decision(context, &host, decision)
+}
+
+/// The host to ask the user about, or `None` when the run already allows
+/// it. Refuses, without a card, where the tool is not offered (a stale tool
+/// list), a host that is not one, and a host on the deny list.
+fn requested_host(
+    execution: &ExecutionCapabilityConfig,
+    allowlist_available: bool,
+    network: &RunNetwork,
+    raw: &str,
+) -> Result<Option<String>, String> {
+    if let Some(refusal) =
+        super::registry::net_request_access_refusal(execution, allowlist_available)
+    {
+        return Err(refusal.to_string());
+    }
+    // An entry, so that what reaches the card is what “Allow this run” can
+    // apply: `parse_entry` refuses `%` (`%2a` would decode to a wildcard)
+    // and characters a host entry may not hold.
+    let raw = raw.trim();
+    let entry = parse_entry(raw).map_err(|reason| {
+        format!(
+            "`{raw}` is not a host name ({reason}). Give the host only, such as \
+             `mirror.example.org`, without a scheme, path or port."
+        )
+    })?;
+    if entry.is_wildcard() {
+        return Err(
+            "Ask for one host, not a wildcard; the user can choose to allow its parent domain."
+                .to_string(),
+        );
+    }
+    let host = entry.normalized();
+    match network.decide(&host) {
+        HostDecision::Allowed => Ok(None),
+        HostDecision::Unlisted => Ok(Some(host)),
+        refused => Err(refused.refusal(&host, true).unwrap_or_default()),
+    }
+}
+
+/// Applies the user's answer to the run: an allowed host or entry joins
+/// the run's lists at once (an “Always” entry is already saved on the
+/// agent); a denial is the tool error and, as for ask-first, the run's
+/// warning.
+fn apply_network_decision(
+    context: &ToolExecutionContext,
+    host: &str,
+    decision: crate::commands::network_access::NetworkAccessDecision,
+) -> Result<serde_json::Value, String> {
+    use crate::commands::network_access::NetworkAccessDecision;
+
+    let (entry, scope) = match decision {
+        NetworkAccessDecision::AllowRun => (host.to_string(), "run"),
+        NetworkAccessDecision::AllowAlways { entry } => (entry, "always"),
+        NetworkAccessDecision::Deny { reason } => {
+            context.note_warning();
+            return Err(network_denied_message(host, reason.as_deref()));
+        }
+    };
+    let parsed = parse_entry(&entry).map_err(|reason| format!("`{entry}`: {reason}"))?;
+    context.run_network.allow(parsed);
+    let mut result = serde_json::json!({
+        "granted": true,
+        "host": host,
+        "entry": entry,
+        "scope": scope,
+    });
+    if scope == "run" {
+        result["note"] = serde_json::json!(
+            "Allowed for the rest of this run only; a later run has to ask again."
+        );
+    }
+    Ok(result)
+}
+
+pub(crate) fn network_denied_message(host: &str, reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) => format!("User denied network access to `{host}`. Reason: {reason}."),
+        None => format!("User denied network access to `{host}`."),
+    }
+}
+
+/// Network-request analogue of [`AbandonedPathGrantGuard`]: when the wait
+/// ends without a decision (the run is cancelled, or a CLI transport drop
+/// orphaned it), it runs `clear` once, which takes the request off the
+/// queue and drops its card, and cancels the run. `clear` is a closure so
+/// the guard is tested without an app.
+struct AbandonedNetworkRequestGuard<C: FnOnce()> {
+    cancel_token: tokio_util::sync::CancellationToken,
+    clear: Option<C>,
+}
+
+impl<C: FnOnce()> AbandonedNetworkRequestGuard<C> {
+    fn disarm(&mut self) {
+        self.clear = None;
+    }
+
+    async fn expire_and_stop<T>(&mut self) -> T {
+        if let Some(clear) = self.clear.take() {
+            clear();
+        }
+        super::cancel_run_and_park(&self.cancel_token).await
+    }
+}
+
+impl<C: FnOnce()> Drop for AbandonedNetworkRequestGuard<C> {
+    fn drop(&mut self) {
+        if let Some(clear) = self.clear.take() {
+            self.cancel_token.cancel();
+            clear();
+        }
+    }
+}
+
+/// Registers the request, shows the card and waits for the user, as
+/// [`await_path_grant_decision`] does for paths.
+async fn await_network_access_decision(
+    deps: &crate::assistant::engine::AssistantDeps,
+    context: &ToolExecutionContext,
+    request: crate::commands::network_access::NetworkAccessRequest,
+) -> Result<crate::commands::network_access::NetworkAccessDecision, String> {
+    use crate::commands::network_access::{
+        emit_attention, emit_network_access_resolved, PendingNetworkOutcome,
+        NETWORK_ACCESS_REQUEST_EVENT,
+    };
+    use tauri::{Emitter, Manager};
+
+    let app_state = deps.app.state::<crate::AppState>();
+    let workspace_id = Some(deps.workspace_id.clone());
+
+    // A request of this run for the same host still pending is an orphan of
+    // a CLI transport drop; the fresh one replaces it and its card.
+    for stale in app_state
+        .pending_network_requests
+        .take_superseded(&context.run_id, &request.host)
+        .await
+    {
+        emit_network_access_resolved(&deps.app, &stale.request_id);
+        emit_attention(&deps.app, stale.workspace_id, stale.remaining);
+    }
+
+    let (rx, count) = app_state
+        .pending_network_requests
+        .register(request.clone(), context.run_id.clone())
+        .await;
+    if let Err(e) = deps.app.emit(NETWORK_ACCESS_REQUEST_EVENT, &request) {
+        tracing::warn!("Failed to emit network access request event: {}", e);
+    }
+    emit_attention(&deps.app, workspace_id.clone(), count);
+
+    let app = deps.app.clone();
+    let request_id = request.request_id;
+    let mut abandon_guard = AbandonedNetworkRequestGuard {
+        cancel_token: context.cancel_token.clone(),
+        clear: Some(move || {
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<crate::AppState>();
+                if let Some((_, remaining)) = state.pending_network_requests.take(&request_id).await
+                {
+                    emit_network_access_resolved(&app, &request_id);
+                    emit_attention(&app, workspace_id, remaining);
+                }
+            });
+        }),
+    };
+
+    match rx.await {
+        Ok(PendingNetworkOutcome::Decision(decision)) => {
+            abandon_guard.disarm();
+            Ok(decision)
+        }
+        Ok(PendingNetworkOutcome::Superseded) => {
+            abandon_guard.disarm();
+            Err(
+                "Network access request was superseded by a newer request for the same host \
+                 before a decision was made"
+                    .to_string(),
+            )
+        }
+        Err(_) if context.cancel_token.is_cancelled() => {
+            super::cancel_run_and_park(&context.cancel_token).await
+        }
+        Err(_) => abandon_guard.expire_and_stop().await,
+    }
+}
+
+const MAX_WEB_SEARCH_REDIRECTS: usize = 3;
+
+/// web_search calls only its provider's fixed endpoint, which is allowed
+/// implicitly; a redirect may not leave the provider or drop https.
+fn provider_redirect_allowed(url: &reqwest::Url) -> bool {
+    url.scheme() == "https"
+        && url
+            .host_str()
+            .is_some_and(|host| host == "duckduckgo.com" || host.ends_with(".duckduckgo.com"))
+}
+
+/// Follows at most [`MAX_WEB_SEARCH_REDIRECTS`] redirects, each to a URL
+/// `allowed` accepts. The counting rule is reqwest's `Policy::limited`.
+fn redirect_policy_within(allowed: fn(&reqwest::Url) -> bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() > MAX_WEB_SEARCH_REDIRECTS {
+            attempt.error("too many redirects")
+        } else if allowed(attempt.url()) {
+            attempt.follow()
+        } else {
+            let message = format!("redirect to `{}` leaves the search provider", attempt.url());
+            attempt.error(message)
+        }
+    })
+}
+
+fn web_search_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(Duration::from_millis(WEB_SEARCH_TIMEOUT_MS))
+        .redirect(redirect_policy_within(provider_redirect_allowed))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))
+}
+
 async fn execute_web_search(params: WebSearchParams) -> Result<serde_json::Value, String> {
     let max_results = params
         .max_results
         .unwrap_or(DEFAULT_WEB_SEARCH_MAX_RESULTS)
         .min(MAX_WEB_SEARCH_MAX_RESULTS);
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_millis(WEB_SEARCH_TIMEOUT_MS))
-        .redirect(reqwest::redirect::Policy::limited(3))
-        .build()
-        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
-
-    let response = client
+    let response = web_search_client()?
         .get("https://html.duckduckgo.com/html/")
         .query(&[("q", &params.query)])
         .header("User-Agent", "CLAI/1.0")
@@ -1032,7 +1753,10 @@ fn hex_val(b: u8) -> Option<u8> {
     }
 }
 
-async fn execute_web_fetch(params: WebFetchParams) -> Result<serde_json::Value, String> {
+async fn execute_web_fetch(
+    gate: WebGate<'_>,
+    params: WebFetchParams,
+) -> Result<serde_json::Value, String> {
     let content_limit = params
         .max_content_chars
         .unwrap_or(DEFAULT_WEB_FETCH_CONTENT_LIMIT)
@@ -1043,7 +1767,7 @@ async fn execute_web_fetch(params: WebFetchParams) -> Result<serde_json::Value, 
         .min(MAX_WEB_FETCH_TIMEOUT_MS);
 
     let url = parse_web_fetch_url(params.url.trim())?;
-    let response = fetch_public_url(url, timeout_ms).await?;
+    let response = fetch_public_url(url, timeout_ms, gate).await?;
     let final_url = response.url().clone();
 
     let status = response.status().as_u16();
@@ -1112,6 +1836,7 @@ fn validate_web_fetch_scheme(url: &reqwest::Url) -> Result<(), String> {
 async fn fetch_public_url(
     mut url: reqwest::Url,
     timeout_ms: u64,
+    gate: WebGate<'_>,
 ) -> Result<reqwest::Response, String> {
     // A redirect must never downgrade the transport: if the original request
     // was https, refuse to follow a redirect to plain http (a MITM/attacker
@@ -1119,7 +1844,7 @@ async fn fetch_public_url(
     let started_https = url.scheme() == "https";
     let mut redirects_followed = 0;
     loop {
-        let dns_override = resolve_public_web_fetch_target(&url).await?;
+        let dns_override = resolve_public_web_fetch_target(&url, gate).await?;
         let mut builder = reqwest::Client::builder()
             .timeout(Duration::from_millis(timeout_ms))
             .redirect(reqwest::redirect::Policy::none());
@@ -1177,8 +1902,10 @@ fn is_followable_redirect(status: reqwest::StatusCode) -> bool {
     matches!(status.as_u16(), 301 | 302 | 303 | 307 | 308)
 }
 
+/// Runs on every redirect hop.
 async fn resolve_public_web_fetch_target(
     url: &reqwest::Url,
+    gate: WebGate<'_>,
 ) -> Result<Option<(String, Vec<SocketAddr>)>, String> {
     validate_web_fetch_scheme(url)?;
     let host = url
@@ -1189,10 +1916,10 @@ async fn resolve_public_web_fetch_target(
     if is_blocked_web_fetch_hostname(&normalized_host) {
         return Err("Fetching private/local URLs is not allowed".to_string());
     }
-
     let port = url
         .port_or_known_default()
         .ok_or_else(|| "URL must include a valid port".to_string())?;
+    check_web_host(gate, host, Some(port))?;
 
     if let Ok(ip) = host_literal.parse::<IpAddr>() {
         reject_private_web_fetch_ip(ip)?;
@@ -1212,89 +1939,6 @@ async fn resolve_public_web_fetch_target(
     // Pin the public DNS result into reqwest for this request so a hostname
     // cannot validate as public and then resolve privately during connect.
     Ok(Some((host.to_string(), addrs)))
-}
-
-fn is_blocked_web_fetch_hostname(normalized_host: &str) -> bool {
-    normalized_host == "localhost"
-        || normalized_host.ends_with(".localhost")
-        || normalized_host.ends_with(".local")
-        || normalized_host.ends_with(".internal")
-}
-
-fn strip_ipv6_url_brackets(host: &str) -> &str {
-    host.strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .unwrap_or(host)
-}
-
-fn reject_private_web_fetch_ip(ip: IpAddr) -> Result<(), String> {
-    if is_private_web_fetch_ip(ip) {
-        Err("Fetching private/local URLs is not allowed".to_string())
-    } else {
-        Ok(())
-    }
-}
-
-fn reject_private_web_fetch_addrs(addrs: &[SocketAddr]) -> Result<(), String> {
-    for addr in addrs {
-        reject_private_web_fetch_ip(addr.ip())?;
-    }
-    Ok(())
-}
-
-fn is_private_web_fetch_ip(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => is_private_web_fetch_ipv4(ip),
-        IpAddr::V6(ip) => is_private_web_fetch_ipv6(ip),
-    }
-}
-
-fn is_private_web_fetch_ipv4(ip: Ipv4Addr) -> bool {
-    let [a, b, c, _] = ip.octets();
-    ip.is_private()
-        || ip.is_loopback()
-        || ip.is_link_local()
-        || ip.is_multicast()
-        || ip.is_broadcast()
-        || ip.is_documentation()
-        || ip.is_unspecified()
-        || (a == 100 && (64..=127).contains(&b))
-        || (a == 198 && (b == 18 || b == 19))
-        || (a == 192 && b == 0 && c == 0)
-        || a >= 240
-}
-
-fn is_private_web_fetch_ipv6(ip: Ipv6Addr) -> bool {
-    if let Some(mapped) = ip.to_ipv4_mapped() {
-        return is_private_web_fetch_ipv4(mapped);
-    }
-
-    let octets = ip.octets();
-    let segments = ip.segments();
-
-    // NAT64: the well-known prefix 64:ff9b::/96 embeds a target IPv4 in the
-    // low 32 bits, so `64:ff9b::7f00:1` would reach 127.0.0.1. Extract and
-    // apply the IPv4 blocklist rather than trusting the v6 literal. The
-    // local-use prefix 64:ff9b:1::/48 (RFC 8215) is site-internal by
-    // definition, so block it wholesale.
-    if segments[0] == 0x0064 && segments[1] == 0xff9b {
-        if segments[2] == 0x0001 {
-            return true;
-        }
-        if segments[2] == 0 && segments[3] == 0 && segments[4] == 0 && segments[5] == 0 {
-            let embedded = std::net::Ipv4Addr::new(octets[12], octets[13], octets[14], octets[15]);
-            return is_private_web_fetch_ipv4(embedded);
-        }
-    }
-
-    ip.is_loopback()
-        || ip.is_unspecified()
-        || ip.is_multicast()
-        || (octets[0] & 0xfe) == 0xfc
-        || (segments[0] & 0xffc0) == 0xfe80
-        || (segments[0] & 0xffc0) == 0xfec0
-        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
-        || segments[0] == 0x2002
 }
 
 fn web_fetch_body_limit(content_limit: usize) -> usize {
@@ -1339,6 +1983,7 @@ fn append_limited_web_fetch_body_chunk(body: &mut Vec<u8>, chunk: &[u8], limit: 
 mod tests {
     use super::*;
     use crate::assistant::run_context::RunContext;
+    use crate::config::NetworkPolicy;
     use tempfile::tempdir;
 
     fn context_with_grants(
@@ -1361,6 +2006,7 @@ mod tests {
             had_warnings: Default::default(),
             session_grants: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             run_removed_ask_first: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            run_network: Default::default(),
         }
     }
 
@@ -1522,75 +2168,6 @@ mod tests {
     }
 
     #[test]
-    fn web_fetch_ip_filter_blocks_non_public_ranges() {
-        for ip in [
-            "0.0.0.0",
-            "10.0.0.1",
-            "100.64.0.1",
-            "127.0.0.1",
-            "169.254.169.254",
-            "172.16.0.1",
-            "192.168.1.1",
-            "192.0.0.1",
-            "198.18.0.1",
-            "224.0.0.1",
-            "240.0.0.1",
-            "::",
-            "::1",
-            "::ffff:127.0.0.1",
-            "fc00::1",
-            "fe80::1",
-            "fec0::1",
-            "2001:db8::1",
-            "2002:0a00:0001::1",
-            // NAT64 well-known prefix embedding 127.0.0.1 (64:ff9b::7f00:1).
-            "64:ff9b::7f00:1",
-            // NAT64 local-use prefix 64:ff9b:1::/48 (site-internal by definition).
-            "64:ff9b:1::1",
-        ] {
-            assert!(is_private_web_fetch_ip(ip.parse().unwrap()), "{ip}");
-        }
-    }
-
-    #[test]
-    fn web_fetch_ip_filter_allows_public_addresses() {
-        for ip in [
-            "8.8.8.8",
-            "1.1.1.1",
-            "2606:4700:4700::1111",
-            // NAT64 well-known prefix embedding a public IPv4 (8.8.8.8) must
-            // still be reachable — only the embedded IPv4 decides.
-            "64:ff9b::808:808",
-        ] {
-            assert!(!is_private_web_fetch_ip(ip.parse().unwrap()), "{ip}");
-        }
-    }
-
-    #[test]
-    fn web_fetch_blocks_private_dns_results() {
-        let addrs = [
-            SocketAddr::new("93.184.216.34".parse().unwrap(), 80),
-            SocketAddr::new("192.168.1.1".parse().unwrap(), 80),
-        ];
-
-        let err = reject_private_web_fetch_addrs(&addrs).unwrap_err();
-        assert!(err.contains("private/local"));
-    }
-
-    #[test]
-    fn web_fetch_hostname_filter_blocks_local_names() {
-        for host in [
-            "localhost",
-            "api.localhost",
-            "myhost.local",
-            "service.internal",
-        ] {
-            assert!(is_blocked_web_fetch_hostname(host), "{host}");
-        }
-        assert!(!is_blocked_web_fetch_hostname("example.com"));
-    }
-
-    #[test]
     fn parse_web_fetch_url_rejects_non_absolute_http_urls() {
         assert!(parse_web_fetch_url("/relative/path").is_err());
         assert!(parse_web_fetch_url("ftp://example.com/file").is_err());
@@ -1666,7 +2243,7 @@ mod tests {
             max_content_chars: None,
             timeout_ms: None,
         };
-        let result = execute_web_fetch(params).await;
+        let result = execute_web_fetch(WebGate::AnyHost, params).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("http:// or https://"));
     }
@@ -1678,7 +2255,7 @@ mod tests {
             max_content_chars: None,
             timeout_ms: None,
         };
-        let result = execute_web_fetch(params).await;
+        let result = execute_web_fetch(WebGate::AnyHost, params).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("private/local"));
     }
@@ -1687,7 +2264,9 @@ mod tests {
     async fn web_fetch_rejects_private_ipv6_literals() {
         let url = parse_web_fetch_url("http://[::1]/admin").unwrap();
 
-        let err = resolve_public_web_fetch_target(&url).await.unwrap_err();
+        let err = resolve_public_web_fetch_target(&url, WebGate::AnyHost)
+            .await
+            .unwrap_err();
         assert!(err.contains("private/local"));
     }
 
@@ -1696,10 +2275,1143 @@ mod tests {
         let start = parse_web_fetch_url("https://example.com/start").unwrap();
         let redirected = start.join("http://127.0.0.1/admin").unwrap();
 
-        let err = resolve_public_web_fetch_target(&redirected)
+        let err = resolve_public_web_fetch_target(&redirected, WebGate::AnyHost)
             .await
             .unwrap_err();
         assert!(err.contains("private/local"));
+    }
+
+    // ------------------------------------------------------------------
+    // Web tools under the agent's network mode
+    // ------------------------------------------------------------------
+
+    fn allowlist(allow: &[&str], deny: &[&str]) -> NetworkPolicy {
+        NetworkPolicy {
+            mode: NetworkMode::Allowlist,
+            allow_domains: allow.iter().map(|entry| entry.to_string()).collect(),
+            deny_domains: deny.iter().map(|entry| entry.to_string()).collect(),
+        }
+    }
+
+    fn run_network(allow: &[&str], deny: &[&str]) -> RunNetwork {
+        RunNetwork::new(&allowlist(allow, deny))
+    }
+
+    fn logged(network: &RunNetwork) -> Vec<(String, Option<u16>, bool)> {
+        network
+            .host_log()
+            .into_iter()
+            .map(|entry| (entry.host, entry.port, entry.allowed))
+            .collect()
+    }
+
+    #[test]
+    fn web_access_follows_the_mode() {
+        let network = run_network(&["github.com"], &[]);
+        assert!(matches!(
+            web_access(NetworkMode::Allowlist, &network),
+            Ok(WebGate::Allowlist(_))
+        ));
+        assert!(matches!(
+            web_access(NetworkMode::HostNetwork, &network),
+            Ok(WebGate::AnyHost)
+        ));
+        assert_eq!(
+            web_access(NetworkMode::Off, &network).unwrap_err(),
+            "Network access is off for this agent"
+        );
+    }
+
+    /// `net_request_access` is offered only where Allowlist is enforceable for
+    /// shell commands, so elsewhere the way out is the settings alone.
+    #[tokio::test]
+    async fn web_fetch_refuses_an_unlisted_host_naming_it_and_the_way_out() {
+        let network = run_network(&["github.com"], &[]);
+        let url = parse_web_fetch_url("https://example.org/page").unwrap();
+        let err = resolve_public_web_fetch_target(&url, WebGate::Allowlist(&network))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("`example.org` is not in this agent's allowed hosts"),
+            "{err}"
+        );
+        assert_eq!(
+            err.contains("net_request_access"),
+            crate::assistant::sandbox::status().allowlist_available,
+            "{err}"
+        );
+        assert!(err.contains("Local access settings"), "{err}");
+        assert_eq!(
+            logged(&network),
+            [("example.org".to_string(), Some(443), false)]
+        );
+    }
+
+    #[tokio::test]
+    async fn web_fetch_refuses_a_denied_host_naming_the_entry() {
+        let network = run_network(&["*.amazonaws.com"], &["*.s3.amazonaws.com"]);
+        let url = parse_web_fetch_url("https://bucket.s3.amazonaws.com/x").unwrap();
+        let err = resolve_public_web_fetch_target(&url, WebGate::Allowlist(&network))
+            .await
+            .unwrap_err();
+        assert!(err.contains("`*.s3.amazonaws.com`"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn web_fetch_checks_the_allowlist_on_every_redirect_hop() {
+        let network = run_network(&["github.com"], &[]);
+        let start = parse_web_fetch_url("https://github.com/start").unwrap();
+        let redirected = start.join("https://example.org/landing").unwrap();
+        let err = resolve_public_web_fetch_target(&redirected, WebGate::Allowlist(&network))
+            .await
+            .unwrap_err();
+        assert!(err.contains("`example.org`"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn web_fetch_keeps_the_private_address_filter_in_every_mode() {
+        let listed = run_network(&["10.0.0.5", "localhost"], &[]);
+        for (gate, raw) in [
+            (WebGate::AnyHost, "http://127.0.0.1/admin"),
+            (WebGate::AnyHost, "http://[::1]/"),
+            (WebGate::Allowlist(&listed), "http://10.0.0.5/"),
+            (WebGate::Allowlist(&listed), "http://localhost:8080/"),
+        ] {
+            let url = parse_web_fetch_url(raw).unwrap();
+            let err = resolve_public_web_fetch_target(&url, gate)
+                .await
+                .unwrap_err();
+            assert!(err.contains("private/local"), "{raw}: {err}");
+        }
+    }
+
+    #[test]
+    fn only_the_allowlist_gate_checks_and_logs_hosts() {
+        let network = run_network(&["github.com"], &[]);
+        let gate = WebGate::Allowlist(&network);
+        assert!(check_web_host(gate, "github.com", Some(443)).is_ok());
+        assert!(check_web_host(gate, "example.org", Some(80)).is_err());
+        assert!(check_web_host(gate, "[2606:4700::1111]", Some(443)).is_err());
+        assert_eq!(
+            logged(&network),
+            [
+                ("github.com".to_string(), Some(443), true),
+                ("example.org".to_string(), Some(80), false),
+                ("2606:4700::1111".to_string(), Some(443), false),
+            ]
+        );
+        assert!(check_web_host(WebGate::AnyHost, "example.org", Some(443)).is_ok());
+    }
+
+    // ------------------------------------------------------------------
+    // net_request_access
+    // ------------------------------------------------------------------
+
+    fn allowlist_execution(allow: &[&str], deny: &[&str]) -> ExecutionCapabilityConfig {
+        let mut execution = ExecutionCapabilityConfig::default();
+        execution.sandbox.network_access = allowlist(allow, deny);
+        execution.shell.mode = ShellAccessMode::Restricted;
+        execution
+    }
+
+    #[test]
+    fn a_request_is_refused_without_a_card_where_the_tool_is_not_offered() {
+        let network = RunNetwork::default();
+        let mut execution = allowlist_execution(&[], &[]);
+        assert!(requested_host(&execution, false, &network, "example.org")
+            .unwrap_err()
+            .contains("not available on this PC"));
+        for (mode, says) in [
+            (NetworkMode::Off, "Network access is off"),
+            (NetworkMode::HostNetwork, "can already reach any host"),
+        ] {
+            execution.sandbox.network_access.mode = mode;
+            let error = requested_host(&execution, true, &network, "example.org").unwrap_err();
+            assert!(error.contains(says), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_request_names_one_host_the_lists_do_not_decide() {
+        let execution = allowlist_execution(&["github.com"], &["*.s3.amazonaws.com"]);
+        let network = RunNetwork::new(&execution.sandbox.network_access);
+        let ask = |raw| requested_host(&execution, true, &network, raw);
+
+        assert_eq!(
+            ask(" Mirror.Example.ORG. "),
+            Ok(Some("mirror.example.org".to_string()))
+        );
+        assert_eq!(ask("[2001:db8::1]"), Ok(Some("2001:db8::1".to_string())));
+        assert_eq!(ask("GitHub.com"), Ok(None), "already allowed: no card");
+        let denied = ask("bucket.s3.amazonaws.com").unwrap_err();
+        assert!(
+            denied.contains("denied hosts (entry `*.s3.amazonaws.com`)")
+                && denied.contains("Local access settings"),
+            "{denied}"
+        );
+        for raw in [
+            "*.example.org",
+            "%2a.com",
+            "%2a.example.org",
+            "a!b.example.org",
+            "https://example.org",
+            "example.org/x",
+            "example.org:443",
+            "a b",
+            "",
+        ] {
+            assert!(ask(raw).is_err(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn an_invalid_deny_entry_refuses_web_hosts_and_requests_naming_it() {
+        let execution = allowlist_execution(&["github.com"], &["github.com:443"]);
+        let network = RunNetwork::new(&execution.sandbox.network_access);
+        let errors = [
+            check_web_host(WebGate::Allowlist(&network), "github.com", Some(443)).unwrap_err(),
+            requested_host(&execution, true, &network, "example.org").unwrap_err(),
+        ];
+        for error in errors {
+            assert!(
+                error.contains("`github.com:443`") && error.contains("Local access settings"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_answer_widens_this_run_and_a_denial_carries_its_reason() {
+        use crate::commands::network_access::NetworkAccessDecision;
+
+        let workspace = tempdir().unwrap();
+        let mut context = context_with_grants(workspace.path(), Vec::new());
+        context.run_network = std::sync::Arc::new(run_network(&[], &["secret.example.org"]));
+
+        let allowed = apply_network_decision(
+            &context,
+            "mirror.example.org",
+            NetworkAccessDecision::AllowRun,
+        )
+        .unwrap();
+        assert_eq!(allowed["scope"], "run");
+        assert_eq!(
+            context.run_network.decide("mirror.example.org"),
+            HostDecision::Allowed
+        );
+        assert_eq!(
+            context.run_network.decide("www.example.org"),
+            HostDecision::Unlisted
+        );
+
+        let always = apply_network_decision(
+            &context,
+            "www.example.org",
+            NetworkAccessDecision::AllowAlways {
+                entry: "*.example.org".to_string(),
+            },
+        )
+        .unwrap();
+        assert_eq!(always["entry"], "*.example.org");
+        assert_eq!(
+            context.run_network.decide("cdn.example.org"),
+            HostDecision::Allowed
+        );
+        assert!(matches!(
+            context.run_network.decide("secret.example.org"),
+            HostDecision::Denied { .. }
+        ));
+        assert!(!context.had_warnings(), "an allow is not a warning");
+
+        let error = apply_network_decision(
+            &context,
+            "other.example.com",
+            NetworkAccessDecision::Deny {
+                reason: Some("not needed".to_string()),
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            "User denied network access to `other.example.com`. Reason: not needed."
+        );
+        assert!(
+            context.had_warnings(),
+            "a denial ends the run with warnings"
+        );
+        assert_eq!(
+            context.run_network.decide("other.example.com"),
+            HostDecision::Unlisted
+        );
+    }
+
+    fn network_guard(
+        token: &tokio_util::sync::CancellationToken,
+        cleared: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    ) -> AbandonedNetworkRequestGuard<impl FnOnce()> {
+        let cleared = cleared.clone();
+        AbandonedNetworkRequestGuard {
+            cancel_token: token.clone(),
+            clear: Some(move || {
+                cleared.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }),
+        }
+    }
+
+    #[test]
+    fn an_abandoned_network_wait_clears_its_request_and_cancels_the_run() {
+        use std::sync::atomic::Ordering;
+        let cleared = std::sync::Arc::default();
+
+        let token = tokio_util::sync::CancellationToken::new();
+        drop(network_guard(&token, &cleared));
+        assert!(token.is_cancelled());
+        assert_eq!(cleared.load(Ordering::SeqCst), 1);
+
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut decided = network_guard(&token, &cleared);
+        decided.disarm();
+        drop(decided);
+        assert!(!token.is_cancelled(), "a decided wait leaves the run alone");
+        assert_eq!(cleared.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_wait_whose_sender_is_gone_clears_once_and_parks_the_cancelled_run() {
+        use std::sync::atomic::Ordering;
+        let cleared = std::sync::Arc::default();
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut guard = network_guard(&token, &cleared);
+
+        let parked = tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            guard.expire_and_stop::<()>(),
+        )
+        .await;
+        assert!(parked.is_err(), "the tool returns no result");
+        assert!(token.is_cancelled());
+        assert_eq!(cleared.load(Ordering::SeqCst), 1);
+        drop(guard);
+        assert_eq!(cleared.load(Ordering::SeqCst), 1, "cleared once");
+    }
+
+    #[tokio::test]
+    async fn web_tools_refuse_before_any_request_when_network_is_off() {
+        let workspace = tempdir().unwrap();
+        let mut context = context_with_grants(workspace.path(), Vec::new());
+        let mut execution = context.run_context.execution.clone();
+        execution.sandbox.network_access = network(NetworkMode::Off);
+        context.run_context = std::sync::Arc::new(RunContext {
+            execution,
+            ..(*context.run_context).clone()
+        });
+        for (tool, params) in [
+            ("web_search", serde_json::json!({ "query": "rust" })),
+            // Private, so even a missing gate fails fast without a request.
+            (
+                "web_fetch",
+                serde_json::json!({ "url": "http://192.168.1.1/" }),
+            ),
+        ] {
+            assert_eq!(
+                execute_web_tool(&context, tool, params).await.unwrap_err(),
+                "Network access is off for this agent",
+                "{tool}"
+            );
+        }
+    }
+
+    /// A server on 127.0.0.1 that answers every request with a redirect to
+    /// itself, and counts the requests.
+    async fn redirecting_server() -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let response = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {base}/next\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        );
+        tokio::spawn(async move {
+            while let Ok((mut socket, _)) = listener.accept().await {
+                counter.fetch_add(1, Ordering::SeqCst);
+                let response = response.clone();
+                tokio::spawn(async move {
+                    let mut head = [0u8; 4096];
+                    let _ = socket.read(&mut head).await;
+                    let _ = socket.write_all(response.as_bytes()).await;
+                    let _ = socket.shutdown().await;
+                });
+            }
+        });
+        (base, hits)
+    }
+
+    #[tokio::test]
+    async fn web_search_refuses_a_redirect_off_the_provider() {
+        use std::sync::atomic::Ordering;
+        let (base, hits) = redirecting_server().await;
+        let error = web_search_client()
+            .unwrap()
+            .get(format!("{base}/start"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("leaves the search provider"),
+            "{error:?}"
+        );
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn the_provider_redirect_policy_follows_at_most_three_hops() {
+        use std::sync::atomic::Ordering;
+        let (base, hits) = redirecting_server().await;
+        let error = reqwest::Client::builder()
+            .redirect(redirect_policy_within(|_| true))
+            .build()
+            .unwrap()
+            .get(format!("{base}/start"))
+            .send()
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{error:?}").contains("too many redirects"),
+            "{error:?}"
+        );
+        // The first request and three redirects, as `Policy::limited(3)`.
+        assert_eq!(hits.load(Ordering::SeqCst), 1 + MAX_WEB_SEARCH_REDIRECTS);
+    }
+
+    #[test]
+    fn web_search_redirects_stay_on_the_provider_over_https() {
+        for (raw, allowed) in [
+            ("https://html.duckduckgo.com/html/?q=x", true),
+            ("https://duckduckgo.com/", true),
+            ("http://html.duckduckgo.com/html/", false),
+            ("https://duckduckgo.com.evil.org/", false),
+            ("https://evilduckduckgo.com/", false),
+            ("https://example.org/", false),
+        ] {
+            let url = reqwest::Url::parse(raw).unwrap();
+            assert_eq!(provider_redirect_allowed(&url), allowed, "{raw}");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Network mode in bash_exec
+    // ------------------------------------------------------------------
+
+    fn network(mode: NetworkMode) -> NetworkPolicy {
+        NetworkPolicy {
+            mode,
+            allow_domains: Vec::new(),
+            deny_domains: Vec::new(),
+        }
+    }
+
+    fn test_endpoint() -> ProxyEndpoint {
+        ProxyEndpoint {
+            socket: PathBuf::from("/c/.clai-net/0123456789ab.sock"),
+            helper: PathBuf::from("/opt/clai/clai-sandbox-helper"),
+            ssh_config: PathBuf::from("/c/.clai-net/ssh_config"),
+        }
+    }
+
+    #[test]
+    fn network_modes_map_onto_the_sandbox_network_per_platform() {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
+        use NetworkMode::{Allowlist, HostNetwork, Off};
+        use SandboxNetworkMode::{Disabled, Host, Proxied};
+        let linux = status_for(Some(SandboxBackend::Bubblewrap));
+        let macos = status_for(Some(SandboxBackend::Seatbelt));
+        let none = status_for(None);
+        for (status, mode, expected) in [
+            (&linux, Off, Ok(Disabled)),
+            (&linux, Allowlist, Ok(Proxied(test_endpoint()))),
+            (&linux, HostNetwork, Ok(Host)),
+            (&macos, Off, Ok(Disabled)),
+            (&macos, Allowlist, Err(())),
+            (&macos, HostNetwork, Ok(Host)),
+            (&none, Off, Ok(Disabled)),
+            (&none, Allowlist, Err(())),
+            (&none, HostNetwork, Ok(Host)),
+        ] {
+            let asked = std::cell::Cell::new(false);
+            let endpoint = || {
+                asked.set(true);
+                Ok(test_endpoint())
+            };
+            assert_eq!(
+                sandbox_network(mode, status, endpoint).map_err(|_| ()),
+                expected,
+                "{:?} {mode:?}",
+                status.backend
+            );
+            assert_eq!(
+                asked.get(),
+                matches!(expected, Ok(Proxied(_))),
+                "only an enforceable Allowlist prepares the proxy files"
+            );
+        }
+        assert_eq!(
+            sandbox_network(Allowlist, &macos, || Ok(test_endpoint())).unwrap_err(),
+            "Allowlist network mode: Not available on macOS yet. Choose Off or Host network \
+             in the agent's Local access settings."
+        );
+        let missing = || Err("Sandboxed shell is unavailable: network helper not found".into());
+        assert_eq!(
+            sandbox_network(Allowlist, &linux, missing),
+            Err("Sandboxed shell is unavailable: network helper not found".to_string()),
+            "a missing helper fails closed, never the host network"
+        );
+    }
+
+    /// The proxy session lives for the command and its refusals reach the
+    /// result. Needs bwrap and the helper `cargo test` builds.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_allowlist_command_runs_behind_its_own_proxy_session() {
+        let exe = std::env::current_exe().unwrap();
+        let helper = exe
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("clai-sandbox-helper");
+        if !helper.is_file() {
+            crate::assistant::sandbox::skip_without_bwrap(&format!(
+                "{} is not built",
+                helper.display()
+            ));
+            return;
+        }
+        let files = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let endpoint = ProxyEndpoint {
+            socket: files.path().join("net.sock"),
+            helper,
+            ssh_config: files.path().join("ssh_config"),
+        };
+        std::fs::write(&endpoint.ssh_config, "").unwrap();
+        let socket = endpoint.socket.clone();
+        let command = |script: &str, timeout_ms| SandboxCommand {
+            argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms,
+            max_output_chars: 10_000,
+            profile: SandboxProfile::for_test(
+                workspace.path().to_path_buf(),
+                Vec::new(),
+                SandboxNetworkMode::Proxied(endpoint.clone()),
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace.path(),
+                    SandboxSessionBusMode::Deny,
+                ),
+                None,
+            ),
+        };
+        let refuse = "/run/clai/helper connect --proxy 127.0.0.1:3128 example.org 443 </dev/null";
+        let network = std::sync::Arc::new(run_network(&["github.com"], &[]));
+        let run = run_with_network(command(refuse, 20_000), &network).await;
+        let (output, refused) = match run.output {
+            Ok(output) => (output, run.refused),
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(output.exit_code, Some(255), "{output:?}");
+        assert_eq!(refused.targets, ["example.org:443"]);
+        assert_eq!(
+            logged(&network),
+            [("example.org".to_string(), Some(443), false)]
+        );
+        assert!(!socket.exists(), "the session ended with the command");
+
+        let run = run_with_network(command(&format!("{refuse}; sleep 30"), 2_000), &network).await;
+        let refused = run.refused;
+        let error = run.output.unwrap_err();
+        assert!(error.contains("timed out after"), "{error}");
+        assert_eq!(
+            refused.targets,
+            ["example.org:443"],
+            "a timed-out command keeps its refusals"
+        );
+        assert!(!socket.exists(), "the session ended with the timeout");
+    }
+
+    #[test]
+    fn a_failed_command_still_names_the_hosts_the_proxy_refused() {
+        let mut refused = RefusedTargets::default();
+        let timed_out = || Err("Command timed out after 2000 ms".to_string());
+        let error = bash_exec_outcome(
+            timed_out(),
+            &refused,
+            &SocketPolicy::default(),
+            None,
+            2_000,
+            true,
+        )
+        .unwrap_err();
+        assert!(!error.contains("Network allowlist refused"), "{error}");
+
+        refused.add("example.org:443".to_string());
+        refused.add("pypi.org:443".to_string());
+        refused.more = 2;
+        let error = bash_exec_outcome(
+            timed_out(),
+            &refused,
+            &SocketPolicy::default(),
+            None,
+            2_000,
+            true,
+        )
+        .unwrap_err();
+        let (timeout, network) = error.split_once('\n').unwrap();
+        assert!(
+            timeout.contains("re-run with a higher `timeoutMs`"),
+            "{error}"
+        );
+        assert_eq!(
+            network,
+            format!("Network allowlist refused: example.org:443, pypi.org:443 and 2 more. {REFUSED_HINT}")
+        );
+    }
+
+    #[test]
+    fn a_result_names_the_hosts_the_proxy_refused() {
+        let output = SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(7),
+            success: false,
+            stdout: String::new(),
+            stderr: "curl: (56) CONNECT tunnel failed, response 403".to_string(),
+        };
+        assert!(bash_exec_result(
+            &output,
+            &RefusedTargets::default(),
+            &SocketPolicy::default(),
+            None
+        )
+        .get("network")
+        .is_none());
+        let mut refused = RefusedTargets::default();
+        refused.add("example.org:443".to_string());
+        let result = bash_exec_result(&output, &refused, &SocketPolicy::default(), None);
+        assert_eq!(
+            result["network"]["refused"],
+            serde_json::json!(["example.org:443"])
+        );
+        assert!(result["network"].get("refusedMore").is_none());
+        let hint = result["network"]["hint"].as_str().unwrap();
+        assert!(hint.contains("net_request_access"), "{hint}");
+        assert_eq!(result["exitCode"], 7);
+
+        refused.more = 3;
+        assert_eq!(
+            bash_exec_result(&output, &refused, &SocketPolicy::default(), None)["network"]
+                ["refusedMore"],
+            3
+        );
+    }
+
+    /// The hint leads to the folder-access card, for the socket itself.
+    #[test]
+    fn the_socket_hint_asks_for_a_grant_on_the_socket_and_says_why() {
+        assert!(SOCKET_HINT.contains("call `fs_request_grant` with the exact socket path"));
+        assert!(SOCKET_HINT.contains("not its folder"));
+        assert!(SOCKET_HINT.contains("A Docker, Podman or containerd socket gives control"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_result_names_the_host_sockets_a_failed_command_could_not_reach() {
+        let temp = tempdir().unwrap();
+        let socket = temp.path().canonicalize().unwrap().join("docker.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        let file = temp.path().join("plain.sock");
+        fs::write(&file, "").unwrap();
+        let path = socket.display().to_string();
+        let output = |success: bool, stderr: &str| SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(if success { 0 } else { 1 }),
+            success,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        };
+        let unreachable = |output: &SandboxCommandOutput, sockets: &SocketPolicy| {
+            bash_exec_result(output, &RefusedTargets::default(), sockets, None)
+                .get("sockets")
+                .map(|sockets| sockets["unreachable"].clone())
+        };
+        let confined = SocketPolicy {
+            helper: Some(PathBuf::from("/opt/h")),
+            kernel_confines: true,
+            allowed: Vec::new(),
+            skipped: Vec::new(),
+            hint_places: vec![temp.path().canonicalize().unwrap()],
+        };
+        let denied = output(
+            false,
+            &format!(
+                "permission denied while trying to connect to the Docker daemon socket at \
+                 unix://{path}: dial unix {path}: connect: permission denied\nopen {}: \
+                 permission denied",
+                file.display()
+            ),
+        );
+        assert_eq!(
+            unreachable(&denied, &confined),
+            Some(serde_json::json!([path]))
+        );
+        let result = bash_exec_result(&denied, &RefusedTargets::default(), &confined, None);
+        assert_eq!(result["sockets"]["hint"], SOCKET_HINT);
+
+        // Without Landlock a refusal comes from the host's permissions.
+        let unconfined = SocketPolicy {
+            kernel_confines: false,
+            ..confined.clone()
+        };
+        assert_eq!(unreachable(&denied, &unconfined), None);
+        // A socket not bound into the sandbox is named either way.
+        let missing = output(
+            false,
+            &format!("dial unix {path}: connect: no such file or directory"),
+        );
+        assert_eq!(
+            unreachable(&missing, &unconfined),
+            Some(serde_json::json!([path]))
+        );
+        let allowed = SocketPolicy {
+            allowed: vec![crate::assistant::sandbox::AllowedSocket {
+                path: socket.clone(),
+                host: socket.clone(),
+            }],
+            ..confined.clone()
+        };
+        assert_eq!(unreachable(&denied, &allowed), None);
+        assert_eq!(unreachable(&output(true, &denied.stderr), &confined), None);
+
+        // m3: a path outside the usual socket places is never looked up, so
+        // a command cannot probe the host by printing paths.
+        let elsewhere = tempdir().unwrap();
+        let hidden = elsewhere.path().canonicalize().unwrap().join("hidden.sock");
+        let _hidden = std::os::unix::net::UnixListener::bind(&hidden).unwrap();
+        let probe = |path: String| output(false, &format!("{path}: no such file or directory"));
+        assert_eq!(
+            unreachable(&probe(hidden.display().to_string()), &confined),
+            None
+        );
+        // Nor is one that only seems to be in such a place.
+        let dotdot = format!(
+            "{}/../{}",
+            temp.path().canonicalize().unwrap().display(),
+            hidden
+                .strip_prefix(elsewhere.path().parent().unwrap().canonicalize().unwrap())
+                .unwrap()
+                .display()
+        );
+        assert_eq!(unreachable(&probe(dotdot), &confined), None);
+        // At most 16 lookups per result: a socket after 16 other paths is
+        // not named.
+        let mut many: String = (0..16)
+            .map(|index| {
+                format!(
+                    "{}/missing-{index}: no such file or directory\n",
+                    temp.path().display()
+                )
+            })
+            .collect();
+        many.push_str(&missing.stderr);
+        assert_eq!(unreachable(&output(false, &many), &unconfined), None);
+        // Paths elsewhere are not even looked up, so they use none of them.
+        let mut elsewhere_paths: String = (0..16)
+            .map(|index| format!("/elsewhere/missing-{index}: no such file or directory\n"))
+            .collect();
+        elsewhere_paths.push_str(&missing.stderr);
+        assert_eq!(
+            unreachable(&output(false, &elsewhere_paths), &unconfined),
+            Some(serde_json::json!([path]))
+        );
+    }
+
+    #[test]
+    fn the_shell_profile_takes_its_network_from_the_mode() {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
+        let workspace = tempdir().unwrap();
+        let profile = |mode, status| {
+            let mut context = context_with_grants(workspace.path(), Vec::new());
+            let mut execution = context.run_context.execution.clone();
+            execution.sandbox.network_access = network(mode);
+            context.run_context = std::sync::Arc::new(RunContext {
+                execution,
+                ..(*context.run_context).clone()
+            });
+            let filesystem = filesystem_policy(&context).unwrap();
+            sandbox_profile(&context, workspace.path().to_path_buf(), filesystem, status)
+        };
+        let linux = status_for(Some(SandboxBackend::Bubblewrap));
+        assert_eq!(
+            profile(NetworkMode::Off, &linux).unwrap().network,
+            SandboxNetworkMode::Disabled
+        );
+        // The test binary has no helper beside it, as an install without one.
+        #[cfg(target_os = "linux")]
+        assert!(profile(NetworkMode::Allowlist, &linux)
+            .unwrap_err()
+            .starts_with("Sandboxed shell is unavailable: network helper not found"));
+        let macos = status_for(Some(SandboxBackend::Seatbelt));
+        assert!(profile(NetworkMode::Allowlist, &macos).is_err());
+    }
+
+    #[test]
+    fn only_full_binds_the_whole_bus_and_keyring_only_fails_closed() {
+        let proxy = SessionBusProxy {
+            socket: PathBuf::from("/c/.clai-net/bus-1.sock"),
+            bus: PathBuf::from("/run/user/1000/bus"),
+        };
+        let unused = || -> Result<Option<SessionBusProxy>, String> { panic!("no plan needed") };
+        assert_eq!(
+            session_bus_for(SandboxSessionBusConfig::Full, unused),
+            (SandboxSessionBusMode::Allow, None, None)
+        );
+        assert_eq!(
+            session_bus_for(SandboxSessionBusConfig::Deny, unused),
+            (SandboxSessionBusMode::Deny, None, None)
+        );
+        let keyring = |plan: Result<Option<SessionBusProxy>, String>| {
+            session_bus_for(SandboxSessionBusConfig::KeyringOnly, || plan)
+        };
+        assert_eq!(
+            keyring(Ok(Some(proxy.clone()))),
+            (SandboxSessionBusMode::Allow, Some(proxy), None)
+        );
+        assert_eq!(
+            keyring(Err("xdg-dbus-proxy is not installed".to_string())),
+            (
+                SandboxSessionBusMode::Deny,
+                None,
+                Some("xdg-dbus-proxy is not installed".to_string())
+            )
+        );
+        assert_eq!(keyring(Ok(None)), (SandboxSessionBusMode::Deny, None, None));
+    }
+
+    /// The review's B1 case: a keyring-only agent whose workspace is outside
+    /// the home directory. Whatever this host offers, the profile never binds
+    /// the real bus: it has the proxy, or no bus.
+    #[test]
+    fn a_keyring_only_profile_never_binds_the_real_bus() {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
+        let workspace = tempdir().unwrap();
+        let mut context = context_with_grants(workspace.path(), Vec::new());
+        let mut execution = context.run_context.execution.clone();
+        execution.sandbox.network_access = network(NetworkMode::Off);
+        execution.sandbox.session_bus = SandboxSessionBusConfig::KeyringOnly;
+        context.run_context = std::sync::Arc::new(RunContext {
+            execution,
+            ..(*context.run_context).clone()
+        });
+        let filesystem = filesystem_policy(&context).unwrap();
+        let profile = sandbox_profile(
+            &context,
+            workspace.path().to_path_buf(),
+            filesystem,
+            &status_for(Some(SandboxBackend::Bubblewrap)),
+        )
+        .unwrap();
+        match profile.session_bus {
+            SandboxSessionBusMode::Allow => assert!(profile.session_bus_proxy.is_some()),
+            SandboxSessionBusMode::Deny => {
+                assert!(profile.session_bus_proxy.is_none());
+                let address: Vec<_> = profile
+                    .env
+                    .iter()
+                    .filter(|(key, _)| *key == "DBUS_SESSION_BUS_ADDRESS")
+                    .map(|(_, value)| value)
+                    .collect();
+                assert_eq!(
+                    address,
+                    [crate::assistant::sandbox::profile::SESSION_BUS_OFF_ADDRESS]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_result_says_why_keyring_only_has_no_bus_and_how_to_get_it() {
+        let output = SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(0),
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let none = SocketPolicy::default();
+        let refused = RefusedTargets::default();
+        assert!(bash_exec_result(&output, &refused, &none, None)
+            .get("sessionBus")
+            .is_none());
+        let reason = Some("xdg-dbus-proxy is not installed");
+        let note = bash_exec_result(&output, &refused, &none, reason)["sessionBus"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(!note.contains('\n'), "one line: {note}");
+        assert!(note.contains("xdg-dbus-proxy is not installed"), "{note}");
+        assert!(note.contains("set its Session bus to Full"), "{note}");
+        let error = bash_exec_outcome(
+            Err("Command timed out after 2000 ms".to_string()),
+            &refused,
+            &none,
+            reason,
+            2_000,
+            true,
+        )
+        .unwrap_err();
+        assert!(error.ends_with(&note), "{error}");
+    }
+
+    /// A keyring proxy that cannot start leaves the command with no bus and
+    /// says so; it neither fails the command nor binds the real bus.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_keyring_proxy_that_does_not_start_leaves_no_bus() {
+        let workspace = tempdir().unwrap();
+        let bus = workspace.path().join("host-bus");
+        let mut profile = SandboxProfile::for_test(
+            workspace.path().to_path_buf(),
+            Vec::new(),
+            SandboxNetworkMode::Disabled,
+            SandboxSessionBusMode::Allow,
+            SandboxEnv::filtered_from_iter(
+                [
+                    ("PATH", "/usr/bin:/bin"),
+                    ("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent/bus"),
+                ],
+                workspace.path(),
+                SandboxSessionBusMode::Allow,
+            ),
+            None,
+        );
+        profile.session_bus_proxy = Some(SessionBusProxy {
+            socket: PathBuf::from("/nonexistent/dir/bus-1.sock"),
+            bus: bus.clone(),
+        });
+        let command = SandboxCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "echo ${DBUS_SESSION_BUS_ADDRESS-none}".into(),
+            ],
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms: 10_000,
+            max_output_chars: 10_000,
+            profile,
+        };
+        let network = std::sync::Arc::new(run_network(&[], &[]));
+        let run = run_with_network(command, &network).await;
+        assert!(
+            run.session_bus_unavailable.is_some(),
+            "the result says why there is no bus"
+        );
+        let output = match run.output {
+            Ok(output) => output,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(
+            output.stdout.trim(),
+            crate::assistant::sandbox::profile::SESSION_BUS_OFF_ADDRESS,
+            "{output:?}"
+        );
+    }
+
+    /// The sockets a shell profile hands over for these saved and run-only
+    /// grants.
+    #[cfg(target_os = "linux")]
+    fn sockets_for(
+        workspace: &Path,
+        saved: Vec<FilesystemPathGrant>,
+        run_only: Vec<FilesystemPathGrant>,
+    ) -> SocketPolicy {
+        use crate::assistant::sandbox::{status_for, SandboxBackend};
+        let mut context = context_with_grants(workspace, saved);
+        let mut execution = context.run_context.execution.clone();
+        execution.sandbox.network_access = network(NetworkMode::Off);
+        context.run_context = std::sync::Arc::new(RunContext {
+            execution,
+            ..(*context.run_context).clone()
+        });
+        for grant in run_only {
+            context.add_session_grant(grant);
+        }
+        let filesystem = filesystem_policy(&context).unwrap();
+        sandbox_profile(
+            &context,
+            workspace.to_path_buf(),
+            filesystem,
+            &status_for(Some(SandboxBackend::Bubblewrap)),
+        )
+        .unwrap()
+        .sockets
+    }
+
+    #[cfg(target_os = "linux")]
+    fn grant_on(path: &Path, access: FilesystemPathAccess) -> FilesystemPathGrant {
+        FilesystemPathGrant {
+            path: path.display().to_string(),
+            access,
+            origin: None,
+        }
+    }
+
+    /// A socket and the directory that holds it, outside the workspace.
+    #[cfg(target_os = "linux")]
+    fn listening_socket() -> (tempfile::TempDir, PathBuf, std::os::unix::net::UnixListener) {
+        let dir = tempdir().unwrap();
+        let socket = dir.path().canonicalize().unwrap().join("docker.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        (dir, socket, listener)
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_exact_grant_on_a_socket_lets_commands_connect_read_only_or_read_write() {
+        let workspace = tempdir().unwrap();
+        let (_dir, socket, _listener) = listening_socket();
+        for access in [
+            FilesystemPathAccess::ReadWrite,
+            FilesystemPathAccess::ReadOnly,
+        ] {
+            let sockets = sockets_for(
+                workspace.path(),
+                vec![grant_on(&socket, access)],
+                Vec::new(),
+            );
+            assert_eq!(
+                sockets.allowed,
+                [crate::assistant::sandbox::AllowedSocket {
+                    path: socket.clone(),
+                    host: socket.clone(),
+                }],
+                "{access:?}: {sockets:?}"
+            );
+            assert!(sockets.skipped.is_empty(), "{access:?}: {sockets:?}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_grant_on_a_socket_for_this_run_only_counts() {
+        let workspace = tempdir().unwrap();
+        let (_dir, socket, _listener) = listening_socket();
+        let run_only = vec![grant_on(&socket, FilesystemPathAccess::ReadOnly)];
+        let sockets = sockets_for(workspace.path(), Vec::new(), run_only);
+        assert_eq!(sockets.allowed.len(), 1, "{sockets:?}");
+        assert_eq!(sockets.allowed[0].host, socket);
+    }
+
+    /// The hint sends the agent to `fs_request_grant` for a socket; a folder
+    /// grant over it must not answer that request without a card.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_under_a_granted_folder_still_needs_its_own_grant() {
+        let workspace = tempdir().unwrap();
+        let (dir, socket, _listener) = listening_socket();
+        let file = dir.path().canonicalize().unwrap().join("notes.txt");
+        fs::write(&file, "").unwrap();
+        let read = FilesystemPathAccess::ReadOnly;
+        let context = context_with_grants(workspace.path(), vec![grant_on(dir.path(), read)]);
+        let filesystem = filesystem_policy(&context).unwrap();
+        assert!(already_granted(&filesystem, &file, read));
+        assert!(!already_granted(&filesystem, &socket, read));
+
+        context.add_session_grant(grant_on(&socket, read));
+        let filesystem = filesystem_policy(&context).unwrap();
+        assert!(already_granted(&filesystem, &socket, read));
+        assert!(!already_granted(
+            &filesystem,
+            &socket,
+            FilesystemPathAccess::ReadWrite
+        ));
+    }
+
+    /// H2: a directory grant shows a socket in it, but does not let a
+    /// command connect to it.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_under_a_granted_directory_stays_unreachable() {
+        let workspace = tempdir().unwrap();
+        let (dir, _socket, _listener) = listening_socket();
+        for access in [
+            FilesystemPathAccess::ReadOnly,
+            FilesystemPathAccess::ReadWrite,
+        ] {
+            let sockets = sockets_for(
+                workspace.path(),
+                vec![grant_on(dir.path(), access)],
+                Vec::new(),
+            );
+            assert!(sockets.allowed.is_empty(), "{access:?}: {sockets:?}");
+            assert!(sockets.skipped.is_empty(), "{access:?}: {sockets:?}");
+        }
+    }
+
+    /// M2: in a directory the sandbox can write, a command could swap the
+    /// socket for a link to another one, so its grant is refused and the
+    /// result says why: under a read-write directory grant, or in the
+    /// workspace.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_socket_grant_in_a_writable_directory_is_refused_and_the_result_says_why() {
+        let workspace = tempdir().unwrap();
+        let (dir, socket, _listener) = listening_socket();
+        let in_workspace = workspace.path().canonicalize().unwrap().join("dev.sock");
+        let _dev = std::os::unix::net::UnixListener::bind(&in_workspace).unwrap();
+        let sockets = sockets_for(
+            workspace.path(),
+            vec![
+                grant_on(dir.path(), FilesystemPathAccess::ReadWrite),
+                grant_on(&socket, FilesystemPathAccess::ReadWrite),
+            ],
+            vec![grant_on(&in_workspace, FilesystemPathAccess::ReadOnly)],
+        );
+        assert!(sockets.allowed.is_empty(), "{sockets:?}");
+        let output = SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(0),
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let result = bash_exec_result(&output, &RefusedTargets::default(), &sockets, None);
+        let skipped = result["socketGrantsSkipped"].as_array().unwrap();
+        assert_eq!(skipped.len(), 2, "{skipped:?}");
+        let dir = dir.path().canonicalize().unwrap();
+        for (refusal, (path, writable)) in skipped.iter().zip([
+            (&socket, dir.as_path()),
+            (&in_workspace, in_workspace.parent().unwrap()),
+        ]) {
+            let refusal = refusal.as_str().unwrap();
+            assert!(
+                refusal.starts_with(&path.display().to_string()),
+                "{refusal}"
+            );
+            assert!(
+                refusal.contains(&format!("can write at {}", writable.display())),
+                "{refusal}"
+            );
+        }
     }
 
     // ------------------------------------------------------------------

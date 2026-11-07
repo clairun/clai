@@ -6,7 +6,7 @@
 }
 
 .card {
-  /* The reason field's textarea has an intrinsic width, so without this the
+  /* The reason field's input has an intrinsic width, so without this the
      card cannot shrink below it. */
   min-width: 0;
   position: relative;
@@ -128,14 +128,7 @@
   border: 1px solid var(--color-warning-light, #F59E0B);
 }
 
-/* The denial: one reason for the whole request, and the confirm that
-   sends it. */
-.denialArea {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
+/* The optional reason Deny sends, shown up front. */
 .reasonField {
   display: flex;
   flex-direction: column;
@@ -146,12 +139,10 @@
   font-size: 11px;
 }
 
-.reasonField textarea {
+.reasonField input {
   box-sizing: border-box;
   width: 100%;
-  min-height: 52px;
-  resize: vertical;
-  padding: 7px 10px;
+  padding: 5px 10px;
   border: 1px solid var(--color-border-medium);
   border-radius: var(--radius-xs);
   background: var(--color-bg-elevated);
@@ -161,7 +152,7 @@
   line-height: 1.4;
 }
 
-.reasonField textarea:focus-visible {
+.reasonField input:focus-visible {
   outline: 2px solid var(--color-border-focus);
   outline-offset: 1px;
 }
@@ -176,24 +167,6 @@
 .mutedHint {
   color: var(--color-text-secondary);
   font-size: 11px;
-}
-
-.denialActions {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-
-.btnConfirmDeny {
-  background: var(--color-critical-bg, rgba(220, 38, 38, 0.08));
-  border-color: var(--color-critical-border, rgba(220, 38, 38, 0.30));
-  color: var(--color-critical-dark, #B91C1C);
-}
-
-.btnConfirmDeny:hover:not(:disabled) {
-  border-color: var(--color-critical, #DC2626);
-  color: var(--color-critical, #DC2626);
 }
 
 .segmentButtons {
@@ -237,12 +210,6 @@
 .btnDenyOnce:hover:not(:disabled) {
   background: var(--color-critical-bg, rgba(220, 38, 38, 0.08));
   border-color: var(--color-critical-border, rgba(220, 38, 38, 0.30));
-}
-
-.btnSelected {
-  border-color: var(--color-primary);
-  background: var(--color-primary-alpha-08);
-  color: var(--color-primary-darker);
 }
 
 .error {

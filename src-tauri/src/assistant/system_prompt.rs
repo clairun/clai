@@ -206,9 +206,12 @@ pub(crate) fn build_system_prompt(
     // needed here. Scoped to sessions that actually expose such a tool;
     // ordinary read/write tools, which can be retried without side effects,
     // need no special handling.
-    let has_interactive_tool = tool_names
-        .iter()
-        .any(|n| matches!(*n, "ask_user" | "bash_exec" | "fs_request_grant"));
+    let has_interactive_tool = tool_names.iter().any(|n| {
+        matches!(
+            *n,
+            "ask_user" | "bash_exec" | "fs_request_grant" | "net_request_access"
+        )
+    });
     if has_interactive_tool {
         prompt.push_str(
             "\n## Interactive Tool Reliability\n\
@@ -323,7 +326,7 @@ pub(crate) fn build_system_prompt(
     prompt.push_str("\n## Local Execution Capabilities\n");
     if shell_enabled {
         prompt.push_str(&format!(
-            "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace.\n",
+            "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace. Its `.clai/` directory is CLAI's own state (settings, conversation history): write there only under `.clai/memory/`; on Linux and macOS the shell can only read the rest. The same holds for the provider CLI configuration at the workspace root (`.claude/`, `.codex/`, `.opencode/`, `.mcp.json`, `opencode.json`, `opencode.jsonc`).\n",
         ));
     } else {
         prompt.push_str(&format!(
@@ -362,7 +365,7 @@ pub(crate) fn build_system_prompt(
     }
 
     if shell_enabled {
-        push_filesystem_boundary(&mut prompt, trigger);
+        push_filesystem_boundary(&mut prompt, trigger, sandbox_prompt_for(context).ssh);
     }
     // The memory protocol is all reads and writes of `.clai/memory/` files.
     if shell_enabled {
@@ -442,40 +445,18 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
         crate::config::ShellAccessMode::Full => "Don't ask (full)",
     };
     prompt.push_str(&format!("- Shell mode: {}\n", shell_mode));
-    let network_status = match context.execution.sandbox.network {
-        crate::config::SandboxNetworkConfig::Enabled => "network allowed",
-        crate::config::SandboxNetworkConfig::Disabled => "network disabled",
-    };
-    let sandbox_status = if cfg!(target_os = "linux") {
-        let session_bus_status = match context.execution.sandbox.session_bus {
-            crate::config::SandboxSessionBusConfig::Allow => "session bus available",
-            crate::config::SandboxSessionBusConfig::Deny => "session bus blocked",
-        };
-        format!(
-            "sandboxed shell on Linux through bubblewrap when `bash_exec` is available ({}, {})",
-            network_status, session_bus_status
-        )
-    } else if cfg!(target_os = "macos") {
-        format!(
-            "sandboxed shell on macOS through Seatbelt/sandbox-exec when `bash_exec` is available ({})",
-            network_status
-        )
-    } else {
-        // No sandbox implementation on this platform (see
-        // `assistant::sandbox::unsupported`), so the path grants are advisory
-        // there.
-        "host shell — no OS sandbox on this platform, so the path grants are NOT enforced by the kernel and the boundary below is a rule you keep yourself".to_string()
-    };
-    prompt.push_str(&format!("- Shell sandbox: {}\n", sandbox_status));
-    if cfg!(target_os = "linux")
-        && matches!(
-            context.execution.sandbox.session_bus,
-            crate::config::SandboxSessionBusConfig::Allow
-        )
-    {
-        prompt.push_str(
-            "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n",
-        );
+    let sandbox = sandbox_prompt_for(context);
+    prompt.push_str(&format!("- Shell sandbox: {}\n", sandbox.sandbox));
+    if let Some(allowlist) = &sandbox.allowlist {
+        prompt.push_str(allowlist);
+    }
+    if cfg!(target_os = "linux") {
+        let unfiltered = crate::assistant::sandbox::status().session_bus_filter_unavailable_reason;
+        if let Some(line) =
+            session_bus_line(context.execution.sandbox.session_bus, unfiltered.as_deref())
+        {
+            prompt.push_str(&line);
+        }
     }
 
     if matches!(
@@ -498,7 +479,7 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
 /// The authorization boundary and the git/SSH etiquette that goes with it.
 /// Both describe how to behave *while running commands*, so they are
 /// omitted for agents without a shell.
-fn push_filesystem_boundary(prompt: &mut String, trigger: &RunTrigger) {
+fn push_filesystem_boundary(prompt: &mut String, trigger: &RunTrigger, ssh: Option<&str>) {
     prompt.push_str(
         "\n## Filesystem boundary\n\
          The path grants listed above are the ONLY locations you are authorized to read, write, or operate against. On Linux and macOS, `bash_exec` runs inside an OS sandbox that allows only the workspace, configured path grants, and required platform system files; if the sandbox is unavailable, `bash_exec` fails closed. On platforms with no sandbox implementation, `bash_exec` is labeled as a host shell: nothing outside this paragraph stops you from reaching an ungranted path, so treat these rules as the boundary itself.\n\
@@ -532,10 +513,121 @@ fn push_filesystem_boundary(prompt: &mut String, trigger: &RunTrigger) {
             "         - If GH007 blocks a push, use `ask_user` with the rejection detail.\n",
         );
     }
-    if cfg!(target_os = "linux") {
-        prompt.push_str(
-            "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh`, so OpenSSH only consults `~/.ssh/config` and its built-in defaults. You do not need `-F /dev/null` workarounds; if you see `Bad owner or permissions` from ssh, the cause is something else (likely an explicit `-F` pointing at an unreadable path).\n",
-        );
+    if let Some(ssh) = ssh {
+        prompt.push_str(ssh);
+    }
+}
+
+/// What the shell sandbox and the network mode mean for the agent on one
+/// platform: `backend` is the sandbox, `None` a PC whose shell runs on the
+/// host. Modes go by the names agent settings show.
+struct SandboxPrompt {
+    /// The text of the `- Shell sandbox:` line.
+    sandbox: String,
+    /// How to work in Allowlist, where the shell is in it.
+    allowlist: Option<String>,
+    /// How ssh is configured inside the sandbox, for the git section.
+    ssh: Option<&'static str>,
+}
+
+const SSH_HOME_CONFIG_ONLY: &str = "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh`, so OpenSSH only consults `~/.ssh/config` and its built-in defaults. You do not need `-F /dev/null` workarounds; if you see `Bad owner or permissions` from ssh, the cause is something else (likely an explicit `-F` pointing at an unreadable path).\n";
+
+const SSH_THROUGH_PROXY: &str = "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh` and binds a CLAI-written `/etc/ssh/ssh_config` there that sends ssh (and git, scp and rsync over ssh) through the network proxy, so ssh to an allowed host works. `~/.ssh/config` is read first: a `ProxyCommand` or `ProxyJump` there overrides CLAI's and then fails inside the sandbox. You do not need `-F /dev/null` workarounds.\n";
+
+/// What the shell's session bus offers on Linux. Keyring only where the bus
+/// cannot be filtered is no bus: `unfiltered` says why and how to get one.
+fn session_bus_line(
+    bus: crate::config::SandboxSessionBusConfig,
+    unfiltered: Option<&str>,
+) -> Option<String> {
+    use crate::config::SandboxSessionBusConfig;
+    match (bus, unfiltered) {
+        (SandboxSessionBusConfig::Deny, _) => None,
+        (SandboxSessionBusConfig::KeyringOnly, Some(note)) => {
+            Some(format!("- No session bus in shell commands. {note}\n"))
+        }
+        _ => Some(
+            "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n"
+                .to_string(),
+        ),
+    }
+}
+
+fn sandbox_prompt_for(context: &RunContext) -> SandboxPrompt {
+    sandbox_prompt(
+        crate::assistant::sandbox::status().backend,
+        &context.execution.sandbox.network_access,
+        context.execution.sandbox.session_bus,
+    )
+}
+
+fn sandbox_prompt(
+    backend: Option<crate::assistant::sandbox::SandboxBackend>,
+    network: &crate::config::NetworkPolicy,
+    session_bus: crate::config::SandboxSessionBusConfig,
+) -> SandboxPrompt {
+    use crate::assistant::sandbox::SandboxBackend;
+    use crate::config::NetworkMode;
+    let mode = match network.mode {
+        NetworkMode::Off => "Off",
+        NetworkMode::Allowlist => "Allowlist",
+        NetworkMode::HostNetwork => "Host network (unfiltered)",
+    };
+    let unenforced = "Allowlist, which cannot be enforced for shell commands here yet, so `bash_exec` refuses to run until the user chooses Off or Host network";
+    match backend {
+        Some(SandboxBackend::Bubblewrap) => {
+            let bus = match session_bus {
+                crate::config::SandboxSessionBusConfig::Full => "session bus available",
+                crate::config::SandboxSessionBusConfig::KeyringOnly => "session bus: keyring only",
+                crate::config::SandboxSessionBusConfig::Deny => "session bus blocked",
+            };
+            let in_allowlist = network.mode == NetworkMode::Allowlist;
+            SandboxPrompt {
+                sandbox: format!(
+                    "sandboxed shell on Linux through bubblewrap when `bash_exec` is available (network: {mode}, {bus})"
+                ),
+                allowlist: in_allowlist.then(|| format!(
+                    "- Network allowlist: shell commands and `web_fetch` reach only the hosts matching the {} entries on this agent's allowlist and any the user allows during this run. Shell traffic goes through CLAI's network proxy: `HTTP_PROXY` and `HTTPS_PROXY` are set, so tools that honour them work; DNS lookups fail inside the sandbox and tools that ignore the proxy variables cannot connect. An unlisted host fails with a 403 or a refused connection, and the `bash_exec` result names it under `network.refused`. When the task needs such a host, call `net_request_access` with the host and the reason; do not look for a way around the proxy. `localhost` inside the sandbox is reachable directly. The proxy never connects to loopback or link-local addresses, so services that listen only on the host computer's loopback are not reachable, while a listed host that resolves to a private local-network address is reachable from shell commands (`web_fetch` refuses every non-public address).\n",
+                    network.allow_domains.len()
+                )),
+                ssh: Some(if in_allowlist {
+                    SSH_THROUGH_PROXY
+                } else {
+                    SSH_HOME_CONFIG_ONLY
+                }),
+            }
+        }
+        Some(SandboxBackend::Seatbelt) => {
+            let network = match network.mode {
+                NetworkMode::Allowlist => unenforced,
+                _ => mode,
+            };
+            SandboxPrompt {
+                sandbox: format!(
+                    "sandboxed shell on macOS through Seatbelt/sandbox-exec when `bash_exec` is available (network: {network})"
+                ),
+                allowlist: None,
+                ssh: None,
+            }
+        }
+        // No sandbox implementation on this platform (see
+        // `assistant::sandbox::unsupported`), so the path grants are advisory
+        // there and the network mode reaches the web tools only.
+        None => {
+            let network = match network.mode {
+                NetworkMode::Allowlist => unenforced.to_string(),
+                _ => format!(
+                    "{mode}, which applies to `web_search` and `web_fetch` only; shell commands are not network-restricted"
+                ),
+            };
+            SandboxPrompt {
+                sandbox: format!(
+                    "host shell — no OS sandbox on this platform, so the path grants are NOT enforced by the kernel and the boundary below is a rule you keep yourself (network: {network})"
+                ),
+                allowlist: None,
+                ssh: None,
+            }
+        }
     }
 }
 
@@ -1383,6 +1475,87 @@ mod tests {
             assert!(text.contains("Treat memory as fallible working notes"));
             assert!(text.contains("Do not store secrets in memory"));
             assert!(text.contains("Knowledge is not a dashboard"));
+        }
+    }
+    #[test]
+    fn a_keyring_only_agent_is_told_it_has_no_bus_where_it_cannot_be_filtered() {
+        use crate::config::SandboxSessionBusConfig::{Deny, Full, KeyringOnly};
+        let note = "Keyring-only agents get no session bus here: x. Set Full.";
+        let available = |line: Option<String>| line.unwrap().contains("Session bus is available");
+        assert!(available(session_bus_line(KeyringOnly, None)));
+        assert!(available(session_bus_line(Full, Some(note))));
+        assert_eq!(
+            session_bus_line(KeyringOnly, Some(note)).as_deref(),
+            Some(format!("- No session bus in shell commands. {note}\n").as_str())
+        );
+        assert_eq!(session_bus_line(Deny, None), None);
+    }
+
+    #[test]
+    fn the_sandbox_lines_follow_the_platform_and_the_network_mode() {
+        use crate::assistant::sandbox::SandboxBackend::{self, Bubblewrap, Seatbelt};
+        use crate::config::{NetworkMode, NetworkPolicy, SandboxSessionBusConfig};
+        let platforms: [Option<SandboxBackend>; 3] = [Some(Bubblewrap), Some(Seatbelt), None];
+        for backend in platforms {
+            for mode in [
+                NetworkMode::Off,
+                NetworkMode::Allowlist,
+                NetworkMode::HostNetwork,
+            ] {
+                let network = NetworkPolicy {
+                    mode,
+                    allow_domains: vec!["github.com".to_string(), "*.npmjs.org".to_string()],
+                    deny_domains: Vec::new(),
+                };
+                let prompt = sandbox_prompt(backend, &network, SandboxSessionBusConfig::Deny);
+                let case = format!("{backend:?} {mode:?}: {}", prompt.sandbox);
+                let linux_allowlist = backend == Some(Bubblewrap) && mode == NetworkMode::Allowlist;
+
+                let name = match mode {
+                    NetworkMode::Off => "network: Off",
+                    NetworkMode::Allowlist => "network: Allowlist",
+                    NetworkMode::HostNetwork => "network: Host network (unfiltered)",
+                };
+                assert!(prompt.sandbox.contains(name), "{case}");
+                assert_eq!(
+                    prompt.sandbox.contains("refuses to run"),
+                    mode == NetworkMode::Allowlist && backend != Some(Bubblewrap),
+                    "{case}"
+                );
+                assert_eq!(
+                    prompt
+                        .sandbox
+                        .contains("applies to `web_search` and `web_fetch` only; shell commands are not network-restricted"),
+                    backend.is_none() && mode != NetworkMode::Allowlist,
+                    "{case}"
+                );
+
+                let allowlist = prompt.allowlist.unwrap_or_default();
+                assert_eq!(
+                    allowlist.contains("call `net_request_access`"),
+                    linux_allowlist,
+                    "{case}"
+                );
+                if linux_allowlist {
+                    assert!(
+                        allowlist.contains("only the hosts matching the 2 entries"),
+                        "{allowlist}"
+                    );
+                    assert!(allowlist.contains("`network.refused`"), "{allowlist}");
+                }
+
+                let ssh = prompt.ssh.unwrap_or_default();
+                assert_eq!(
+                    ssh.contains("OpenSSH only consults `~/.ssh/config`"),
+                    backend == Some(Bubblewrap) && !linux_allowlist,
+                    "{case}"
+                );
+                assert_eq!(
+                    ssh.contains("`/etc/ssh/ssh_config`"),
+                    linux_allowlist,
+                    "{case}"
+                );
+            }
         }
     }
 }

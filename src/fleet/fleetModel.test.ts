@@ -334,6 +334,7 @@ describe('the highlight feed', () => {
         tasks: [],
         pendingPermissions: [],
         pendingPathGrants: [],
+        pendingNetworkRequests: [],
         pendingAsks: [],
         lastAssistantMessage: null,
         recentMessages: [
@@ -587,6 +588,7 @@ const snapshotOf = (patch: Partial<FleetWorkspace> = {}): FleetWorkspace => ({
   tasks: [],
   pendingPermissions: [],
   pendingPathGrants: [],
+  pendingNetworkRequests: [],
   pendingAsks: [],
   lastAssistantMessage: null,
   recentMessages: [],
@@ -615,6 +617,21 @@ describe('snapshot', () => {
     expect(c.requests['ask:new']).toMatchObject({ kind: 'ask', ask: { pendingId: 'new', sessionId: MAIN }, text: '?', at: 7 });
     // A request has no timestamp of its own: it takes the workspace's activity.
     expect(c.requests['grant:g1']).toMatchObject({ at: 10 });
+  });
+
+  it('takes the network access requests of the snapshot, counted with the access requests', () => {
+    const network = { requestId: 'n1', workspaceId: WS, agentId: null, host: 'mirror.example.org', port: 443 } as never;
+    let s = seedFleet(EMPTY_FLEET, [snapshotOf({ pendingNetworkRequests: [network] })]);
+    expect(card(s).requests['network:n1']).toMatchObject({ kind: 'network', text: 'Reach mirror.example.org', at: 10 });
+    expect(cardAttention(card(s))).toMatchObject({ grants: 1, total: 1 });
+    s = applyRequestResolved(s, 'network', 'n1');
+    expect(cardAttention(card(s)).total).toBe(0);
+  });
+
+  it('names the host of a network request in Unicode, as the card and the toast do', () => {
+    const network = { requestId: 'n2', workspaceId: WS, agentId: null, host: 'xn--bcher-kva.example', port: null } as never;
+    const s = seedFleet(EMPTY_FLEET, [snapshotOf({ pendingNetworkRequests: [network] })]);
+    expect(card(s).requests['network:n2']).toMatchObject({ text: 'Reach bücher.example' });
   });
 
   it('removes cards missing from the snapshot, e.g. deleted workspaces', () => {

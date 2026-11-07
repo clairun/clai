@@ -9,6 +9,7 @@ use tauri::Manager;
 
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
 use crate::assistant::events::AssistantUiEvent;
+use crate::assistant::network::run_state::RunNetwork;
 use crate::assistant::providers;
 use crate::assistant::providers::types::{ProviderAdapter, ProviderError};
 use crate::assistant::repository;
@@ -346,6 +347,9 @@ async fn start_api_turn(
     // to subsequent tool calls through this shared context.
     let session_grants = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let run_removed_ask_first = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let run_network = Arc::new(RunNetwork::new(
+        &run_context.execution.sandbox.network_access,
+    ));
 
     // === Tool execution loop ===
     // Build system prompt (prepended to every API call, not persisted).
@@ -358,9 +362,10 @@ async fn start_api_turn(
         tool_call_id: None,
         cancel_token: input.cancel_token.clone(),
         run_context: Arc::clone(run_context),
-        had_warnings: Default::default(),
+        had_warnings: tools::run_warnings(&run_network),
         session_grants,
         run_removed_ask_first,
+        run_network,
     };
 
     // The run's conversation, read from the database once. Every row this run

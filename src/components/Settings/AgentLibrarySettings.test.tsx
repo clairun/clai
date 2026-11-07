@@ -302,6 +302,18 @@ describe('AgentLibrarySettings', () => {
     expect(screen.getByRole('radio', { name: 'Face 3' })).toBeEnabled();
   });
 
+  it('reads the library again on the way back, so a reopened agent is current', async () => {
+    await openReviewer();
+    api.listAgentDefinitions.mockResolvedValue([{ ...REVIEWER, revision: 4 }]);
+    await userEvent.click(screen.getByRole('button', { name: '‹ Agents' }));
+    await waitFor(() => expect(api.listAgentDefinitions).toHaveBeenCalledTimes(2));
+    await userEvent.click(await screen.findByRole('button', { name: /^Reviewer/ }));
+    await screen.findByRole('radio', { name: 'Current face' });
+    await userEvent.click(screen.getByRole('button', { name: 'Save agent' }));
+    await waitFor(() => expect(api.saveAgentDefinition).toHaveBeenCalledTimes(1));
+    expect(lastSave()).toMatchObject({ id: 'def-1', expectedRevision: 4 });
+  });
+
   it('archives from the editor, keeping the revision guard, and stays on the agent', async () => {
     await openReviewer();
     api.listAgentDefinitions.mockResolvedValue([{ ...REVIEWER, revision: 4, archived: true }]);

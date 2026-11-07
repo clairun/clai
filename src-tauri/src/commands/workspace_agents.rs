@@ -57,7 +57,36 @@ pub struct WorkspaceAgentUpdateRequest {
     pub provider_connection_ids: Vec<String>,
     pub execution: ExecutionCapabilityConfig,
     pub enabled: bool,
+    /// The agent's `updatedAt` when the form loaded it. The save is refused
+    /// if anything wrote the agent since, so it cannot silently revert that
+    /// write.
+    #[ts(type = "number")]
+    pub expected_updated_at: i64,
 }
+
+/// Why saving the Main failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub enum WorkspaceAgentUpdateError {
+    /// Something wrote the agent after the form loaded it: discard the edits
+    /// and load it again, do not retry.
+    Stale {
+        message: String,
+    },
+    Failed {
+        message: String,
+    },
+}
+
+impl From<String> for WorkspaceAgentUpdateError {
+    fn from(message: String) -> Self {
+        Self::Failed { message }
+    }
+}
+
+const STALE_AGENT: &str = "This agent was changed elsewhere after you opened it. Use Discard \
+     to load the latest settings; your unsaved edits here will be lost.";
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -152,7 +181,14 @@ pub async fn workspace_create_agent(
     request: WorkspaceAgentCreateRequest,
     state: State<'_, AppState>,
 ) -> Result<WorkspaceAgentDetail, String> {
-    let app_config = app_config(state.inner())?;
+    create_main_agent(state.inner(), request)
+}
+
+fn create_main_agent(
+    state: &AppState,
+    request: WorkspaceAgentCreateRequest,
+) -> Result<WorkspaceAgentDetail, String> {
+    let app_config = app_config(state)?;
     let id = request
         .id
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -161,7 +197,8 @@ pub async fn workspace_create_agent(
     // `workspace_agent_default_execution` so the user can see and remove it
     // before saving. Trust the request's execution verbatim — if the user
     // cleared all path grants on purpose, we honor that.
-    let execution = request.execution;
+    let mut execution = request.execution;
+    execution.sandbox.canonicalize()?;
 
     let now = now_millis();
     let agent = WorkspaceAgent {
@@ -208,12 +245,21 @@ pub async fn workspace_create_agent(
 pub async fn workspace_update_agent(
     request: WorkspaceAgentUpdateRequest,
     state: State<'_, AppState>,
-) -> Result<WorkspaceAgentDetail, String> {
-    let app_config = app_config(state.inner())?;
+) -> Result<WorkspaceAgentDetail, WorkspaceAgentUpdateError> {
+    update_main_agent(state.inner(), request)
+}
+
+fn update_main_agent(
+    state: &AppState,
+    mut request: WorkspaceAgentUpdateRequest,
+) -> Result<WorkspaceAgentDetail, WorkspaceAgentUpdateError> {
+    request.execution.sandbox.canonicalize()?;
+    let app_config = app_config(state)?;
     let now = now_millis();
     let agent_id = request.agent_id.clone();
     let workspace_id = request.workspace_id.clone();
-    let ((), config) = state.update_workspace_config(&workspace_id, |config| {
+    let mut stale = false;
+    let updated = state.update_workspace_config(&workspace_id, |config| {
         if config.assignment(&request.agent_id).is_some() {
             return Err(
                 "This agent's behavior is shared. Edit it in the agent library, or change its local context and access in the workspace's Team settings."
@@ -227,6 +273,10 @@ pub async fn workspace_update_agent(
         else {
             return Err(format!("Workspace agent not found: {}", request.agent_id));
         };
+        if agent.updated_at != request.expected_updated_at {
+            stale = true;
+            return Err(STALE_AGENT.to_string());
+        }
 
         agent.name = request.name;
         agent.description = request.description;
@@ -241,9 +291,16 @@ pub async fn workspace_update_agent(
         agent.provider_connection_ids = request.provider_connection_ids;
         agent.execution = request.execution;
         agent.enabled = request.enabled;
-        agent.updated_at = now;
+        agent.touch(now);
         config.updated_at = now;
         Ok(())
+    });
+    let ((), config) = updated.map_err(|message| {
+        if stale {
+            WorkspaceAgentUpdateError::Stale { message }
+        } else {
+            WorkspaceAgentUpdateError::Failed { message }
+        }
     })?;
 
     let saved = config
@@ -318,7 +375,7 @@ pub async fn workspace_set_agent_enabled(
             return Err(format!("Workspace agent not found: {}", agent_id));
         };
         agent.enabled = request.enabled;
-        agent.updated_at = now;
+        agent.touch(now);
         config.updated_at = now;
         Ok(())
     })?;
@@ -406,6 +463,216 @@ mod stored_agent_tests {
         assert_eq!(detail.id, ASSIGNMENT_ID, "addressed by the local identity");
         assert_eq!(detail.name, "Reviewer", "behavior comes from the library");
         assert!(!detail.is_default);
+    }
+
+    fn update_request(fixture: &Fixture) -> WorkspaceAgentUpdateRequest {
+        let main = fixture.config().main_agent.expect("main");
+        WorkspaceAgentUpdateRequest {
+            workspace_id: WORKSPACE_ID.to_string(),
+            agent_id: main.id.clone(),
+            name: main.name.clone(),
+            description: "edited".to_string(),
+            selected_skill_ids: Vec::new(),
+            selected_mcp_server_ids: Vec::new(),
+            provider_connection_ids: Vec::new(),
+            execution: main.execution.clone(),
+            enabled: true,
+            expected_updated_at: main.updated_at,
+        }
+    }
+
+    #[test]
+    fn a_save_from_a_form_opened_before_an_always_approval_is_refused() {
+        let fixture = Fixture::new();
+        let opened = update_request(&fixture);
+        assert!(fixture
+            .config()
+            .main_agent
+            .unwrap()
+            .execution
+            .shell
+            .ask_first_command_prefixes
+            .contains(&"git push".to_string()));
+
+        // "Always" on an ask-first card, saved while the form is open.
+        crate::commands::permissions::persist_always_allow(
+            &fixture.state,
+            WORKSPACE_ID,
+            MAIN_ID,
+            &["git push".to_string()],
+        )
+        .expect("approval saved");
+
+        let error = update_main_agent(&fixture.state, opened).expect_err("stale");
+        assert!(
+            matches!(&error, WorkspaceAgentUpdateError::Stale { message } if message.contains("Use Discard")),
+            "{error:?}"
+        );
+        let stored = fixture.config().main_agent.unwrap();
+        assert_ne!(stored.description, "edited");
+        assert!(!stored
+            .execution
+            .shell
+            .ask_first_command_prefixes
+            .contains(&"git push".to_string()));
+
+        // Reloaded, the same edit saves and keeps the approval.
+        let saved = update_main_agent(&fixture.state, update_request(&fixture)).expect("fresh");
+        assert_eq!(saved.description, "edited");
+        assert!(!saved
+            .execution
+            .shell
+            .ask_first_command_prefixes
+            .contains(&"git push".to_string()));
+    }
+
+    #[test]
+    fn a_save_from_a_form_opened_before_a_network_always_is_refused() {
+        let fixture = Fixture::new();
+        let opened = update_request(&fixture);
+        let listed = |agent: &crate::config::WorkspaceAgent| {
+            agent
+                .execution
+                .sandbox
+                .network_access
+                .allow_domains
+                .contains(&"mirror.example.org".to_string())
+        };
+
+        // “Always for Manager” on a network card, saved while the form is open.
+        crate::commands::network_access::persist_network_allow(
+            &fixture.state,
+            WORKSPACE_ID,
+            MAIN_ID,
+            "mirror.example.org",
+        )
+        .expect("approval saved");
+
+        let error = update_main_agent(&fixture.state, opened).expect_err("stale");
+        assert!(
+            matches!(&error, WorkspaceAgentUpdateError::Stale { .. }),
+            "{error:?}"
+        );
+        let stored = fixture.config().main_agent.unwrap();
+        assert_ne!(stored.description, "edited");
+        assert!(listed(&stored), "the saved host survives");
+
+        let saved = update_main_agent(&fixture.state, update_request(&fixture)).expect("fresh");
+        assert!(saved
+            .execution
+            .sandbox
+            .network_access
+            .allow_domains
+            .contains(&"mirror.example.org".to_string()));
+    }
+
+    #[test]
+    fn a_write_in_the_same_millisecond_as_a_save_makes_that_save_stale() {
+        let fixture = Fixture::new();
+        let saved = update_main_agent(&fixture.state, update_request(&fixture)).expect("save");
+        fixture
+            .state
+            .update_workspace_config(WORKSPACE_ID, |config| {
+                let main = config.main_agent.as_mut().expect("main");
+                main.description = "written elsewhere".to_string();
+                main.touch(saved.updated_at);
+                Ok(())
+            })
+            .expect("other write");
+
+        let mut from_the_form = update_request(&fixture);
+        from_the_form.expected_updated_at = saved.updated_at;
+        let error = update_main_agent(&fixture.state, from_the_form).expect_err("stale");
+        assert!(
+            matches!(error, WorkspaceAgentUpdateError::Stale { .. }),
+            "{error:?}"
+        );
+        let stored = fixture.config().main_agent.expect("main");
+        assert_eq!(stored.description, "written elsewhere");
+    }
+
+    #[test]
+    fn creating_the_main_with_an_invalid_host_entry_is_refused_naming_it() {
+        let fixture = Fixture::new();
+        fixture
+            .state
+            .update_workspace_config(WORKSPACE_ID, |config| {
+                config.main_agent = None;
+                Ok(())
+            })
+            .expect("drop the main");
+        let request = |allow: &str| WorkspaceAgentCreateRequest {
+            workspace_id: WORKSPACE_ID.to_string(),
+            name: "Manager".to_string(),
+            description: String::new(),
+            selected_skill_ids: Vec::new(),
+            selected_mcp_server_ids: Vec::new(),
+            provider_connection_ids: Vec::new(),
+            execution: {
+                let mut execution = ExecutionCapabilityConfig::default();
+                execution.sandbox.network_access.mode = crate::config::NetworkMode::Allowlist;
+                execution.sandbox.network_access.allow_domains = vec![allow.to_string()];
+                execution
+            },
+            enabled: true,
+            id: None,
+        };
+
+        let error =
+            create_main_agent(&fixture.state, request("git@github.com")).expect_err("refused");
+        assert!(error.contains("`git@github.com`"), "{error}");
+        assert!(fixture.config().main_agent.is_none());
+
+        create_main_agent(&fixture.state, request("Bücher.example")).expect("valid create");
+        let main = fixture.config().main_agent.expect("created");
+        assert_eq!(
+            main.execution.sandbox.network_access.allow_domains,
+            ["xn--bcher-kva.example"]
+        );
+    }
+
+    #[test]
+    fn saving_the_main_with_an_invalid_host_entry_in_allowlist_is_refused_naming_it() {
+        use crate::config::NetworkMode;
+        let fixture = Fixture::new();
+        let invalid = |mode| {
+            let mut request = update_request(&fixture);
+            let network = &mut request.execution.sandbox.network_access;
+            network.mode = mode;
+            network.deny_domains.push("*.0.0.5".to_string());
+            request
+        };
+        let error = update_main_agent(&fixture.state, invalid(NetworkMode::Allowlist))
+            .expect_err("refused");
+        assert!(
+            matches!(&error, WorkspaceAgentUpdateError::Failed { message } if message.contains("Denied hosts: `*.0.0.5`")),
+            "{error:?}"
+        );
+        assert_ne!(fixture.config().main_agent.unwrap().description, "edited");
+
+        // Switching to Host network saves, and keeps the entry for the user
+        // to fix when they come back to Allowlist.
+        update_main_agent(&fixture.state, invalid(NetworkMode::HostNetwork))
+            .expect("saved in Host network");
+        let main = fixture.config().main_agent.unwrap();
+        assert_eq!(main.description, "edited");
+        assert!(main
+            .execution
+            .sandbox
+            .network_access
+            .deny_domains
+            .contains(&"*.0.0.5".to_string()));
+
+        let mut request = update_request(&fixture);
+        request.execution.sandbox.network_access.mode = NetworkMode::Allowlist;
+        request.execution.sandbox.network_access.deny_domains = vec!["Bücher.example".to_string()];
+        update_main_agent(&fixture.state, request).expect("valid save");
+        let main = fixture.config().main_agent.unwrap();
+        assert_eq!(main.description, "edited");
+        assert_eq!(
+            main.execution.sandbox.network_access.deny_domains,
+            ["xn--bcher-kva.example"]
+        );
     }
 
     #[test]

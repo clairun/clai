@@ -67,6 +67,7 @@ fn compact_input(tool_name: &str, input: &Value) -> Value {
         "bash_exec" => "command",
         "web_search" => "query",
         "web_fetch" => "url",
+        "net_request_access" => "host",
         "ask_user" => "question",
         "create_vega_chart" => "title",
         "workspace_sendTaskMessage" => "message",

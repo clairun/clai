@@ -14,6 +14,7 @@ use crate::assistant::tools::ask_user::{self, PendingAsk};
 use crate::assistant::types::{AgentRefSnapshot, AssistantMessage, AssistantRun, ContentPart};
 use crate::assistant::workspace_agents::{agent_display_names, load_workspace_agent_rows};
 use crate::assistant::workspace_tasks_repo::{self, WorkspaceTaskResponse};
+use crate::commands::network_access::NetworkAccessRequest;
 use crate::commands::path_grants::PathGrantRequest;
 use crate::commands::permissions::PermissionRequest;
 use crate::db::DbPool;
@@ -52,6 +53,7 @@ pub struct FleetWorkspace {
     pub tasks: Vec<WorkspaceTaskResponse>,
     pub pending_permissions: Vec<PermissionRequest>,
     pub pending_path_grants: Vec<PathGrantRequest>,
+    pub pending_network_requests: Vec<NetworkAccessRequest>,
     pub pending_asks: Vec<PendingAsk>,
     /// The main session's newest assistant reply with text.
     pub last_assistant_message: Option<FleetHighlight>,
@@ -200,9 +202,11 @@ async fn snapshot(
     // surface the request. So does the selected one, however old.
     let approvals = state.pending_approvals.counts_snapshot().await;
     let path_grants = state.pending_path_grants.counts_snapshot().await;
+    let network_requests = state.pending_network_requests.counts_snapshot().await;
     let waits = |id: &str| {
         approvals.contains_key(id)
             || path_grants.contains_key(id)
+            || network_requests.contains_key(id)
             || !ask_user::pending_for_workspace(id).is_empty()
     };
     let older = ranked.split_off(limit.min(ranked.len()));
@@ -271,6 +275,10 @@ async fn workspace_snapshot(
             .await,
         pending_path_grants: state
             .pending_path_grants
+            .list_for_workspace(&locator.id)
+            .await,
+        pending_network_requests: state
+            .pending_network_requests
             .list_for_workspace(&locator.id)
             .await,
         pending_asks: ask_user::pending_for_workspace(&locator.id),
@@ -714,6 +722,30 @@ mod tests {
         assert_eq!(top.len(), 2);
         assert_eq!(top[1].workspace_id, WAITING);
         assert_eq!(top[1].pending_path_grants.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn pending_network_request_keeps_workspace_past_limit() {
+        const WAITING: &str = "88888888-8888-4888-8888-888888888888";
+        let temp = tempfile::tempdir().expect("temp dir");
+        let state = busy_and(WAITING, &temp).await;
+        let request = NetworkAccessRequest::for_agent(
+            &state,
+            Some(WAITING.to_string()),
+            None,
+            "mirror.example.org".to_string(),
+            Some(443),
+            String::new(),
+            Vec::new(),
+        );
+        let _waiting = state
+            .pending_network_requests
+            .register(request, "run".to_string())
+            .await;
+        let top = snapshot(&state, Some(1), None).await.expect("snapshot");
+        assert_eq!(top.len(), 2);
+        assert_eq!(top[1].workspace_id, WAITING);
+        assert_eq!(top[1].pending_network_requests.len(), 1);
     }
 
     #[tokio::test]

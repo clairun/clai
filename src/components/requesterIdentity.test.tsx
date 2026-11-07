@@ -7,11 +7,13 @@ vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(() => Promise.resolve(()
 
 import InlineApprovalCard, { ApprovalCard } from './InlineApprovalCard';
 import InlinePathGrantCard from './InlinePathGrantCard';
+import InlineNetworkAccessCard from './InlineNetworkAccessCard';
 import AskUserPanel from './AskUserPanel/AskUserPanel';
 import AgentAvatar from './Agents/AgentAvatar';
 import { identityFor } from './Agents/agentIdentity';
 import { rosterAgent } from './AssistantChat/messageSender';
 import type {
+  NetworkAccessRequest,
   PathGrantRequest,
   PermissionRequest,
   WorkspaceAgentResponse,
@@ -72,15 +74,35 @@ const faceOf = (scope: HTMLElement) => scope.querySelector('[data-activity]');
 const svgOf = (agent: Parameters<typeof identityFor>[0]) =>
   render(<AgentAvatar identity={identityFor(agent)} size={18} />).container.querySelector('span')?.innerHTML;
 
+const network = (agentId: string | null): NetworkAccessRequest => ({
+  requestId: `net-${agentId}`,
+  workspaceId: 'ws-1',
+  agentId,
+  agentName: null,
+  host: 'mirror.example.org',
+  port: 443,
+  reason: 'Download a fixture',
+  runHosts: [],
+  suggestedWildcard: null,
+  persistsToSharedAgent: false,
+  alsoAffectsWorkspaces: [],
+});
+
 // Seed each card from the backend's pending list, as a reload would.
-const pending = (requests: { permissions?: PermissionRequest[]; grants?: PathGrantRequest[] }) =>
+const pending = (requests: {
+  permissions?: PermissionRequest[];
+  grants?: PathGrantRequest[];
+  network?: NetworkAccessRequest[];
+}) =>
   mockInvoke.mockImplementation((command: string) =>
     Promise.resolve(
       command === 'list_pending_permission_requests'
         ? (requests.permissions ?? [])
         : command === 'list_pending_path_grant_requests'
           ? (requests.grants ?? [])
-          : undefined
+          : command === 'list_pending_network_access_requests'
+            ? (requests.network ?? [])
+            : undefined
     )
   );
 
@@ -170,6 +192,27 @@ describe('a path grant names the agent that asked', () => {
     const card = await screen.findByRole('article', { name: 'Path grant requested' });
     expect(faceOf(card)).toBeNull();
     expect(card).toHaveTextContent('An agent wants to extend its filesystem grants:');
+  });
+});
+
+describe('a network request names the agent that asked', () => {
+  it("draws the asking agent's face and name, and says it in the announcement", async () => {
+    pending({ network: [network('wa-rust')] });
+    render(<InlineNetworkAccessCard workspaceId="ws-1" roster={roster} />);
+
+    const card = await screen.findByRole('article', { name: 'Network access requested by Rust Architect' });
+    expect(faceOf(card)?.innerHTML).toBe(svgOf(RUST));
+    expect(card).toHaveTextContent('Rust Architect wants network access:');
+    expect(screen.getByRole('status')).toHaveTextContent('Rust Architect wants network access to mirror.example.org:443.');
+  });
+
+  it('falls back to the plain subtitle, with no face, when the agent is unknown', async () => {
+    pending({ network: [network(null)] });
+    render(<InlineNetworkAccessCard workspaceId="ws-1" roster={roster} />);
+
+    const card = await screen.findByRole('article', { name: 'Network access requested' });
+    expect(faceOf(card)).toBeNull();
+    expect(card).toHaveTextContent('An agent wants network access:');
   });
 });
 

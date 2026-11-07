@@ -1,10 +1,10 @@
 /**
- * Small editable lists used by several settings pages: path grants and
- * command prefixes. Each is a bounded list plus one add row; the list
+ * Small editable lists used by several settings pages: path grants,
+ * command prefixes and host names. Each is a bounded list plus one add row; the list
  * scrolls inside its panel if it ever outgrows it, the page never does.
  */
 
-import { useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import styles from './SettingsForm.module.css';
 
 export interface GrantLike {
@@ -17,6 +17,7 @@ export function PathGrantEditor<T extends GrantLike>({
   onChange,
   make,
   describe,
+  warning,
   disabled,
   label = 'Path grants',
   placeholder = '/home/user/project',
@@ -27,6 +28,8 @@ export function PathGrantEditor<T extends GrantLike>({
   make: (path: string, access: 'read_only' | 'read_write') => T;
   /** Optional provenance shown next to each grant (Manual, Preset, Approved …). */
   describe?: (grant: T) => { text: string; title?: string } | null;
+  /** Optional warning drawn under a grant. It informs; the grant stays. */
+  warning?: (grant: T) => string | null;
   disabled?: boolean;
   /** Accessible name of the list and the add row. */
   label?: string;
@@ -52,8 +55,9 @@ export function PathGrantEditor<T extends GrantLike>({
           {grants.map((grant) => {
             const origin = describe?.(grant);
             const write = grant.access === 'read_write';
+            const note = warning?.(grant);
             return (
-              <li key={grant.path} className={styles.listItem}>
+              <li key={grant.path} className={note ? `${styles.listItem} ${styles.listItemWarned}` : styles.listItem}>
                 <span className={styles.listItemText} title={grant.path}>{grant.path}</span>
                 {origin && <span className={styles.tag} title={origin.title}>{origin.text}</span>}
                 <span className={`${styles.tag} ${write ? styles.tagWrite : ''}`}>
@@ -68,6 +72,7 @@ export function PathGrantEditor<T extends GrantLike>({
                 >
                   ×
                 </button>
+                {note && <p className={`${styles.hintWarning} ${styles.listItemNote}`}>{note}</p>}
               </li>
             );
           })}
@@ -108,12 +113,17 @@ export function PathGrantEditor<T extends GrantLike>({
   );
 }
 
+// Rules match single-spaced command words, so `git  push` would never match.
+const singleSpaced = (raw: string): string => raw.trim().split(/\s+/).join(' ');
+
 export const PrefixListEditor = ({
   items,
   onChange,
   disabled,
   label,
   placeholder,
+  parse = singleSpaced,
+  display = (item: string) => item,
 }: {
   items: string[];
   onChange: (next: string[]) => void;
@@ -121,14 +131,42 @@ export const PrefixListEditor = ({
   /** Accessible name of the list, e.g. "Ask-first command prefixes". */
   label: string;
   placeholder: string;
+  /** Turns what was typed into an entry, or says why it is not one. */
+  parse?: (raw: string) => string | { error: string };
+  /** How an entry reads, when that differs from how it is stored. */
+  display?: (item: string) => string;
 }) => {
   const [draft, setDraft] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const errorId = useId();
+  const list = useRef<HTMLUListElement>(null);
+  // The entry just added, scrolled into view once it arrives in `items`.
+  const added = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!added.current) return;
+    const item = Array.from(list.current?.children ?? []).find(
+      (child) => (child as HTMLElement).dataset.item === added.current,
+    );
+    added.current = null;
+    item?.scrollIntoView?.({ block: 'nearest' });
+  }, [items]);
 
   const add = () => {
-    // Rules match single-spaced command words, so `git  push` would never match.
-    const value = draft.trim().split(/\s+/).join(' ');
-    if (value && !items.includes(value)) onChange([...items, value]);
+    if (!draft.trim()) return;
+    const parsed = parse(draft);
+    if (typeof parsed !== 'string') {
+      setError(parsed.error);
+      return;
+    }
     setDraft('');
+    if (!parsed) return;
+    if (items.includes(parsed)) {
+      setError(`${display(parsed)} is already in the list.`);
+      return;
+    }
+    added.current = parsed;
+    onChange([...items, parsed]);
   };
 
   return (
@@ -136,21 +174,29 @@ export const PrefixListEditor = ({
       {items.length === 0 ? (
         <p className={styles.listEmpty}>None.</p>
       ) : (
-        <ul className={styles.list} aria-label={label}>
-          {items.map((item) => (
-            <li key={item} className={styles.listItem}>
-              <span className={styles.listItemText}>{item}</span>
-              <button
-                type="button"
-                className={styles.removeButton}
-                onClick={() => onChange(items.filter((other) => other !== item))}
-                disabled={disabled}
-                aria-label={`Remove ${item}`}
-              >
-                ×
-              </button>
-            </li>
-          ))}
+        <ul className={styles.list} aria-label={label} ref={list}>
+          {items.map((item) => {
+            // Only a hand edit stores an entry that does not parse.
+            const parsed = parse(item);
+            const invalid = typeof parsed === 'string' ? null : parsed.error;
+            return (
+              <li key={item} className={styles.listItem} data-item={item}>
+                <span className={styles.listItemText} title={display(item) === item ? undefined : item}>
+                  {display(item)}
+                </span>
+                {invalid && <span className={styles.hintWarning}>Not valid: {invalid}</span>}
+                <button
+                  type="button"
+                  className={styles.removeButton}
+                  onClick={() => onChange(items.filter((other) => other !== item))}
+                  disabled={disabled}
+                  aria-label={`Remove ${display(item)}`}
+                >
+                  ×
+                </button>
+              </li>
+            );
+          })}
         </ul>
       )}
       <div className={styles.addRow}>
@@ -158,9 +204,11 @@ export const PrefixListEditor = ({
           type="text"
           className={`${styles.input} ${styles.mono}`}
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => { setDraft(e.target.value); setError(null); }}
           placeholder={placeholder}
           aria-label={`New entry for ${label.toLowerCase()}`}
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? errorId : undefined}
           disabled={disabled}
           spellCheck={false}
           onKeyDown={(e) => {
@@ -174,6 +222,7 @@ export const PrefixListEditor = ({
           Add
         </button>
       </div>
+      {error && <p className={styles.hintWarning} role="alert" id={errorId}>{error}</p>}
     </>
   );
 };
