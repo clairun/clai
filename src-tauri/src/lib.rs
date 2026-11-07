@@ -383,14 +383,21 @@ pub fn run() {
     };
 
     // Build and run the Tauri application
-    tauri::Builder::default()
-        // Register Tauri plugins. Single-instance goes first: a second launch
-        // must exit before any other setup runs, and above all before the
-        // setup hook opens the workspace databases, whose restart recovery
-        // would mark this instance's live runs failed and its tasks stopped.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    let builder = tauri::Builder::default();
+    // Register Tauri plugins. Single-instance goes first: a second launch
+    // must exit before any other setup runs, and above all before the setup
+    // hook opens the workspace databases, whose restart recovery would mark
+    // this instance's live runs failed and its tasks stopped. A custom
+    // `CLAI_HOME` has its own config and databases, so it skips the check
+    // and runs alongside.
+    let builder = if paths::uses_default_home() {
+        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             main_window::show_main_window(app);
         }))
+    } else {
+        builder
+    };
+    builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())

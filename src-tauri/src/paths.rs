@@ -1,3 +1,4 @@
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -31,11 +32,20 @@ pub(crate) fn real_home() -> Option<PathBuf> {
 }
 
 pub fn clai_home() -> PathBuf {
-    std::env::var_os("CLAI_HOME")
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
+    custom_home(std::env::var_os("CLAI_HOME"))
         .or_else(|| real_home().map(|home| home.join(".clai")))
         .unwrap_or_else(|| PathBuf::from(".clai"))
+}
+
+/// Whether this process uses the CLAI home that every instance shares by
+/// default, rather than one of its own set through `CLAI_HOME`.
+pub fn uses_default_home() -> bool {
+    custom_home(std::env::var_os("CLAI_HOME")).is_none()
+}
+
+/// The home a `CLAI_HOME` value sets: unset and empty both mean the default.
+fn custom_home(value: Option<OsString>) -> Option<PathBuf> {
+    value.filter(|value| !value.is_empty()).map(PathBuf::from)
 }
 
 pub fn clai_skills_root() -> PathBuf {
@@ -70,6 +80,16 @@ pub fn expand_tilde(path: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn custom_home_needs_a_non_empty_clai_home() {
+        assert_eq!(custom_home(None), None);
+        assert_eq!(custom_home(Some(OsString::new())), None);
+        assert_eq!(
+            custom_home(Some(OsString::from("/tmp/dev"))),
+            Some(PathBuf::from("/tmp/dev"))
+        );
+    }
 
     #[test]
     fn expand_tilde_passes_absolute_and_relative_through() {
