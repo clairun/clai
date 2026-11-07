@@ -33,9 +33,15 @@ import styles from './FleetLayout.module.css';
 const REFRESH_INTERVAL_MS = 5000;
 const OPTIMISTIC_RUN_TTL_MS = 12000;
 const COLLAPSED_KEY = 'fleet.rail.collapsed';
-// Below this window width the rail shows as icons whatever the saved
-// preference, leaving the room to the workspace.
-const NARROW_WINDOW_QUERY = '(max-width: 899.98px)';
+// Up to this window width the rail shows as icons whatever the saved
+// preference, leaving the room to the workspace. It is the widest window
+// whose expanded-rail pane would open the side panels as sheets: the
+// sheet breakpoint (810, Workspace.module.css) + the expanded rail (248)
+// + the page padding (2 * 24) = 1106. Collapsing from there keeps the
+// panels beside the chat until the collapsed-rail pane reaches 810, so a
+// shrinking window turns them into sheets once instead of back and forth.
+// scripts/workspaceSheetBreakpoint.test.mjs checks the sum.
+const NARROW_WINDOW_QUERY = '(max-width: 1106px)';
 
 /**
  * Shared via `<Outlet context={...}>` so the nested Workspace view can read

@@ -374,8 +374,8 @@ describe('FleetLayout rail in a narrow window', () => {
   // A window whose width the test sets; matchMedia evaluates its width
   // query against it on every call and notifies its listeners on a resize,
   // as the browser does.
-  const WIDE = 900;
-  const NARROW = 899;
+  const WIDE = 1107;
+  const NARROW = 1106;
   const media = { width: WIDE, listeners: new Set<() => void>() };
   const originalMatchMedia = window.matchMedia;
   const matchesWidth = (query: string) => {
