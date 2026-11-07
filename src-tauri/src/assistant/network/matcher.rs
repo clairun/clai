@@ -381,7 +381,7 @@ fn labels_match(entry: &[&str], host: &[&str]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::network::default_lists::{DEFAULT_ALLOW_DOMAINS, DEFAULT_DENY_DOMAINS};
+    use crate::assistant::network::default_lists::DEFAULT_ALLOW_DOMAINS;
     use HostDecision::{Allowed, Unlisted};
 
     fn decide(allow: &[&str], deny: &[&str], host: &str) -> HostDecision {
@@ -389,7 +389,7 @@ mod tests {
     }
 
     fn with_defaults(host: &str) -> HostDecision {
-        decide(DEFAULT_ALLOW_DOMAINS, DEFAULT_DENY_DOMAINS, host)
+        decide(DEFAULT_ALLOW_DOMAINS, &[], host)
     }
 
     fn denied(entry: &str) -> HostDecision {
@@ -407,26 +407,15 @@ mod tests {
             ("crates.io", Allowed),
             ("index.crates.io", Allowed),
             ("generativelanguage.googleapis.com", Allowed),
-            // No whole-provider wildcard: other cloud hosts are asked for.
+            // No whole-provider wildcard: other cloud hosts, storage and
+            // API gateways included, are asked for.
             ("ec2.us-east-1.amazonaws.com", Unlisted),
-            (
-                "abc123.execute-api.us-east-1.amazonaws.com",
-                denied("*.execute-api.*.amazonaws.com"),
-            ),
+            ("abc123.execute-api.us-east-1.amazonaws.com", Unlisted),
             ("www.googleapis.com", Unlisted),
-            ("s3-us-west-2.amazonaws.com", Unlisted),
-            ("s3.amazonaws.com", denied("s3.amazonaws.com")),
-            ("bucket.s3.amazonaws.com", denied("*.s3.amazonaws.com")),
-            ("s3.us-east-1.amazonaws.com", denied("s3.*.amazonaws.com")),
-            (
-                "bucket.s3.us-east-1.amazonaws.com",
-                denied("*.s3.*.amazonaws.com"),
-            ),
-            ("storage.googleapis.com", denied("storage.googleapis.com")),
-            (
-                "bucket.storage.googleapis.com",
-                denied("*.storage.googleapis.com"),
-            ),
+            ("s3.amazonaws.com", Unlisted),
+            ("bucket.s3.amazonaws.com", Unlisted),
+            ("bucket.s3.us-east-1.amazonaws.com", Unlisted),
+            ("bucket.storage.googleapis.com", Unlisted),
             ("example.org", Unlisted),
             ("evilgithub.com", Unlisted),
             ("github.com.evil.org", Unlisted),
@@ -436,77 +425,10 @@ mod tests {
         }
     }
 
-    /// A user who adds a whole provider still cannot reach the storage
-    /// endpoints the deny list names (best effort, see its doc).
-    #[test]
-    fn the_default_deny_list_covers_s3_and_gcs_under_a_broad_allow_entry() {
-        let allow = ["*.amazonaws.com", "*.googleapis.com"];
-        for (host, entry) in [
-            ("s3.amazonaws.com", "s3.amazonaws.com"),
-            ("bucket.s3.amazonaws.com", "*.s3.amazonaws.com"),
-            ("s3.us-east-1.amazonaws.com", "s3.*.amazonaws.com"),
-            ("bucket.s3.us-east-1.amazonaws.com", "*.s3.*.amazonaws.com"),
-            (
-                "s3.dualstack.us-east-1.amazonaws.com",
-                "s3.dualstack.*.amazonaws.com",
-            ),
-            (
-                "bucket.s3.dualstack.us-east-1.amazonaws.com",
-                "*.s3.dualstack.*.amazonaws.com",
-            ),
-            ("s3-accelerate.amazonaws.com", "s3-accelerate.amazonaws.com"),
-            (
-                "bucket.s3-accelerate.amazonaws.com",
-                "*.s3-accelerate.amazonaws.com",
-            ),
-            (
-                "bucket.s3-accelerate.dualstack.amazonaws.com",
-                "*.s3-accelerate.dualstack.amazonaws.com",
-            ),
-            ("s3-fips.us-east-1.amazonaws.com", "s3-fips.*.amazonaws.com"),
-            (
-                "bucket.s3-fips.us-east-1.amazonaws.com",
-                "*.s3-fips.*.amazonaws.com",
-            ),
-            (
-                "s3-fips.dualstack.us-east-1.amazonaws.com",
-                "s3-fips.dualstack.*.amazonaws.com",
-            ),
-            (
-                "bucket.s3-fips.dualstack.us-east-1.amazonaws.com",
-                "*.s3-fips.dualstack.*.amazonaws.com",
-            ),
-            (
-                "ap-123456789012.s3-accesspoint.us-east-1.amazonaws.com",
-                "*.s3-accesspoint.*.amazonaws.com",
-            ),
-            (
-                "ap-123456789012.s3-accesspoint.dualstack.us-east-1.amazonaws.com",
-                "*.s3-accesspoint.dualstack.*.amazonaws.com",
-            ),
-            (
-                "abc123.execute-api.us-east-1.amazonaws.com",
-                "*.execute-api.*.amazonaws.com",
-            ),
-            ("storage.googleapis.com", "storage.googleapis.com"),
-            ("bucket.storage.googleapis.com", "*.storage.googleapis.com"),
-        ] {
-            assert_eq!(
-                decide(&allow, DEFAULT_DENY_DOMAINS, host),
-                denied(entry),
-                "{host}"
-            );
-        }
-        assert_eq!(
-            decide(&allow, DEFAULT_DENY_DOMAINS, "ec2.us-east-1.amazonaws.com"),
-            Allowed
-        );
-    }
-
     #[test]
     fn default_allow_list_has_no_duplicates_and_every_entry_parses() {
         let mut seen = std::collections::HashSet::new();
-        for entry in DEFAULT_ALLOW_DOMAINS.iter().chain(DEFAULT_DENY_DOMAINS) {
+        for entry in DEFAULT_ALLOW_DOMAINS {
             assert!(seen.insert(*entry), "duplicate {entry}");
             assert!(parse_entry(entry).is_ok(), "{entry}");
         }
@@ -556,6 +478,17 @@ mod tests {
         assert_eq!(
             decide(&["example.org"], &["example.org"], "example.org"),
             denied("example.org")
+        );
+        // An interior wildcard in a deny entry, under a broad allow entry.
+        let allow = ["*.amazonaws.com"];
+        let deny = ["*.s3.*.amazonaws.com"];
+        assert_eq!(
+            decide(&allow, &deny, "bucket.s3.us-east-1.amazonaws.com"),
+            denied("*.s3.*.amazonaws.com")
+        );
+        assert_eq!(
+            decide(&allow, &deny, "ec2.us-east-1.amazonaws.com"),
+            Allowed
         );
     }
 

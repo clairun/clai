@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::assistant::network::default_lists::{DEFAULT_ALLOW_DOMAINS, DEFAULT_DENY_DOMAINS};
+use crate::assistant::network::default_lists::DEFAULT_ALLOW_DOMAINS;
 use crate::assistant::network::matcher::parse_entry;
 use crate::assistant::types::ProviderConnection;
 use crate::paths;
@@ -382,7 +382,7 @@ pub struct NetworkPolicy {
     #[serde(default = "default_allow_domains")]
     pub allow_domains: Vec<String>,
     /// Checked before the allow list.
-    #[serde(default = "default_deny_domains")]
+    #[serde(default)]
     pub deny_domains: Vec<String>,
 }
 
@@ -427,16 +427,10 @@ fn default_allow_domains() -> Vec<String> {
         .collect()
 }
 
-fn default_deny_domains() -> Vec<String> {
-    DEFAULT_DENY_DOMAINS
-        .iter()
-        .map(|entry| entry.to_string())
-        .collect()
-}
-
 /// The policy of an agent stored before `networkAccess` existed, or created
-/// now, with the default lists. Legacy `disabled` stays Off on every PC, so
-/// it blocks the web tools even where no sandbox restricts the shell.
+/// now, with the default allow list and an empty deny list. Legacy
+/// `disabled` stays Off on every PC, so it blocks the web tools even where
+/// no sandbox restricts the shell.
 /// `enabled` or nothing becomes Allowlist where the sandbox can enforce it,
 /// and Host network elsewhere, which is what the shell does there.
 pub fn network_access_from_legacy(
@@ -451,7 +445,7 @@ pub fn network_access_from_legacy(
     NetworkPolicy {
         mode,
         allow_domains: default_allow_domains(),
-        deny_domains: default_deny_domains(),
+        deny_domains: Vec::new(),
     }
 }
 
@@ -1292,7 +1286,7 @@ mod tests {
             let policy = network_access_from_legacy(legacy, allowlist_on(backend));
             assert_eq!(policy.mode, expected, "{backend:?} {legacy:?}");
             assert_eq!(policy.allow_domains, default_allow_domains());
-            assert_eq!(policy.deny_domains, default_deny_domains());
+            assert!(policy.deny_domains.is_empty());
         }
     }
 
@@ -1343,10 +1337,11 @@ mod tests {
                 session_bus: SandboxSessionBusConfig::Deny,
             }
         );
-        // Lists missing from a hand-written policy are the defaults.
+        // A hand-written policy without lists gets the default allow list
+        // and an empty deny list.
         let config = sandbox_json(serde_json::json!({ "networkAccess": { "mode": "off" } }));
         assert_eq!(config.network_access.allow_domains, default_allow_domains());
-        assert_eq!(config.network_access.deny_domains, default_deny_domains());
+        assert!(config.network_access.deny_domains.is_empty());
     }
 
     fn policy(mode: NetworkMode) -> ExecutionSandboxConfig {
