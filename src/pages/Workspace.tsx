@@ -1456,11 +1456,11 @@ const ChatFirstLayout = ({
       // When the pane is too narrow the card slides left out of it (its
       // left edge clips under the workspace rail — see .chatFirstContent),
       // but the input bar must stay inside the pane. Publish the VISIBLE
-      // strip instead of the raw card rect, floored at the same minimum
-      // as the CSS --chat-min-width so the bar never shrinks below it.
-      const paneLeft = node.parentElement?.getBoundingClientRect().left ?? rect.left;
-      const visibleLeft = Math.max(rect.left, paneLeft);
-      const width = Math.max(rect.right - visibleLeft, 420);
+      // strip instead of the raw card rect, floored at the CSS
+      // --chat-min-width (420px) or the whole pane when that is narrower.
+      const pane = node.parentElement?.getBoundingClientRect() ?? rect;
+      const visibleLeft = Math.max(rect.left, pane.left);
+      const width = Math.max(rect.right - visibleLeft, Math.min(420, pane.width));
       const rootStyle = document.documentElement.style;
       rootStyle.setProperty('--chat-card-center', `${visibleLeft + width / 2}px`);
       rootStyle.setProperty('--chat-card-width', `${width}px`);

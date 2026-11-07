@@ -33,25 +33,3 @@
      here instead shrank the whole app (rail + artifacts) by the terminal
      height, which was wrong once terminal mode grew the card to ~33vh. */
 }
-
-/* Desktop: Add left padding to avoid overlap with chat panel */
-@media (min-width: 769px) and (pointer: fine) {
-  .contentArea {
-    padding-left: 0;
-    transition: padding-left 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-  }
-}
-
-/* Large desktop: Wider padding for wider chat panel */
-@media (min-width: 1200px) and (pointer: fine) {
-  .contentArea {
-    padding-left: 0;
-  }
-}
-
-/* Extra large desktop: Even wider padding */
-@media (min-width: 1600px) and (pointer: fine) {
-  .contentArea {
-    padding-left: 0;
-  }
-}

@@ -1407,6 +1407,39 @@ describe('Workspace file preview', () => {
   });
 });
 
+describe('Workspace composer geometry', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  // jsdom has no layout: give the conversation column a 360px pane at x=100
+  // and the card its 420px floor, slid left so its right edge meets the
+  // pane's, as .chatFirstContent lays it out when the pane is that narrow.
+  const rectOf = (left: number, width: number) =>
+    ({ left, right: left + width, width, top: 0, bottom: 500, height: 500, x: left, y: 0 }) as DOMRect;
+
+  it('keeps the published chat width inside a pane narrower than the 420px floor', async () => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      }
+    );
+    vi.spyOn(Element.prototype, 'getBoundingClientRect').mockImplementation(function (this: Element) {
+      if (this.matches(`.${styles.workspaceMain}`)) return rectOf(100, 360);
+      if (this.matches(`.${styles.chatFirstContent}`)) return rectOf(40, 420);
+      return rectOf(0, 0);
+    });
+    renderWorkspace();
+
+    const rootStyle = document.documentElement.style;
+    await waitFor(() => expect(rootStyle.getPropertyValue('--chat-card-width')).toBe('360px'));
+    expect(rootStyle.getPropertyValue('--chat-card-center')).toBe('280px');
+  });
+});
+
 describe('Workspace task transcript', () => {
   it('follows the polled task status after the panel opened', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });

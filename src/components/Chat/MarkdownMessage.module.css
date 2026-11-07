@@ -3,7 +3,7 @@
 .markdownContainer {
   width: 100%;
   color: var(--color-text-primary);
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.6;
   word-wrap: break-word;
   overflow-wrap: break-word;
@@ -13,13 +13,6 @@
 .markdownContainer > p:only-child {
   display: inline;
   margin: 0;
-}
-
-/* Desktop: Slightly larger font */
-@media (min-width: 769px) and (pointer: fine) {
-  .markdownContainer {
-    font-size: 16px;
-  }
 }
 
 /* Paragraphs */
@@ -128,7 +121,7 @@
 /* Code blocks */
 .codeBlock {
   margin: 12px 0;
-  padding: 12px 16px;
+  padding: 14px 18px;
   background: var(--color-code-bg);
   border: 1px solid var(--color-code-border);
   border-radius: 6px;
@@ -145,14 +138,6 @@
   color: var(--color-text-primary);
   white-space: pre;
   word-wrap: normal;
-}
-
-/* Desktop: Slightly larger code blocks */
-@media (min-width: 769px) and (pointer: fine) {
-  .codeBlock {
-    padding: 14px 18px;
-    font-size: 14px;
-  }
 }
 
 /* Scrollbar for code blocks */
