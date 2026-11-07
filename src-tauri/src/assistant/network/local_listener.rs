@@ -21,9 +21,10 @@ const MAX_ANCESTORS: usize = 64;
 const MAX_CMDLINE: u64 = 2048;
 /// What `/proc/<pid>/exe` appends once the file is unlinked.
 const DELETED: &str = " (deleted)";
-/// The uid `/proc` shows for every user not mapped into the user namespace
-/// of CLAI, as in a Flatpak: the default `/proc/sys/kernel/overflowuid`.
-const OVERFLOW_UID: u32 = 65534;
+/// `nobody`, which unrelated daemons share, so a grant naming it would hold
+/// for all of them. In a user namespace it is also the overflow uid, but
+/// `other_user` refuses every uid there anyway.
+const NOBODY_UID: u32 = 65534;
 /// The largest buffer offered to `getpwuid_r`.
 const MAX_PASSWD_BUF: usize = 1 << 20;
 /// The first read of `/proc/net/tcp`: about 400 sockets.
@@ -96,9 +97,10 @@ pub struct Program {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOnly {
     /// CLAI cannot see every process behind the sockets, and they are not
-    /// those of one other user it can name: they belong to its own user (as
-    /// a Flatpak, CLAI sees no host processes), to a uid its user runs
-    /// containers as, to a uid without a user name, or to several users.
+    /// those of one other user it can name: they belong to its own user, to
+    /// a uid its user runs containers as, to a uid without a user name, or to
+    /// several users, or CLAI runs in a user namespace (a Flatpak, toolbox or
+    /// container), where it cannot tell another user from one it controls.
     Unseen,
     /// A holder runs in another pid or mount namespace, such as a container
     /// or another sandbox, where its path names a different file.
@@ -170,6 +172,8 @@ trait ProcSource {
     /// the holders.
     fn self_pid(&self) -> Option<u32>;
     fn euid(&self) -> u32;
+    /// The text of `/proc/self/uid_map`; none when it cannot be read.
+    fn uid_map(&self) -> Option<String>;
     /// The name of user `uid` in the user database.
     fn user_name(&self, uid: u32) -> Option<String>;
     /// The text of `/etc/subuid`; empty when it cannot be read.
@@ -297,14 +301,20 @@ fn classify(
 }
 
 /// The other user all `sockets` belong to, by uid and name. A saved grant
-/// names that uid, so it must be a user the user of CLAI does not control:
-/// not a uid its rootless containers run as (`/etc/subuid`), and only a uid
-/// with a user name, which subordinate uids rarely have. A Flatpak may see
-/// few users, so there such sockets stay run-only.
+/// names that uid, so it must be a user the user of CLAI does not control.
+/// Only the initial user namespace shows host uids: in one the user created
+/// (a Flatpak, toolbox or rootless container) every uid is the user, one it
+/// runs containers as, or the overflow uid, and passwd and `/etc/subuid`
+/// describe the namespace, so no uid there counts. On the host, the uid must
+/// not be one its rootless containers run as (`/etc/subuid`), and must have a
+/// user name, which subordinate uids rarely have.
 fn other_user(proc: &impl ProcSource, sockets: &[Socket]) -> Option<(u32, String)> {
     let uid = sockets[0].uid;
     let euid = proc.euid();
-    if uid == euid || uid == OVERFLOW_UID || sockets.iter().any(|socket| socket.uid != uid) {
+    if uid == euid || uid == NOBODY_UID || sockets.iter().any(|socket| socket.uid != uid) {
+        return None;
+    }
+    if !proc.uid_map().is_some_and(|map| identity_uid_map(&map)) {
         return None;
     }
     let user = proc.user_name(euid);
@@ -328,6 +338,16 @@ fn subordinate(subuid: &str, user: Option<&str>, euid: u32, uid: u32) -> bool {
             (Some(owner) == user || owner == euid).then_some(start..start.saturating_add(count))
         })
         .any(|range| range.contains(&u64::from(uid)))
+}
+
+/// Whether the text of `/proc/self/uid_map` maps every uid to itself, as
+/// only the initial user namespace does.
+fn identity_uid_map(map: &str) -> bool {
+    let mut lines = map.lines();
+    lines
+        .next()
+        .is_some_and(|line| line.split_whitespace().eq(["0", "0", "4294967295"]))
+        && lines.next().is_none()
 }
 
 fn run_only(reason: RunOnly, sockets: &[Socket], seen: &[Seen]) -> Listener {
@@ -450,6 +470,10 @@ impl ProcSource for HostProc {
         unsafe { libc::geteuid() }
     }
 
+    fn uid_map(&self) -> Option<String> {
+        fs::read_to_string("/proc/self/uid_map").ok()
+    }
+
     fn user_name(&self, uid: u32) -> Option<String> {
         let mut buf = vec![0u8; 1024];
         loop {
@@ -471,10 +495,11 @@ impl ProcSource for HostProc {
                 buf.resize(buf.len() * 2, 0);
                 continue;
             }
-            if error != 0 || found.is_null() {
+            if error != 0 || found.is_null() || entry.pw_name.is_null() {
                 return None;
             }
-            // SAFETY: on success pw_name points to a C string inside buf.
+            // SAFETY: pw_name is not null, and on success points to a C
+            // string inside buf.
             let name = unsafe { CStr::from_ptr(entry.pw_name) };
             return name.to_str().ok().map(str::to_owned);
         }
@@ -568,6 +593,13 @@ mod tests {
     const CLAI: u32 = 100;
     const EUID: u32 = 1000;
     const PORT: u16 = 5432;
+    /// `/proc/self/uid_map` on the host.
+    const INITIAL_UID_MAP: &str = "         0          0 4294967295\n";
+    /// In a toolbox: its root is the user, the rest subordinate uids.
+    const TOOLBOX_UID_MAP: &str =
+        "         0       1000          1\n         1     100000      65536\n";
+    /// In a Flatpak: only the user.
+    const FLATPAK_UID_MAP: &str = "      1000       1000          1\n";
     const HEADER: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
 
     /// Captured on x86_64 from listeners on 127.0.0.1:5432, 0.0.0.0:6379,
@@ -675,6 +707,7 @@ mod tests {
         processes: BTreeMap<u32, FakeProcess>,
         users: BTreeMap<u32, String>,
         subuid: String,
+        uid_map: Option<String>,
     }
 
     fn namespaces(pid: &str, mnt: &str) -> Namespaces {
@@ -694,12 +727,13 @@ mod tests {
                     (0, "root"),
                     (26, "postgres"),
                     (EUID, "me"),
-                    (OVERFLOW_UID, "nobody"),
+                    (NOBODY_UID, "nobody"),
                 ]
                 .into_iter()
                 .map(|(uid, name)| (uid, name.to_string()))
                 .collect(),
                 subuid: "me:100000:65536\n".to_string(),
+                uid_map: Some(INITIAL_UID_MAP.to_string()),
             }
             .holder(1, 0, "/usr/lib/systemd/systemd", &[])
             .holder(CLAI, 1, "/usr/bin/clai", &[])
@@ -758,6 +792,11 @@ mod tests {
             self.subuid = text.to_string();
             self
         }
+
+        fn with_uid_map(mut self, map: Option<&str>) -> Self {
+            self.uid_map = map.map(str::to_string);
+            self
+        }
     }
 
     impl ProcSource for Fake {
@@ -775,6 +814,10 @@ mod tests {
 
         fn euid(&self) -> u32 {
             EUID
+        }
+
+        fn uid_map(&self) -> Option<String> {
+            self.uid_map.clone()
         }
 
         fn user_name(&self, uid: u32) -> Option<String> {
@@ -948,6 +991,14 @@ mod tests {
                 Listener::Clai,
             ),
             (
+                "an exiting CLAI descendant whose program cannot be read",
+                tunnel().holder(200, CLAI, PYTHON, &[11]).with(200, |p| {
+                    p.hides_namespaces = true;
+                    p.hides_exe = true;
+                }),
+                Listener::Clai,
+            ),
+            (
                 "a holder too deep below init to tell",
                 nested(64),
                 Listener::Clai,
@@ -1015,6 +1066,22 @@ mod tests {
             (
                 "a program and an unseen socket of another user",
                 tunnel()
+                    .listening("::", PORT, 26, 12)
+                    .holder(300, 1, SSH, &[11]),
+                run_only(RunOnly::Unseen, &[11, 12], &[(300, SSH)]),
+            ),
+            (
+                "a socket of another user held only by a process it cannot read",
+                Fake::new()
+                    .listening("127.0.0.1", PORT, 26, 11)
+                    .holder(300, 1, SSH, &[11])
+                    .with(300, |p| p.hides_exe = true),
+                run_only(RunOnly::Unseen, &[11], &[]),
+            ),
+            (
+                "sockets of another user, one held by a process of the user",
+                Fake::new()
+                    .listening("127.0.0.1", PORT, 26, 11)
                     .listening("::", PORT, 26, 12)
                     .holder(300, 1, SSH, &[11]),
                 run_only(RunOnly::Unseen, &[11, 12], &[(300, SSH)]),
@@ -1092,11 +1159,45 @@ mod tests {
                 other(100_998, "service"),
             ),
             (
-                "the uid of every user outside the user namespace of CLAI",
-                socket_of(OVERFLOW_UID),
+                "nobody, shared by unrelated daemons",
+                socket_of(NOBODY_UID),
+                unseen(),
+            ),
+            ("root, seen from the host", socket_of(0), other(0, "root")),
+            (
+                "root, seen from a user namespace such as a toolbox",
+                socket_of(0).with_uid_map(Some(TOOLBOX_UID_MAP)),
+                unseen(),
+            ),
+            (
+                "a named user, seen from a user namespace such as a Flatpak",
+                socket_of(26).with_uid_map(Some(FLATPAK_UID_MAP)),
+                unseen(),
+            ),
+            (
+                "a named user, when the uid map cannot be read",
+                socket_of(26).with_uid_map(None),
                 unseen(),
             ),
         ]);
+    }
+
+    #[test]
+    fn only_the_identity_uid_map_is_the_initial_user_namespace() {
+        for (map, initial) in [
+            (INITIAL_UID_MAP, true),
+            ("0 0 4294967295", true),
+            (FLATPAK_UID_MAP, false),
+            (TOOLBOX_UID_MAP, false),
+            ("         0          0 4294967294\n", false),
+            (
+                "         0          0 4294967295\n         0          0          1\n",
+                false,
+            ),
+            ("", false),
+        ] {
+            assert_eq!(identity_uid_map(map), initial, "{map:?}");
+        }
     }
 
     #[test]
