@@ -1497,6 +1497,7 @@ mod tests {
                 "{line}"
             );
             assert!(line.contains("(`gh`,"), "{line}");
+            assert!(line.contains("invalid token"), "{line}");
             assert!(
                 line.contains("Do not ask the user to log in again."),
                 "{line}"
@@ -1505,6 +1506,25 @@ mod tests {
             // Where keyring only gives no bus, it is not the fix.
             assert_eq!(line.contains(keyring_only), unfiltered.is_none(), "{line}");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_system_prompt_tells_a_busless_shell_agent_about_the_bus() {
+        let mut execution = shell_execution();
+        execution.sandbox.session_bus = crate::config::SandboxSessionBusConfig::Deny;
+        let context = RunContext {
+            execution,
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(text.contains("- No session bus in shell commands:"));
     }
 
     #[test]
