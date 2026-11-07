@@ -298,8 +298,12 @@
 /* A pane too narrow for the drawer beside the conversation: the drawer
    becomes a sheet over the whole pane, ending above the floating composer,
    and the conversation keeps its full width underneath. The side panels
-   (WorkspaceFilePreviewPanel, WorkspaceTaskTranscriptPanel) do the same. */
-@container workspace-body (max-width: 720px) {
+   (WorkspaceFilePreviewPanel, WorkspaceTaskTranscriptPanel) do the same.
+   810px clears the widest side-by-side floor: chat (--chat-min-width 420)
+   + drawer with gap (368) = 788; chat + 24px gap + preview floor (360) =
+   804. Container queries cannot read custom properties, so both panels
+   repeat it; scripts/workspaceSheetBreakpoint.test.mjs keeps them equal. */
+@container workspace-body (max-width: 810px) {
   .workspaceMainWithPreview,
   .workspaceMainWithDrawer {
     padding-right: 0;

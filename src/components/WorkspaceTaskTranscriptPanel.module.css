@@ -20,8 +20,9 @@
 }
 
 /* Narrow pane (Workspace's .workspaceBody): a sheet over the whole
-   pane and the drawer, ending above the composer. */
-@container workspace-body (max-width: 720px) {
+   pane and the drawer, ending above the composer.
+   Breakpoint shared with .workspaceDrawer in Workspace.module.css. */
+@container workspace-body (max-width: 810px) {
   .panel {
     left: 0;
     right: 0;
