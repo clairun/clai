@@ -234,7 +234,7 @@ pub fn parse_local_port(raw: &str) -> Result<Option<u16>, &'static str> {
         host == "localhost" || host == "127.0.0.1"
     };
     if !alias {
-        return if names_this_computer(host) {
+        return if names_this_computer(host) || names_this_computer(&value) {
             Err("write this computer as localhost, as in localhost:5432")
         } else {
             Ok(None)
