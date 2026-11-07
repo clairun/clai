@@ -3,7 +3,7 @@ import {
   listPendingNetworkAccessRequests,
   submitNetworkAccessDecision,
 } from '../permissions/networkAccessClient';
-import { hostWithPort, unicodeHost } from '../permissions/hostNames';
+import { hostWithPort, isLoopbackHost, requestTarget, unicodeHost } from '../permissions/hostNames';
 import type {
   HostLogEntry,
   NetworkAccessDecision,
@@ -62,15 +62,15 @@ const SaveScope = ({ req, workspaceName }: { req: NetworkAccessRequest; workspac
   );
 };
 
-/** “This run: github.com ✓ · example.org ✕ and 3 more” */
+/** “This run: github.com ✓ · port 5432 on this computer ✕ and 3 more” */
 const RunHosts = ({ hosts }: { hosts: readonly HostLogEntry[] }) =>
   hosts.length === 0 ? null : (
     <p className={styles.segmentHint}>
       This run:{' '}
       {hosts.slice(0, RUN_HOSTS_SHOWN).map((entry, i) => (
-        <Fragment key={`${entry.host}-${entry.allowed}`}>
+        <Fragment key={`${entry.host}-${entry.port}-${entry.allowed}`}>
           {i > 0 && ' · '}
-          {unicodeHost(entry.host)}{' '}
+          {requestTarget(entry.host, isLoopbackHost(entry.host) ? entry.port : null)}{' '}
           <span role="img" aria-label={entry.allowed ? 'allowed' : 'refused'}>
             {entry.allowed ? '✓' : '✕'}
           </span>
@@ -110,7 +110,8 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
   // name is not mistaken for the one it imitates.
   const host = unicodeHost(req.host);
   const asciiHost = host === req.host ? null : req.host;
-  const shown = hostWithPort(host, req.port);
+  const address = hostWithPort(host, req.port);
+  const shown = requestTarget(req.host, req.port);
   const wildcard = req.suggestedWildcard ? unicodeHost(req.suggestedWildcard) : null;
 
   return (
@@ -153,14 +154,14 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
           {speaker ? (
             speaker(
               <>
-                May I reach <code title={asciiHost ?? undefined}>{shown}</code>?
+                May I reach {isLoopbackHost(req.host) ? shown : <code title={asciiHost ?? undefined}>{shown}</code>}?
                 <span className={grantStyles.spokenReason}>{req.reason || '(no reason given)'}</span>
               </>,
             )
           ) : (
             <>
               <div className={styles.segmentText}>
-                <code>{shown}</code>
+                <code>{address}</code>
                 {asciiHost && <span className={styles.mutedHint}>{asciiHost}</span>}
                 <span className={styles.ruleChip}>not in allowed hosts</span>
               </div>
@@ -256,7 +257,7 @@ const InlineNetworkAccessCard = ({
       workspaceId={workspaceId}
       source={NETWORK_ACCESS_REQUESTS}
       className={styles.stack}
-      announce={(req) => `${requesterName(req)} wants network access to ${hostWithPort(unicodeHost(req.host), req.port)}.`}
+      announce={(req) => `${requesterName(req)} wants network access to ${requestTarget(req.host, req.port)}.`}
       renderCard={(req, card) => <NetworkAccessCard {...card} req={req} requester={requester(req)} />}
     />
   );

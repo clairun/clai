@@ -29,7 +29,7 @@ import type {
 } from '../generated/bindings';
 import { imageParts, type ImagePart } from '../assistant/imageParts';
 import { isRunMarkerText } from '../assistant/runMarker';
-import { unicodeHost } from '../permissions/hostNames';
+import { requestTarget } from '../permissions/hostNames';
 import type { PendingAskUser } from '../assistant/sessionStore';
 
 /** A workspace with no event in this window and nothing live gets no card. */
@@ -350,7 +350,7 @@ const requestText = (pending: FleetPendingRequest): string => {
     case 'grant':
       return `${pending.request.requestedAccess === 'read_write' ? 'Write' : 'Read'} ${pending.request.requestedPath}`;
     case 'network':
-      return `Reach ${unicodeHost(pending.request.host)}`;
+      return `Reach ${requestTarget(pending.request.host, pending.request.port)}`;
   }
 };
 

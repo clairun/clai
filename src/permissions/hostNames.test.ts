@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { hostWithPort, unicodeHost } from './hostNames';
+import { hostWithPort, requestTarget, unicodeHost } from './hostNames';
 
 describe('unicodeHost', () => {
   it('reads each xn-- label in Unicode', () => {
@@ -27,5 +27,19 @@ describe('hostWithPort', () => {
     expect(hostWithPort('mirror.example.org', 443)).toBe('mirror.example.org:443');
     expect(hostWithPort('10.0.0.5', 8080)).toBe('10.0.0.5:8080');
     expect(hostWithPort('example.org', null)).toBe('example.org');
+  });
+});
+
+describe('requestTarget', () => {
+  it.each([
+    ['localhost', 5432, 'port 5432 on this computer'],
+    ['127.0.0.1', 5432, 'port 5432 on this computer'],
+    ['::1', 5432, 'port 5432 on this computer'],
+    ['localhost', null, 'localhost'],
+    ['127.0.0.2', 80, '127.0.0.2:80'],
+    ['xn--bcher-kva.example', 443, 'bücher.example:443'],
+    ['2001:db8::1', 443, '[2001:db8::1]:443'],
+  ] as const)('reads %s with port %s as “%s”', (host, port, text) => {
+    expect(requestTarget(host, port)).toBe(text);
   });
 });

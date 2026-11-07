@@ -105,6 +105,27 @@ describe('NetworkAccessCard', () => {
     expect(screen.getByText('[2001:db8::1]:443')).toBeInTheDocument();
   });
 
+  it('names a port of this computer as a port, in the run line and when spoken', () => {
+    const req = request({
+      host: 'localhost',
+      port: 5432,
+      suggestedWildcard: null,
+      runHosts: [
+        { host: 'localhost', port: 5432, allowed: false },
+        { host: 'localhost', port: 6379, allowed: true },
+        { host: 'github.com', port: 443, allowed: true },
+      ],
+    });
+    const { unmount } = render(<NetworkAccessCard req={req} />);
+    expect(screen.getByText(/^This run:/)).toHaveTextContent(
+      'This run: port 5432 on this computer ✕ · port 6379 on this computer ✓ · github.com ✓',
+    );
+    unmount();
+
+    render(<NetworkAccessCard req={req} speaker={(prompt: ReactNode) => <div>{prompt}</div>} />);
+    expect(screen.getByText('May I reach port 5432 on this computer?')).toBeInTheDocument();
+  });
+
   it('names the first eight hosts of the run and counts the rest', () => {
     const runHosts = Array.from({ length: 11 }, (_, i) => ({ host: `h${i}.example.org`, port: 443, allowed: i % 2 === 0 }));
     render(<NetworkAccessCard req={request({ runHosts })} />);
