@@ -404,7 +404,11 @@ mod tests {
     /// An upstream that answers each connection with what `reply` makes of
     /// the bytes it received (an echo when it returns them).
     async fn upstream(reply: fn(Vec<u8>) -> Vec<u8>) -> Arc<Upstream> {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        upstream_at("127.0.0.1:0", reply).await
+    }
+
+    async fn upstream_at(addr: &str, reply: fn(Vec<u8>) -> Vec<u8>) -> Arc<Upstream> {
+        let listener = TcpListener::bind(addr).await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
             while let Ok((mut stream, _)) = listener.accept().await {
@@ -427,27 +431,38 @@ mod tests {
         _dir: tempfile::TempDir,
     }
 
-    /// Says what listens on every local port, and counts full scans.
+    /// Says what listens on every local port, and records the dial of each
+    /// full scan.
     struct FakeInspector {
         listener: Mutex<Listener>,
+        /// The only dial `listener` is found at; every dial when none.
+        at: Option<Loopback>,
         /// What the cheap check answers when the port has program rules.
         confirms: bool,
-        scans: AtomicUsize,
+        scanned: Mutex<Vec<Loopback>>,
     }
 
     impl FakeInspector {
         fn new(listener: Listener) -> Self {
             Self {
                 listener: Mutex::new(listener),
+                at: None,
                 confirms: false,
-                scans: AtomicUsize::new(0),
+                scanned: Mutex::default(),
             }
+        }
+
+        fn scans(&self) -> usize {
+            self.scanned.lock().unwrap().len()
         }
     }
 
     impl ListenerInspector for FakeInspector {
-        fn inspect(&self, _port: u16, _dial: Loopback) -> io::Result<Listener> {
-            self.scans.fetch_add(1, Ordering::SeqCst);
+        fn inspect(&self, _port: u16, dial: Loopback) -> io::Result<Listener> {
+            self.scanned.lock().unwrap().push(dial);
+            if self.at.is_some_and(|at| at != dial) {
+                return Ok(Listener::Nothing);
+            }
             Ok(self.listener.lock().unwrap().clone())
         }
 
@@ -610,13 +625,14 @@ mod tests {
             Arc::new(HostConnector),
             inspector,
         );
-        for target in ["localhost", "127.0.0.1", "[::1]", "LOCALHOST."] {
-            let response = exchange(
-                &running,
-                &format!("CONNECT {target}:{port} HTTP/1.1\r\n\r\n"),
-                b"",
-            )
-            .await;
+        for request in [
+            format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\n"),
+            format!("CONNECT 127.0.0.1:{port} HTTP/1.1\r\n\r\n"),
+            format!("CONNECT [::1]:{port} HTTP/1.1\r\n\r\n"),
+            format!("CONNECT LOCALHOST.:{port} HTTP/1.1\r\n\r\n"),
+            format!("GET http://localhost:{port}/ HTTP/1.1\r\n\r\n"),
+        ] {
+            let response = exchange(&running, &request, b"").await;
             assert!(
                 response.starts_with("HTTP/1.1 403 Forbidden\r\n"),
                 "{response}"
@@ -661,8 +677,18 @@ mod tests {
             .await;
             assert_eq!(response, "HTTP/1.1 200 Connection established\r\n\r\nping");
         }
+        let response = exchange(
+            &running,
+            &format!("GET http://localhost:{port}/x HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n"),
+            b"",
+        )
+        .await;
+        assert_eq!(
+            response,
+            format!("GET /x HTTP/1.1\r\nHost: localhost:{port}\r\nConnection: close\r\n\r\n")
+        );
         assert!(running.session.refused().is_empty());
-        assert_eq!(inspector.scans.load(Ordering::SeqCst), 2);
+        assert_eq!(inspector.scans(), 3);
         assert_eq!(
             echo.dials.load(Ordering::SeqCst),
             0,
@@ -676,6 +702,42 @@ mod tests {
                 allowed: true
             }]
         );
+    }
+
+    /// Each name is checked, then dialled, at its own address; `localhost`
+    /// at `::1` when nothing listens at 127.0.0.1.
+    #[tokio::test]
+    async fn each_local_name_is_checked_and_dialled_at_its_own_address() {
+        let v4 = upstream(|bytes| bytes).await;
+        let v6 = upstream_at("[::1]:0", |bytes| bytes).await;
+        for (target, echo, at, scanned) in [
+            ("127.0.0.1", &v4, Loopback::V4, &[Loopback::V4][..]),
+            ("[::1]", &v6, Loopback::V6, &[Loopback::V6][..]),
+            (
+                "localhost",
+                &v6,
+                Loopback::V6,
+                &[Loopback::V4, Loopback::V6][..],
+            ),
+        ] {
+            let port = echo.addr.port();
+            let inspector = Arc::new(FakeInspector {
+                at: Some(at),
+                ..FakeInspector::new(ssh())
+            });
+            let running = start_with(
+                local_network(vec![grant(port, SSH)], &[]),
+                echo.clone(),
+                inspector.clone(),
+            );
+            let request = format!("CONNECT {target}:{port} HTTP/1.1\r\n\r\n");
+            let response = exchange(&running, &request, b"ping").await;
+            assert_eq!(
+                response, "HTTP/1.1 200 Connection established\r\n\r\nping",
+                "{target}"
+            );
+            assert_eq!(*inspector.scanned.lock().unwrap(), scanned, "{target}");
+        }
     }
 
     #[tokio::test]
@@ -694,7 +756,7 @@ mod tests {
         let request = format!("CONNECT localhost:{port} HTTP/1.1\r\n\r\n");
         let response = exchange(&running, &request, b"ping").await;
         assert_eq!(response, "HTTP/1.1 200 Connection established\r\n\r\nping");
-        assert_eq!(inspector.scans.load(Ordering::SeqCst), 0);
+        assert_eq!(inspector.scans(), 0);
 
         // Only a program rule of the port can be confirmed without a scan.
         let running = start_with(
@@ -707,7 +769,7 @@ mod tests {
             response.starts_with("HTTP/1.1 403 Forbidden\r\n"),
             "{response}"
         );
-        assert_eq!(inspector.scans.load(Ordering::SeqCst), 1);
+        assert_eq!(inspector.scans(), 1);
     }
 
     #[tokio::test]
@@ -773,7 +835,7 @@ mod tests {
                 running.session.refused().targets,
                 [format!("localhost:{port}")]
             );
-            assert_eq!(inspector.scans.load(Ordering::SeqCst), 0, "{entry}");
+            assert_eq!(inspector.scans(), 0, "{entry}");
         }
         assert!(never_reached(&local).await);
     }
@@ -807,6 +869,16 @@ mod tests {
         let response = exchange(&running, &request, b"").await;
         assert!(
             response.contains("now served by a program CLAI cannot name"),
+            "{response}"
+        );
+        *inspector.listener.lock().unwrap() = Listener::OtherUser {
+            uid: 26,
+            name: "postgres".to_string(),
+            sockets: vec![13],
+        };
+        let response = exchange(&running, &request, b"").await;
+        assert!(
+            response.contains("now served by a program of user `postgres`, not by"),
             "{response}"
         );
         assert!(never_reached(&local).await);

@@ -12,6 +12,7 @@ use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -37,6 +38,10 @@ const NET_TCP_CHUNK: usize = 64 * 1024;
 /// saved grant for that user does not match it: the proxy refuses the port
 /// and the agent can ask again, for this run only.
 const NAME_TTL: Duration = Duration::from_secs(60);
+/// How long after a full scan the cheap check can confirm the program it
+/// found. The check cannot see a second process sharing the socket, so the
+/// next full scan, at most this much later, is what finds one.
+const SERVED_TTL: Duration = Duration::from_secs(5);
 
 /// The loopback address the proxy dials.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -149,9 +154,10 @@ pub trait ListenerInspector: Send + Sync {
     /// port found running one of `programs` still holds every socket there,
     /// in the namespaces of CLAI and running the same file; `false` means
     /// "inspect it". It reads only the socket table and that process, so it
-    /// does not see a second holder: that is acceptable to confirm a program
-    /// already allowed, which alone can share its sockets, and for nothing
-    /// else.
+    /// misses a second process sharing the socket (a fork, or one handed the
+    /// fd through `SCM_RIGHTS` or `pidfd_getfd(2)`), which a full scan
+    /// refuses. So it confirms only a program already allowed, and only for
+    /// [`SERVED_TTL`] after the scan that found it.
     fn still_serves(&self, port: u16, dial: Loopback, programs: &[String]) -> bool;
 }
 
@@ -174,17 +180,32 @@ impl ListenerInspector for HostInspector {
     }
 
     fn still_serves(&self, port: u16, dial: Loopback, programs: &[String]) -> bool {
-        self.served.still_serves(&self.proc, port, dial, programs)
+        self.served
+            .still_serves(&self.proc, port, dial, programs, SERVED_TTL)
     }
 }
 
-/// Per port and dial, the sockets and the lowest-pid process that the last
-/// full scan found serving a program.
+/// Per port and dial, what the latest full scan found.
 #[derive(Default)]
 struct Served {
-    by_port: Mutex<HashMap<(u16, Loopback), ServedBy>>,
+    /// Numbers the full scans in the order they start.
+    scans: AtomicU64,
+    by_port: Mutex<HashMap<(u16, Loopback), Scanned>>,
 }
 
+#[derive(Clone, Copy)]
+struct ScanStart {
+    number: u64,
+    at: Instant,
+}
+
+struct Scanned {
+    start: ScanStart,
+    /// None when the scan found no program.
+    program: Option<ServedBy>,
+}
+
+/// The sockets and the lowest-pid process of the program a scan found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServedBy {
     sockets: Vec<u64>,
@@ -194,24 +215,38 @@ struct ServedBy {
 
 impl Served {
     fn inspect(&self, proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<Listener> {
+        let start = self.start();
         let (listener, sockets) = scan(proc, port, dial)?;
-        let mut by_port = self.by_port.lock().unwrap_or_else(PoisonError::into_inner);
-        match &listener {
-            Listener::Program(program) => {
-                by_port.insert(
-                    (port, dial),
-                    ServedBy {
-                        sockets,
-                        pid: program.pid,
-                        exe: program.exe.clone(),
-                    },
-                );
-            }
-            _ => {
-                by_port.remove(&(port, dial));
-            }
-        }
+        let program = match &listener {
+            Listener::Program(program) => Some(ServedBy {
+                sockets,
+                pid: program.pid,
+                exe: program.exe.clone(),
+            }),
+            _ => None,
+        };
+        self.record(port, dial, start, program);
         Ok(listener)
+    }
+
+    fn start(&self) -> ScanStart {
+        ScanStart {
+            number: self.scans.fetch_add(1, Ordering::Relaxed),
+            at: Instant::now(),
+        }
+    }
+
+    /// Scans run unlocked and can finish out of order, so one that started
+    /// before the scan last recorded for the port is dropped.
+    fn record(&self, port: u16, dial: Loopback, start: ScanStart, program: Option<ServedBy>) {
+        let mut by_port = self.by_port.lock().unwrap_or_else(PoisonError::into_inner);
+        if by_port
+            .get(&(port, dial))
+            .is_some_and(|recorded| recorded.start.number > start.number)
+        {
+            return;
+        }
+        by_port.insert((port, dial), Scanned { start, program });
     }
 
     fn still_serves(
@@ -220,13 +255,15 @@ impl Served {
         port: u16,
         dial: Loopback,
         programs: &[String],
+        ttl: Duration,
     ) -> bool {
         let Some(served) = self
             .by_port
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .get(&(port, dial))
-            .cloned()
+            .filter(|scanned| scanned.start.at.elapsed() < ttl)
+            .and_then(|scanned| scanned.program.clone())
         else {
             return false;
         };
@@ -1071,12 +1108,12 @@ mod tests {
         let allowed = [SSH.to_string()];
         let served = Served::default();
         let fake = tunnel().holder(300, 1, SSH, &[11]);
-        assert!(!served.still_serves(&fake, PORT, Loopback::V4, &allowed));
+        assert!(!served.still_serves(&fake, PORT, Loopback::V4, &allowed, SERVED_TTL));
         assert_eq!(
             served.inspect(&fake, PORT, Loopback::V4).unwrap(),
             program(SSH, 300, "/usr/bin/ssh -N")
         );
-        assert!(served.still_serves(&fake, PORT, Loopback::V4, &allowed));
+        assert!(served.still_serves(&fake, PORT, Loopback::V4, &allowed, SERVED_TTL));
         for (name, port, dial, programs) in [
             ("another dial", PORT, Loopback::V6, &allowed[..]),
             ("another port", PORT + 1, Loopback::V4, &allowed[..]),
@@ -1088,7 +1125,10 @@ mod tests {
             ),
             ("no program allowed", PORT, Loopback::V4, &[][..]),
         ] {
-            assert!(!served.still_serves(&fake, port, dial, programs), "{name}");
+            assert!(
+                !served.still_serves(&fake, port, dial, programs, SERVED_TTL),
+                "{name}"
+            );
         }
         for (name, changed) in [
             (
@@ -1125,10 +1165,17 @@ mod tests {
                     .holder(300, 1, SSH, &[11])
                     .with(300, |p| p.hides_namespaces = true),
             ),
+            (
+                "neither its namespaces nor those of CLAI can be read",
+                tunnel()
+                    .holder(300, 1, SSH, &[11])
+                    .with(300, |p| p.hides_namespaces = true)
+                    .with(CLAI, |p| p.hides_namespaces = true),
+            ),
             ("nothing listens", Fake::new().holder(300, 1, SSH, &[])),
         ] {
             assert!(
-                !served.still_serves(&changed, PORT, Loopback::V4, &allowed),
+                !served.still_serves(&changed, PORT, Loopback::V4, &allowed, SERVED_TTL),
                 "{name}"
             );
         }
@@ -1150,7 +1197,53 @@ mod tests {
             served.inspect(&shared, PORT, Loopback::V4).unwrap(),
             Listener::Clai
         );
-        assert!(!served.still_serves(&shared, PORT, Loopback::V4, &allowed));
+        assert!(!served.still_serves(&shared, PORT, Loopback::V4, &allowed, SERVED_TTL));
+    }
+
+    /// The cheap check cannot see a second process sharing the socket, so
+    /// it confirms only until the scan that found the program expires.
+    #[test]
+    fn a_scanned_program_is_confirmed_only_until_the_scan_expires() {
+        let allowed = [SSH.to_string()];
+        let served = Served::default();
+        served
+            .inspect(&tunnel().holder(300, 1, SSH, &[11]), PORT, Loopback::V4)
+            .unwrap();
+        let shared = tunnel()
+            .holder(300, 1, SSH, &[11])
+            .holder(301, 1, PYTHON, &[11]);
+        assert!(served.still_serves(&shared, PORT, Loopback::V4, &allowed, SERVED_TTL));
+        assert!(!served.still_serves(&shared, PORT, Loopback::V4, &allowed, Duration::ZERO));
+        assert_eq!(
+            served.inspect(&shared, PORT, Loopback::V4).unwrap(),
+            run_only(
+                RunOnly::SeveralPrograms,
+                &[11],
+                &[(300, SSH), (301, PYTHON)]
+            )
+        );
+        assert!(!served.still_serves(&shared, PORT, Loopback::V4, &allowed, SERVED_TTL));
+    }
+
+    #[test]
+    fn a_scan_that_started_earlier_never_replaces_a_later_one() {
+        let allowed = [SSH.to_string()];
+        let fake = tunnel().holder(300, 1, SSH, &[11]);
+        let ssh = || {
+            Some(ServedBy {
+                sockets: vec![11],
+                pid: 300,
+                exe: SSH.to_string(),
+            })
+        };
+        let served = Served::default();
+        let earlier = served.start();
+        let later = served.start();
+        served.record(PORT, Loopback::V4, later, None);
+        served.record(PORT, Loopback::V4, earlier, ssh());
+        assert!(!served.still_serves(&fake, PORT, Loopback::V4, &allowed, SERVED_TTL));
+        served.record(PORT, Loopback::V4, served.start(), ssh());
+        assert!(served.still_serves(&fake, PORT, Loopback::V4, &allowed, SERVED_TTL));
     }
 
     #[test]
