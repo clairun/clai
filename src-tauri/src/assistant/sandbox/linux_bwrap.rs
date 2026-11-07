@@ -1648,6 +1648,9 @@ mod tests {
                 network != SandboxNetworkMode::Host,
                 "{network:?}"
             );
+            // A daemonised command stays under bwrap, so local_listener
+            // still finds CLAI among its ancestors.
+            assert!(args.contains(&"--unshare-pid".to_string()), "{network:?}");
             let has = |needle: &[&str]| args.windows(needle.len()).any(|window| window == needle);
             let binds: [&[&str]; 3] = [
                 &["--bind", "/c/.clai-net/net.sock", "/run/clai/net.sock"],
