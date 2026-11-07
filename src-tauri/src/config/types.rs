@@ -443,6 +443,21 @@ impl LocalPortGrant {
             Self::Program { port, program } if !program.starts_with('/') => Err(format!(
                 "Local ports: the program `{program}` on port {port} is not an absolute path."
             )),
+            // `/proc/<pid>/exe` never names a directory or has an empty, `.` or
+            // `..` component. Lexical only: symlinks are resolved where a path
+            // is typed in.
+            Self::Program { port, program }
+                if program
+                    .split('/')
+                    .skip(1)
+                    .any(|part| matches!(part, "" | "." | "..")) =>
+            {
+                Err(format!(
+                    "Local ports: the program `{program}` on port {port} is not a plain \
+                     absolute path: write the full path to the program, without `.` or \
+                     `..` parts, doubled slashes or a trailing slash."
+                ))
+            }
             _ => Ok(()),
         }
     }
@@ -460,7 +475,8 @@ impl NetworkPolicy {
     /// run handles it when the lists are matched (see [`HostLists::new`]).
     ///
     /// Repeated local port grants are dropped, the first one kept. In
-    /// Allowlist a grant for port 0 or a relative program refuses the save.
+    /// Allowlist a grant for port 0, or for a program path `/proc/<pid>/exe`
+    /// never gives (relative, or not plain), refuses the save.
     ///
     /// [`HostLists::new`]: crate::assistant::network::matcher::HostLists::new
     pub fn canonicalize(&mut self) -> Result<(), String> {
@@ -1654,22 +1670,40 @@ mod tests {
     }
 
     #[test]
-    fn in_allowlist_saving_refuses_port_0_and_a_relative_program() {
-        let relative = LocalPortGrant::Program {
+    fn in_allowlist_saving_refuses_port_0_and_a_program_path_that_never_matches() {
+        let program = |program: &str| LocalPortGrant::Program {
             port: 5432,
-            program: "bin/ssh".to_string(),
+            program: program.to_string(),
         };
-        for (grant, error) in [
-            (ssh(0), "Local ports: port 0 cannot be allowed."),
-            (postgres(0, None), "Local ports: port 0 cannot be allowed."),
+        let port_0 = "Local ports: port 0 cannot be allowed.";
+        let mut cases = vec![
+            (ssh(0), port_0.to_string()),
+            (postgres(0, None), port_0.to_string()),
             (
-                relative,
-                "Local ports: the program `bin/ssh` on port 5432 is not an absolute path.",
+                program("bin/ssh"),
+                "Local ports: the program `bin/ssh` on port 5432 is not an absolute path."
+                    .to_string(),
             ),
+        ];
+        for path in [
+            "/",
+            "/usr/bin/ssh/",
+            "/usr/bin/../bin/ssh",
+            "/usr/./bin/ssh",
+            "//usr/bin/ssh",
+            "/usr//bin/ssh",
         ] {
+            let error = format!(
+                "Local ports: the program `{path}` on port 5432 is not a plain absolute path: \
+                 write the full path to the program, without `.` or `..` parts, doubled \
+                 slashes or a trailing slash."
+            );
+            cases.push((program(path), error));
+        }
+        for (grant, error) in cases {
             let mut network = policy(NetworkMode::Allowlist).network_access;
             network.local_ports = vec![ssh(22), grant.clone()];
-            assert_eq!(network.canonicalize(), Err(error.to_string()), "{grant:?}");
+            assert_eq!(network.canonicalize(), Err(error), "{grant:?}");
             assert_eq!(network.local_ports, [ssh(22), grant.clone()]);
 
             // Kept as is outside Allowlist, like an invalid host entry.
@@ -1679,6 +1713,13 @@ mod tests {
                 assert_eq!(network.local_ports, [ssh(22), grant.clone()], "{mode:?}");
             }
         }
+
+        // Dots inside a name are fine.
+        let dotted = program("/opt/my.app/..bin/.ssh.");
+        let mut network = policy(NetworkMode::Allowlist).network_access;
+        network.local_ports = vec![dotted.clone()];
+        assert_eq!(network.canonicalize(), Ok(()));
+        assert_eq!(network.local_ports, [dotted]);
     }
 
     #[test]
@@ -1687,27 +1728,34 @@ mod tests {
             port: 5432,
             program: "/usr/bin/autossh".to_string(),
         };
-        let mut network = policy(NetworkMode::Allowlist).network_access;
-        network.local_ports = vec![
-            ssh(5432),
-            postgres(5432, Some("postgres")),
-            ssh(5432),
-            autossh.clone(),
-            postgres(5432, None),
-            ssh(8080),
-            postgres(5433, None),
-        ];
-        network.canonicalize().expect("valid");
-        assert_eq!(
-            network.local_ports,
-            [
+        for mode in [
+            NetworkMode::Allowlist,
+            NetworkMode::Off,
+            NetworkMode::HostNetwork,
+        ] {
+            let mut network = policy(mode).network_access;
+            network.local_ports = vec![
                 ssh(5432),
                 postgres(5432, Some("postgres")),
-                autossh,
+                ssh(5432),
+                autossh.clone(),
+                postgres(5432, None),
                 ssh(8080),
                 postgres(5433, None),
-            ]
-        );
+            ];
+            network.canonicalize().expect("valid");
+            assert_eq!(
+                network.local_ports,
+                [
+                    ssh(5432),
+                    postgres(5432, Some("postgres")),
+                    autossh.clone(),
+                    ssh(8080),
+                    postgres(5433, None),
+                ],
+                "{mode:?}"
+            );
+        }
     }
 
     /// `NetworkPolicy` as the build before local ports reads it.
