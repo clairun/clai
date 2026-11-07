@@ -452,11 +452,10 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
     }
     if cfg!(target_os = "linux") {
         let unfiltered = crate::assistant::sandbox::status().session_bus_filter_unavailable_reason;
-        if let Some(line) =
-            session_bus_line(context.execution.sandbox.session_bus, unfiltered.as_deref())
-        {
-            prompt.push_str(&line);
-        }
+        prompt.push_str(&session_bus_line(
+            context.execution.sandbox.session_bus,
+            unfiltered.as_deref(),
+        ));
     }
 
     if matches!(
@@ -536,20 +535,20 @@ const SSH_THROUGH_PROXY: &str = "             - The Linux sandbox overlays an em
 
 /// What the shell's session bus offers on Linux. Keyring only where the bus
 /// cannot be filtered is no bus: `unfiltered` says why and how to get one.
+/// Without a bus, keyring tools fail as if logged out, so the line says so.
 fn session_bus_line(
     bus: crate::config::SandboxSessionBusConfig,
     unfiltered: Option<&str>,
-) -> Option<String> {
-    use crate::config::SandboxSessionBusConfig;
+) -> String {
+    use crate::config::SandboxSessionBusConfig::{Deny, KeyringOnly};
+    const NO_BUS: &str = "- No session bus in shell commands: tools that read the host keyring (`gh`, `git-credential-libsecret`, `secret-tool`) cannot reach it and report not logged in or an invalid token. Do not ask the user to log in again.";
     match (bus, unfiltered) {
-        (SandboxSessionBusConfig::Deny, _) => None,
-        (SandboxSessionBusConfig::KeyringOnly, Some(note)) => {
-            Some(format!("- No session bus in shell commands. {note}\n"))
-        }
-        _ => Some(
-            "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n"
-                .to_string(),
+        (KeyringOnly | Deny, Some(note)) => format!("{NO_BUS} {note}\n"),
+        (Deny, None) => format!(
+            "{NO_BUS} Ask the user to set this agent's Session bus to Keyring only in its Local access settings.\n"
         ),
+        _ => "- Session bus is available: tools that authenticate through libsecret (e.g. `gh`, `git-credential-libsecret`, `secret-tool`) can reach the host keyring directly. Use the host's existing auth instead of asking the user for tokens.\n"
+            .to_string(),
     }
 }
 
@@ -1478,17 +1477,54 @@ mod tests {
         }
     }
     #[test]
-    fn a_keyring_only_agent_is_told_it_has_no_bus_where_it_cannot_be_filtered() {
+    fn an_agent_without_a_bus_is_told_why_keyring_tools_fail() {
         use crate::config::SandboxSessionBusConfig::{Deny, Full, KeyringOnly};
         let note = "Keyring-only agents get no session bus here: x. Set Full.";
-        let available = |line: Option<String>| line.unwrap().contains("Session bus is available");
+        let available = |line: String| line.contains("Session bus is available");
         assert!(available(session_bus_line(KeyringOnly, None)));
+        assert!(available(session_bus_line(Full, None)));
         assert!(available(session_bus_line(Full, Some(note))));
-        assert_eq!(
-            session_bus_line(KeyringOnly, Some(note)).as_deref(),
-            Some(format!("- No session bus in shell commands. {note}\n").as_str())
-        );
-        assert_eq!(session_bus_line(Deny, None), None);
+        let keyring_only =
+            "set this agent's Session bus to Keyring only in its Local access settings";
+        for (bus, unfiltered, fix) in [
+            (Deny, None, keyring_only),
+            (Deny, Some(note), note),
+            (KeyringOnly, Some(note), note),
+        ] {
+            let line = session_bus_line(bus, unfiltered);
+            assert!(
+                line.starts_with("- No session bus in shell commands:"),
+                "{line}"
+            );
+            assert!(line.contains("(`gh`,"), "{line}");
+            assert!(line.contains("invalid token"), "{line}");
+            assert!(
+                line.contains("Do not ask the user to log in again."),
+                "{line}"
+            );
+            assert!(line.contains(fix), "{line}");
+            // Where keyring only gives no bus, it is not the fix.
+            assert_eq!(line.contains(keyring_only), unfiltered.is_none(), "{line}");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn build_system_prompt_tells_a_busless_shell_agent_about_the_bus() {
+        let mut execution = shell_execution();
+        execution.sandbox.session_bus = crate::config::SandboxSessionBusConfig::Deny;
+        let context = RunContext {
+            execution,
+            ..Default::default()
+        };
+
+        let message = build_system_prompt(&context, None, &[], &RunTrigger::Scheduled);
+        let text = match &message.content[0] {
+            ContentPart::Text { text } => text,
+            other => panic!("expected text content, got {:?}", other),
+        };
+
+        assert!(text.contains("- No session bus in shell commands:"));
     }
 
     #[test]
