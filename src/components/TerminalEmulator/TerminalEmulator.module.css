@@ -1,71 +1,59 @@
 /* Terminal Emulator - Cross-Platform Component */
 /* Premium Indigo theme with gradient accents */
 
+/* A floating card fixed at the bottom of the window, at every width. */
 .terminal {
-  position: relative;
-  width: 100%;
-  background: transparent;
+  position: fixed;
+  bottom: 12px;
   display: flex;
   flex-direction: column;
   min-height: 0;
-  flex: 1;
-}
+  /* Align with the conversation column when a workspace publishes its
+     geometry (--chat-card-center / --chat-card-width, set by the
+     Workspace page): the input sits exactly under the conversation and
+     follows it when side panels shift it left.
 
-/* Desktop: Fixed positioning at bottom as a floating card */
-@media (min-width: 769px) and (pointer: fine) {
-  .terminal {
-    position: fixed;
-    bottom: 12px;
-    /* Align with the conversation column when a workspace publishes its
-       geometry (--chat-card-center / --chat-card-width, set by the
-       Workspace page): the input sits exactly under the conversation and
-       follows it when side panels shift it left, with a 420px floor so
-       it stays usable at the conversation's own minimum width.
+     Fallback (fleet & other routes): center over the detail pane — the
+     Fleet rail occupies the left edge (--fleet-rail-width, published
+     by FleetLayout), so shift right by half its width. Width takes the
+     larger of 80% of the detail pane and the chat card's own width
+     (min(1024px, detail − 48px page padding); == --chat-max-width), so the bar matches the
+     conversation on small screens instead of sitting narrower.
 
-       Fallback (fleet & other routes): center over the detail pane — the
-       Fleet rail occupies the left edge (--fleet-rail-width, published
-       by FleetLayout), so shift right by half its width. Width takes the
-       larger of 80% of the detail pane and the chat card's own width
-       (min(1024px, detail − 48px page padding); == --chat-max-width), so the bar matches the
-       conversation on small screens instead of sitting narrower. */
-    left: var(--chat-card-center, calc(50% + var(--fleet-rail-width, 0px) / 2));
-    transform: translateX(-50%);
-    width: max(
-      420px,
-      var(
-        --chat-card-width,
-        max(
-          calc((100vw - var(--fleet-rail-width, 0px)) * 0.8),
-          min(1024px, calc(100vw - var(--fleet-rail-width, 0px) - 48px))
-        )
+     Floored at 420px so it stays usable, unless the detail pane (less
+     the narrowest page padding) is narrower than that. */
+  left: var(--chat-card-center, calc(50% + var(--fleet-rail-width, 0px) / 2));
+  transform: translateX(-50%);
+  width: max(
+    min(420px, calc(100vw - var(--fleet-rail-width, 0px) - 32px)),
+    var(
+      --chat-card-width,
+      max(
+        calc((100vw - var(--fleet-rail-width, 0px)) * 0.8),
+        min(1024px, calc(100vw - var(--fleet-rail-width, 0px) - 48px))
       )
-    );
-    transition:
-      left var(--transition-fast),
-      width var(--transition-fast);
-    z-index: 100;
-    background: color-mix(in srgb, var(--color-bg-elevated) 92%, white);
-    border: 1px solid var(--color-border-light);
-    border-radius: var(--radius-xl);
-    box-shadow: var(--shadow-card);
-    max-height: 50vh;
-    flex: none;
-  }
+    )
+  );
+  transition:
+    left var(--transition-fast),
+    width var(--transition-fast);
+  z-index: 100;
+  background: color-mix(in srgb, var(--color-bg-elevated) 92%, white);
+  border: 1px solid var(--color-border-light);
+  border-radius: var(--radius-xl);
+  box-shadow: var(--shadow-card);
+  max-height: 50vh;
 }
 
-/* Fullscreen: fill the detail pane and keep the left rail + top bar visible.
-   Desktop only (the bar is position:fixed there); compound selector beats the
-   media-query .terminal rule above regardless of source order. */
-@media (min-width: 769px) and (pointer: fine) {
-  .terminal.terminalFullscreen {
-    left: var(--fleet-rail-width, 0px);
-    width: calc(100vw - var(--fleet-rail-width, 0px));
-    top: var(--fleet-content-top, 45px);
-    bottom: 0;
-    max-height: none;
-    transform: none;
-    border-radius: 0;
-  }
+/* Fullscreen: fill the detail pane and keep the left rail + top bar visible. */
+.terminal.terminalFullscreen {
+  left: var(--fleet-rail-width, 0px);
+  width: calc(100vw - var(--fleet-rail-width, 0px));
+  top: var(--fleet-content-top, 45px);
+  bottom: 0;
+  max-height: none;
+  transform: none;
+  border-radius: 0;
 }
 
 /* Workspace context bar inside terminal */

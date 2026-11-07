@@ -36,6 +36,25 @@
   z-index: 101;
 }
 
+/* Narrow pane (Workspace's .workspaceBody): a sheet over the whole
+   pane and the drawer, ending above the composer unless maximized.
+   Breakpoint shared with .workspaceDrawer in Workspace.module.css. */
+@container workspace-body (max-width: 810px) {
+  .panel {
+    left: 0;
+    right: 0;
+    bottom: var(--terminal-height, 80px);
+    width: auto;
+    max-width: none;
+    z-index: 11;
+  }
+
+  .panelFullscreen {
+    bottom: 0;
+    z-index: 101;
+  }
+}
+
 @keyframes previewSlideOut {
   from {
     transform: translateX(calc(100% + 8px));

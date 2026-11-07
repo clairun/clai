@@ -1209,6 +1209,15 @@ const WorkspaceHeader = ({
     );
   };
 
+  const messagesStat = renderCounter(null, messageCount, 'msgs', false);
+  // A stat and the separator before it wrap as one unit.
+  const withSeparator = (stat: React.ReactNode) => (
+    <span className={styles.metricGroup}>
+      <span className={styles.metricSeparator}>{'\u00B7'}</span>
+      {stat}
+    </span>
+  );
+
   return (
     <div className={styles.header}>
       <div className={styles.headerLeft}>
@@ -1329,44 +1338,42 @@ const WorkspaceHeader = ({
       <div className={styles.headerRight}>
         {isAgent && lastRun && (
           <>
-            <span className={`${styles.statusDot} ${styles[`status_${lastRun.status}`]}`} />
-            <span className={styles.metric}>
-              {RUN_STATUS_LABEL[lastRun.status] || lastRun.status}
+            <span className={styles.metricGroup}>
+              <span className={`${styles.statusDot} ${styles[`status_${lastRun.status}`]}`} />
+              <span className={styles.metric}>
+                {RUN_STATUS_LABEL[lastRun.status] || lastRun.status}
+              </span>
             </span>
-            <span className={styles.metricSeparator}>{'\u00B7'}</span>
-            <span className={styles.metric}>
-              Last: {formatRelativeTime(lastRun.completedAt || lastRun.startedAt)}
-            </span>
-            {nextRunText && (
-              <>
-                <span className={styles.metricSeparator}>{'\u00B7'}</span>
-                <span className={styles.metric}>Next: {nextRunText}</span>
-              </>
+            {withSeparator(
+              <span className={styles.metric}>
+                Last: {formatRelativeTime(lastRun.completedAt || lastRun.startedAt)}
+              </span>
             )}
-            <span className={styles.metricSeparator}>{'\u00B7'}</span>
+            {nextRunText &&
+              withSeparator(<span className={styles.metric}>Next: {nextRunText}</span>)}
           </>
         )}
-        {renderCounter(null, messageCount, 'msgs', false)}
-        <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        {renderCounter(
-          'agents',
-          assignedAgentCount,
-          'agents',
-          true,
-          0,
-          assignedAgentCount > 0 ? (
-            <AgentFacepile agents={details?.assignedAgents || []} tasks={details?.tasks || []} />
-          ) : null
+        {isAgent && lastRun ? withSeparator(messagesStat) : messagesStat}
+        {withSeparator(
+          renderCounter(
+            'agents',
+            assignedAgentCount,
+            'agents',
+            true,
+            0,
+            assignedAgentCount > 0 ? (
+              <AgentFacepile agents={details?.assignedAgents || []} tasks={details?.tasks || []} />
+            ) : null
+          )
         )}
-        <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        {renderCounter('tasks', taskCount, 'tasks', true, activeTaskCount)}
-        <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        {renderCounter('memories', memories.length, 'memories')}
-        <span className={styles.metricSeparator}>{'\u00B7'}</span>
-        {renderCounter(
-          'artifacts',
-          formatCappedCount(artifactCount, artifactCountCapped),
-          'artifacts'
+        {withSeparator(renderCounter('tasks', taskCount, 'tasks', true, activeTaskCount))}
+        {withSeparator(renderCounter('memories', memories.length, 'memories'))}
+        {withSeparator(
+          renderCounter(
+            'artifacts',
+            formatCappedCount(artifactCount, artifactCountCapped),
+            'artifacts'
+          )
         )}
       </div>
     </div>
@@ -1456,11 +1463,11 @@ const ChatFirstLayout = ({
       // When the pane is too narrow the card slides left out of it (its
       // left edge clips under the workspace rail — see .chatFirstContent),
       // but the input bar must stay inside the pane. Publish the VISIBLE
-      // strip instead of the raw card rect, floored at the same minimum
-      // as the CSS --chat-min-width so the bar never shrinks below it.
-      const paneLeft = node.parentElement?.getBoundingClientRect().left ?? rect.left;
-      const visibleLeft = Math.max(rect.left, paneLeft);
-      const width = Math.max(rect.right - visibleLeft, 420);
+      // strip instead of the raw card rect, floored at the CSS
+      // --chat-min-width (420px) or the whole pane when that is narrower.
+      const pane = node.parentElement?.getBoundingClientRect() ?? rect;
+      const visibleLeft = Math.max(rect.left, pane.left);
+      const width = Math.max(rect.right - visibleLeft, Math.min(420, pane.width));
       const rootStyle = document.documentElement.style;
       rootStyle.setProperty('--chat-card-center', `${visibleLeft + width / 2}px`);
       rootStyle.setProperty('--chat-card-width', `${width}px`);

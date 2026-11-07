@@ -19,6 +19,20 @@
   animation: transcriptSlideOut 200ms ease-out;
 }
 
+/* Narrow pane (Workspace's .workspaceBody): a sheet over the whole
+   pane and the drawer, ending above the composer.
+   Breakpoint shared with .workspaceDrawer in Workspace.module.css. */
+@container workspace-body (max-width: 810px) {
+  .panel {
+    left: 0;
+    right: 0;
+    bottom: var(--terminal-height, 80px);
+    width: auto;
+    max-width: none;
+    z-index: 11;
+  }
+}
+
 @keyframes transcriptSlideOut {
   from {
     transform: translateX(calc(100% + 8px));

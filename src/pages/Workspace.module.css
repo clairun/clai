@@ -84,6 +84,14 @@
   flex-shrink: 0;
 }
 
+/* A stat with the separator before it, so a wrapped row never starts or
+   ends with a lone separator. */
+.metricGroup {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
 .statusDot {
   width: 7px;
   height: 7px;
@@ -189,6 +197,9 @@
   min-height: 0;
   display: flex;
   align-items: stretch;
+  /* Its children and the side panels lay out by the pane's width, not the
+     window's: the workspace rail takes a varying share of the window. */
+  container: workspace-body / inline-size;
   /* The conversation column never compresses below this. When the pane
      can't fit chat + preview + drawer side by side, the chat card keeps
      this width and slides LEFT, its left edge clipping out of the pane
@@ -282,6 +293,27 @@
   overflow: hidden;
   z-index: 10;
   animation: drawerSlideIn 160ms ease-out;
+}
+
+/* A pane too narrow for the drawer beside the conversation: the drawer
+   becomes a sheet over the whole pane, ending above the floating composer,
+   and the conversation keeps its full width underneath. The side panels
+   (WorkspaceFilePreviewPanel, WorkspaceTaskTranscriptPanel) do the same.
+   810px clears the widest side-by-side floor: chat (--chat-min-width 420)
+   + drawer with gap (368) = 788; chat + 24px gap + preview floor (360) =
+   804. Container queries cannot read custom properties, so both panels
+   repeat it; scripts/workspaceSheetBreakpoint.test.mjs keeps them equal. */
+@container workspace-body (max-width: 810px) {
+  .workspaceMainWithPreview,
+  .workspaceMainWithDrawer {
+    padding-right: 0;
+  }
+
+  .workspaceDrawer {
+    left: 0;
+    width: auto;
+    bottom: var(--terminal-height, 80px);
+  }
 }
 
 @keyframes drawerSlideIn {
@@ -870,8 +902,18 @@
     padding: 12px 16px;
   }
 
+  /* Title and stats share a row while they fit; otherwise the stats take
+     their own row and wrap within it rather than clipping at the pane edge. */
   .header {
     flex-wrap: wrap;
+    gap: 4px 16px;
+  }
+
+  .headerRight {
+    flex-wrap: wrap;
+    flex-shrink: 1;
+    gap: 2px 6px;
+    min-width: 0;
   }
 }
 

@@ -1,5 +1,5 @@
 import React from 'react';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
@@ -366,5 +366,110 @@ describe('FleetLayout switch to the Fleet', () => {
     await userEvent.keyboard('{Control>}{Shift>}F{/Shift}{/Control}');
     expect(await screen.findByTestId('fleet')).toBeInTheDocument();
     expect(useFleetStore.getState().selectedId).toBe('a');
+  });
+});
+
+describe('FleetLayout rail in a narrow window', () => {
+  const PREFERENCE_KEY = 'fleet.rail.collapsed';
+  // A window whose width the test sets; matchMedia evaluates its width
+  // query against it on every call and notifies its listeners on a resize,
+  // as the browser does.
+  const WIDE = 1107;
+  const NARROW = 1106;
+  const media = { width: WIDE, listeners: new Set<() => void>() };
+  const originalMatchMedia = window.matchMedia;
+  const matchesWidth = (query: string) => {
+    const match = /^\((max|min)-width: ([\d.]+)px\)$/.exec(query);
+    if (!match) throw new Error(`unsupported media query: ${query}`);
+    const limit = Number(match[2]);
+    return match[1] === 'max' ? media.width <= limit : media.width >= limit;
+  };
+  const resize = (width: number) =>
+    act(() => {
+      media.width = width;
+      media.listeners.forEach((listener) => listener());
+    });
+  const railWidth = () => document.documentElement.style.getPropertyValue('--fleet-rail-width');
+  // A `localStorage` of its own: Node's global one, without a file, has none.
+  const memoryStorage = () => {
+    const items = new Map<string, string>();
+    return { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) };
+  };
+
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', memoryStorage());
+    media.width = WIDE;
+    media.listeners.clear();
+    window.matchMedia = vi.fn((query: string) => ({
+      get matches() {
+        return matchesWidth(query);
+      },
+      media: query,
+      addEventListener: (_type: string, listener: () => void) => media.listeners.add(listener),
+      removeEventListener: (_type: string, listener: () => void) => media.listeners.delete(listener),
+    })) as unknown as typeof window.matchMedia;
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+  });
+
+  afterEach(() => {
+    window.matchMedia = originalMatchMedia;
+    vi.unstubAllGlobals();
+  });
+
+  it('collapses an expanded rail while narrow and restores it on widening, leaving the saved preference alone', async () => {
+    localStorage.setItem(PREFERENCE_KEY, '0');
+    media.width = NARROW;
+    renderFleet();
+
+    expect(await screen.findByRole('button', { name: 'Expand sidebar' })).toBeInTheDocument();
+    expect(railWidth()).toBe('52px');
+
+    resize(WIDE);
+    expect(screen.getByRole('button', { name: 'Collapse sidebar' })).toBeInTheDocument();
+    expect(railWidth()).toBe('248px');
+
+    resize(NARROW);
+    expect(screen.getByRole('button', { name: 'Expand sidebar' })).toBeInTheDocument();
+    expect(localStorage.getItem(PREFERENCE_KEY)).toBe('0');
+  });
+
+  it('expands the rail from its toggle while narrow without saving that, until the window widens', async () => {
+    localStorage.setItem(PREFERENCE_KEY, '1');
+    media.width = NARROW;
+    renderFleet();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Expand sidebar' }));
+    expect(railWidth()).toBe('248px');
+    expect(localStorage.getItem(PREFERENCE_KEY)).toBe('1');
+    await userEvent.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
+    expect(railWidth()).toBe('52px');
+
+    // Expanded again, then widened: the saved (collapsed) preference wins,
+    // and narrowing once more starts collapsed rather than expanded.
+    await userEvent.click(screen.getByRole('button', { name: 'Expand sidebar' }));
+    resize(WIDE);
+    expect(railWidth()).toBe('52px');
+    resize(NARROW);
+    expect(railWidth()).toBe('52px');
+    expect(localStorage.getItem(PREFERENCE_KEY)).toBe('1');
+  });
+
+  it('stops listening for window resizes once unmounted', async () => {
+    const { unmount } = renderFleet();
+    await screen.findByRole('button', { name: 'Collapse sidebar' });
+    expect(media.listeners.size).toBeGreaterThan(0);
+
+    unmount();
+    expect(media.listeners.size).toBe(0);
+  });
+
+  it('still saves the toggle in a wide window', async () => {
+    localStorage.setItem(PREFERENCE_KEY, '0');
+    renderFleet();
+
+    await userEvent.click(await screen.findByRole('button', { name: 'Collapse sidebar' }));
+    expect(railWidth()).toBe('52px');
+    expect(localStorage.getItem(PREFERENCE_KEY)).toBe('1');
   });
 });
