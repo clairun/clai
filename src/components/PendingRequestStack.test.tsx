@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
@@ -55,18 +55,15 @@ const Stack = ({ workspaceId }: { workspaceId: string | null }) => (
 const cards = () => screen.queryAllByRole('article').map((card) => card.getAttribute('aria-label'));
 const subscribed = () => waitFor(() => expect(listeners.some((l) => l.name === SOURCE.resolvedEvent)).toBe(true));
 
-let scrollIntoView: ReturnType<typeof vi.fn>;
+let scrollIntoView: MockInstance<Element['scrollIntoView']>;
 
 beforeEach(() => {
   listeners.length = 0;
   list.mockReset();
   list.mockResolvedValue([]);
-  scrollIntoView = vi.fn();
-  Element.prototype.scrollIntoView = scrollIntoView as unknown as Element['scrollIntoView'];
-});
-
-afterEach(() => {
-  delete (Element.prototype as Partial<Element>).scrollIntoView;
+  // Spy on the stub from setup.ts rather than replacing it: a late effect can
+  // still call it before the shared cleanup unmounts the component.
+  scrollIntoView = vi.spyOn(Element.prototype, 'scrollIntoView');
 });
 
 describe('PendingRequestStack', () => {
