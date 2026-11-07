@@ -193,6 +193,9 @@
   min-height: 0;
   display: flex;
   align-items: stretch;
+  /* Its children and the side panels lay out by the pane's width, not the
+     window's: the workspace rail takes a varying share of the window. */
+  container-type: inline-size;
   /* The conversation column never compresses below this. When the pane
      can't fit chat + preview + drawer side by side, the chat card keeps
      this width and slides LEFT, its left edge clipping out of the pane
@@ -286,6 +289,23 @@
   overflow: hidden;
   z-index: 10;
   animation: drawerSlideIn 160ms ease-out;
+}
+
+/* A pane too narrow for the drawer beside the conversation: the drawer
+   becomes a sheet over the whole pane, ending above the floating composer,
+   and the conversation keeps its full width underneath. The side panels
+   (WorkspaceFilePreviewPanel, WorkspaceTaskTranscriptPanel) do the same. */
+@container (max-width: 720px) {
+  .workspaceMainWithPreview,
+  .workspaceMainWithDrawer {
+    padding-right: 0;
+  }
+
+  .workspaceDrawer {
+    left: 0;
+    width: auto;
+    bottom: var(--terminal-height, 80px);
+  }
 }
 
 @keyframes drawerSlideIn {
