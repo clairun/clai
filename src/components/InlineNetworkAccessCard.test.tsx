@@ -274,6 +274,25 @@ describe('InlineNetworkAccessCard', () => {
     expect(screen.queryByRole('article')).not.toBeInTheDocument();
   });
 
+  it('announces a request for a port on this computer by its port', async () => {
+    mockInvoke.mockResolvedValue([]);
+    render(<InlineNetworkAccessCard workspaceId="ws-1" />);
+    await waitFor(() => expect(listenHandlers['network-access://request']).toBeDefined());
+    fire(
+      'network-access://request',
+      request({
+        host: 'localhost',
+        port: 5432,
+        suggestedWildcard: null,
+        runHosts: [],
+        localListener: { kind: 'runOnly', reason: 'unseen', holders: [] },
+      }),
+    );
+    expect(screen.getByRole('status')).toHaveTextContent(
+      /^An agent wants network access to port 5432 on this computer\.$/,
+    );
+  });
+
   it('drops the card once its decision is accepted', async () => {
     mockInvoke.mockImplementation((cmd: string) =>
       Promise.resolve(cmd === 'list_pending_network_access_requests' ? [request()] : undefined),
@@ -327,6 +346,14 @@ describe('NetworkAccessCard for a port on this computer', () => {
     );
   });
 
+  it('names the port on this computer when collapsed', async () => {
+    const user = userEvent.setup();
+    render(<NetworkAccessCard req={localRequest(ssh)} requester={requester} />);
+    await user.click(screen.getByRole('button', { name: 'Collapse request' }));
+    expect(screen.getByText('port 5432 on this computer')).toBeInTheDocument();
+    expect(screen.queryByText(/localhost/)).not.toBeInTheDocument();
+  });
+
   it('renders markup in a command line as text', () => {
     const commandLine = 'node <img src=x onerror=alert(1)> <b>bold</b>';
     render(<NetworkAccessCard req={localRequest({ ...ssh, commandLine })} />);
@@ -347,6 +374,20 @@ describe('NetworkAccessCard for a port on this computer', () => {
     await user.click(toggle);
     expect(command).not.toHaveAttribute('data-collapsed');
     expect(screen.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('names each toggle by its pid when several programs are listed', async () => {
+    const user = userEvent.setup();
+    const long = (pid: number, exe: string) => ({ pid, exe, commandLine: `${exe} ${'--flag '.repeat(60)}`.trim() });
+    const holders = [long(1, '/usr/bin/a'), long(2, '/usr/bin/b')];
+    render(<NetworkAccessCard req={localRequest({ kind: 'runOnly', reason: 'severalPrograms', holders })} />);
+    const first = screen.getByRole('button', { name: 'Show all of the command line of pid 1' });
+    expect(screen.getByRole('button', { name: 'Show all of the command line of pid 2' })).toBeInTheDocument();
+    await user.click(first);
+    expect(screen.getByRole('button', { name: 'Show less of the command line of pid 1' })).toHaveAttribute(
+      'aria-expanded',
+      'true',
+    );
   });
 
   it('collapses a short command line of more than three lines', () => {
@@ -402,7 +443,7 @@ describe('NetworkAccessCard for a port on this computer', () => {
   });
 
   it.each([
-    ['unseen', [], 'CLAI cannot see which program listens on port 5432, for example because CLAI runs as a Flatpak.'],
+    ['unseen', [], 'CLAI cannot see every program listening on port 5432.'],
     [
       'otherNamespace',
       [holder(77, '/usr/bin/conmon')],
@@ -425,7 +466,7 @@ describe('NetworkAccessCard for a port on this computer', () => {
       expect(screen.getByText(commandLine)).toBeInTheDocument();
     }
     expect(screen.getByText(/this run only/)).toHaveTextContent(
-      /^CLAI cannot name the program, so the port can be allowed for this run only, while the same program listens\.$/,
+      /^CLAI cannot save a rule for this listener, so the port can be allowed for this run only, until the listener restarts\.$/,
     );
     const allowRun = screen.getByRole('button', { name: 'Allow this run' });
     expect(allowRun).toHaveAttribute('title', 'Allows what listens on port 5432 now, until this run ends.');

@@ -51,7 +51,7 @@ const SaveScope = ({ req, workspaceName }: { req: NetworkAccessRequest; workspac
     return <>There is no agent to save an entry on, so the {local ? 'port' : 'host'} can be allowed for this run only.</>;
   }
   if (listener && !isSavable(listener)) {
-    return <>CLAI cannot name the program, so the port can be allowed for this run only, while the same program listens.</>;
+    return <>CLAI cannot save a rule for this listener, so the port can be allowed for this run only, until the listener restarts.</>;
   }
   const list = local ? 'allowed local ports' : 'allowed hosts';
   const saves = local && listener ? (

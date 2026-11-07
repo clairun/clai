@@ -44,8 +44,7 @@ export const SpokenListener = ({ listener }: { listener: LocalListenerView }) =>
   );
 
 const RUN_ONLY_REASONS: Record<LocalRunOnlyReason, (port: number) => string> = {
-  unseen: (port) =>
-    `CLAI cannot see which program listens on port ${port}, for example because CLAI runs as a Flatpak.`,
+  unseen: (port) => `CLAI cannot see every program listening on port ${port}.`,
   otherNamespace: (port) =>
     `The program on port ${port} runs in a container or another sandbox, so CLAI cannot name it.`,
   severalPrograms: (port) => `Different programs listen on port ${port}:`,
@@ -59,12 +58,16 @@ const RUN_ONLY_REASONS: Record<LocalRunOnlyReason, (port: number) => string> = {
 const LONG_COMMAND_CHARS = 240;
 const SHOWN_LINES = 3;
 
-/** A command line, always as text, collapsed to three lines when long. */
-const CommandLine = ({ text }: { text: string }) => {
+/**
+ * A command line, always as text, collapsed to three lines when long. With
+ * several programs listed, `pid` tells their toggles apart.
+ */
+const CommandLine = ({ text, pid }: { text: string; pid?: number }) => {
   const id = useId();
   const [expanded, setExpanded] = useState(false);
   if (!text) return null;
   const long = text.length > LONG_COMMAND_CHARS || text.split('\n').length > SHOWN_LINES;
+  const toggle = expanded ? 'Show less' : 'Show all';
   return (
     <>
       <code
@@ -80,21 +83,32 @@ const CommandLine = ({ text }: { text: string }) => {
           className={localStyles.toggle}
           aria-controls={id}
           aria-expanded={expanded}
+          aria-label={pid === undefined ? undefined : `${toggle} of the command line of pid ${pid}`}
           onClick={() => setExpanded((e) => !e)}
         >
-          {expanded ? 'Show less' : 'Show all'}
+          {toggle}
         </button>
       )}
     </>
   );
 };
 
-const Program = ({ exe, pid, commandLine }: { exe: string; pid: number; commandLine: string }) => (
+const Program = ({
+  exe,
+  pid,
+  commandLine,
+  oneOfSeveral = false,
+}: {
+  exe: string;
+  pid: number;
+  commandLine: string;
+  oneOfSeveral?: boolean;
+}) => (
   <>
     <p className={styles.segmentHint}>
       Listening: <code>{exe}</code> (pid {pid})
     </p>
-    <CommandLine text={commandLine} />
+    <CommandLine text={commandLine} pid={oneOfSeveral ? pid : undefined} />
   </>
 );
 
@@ -144,7 +158,12 @@ export const LocalListenerDetails = ({
             <ul className={localStyles.holders}>
               {listener.holders.map((holder, i) => (
                 <li key={`${holder.pid}-${i}`} className={localStyles.details}>
-                  <Program exe={holder.exe} pid={holder.pid} commandLine={holder.commandLine} />
+                  <Program
+                    exe={holder.exe}
+                    pid={holder.pid}
+                    commandLine={holder.commandLine}
+                    oneOfSeveral={listener.holders.length > 1}
+                  />
                 </li>
               ))}
             </ul>
