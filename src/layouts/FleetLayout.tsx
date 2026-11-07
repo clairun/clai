@@ -21,6 +21,7 @@ import ProgressDialog from '../components/ProgressDialog';
 import { useFleetActivity } from '../hooks/useFleetActivity';
 import { optimisticRunNowId, useFleetActivityStore } from '../stores/fleetActivityStore';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
+import { useMediaQuery } from '../hooks/useMediaQuery';
 import { errText, num } from '../fleet/workspaceStatus';
 import { cardAttention } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
@@ -32,6 +33,9 @@ import styles from './FleetLayout.module.css';
 const REFRESH_INTERVAL_MS = 5000;
 const OPTIMISTIC_RUN_TTL_MS = 12000;
 const COLLAPSED_KEY = 'fleet.rail.collapsed';
+// Below this window width the rail shows as icons whatever the saved
+// preference, leaving the room to the workspace.
+const NARROW_WINDOW_QUERY = '(max-width: 899.98px)';
 
 /**
  * Shared via `<Outlet context={...}>` so the nested Workspace view can read
@@ -90,6 +94,13 @@ const FleetLayout = () => {
       return false;
     }
   });
+  // In a narrow window the rail is collapsed and its toggle expands it only
+  // for as long as the window stays narrow: the saved preference is the
+  // wide-window one, and widening the window brings it back.
+  const narrow = useMediaQuery(NARROW_WINDOW_QUERY);
+  const [expandedWhileNarrow, setExpandedWhileNarrow] = useState(false);
+  if (!narrow && expandedWhileNarrow) setExpandedWhileNarrow(false);
+  const railCollapsed = narrow ? !expandedWhileNarrow : collapsed;
 
   const [settingsState, setSettingsState] = useState<SettingsState>({
     open: false,
@@ -154,12 +165,12 @@ const FleetLayout = () => {
   // WorkspaceRail.module.css. Cleared on unmount so non-Fleet routes fall back
   // to viewport-centered.
   useEffect(() => {
-    const railWidth = collapsed ? '52px' : '248px';
+    const railWidth = railCollapsed ? '52px' : '248px';
     document.documentElement.style.setProperty('--fleet-rail-width', railWidth);
     return () => {
       document.documentElement.style.removeProperty('--fleet-rail-width');
     };
-  }, [collapsed]);
+  }, [railCollapsed]);
 
   // Publish the content area's top offset (below the top bar + any error
   // banner) so the globally-fixed terminal card can fill the detail pane in
@@ -180,6 +191,10 @@ const FleetLayout = () => {
   }, [error]);
 
   const toggleCollapsed = useCallback(() => {
+    if (narrow) {
+      setExpandedWhileNarrow((prev) => !prev);
+      return;
+    }
     setCollapsed((prev) => {
       const next = !prev;
       try {
@@ -189,7 +204,7 @@ const FleetLayout = () => {
       }
       return next;
     });
-  }, []);
+  }, [narrow]);
 
   const counters = useMemo(
     () => ({
@@ -491,7 +506,7 @@ const FleetLayout = () => {
           selectedId={selectedId}
           attentionCounts={attentionCounts}
           activeRuns={activeRunsByWorkspace}
-          collapsed={collapsed}
+          collapsed={railCollapsed}
           onToggleCollapsed={toggleCollapsed}
           onSelect={handleSelect}
           onCreate={handleCreate}
