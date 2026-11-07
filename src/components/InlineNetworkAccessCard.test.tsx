@@ -2,7 +2,7 @@ import type { ReactNode } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { NetworkAccessRequest, WorkspaceAgentResponse } from '../generated/bindings';
+import type { LocalListenerView, NetworkAccessRequest, WorkspaceAgentResponse } from '../generated/bindings';
 import { rosterAgent } from './AssistantChat/messageSender';
 
 const mockInvoke = vi.hoisted(() => vi.fn());
@@ -294,5 +294,175 @@ describe('InlineNetworkAccessCard', () => {
     render(<InlineNetworkAccessCard workspaceId="ws-1" />);
     expect(await screen.findAllByRole('article', { name: 'Network access requested' })).toHaveLength(2);
     expect(mockInvoke).toHaveBeenCalledWith('list_pending_network_access_requests', { workspaceId: 'ws-1' });
+  });
+});
+
+describe('NetworkAccessCard for a port on this computer', () => {
+  const ssh = {
+    kind: 'program',
+    pid: 4321,
+    exe: '/usr/bin/ssh',
+    commandLine: 'ssh -N -L 5432:db.internal:5432 bastion',
+    interpreter: false,
+  } as const;
+  const postgres = { kind: 'otherUser', uid: 120, userName: 'postgres' } as const;
+  const holder = (pid: number, exe: string) => ({ pid, exe, commandLine: `${exe} --serve` });
+  const localRequest = (localListener: LocalListenerView, overrides: Partial<NetworkAccessRequest> = {}) =>
+    request({ host: 'localhost', port: 5432, suggestedWildcard: null, runHosts: [], localListener, ...overrides });
+  const buttons = () => screen.getAllByRole('button').map((button) => button.textContent);
+  const always = () => screen.getByRole('button', { name: 'Always for Rust Architect' });
+
+  it('shows the program, its pid and its command line, and where Always saves the port', () => {
+    render(<NetworkAccessCard req={localRequest(ssh)} requester={requester} />);
+    expect(screen.getByText('localhost:5432').tagName).toBe('CODE');
+    expect(screen.getByText('not in allowed local ports')).toBeInTheDocument();
+    expect(screen.getByText(/^Listening:/)).toHaveTextContent('Listening: /usr/bin/ssh (pid 4321)');
+    const command = screen.getByText(ssh.commandLine);
+    expect(command.tagName).toBe('CODE');
+    expect(command).not.toHaveAttribute('data-collapsed');
+    expect(screen.queryByRole('button', { name: 'Show all' })).not.toBeInTheDocument();
+    expect(screen.queryByText(/runs many programs/)).not.toBeInTheDocument();
+    expect(screen.getByText(/adds port/)).toHaveTextContent(
+      /^“Always” adds port 5432 for \/usr\/bin\/ssh to this agent.s allowed local ports in this workspace only\.$/,
+    );
+  });
+
+  it('renders markup in a command line as text', () => {
+    const commandLine = 'node <img src=x onerror=alert(1)> <b>bold</b>';
+    render(<NetworkAccessCard req={localRequest({ ...ssh, commandLine })} />);
+    const command = screen.getByText(commandLine);
+    expect(command.tagName).toBe('CODE');
+    expect(command.querySelector('img, b')).toBeNull();
+  });
+
+  it('collapses a long command line to three lines until Show all', async () => {
+    const user = userEvent.setup();
+    const commandLine = `python3 -m http.server ${'--flag '.repeat(60)}`.trim();
+    render(<NetworkAccessCard req={localRequest({ ...ssh, commandLine })} />);
+    const command = screen.getByText(commandLine);
+    const toggle = screen.getByRole('button', { name: 'Show all' });
+    expect(command).toHaveAttribute('data-collapsed');
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    expect(toggle).toHaveAttribute('aria-controls', command.id);
+    await user.click(toggle);
+    expect(command).not.toHaveAttribute('data-collapsed');
+    expect(screen.getByRole('button', { name: 'Show less' })).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('collapses a short command line of more than three lines', () => {
+    const { container } = render(<NetworkAccessCard req={localRequest({ ...ssh, commandLine: 'a\nb\nc\nd' })} />);
+    expect(container.querySelector('code[data-collapsed]')).toHaveTextContent(/^a\s*b\s*c\s*d$/);
+    expect(screen.getByRole('button', { name: 'Show all' })).toBeInTheDocument();
+  });
+
+  it('says an interpreter allows whatever it runs', () => {
+    render(<NetworkAccessCard req={localRequest({ ...ssh, exe: '/usr/bin/python3.12', interpreter: true })} />);
+    expect(screen.getByText(/runs many programs/)).toHaveTextContent(
+      '/usr/bin/python3.12 runs many programs, so allowing it allows any of them on port 5432.',
+    );
+  });
+
+  it('sends Always as the port, never the program, and offers no wildcard', async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<NetworkAccessCard req={localRequest(ssh)} requester={requester} />);
+    expect(buttons()).toEqual(['▾', 'Allow this run', 'Always for Rust Architect', 'Deny']);
+    expect(screen.getByRole('button', { name: 'Allow this run' })).toHaveAttribute(
+      'title',
+      'Allows /usr/bin/ssh on port 5432 until this run ends.',
+    );
+    expect(always()).toHaveAttribute('title', "Adds port 5432, served by /usr/bin/ssh, to this agent's allowed local ports.");
+    await user.click(always());
+    expect(submitted()).toEqual([{ requestId: 'net-1', decision: { kind: 'allowAlways', entry: 'localhost:5432' } }]);
+  });
+
+  it("names another user's service for both choices, and saves the port for that user", async () => {
+    mockInvoke.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(<NetworkAccessCard req={localRequest(postgres)} requester={requester} workspaceName="clai" />);
+    expect(screen.getByText(/^Listening:/)).toHaveTextContent(
+      'Listening: a program of user postgres (uid 120). CLAI cannot see which program, because it runs as another user.',
+    );
+    expect(screen.getByText(/^Any program/)).toHaveTextContent(
+      'Any program of user postgres on port 5432 will be allowed, for this run or always.',
+    );
+    expect(screen.getByRole('button', { name: 'Allow this run' })).toHaveAttribute(
+      'title',
+      'Allows any program of user postgres on port 5432 until this run ends.',
+    );
+    expect(always()).toHaveAttribute(
+      'title',
+      "Adds port 5432, served by user postgres (uid 120), to this agent's allowed local ports.",
+    );
+    expect(screen.getByText(/adds port/)).toHaveTextContent(
+      /^“Always” adds port 5432 for user postgres to this agent.s allowed local ports in .clai. only\.$/,
+    );
+    await user.click(always());
+    expect(submitted()).toEqual([{ requestId: 'net-1', decision: { kind: 'allowAlways', entry: 'localhost:5432' } }]);
+  });
+
+  it.each([
+    ['unseen', [], 'CLAI cannot see which program listens on port 5432, for example because CLAI runs as a Flatpak.'],
+    [
+      'otherNamespace',
+      [holder(77, '/usr/bin/conmon')],
+      'The program on port 5432 runs in a container or another sandbox, so CLAI cannot name it.',
+    ],
+    ['severalPrograms', [holder(1, '/usr/bin/a'), holder(2, '/usr/bin/b')], 'Different programs listen on port 5432:'],
+    ['replaced', [holder(3, '/opt/app/server')], 'The program on port 5432 was replaced or deleted on disk since it started.'],
+    ['pathNotUtf8', [holder(4, '/opt/\ufffd/server')], 'The path of the program on port 5432 is not valid UTF-8, so CLAI cannot save it.'],
+  ] as const)('offers this run only when CLAI cannot name the program (%s)', async (reason, holders, why) => {
+    mockInvoke.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    render(
+      <NetworkAccessCard req={localRequest({ kind: 'runOnly', reason, holders: [...holders] })} requester={requester} />,
+    );
+    expect(buttons()).toEqual(['▾', 'Allow this run', 'Deny']);
+    expect(screen.getByText(why)).toBeInTheDocument();
+    expect(screen.queryAllByText(/^Listening:/)).toHaveLength(holders.length);
+    for (const { exe, commandLine } of holders) {
+      expect(screen.getByText(exe)).toBeInTheDocument();
+      expect(screen.getByText(commandLine)).toBeInTheDocument();
+    }
+    expect(screen.getByText(/this run only/)).toHaveTextContent(
+      /^CLAI cannot name the program, so the port can be allowed for this run only, while the same program listens\.$/,
+    );
+    const allowRun = screen.getByRole('button', { name: 'Allow this run' });
+    expect(allowRun).toHaveAttribute('title', 'Allows what listens on port 5432 now, until this run ends.');
+    await user.click(allowRun);
+    expect(submitted()).toEqual([{ requestId: 'net-1', decision: { kind: 'allowRun' } }]);
+  });
+
+  it('says the port can be allowed for this run only when there is no agent to save on', () => {
+    render(<NetworkAccessCard req={localRequest(ssh, { agentId: null })} requester={requester} />);
+    expect(buttons()).toEqual(['▾', 'Allow this run', 'Deny']);
+    expect(screen.getByText(/no agent to save/)).toHaveTextContent(
+      /^There is no agent to save an entry on, so the port can be allowed for this run only\.$/,
+    );
+  });
+
+  it.each([
+    [ssh, 'It is served by /usr/bin/ssh.', ['This run', 'Always', 'Deny']],
+    [postgres, 'It is served by user postgres.', ['This run', 'Always', 'Deny']],
+    [{ kind: 'runOnly', reason: 'unseen', holders: [] }, 'CLAI cannot name the program serving it.', ['This run', 'Deny']],
+  ] as const)('speaks on the Fleet with the listener and short chips (%o)', (listener, line, chips) => {
+    render(
+      <NetworkAccessCard
+        req={localRequest(listener as LocalListenerView)}
+        speaker={(prompt: ReactNode) => <div>{prompt}</div>}
+      />,
+    );
+    expect(screen.getByText('May I reach port 5432 on this computer?')).toBeInTheDocument();
+    expect(screen.getByText((_, el) => el?.tagName === 'SPAN' && el.textContent === line)).toBeInTheDocument();
+    expect(buttons()).toEqual(chips);
+    expect(screen.queryByText(/^Listening:/)).not.toBeInTheDocument();
+  });
+
+  it('titles the spoken This run chip with the user it allows', () => {
+    render(<NetworkAccessCard req={localRequest(postgres)} speaker={(prompt: ReactNode) => <div>{prompt}</div>} />);
+    expect(screen.getByRole('button', { name: 'This run' })).toHaveAttribute(
+      'title',
+      'Allow this run. Allows any program of user postgres on port 5432 until this run ends.',
+    );
   });
 });

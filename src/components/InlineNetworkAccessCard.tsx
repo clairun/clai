@@ -18,6 +18,14 @@ import { DenyReasonField, useDenyReason } from './DenyReasonField';
 import { useDecisionSender } from './useDecisionSender';
 import { ResolvedRequestNotice } from './ResolvedRequestNotice';
 import { PendingRequestStack, type PendingRequestSource } from './PendingRequestStack';
+import {
+  LocalListenerDetails,
+  ServedBy,
+  SpokenListener,
+  allowRunTitle,
+  alwaysTitle,
+  isSavable,
+} from './LocalListenerDetails';
 import styles from './InlineApprovalCard.module.css';
 import grantStyles from './InlinePathGrantCard.module.css';
 
@@ -31,12 +39,26 @@ const RUN_HOSTS_SHOWN = 8;
 /** “Always” saves on the agent; the backend refuses it with no agent to save on. */
 const canSave = (req: NetworkAccessRequest) => Boolean(req.workspaceId && req.agentId);
 
+/** The listener and port of a request for a port on this computer. */
+const localOf = (req: NetworkAccessRequest) =>
+  req.localListener && req.port ? { listener: req.localListener, port: req.port } : null;
+
 /** Where “Always” saves, as for the ask-first card. */
 const SaveScope = ({ req, workspaceName }: { req: NetworkAccessRequest; workspaceName?: string }) => {
+  const local = localOf(req);
+  const listener = local?.listener;
   if (!canSave(req)) {
-    return <>There is no agent to save an entry on, so the host can be allowed for this run only.</>;
+    return <>There is no agent to save an entry on, so the {local ? 'port' : 'host'} can be allowed for this run only.</>;
   }
-  const saves = req.suggestedWildcard ? (
+  if (listener && !isSavable(listener)) {
+    return <>CLAI cannot name the program, so the port can be allowed for this run only, while the same program listens.</>;
+  }
+  const list = local ? 'allowed local ports' : 'allowed hosts';
+  const saves = local && listener ? (
+    <>
+      “Always” adds port {local.port} for <ServedBy listener={listener} />
+    </>
+  ) : req.suggestedWildcard ? (
     <>
       “Always” and “Allow {unicodeHost(req.suggestedWildcard)}” add their entry
     </>
@@ -49,14 +71,14 @@ const SaveScope = ({ req, workspaceName }: { req: NetworkAccessRequest; workspac
   if (!req.persistsToSharedAgent) {
     return (
       <>
-        {saves} to this agent's allowed hosts in {here ?? 'this workspace'} only.
+        {saves} to this agent's {list} in {here ?? 'this workspace'} only.
       </>
     );
   }
   const others = req.alsoAffectsWorkspaces.map(quoted);
   return (
     <>
-      {saves} to this shared agent's allowed hosts in every workspace that has it, now and later.
+      {saves} to this shared agent's {list} in every workspace that has it, now and later.
       {others.length > 0 && <> Today that is {listOf([here ?? 'this one', ...others])}.</>}
     </>
   );
@@ -113,6 +135,9 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
   const address = hostWithPort(host, req.port);
   const shown = requestTarget(req.host, req.port);
   const wildcard = req.suggestedWildcard ? unicodeHost(req.suggestedWildcard) : null;
+  const local = localOf(req);
+  const savable = local && isSavable(local.listener) ? local.listener : null;
+  const offersAlways = canSave(req) && (!local || savable !== null);
 
   return (
     <article
@@ -155,6 +180,14 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
             speaker(
               <>
                 May I reach {isLoopbackHost(req.host) ? shown : <code title={asciiHost ?? undefined}>{shown}</code>}?
+                {local && (
+                  <>
+                    {' '}
+                    <span>
+                      <SpokenListener listener={local.listener} />
+                    </span>
+                  </>
+                )}
                 <span className={grantStyles.spokenReason}>{req.reason || '(no reason given)'}</span>
               </>,
             )
@@ -163,12 +196,13 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
               <div className={styles.segmentText}>
                 <code>{address}</code>
                 {asciiHost && <span className={styles.mutedHint}>{asciiHost}</span>}
-                <span className={styles.ruleChip}>not in allowed hosts</span>
+                <span className={styles.ruleChip}>{local ? 'not in allowed local ports' : 'not in allowed hosts'}</span>
               </div>
               <div className={grantStyles.reasonBlock}>
                 <span className={grantStyles.reasonLabel}>Reason from agent:</span>
                 <div className={grantStyles.reasonText}>{req.reason || '(no reason given)'}</div>
               </div>
+              {local && <LocalListenerDetails listener={local.listener} port={local.port} />}
             </>
           )}
           <RunHosts hosts={req.runHosts} />
@@ -185,15 +219,26 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
                 className={`${styles.btn} ${styles.btnAllowOnce}`}
                 onClick={() => send({ kind: 'allowRun' })}
                 disabled={isSubmitting}
-                {...chipText(spoken, 'Allow this run', 'This run', 'A later run asks again.')}
+                {...chipText(
+                  spoken,
+                  'Allow this run',
+                  'This run',
+                  local ? allowRunTitle(local.listener, local.port) : 'A later run asks again.',
+                )}
               />
-              {canSave(req) && (
+              {offersAlways && (
                 <button
                   type="button"
                   className={`${styles.btn} ${styles.btnAllow}`}
-                  onClick={() => send({ kind: 'allowAlways', entry: req.host })}
+                  // A local grant is saved from the listener the card showed, never from this entry.
+                  onClick={() => send({ kind: 'allowAlways', entry: local ? `localhost:${local.port}` : req.host })}
                   disabled={isSubmitting}
-                  {...chipText(spoken, `Always for ${agentName}`, 'Always', `Adds ${host} to this agent's allowed hosts.`)}
+                  {...chipText(
+                    spoken,
+                    `Always for ${agentName}`,
+                    'Always',
+                    local && savable ? alwaysTitle(savable, local.port) : `Adds ${host} to this agent's allowed hosts.`,
+                  )}
                 />
               )}
               {canSave(req) && req.suggestedWildcard && wildcard && (

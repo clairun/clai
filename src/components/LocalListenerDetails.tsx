@@ -1,0 +1,155 @@
+import { useId, useState, type ReactNode } from 'react';
+import type { LocalListenerView, LocalRunOnlyReason } from '../generated/bindings';
+import styles from './InlineApprovalCard.module.css';
+import grantStyles from './InlinePathGrantCard.module.css';
+import localStyles from './LocalListenerDetails.module.css';
+
+type ProgramListener = Extract<LocalListenerView, { kind: 'program' }>;
+type UserListener = Extract<LocalListenerView, { kind: 'otherUser' }>;
+
+/** A listener “Always” can save: one program, or another user's service. */
+export const isSavable = (
+  listener: LocalListenerView
+): listener is ProgramListener | UserListener => listener.kind !== 'runOnly';
+
+/** What “Allow this run” lets through; for another user, any of its programs. */
+export const allowRunTitle = (listener: LocalListenerView, port: number) => {
+  switch (listener.kind) {
+    case 'program':
+      return `Allows ${listener.exe} on port ${port} until this run ends.`;
+    case 'otherUser':
+      return `Allows any program of user ${listener.userName} on port ${port} until this run ends.`;
+    case 'runOnly':
+      return `Allows what listens on port ${port} now, until this run ends.`;
+  }
+};
+
+export const alwaysTitle = (listener: ProgramListener | UserListener, port: number) =>
+  `Adds port ${port}, served by ${
+    listener.kind === 'program' ? listener.exe : `user ${listener.userName} (uid ${listener.uid})`
+  }, to this agent's allowed local ports.`;
+
+/** “/usr/bin/ssh” or “user postgres”, as “Always” saves it. */
+export const ServedBy = ({ listener }: { listener: ProgramListener | UserListener }) =>
+  listener.kind === 'program' ? <code>{listener.exe}</code> : <>user {listener.userName}</>;
+
+/** The listener in one sentence, for the spoken (Fleet) card. */
+export const SpokenListener = ({ listener }: { listener: LocalListenerView }) =>
+  isSavable(listener) ? (
+    <>
+      It is served by <ServedBy listener={listener} />.
+    </>
+  ) : (
+    <>CLAI cannot name the program serving it.</>
+  );
+
+const RUN_ONLY_REASONS: Record<LocalRunOnlyReason, (port: number) => string> = {
+  unseen: (port) =>
+    `CLAI cannot see which program listens on port ${port}, for example because CLAI runs as a Flatpak.`,
+  otherNamespace: (port) =>
+    `The program on port ${port} runs in a container or another sandbox, so CLAI cannot name it.`,
+  severalPrograms: (port) => `Different programs listen on port ${port}:`,
+  replaced: (port) =>
+    `The program on port ${port} was replaced or deleted on disk since it started.`,
+  pathNotUtf8: (port) =>
+    `The path of the program on port ${port} is not valid UTF-8, so CLAI cannot save it.`,
+};
+
+/** A program's command line is long when it would not fit in about three lines. */
+const LONG_COMMAND_CHARS = 240;
+const SHOWN_LINES = 3;
+
+/** A command line, always as text, collapsed to three lines when long. */
+const CommandLine = ({ text }: { text: string }) => {
+  const id = useId();
+  const [expanded, setExpanded] = useState(false);
+  if (!text) return null;
+  const long = text.length > LONG_COMMAND_CHARS || text.split('\n').length > SHOWN_LINES;
+  return (
+    <>
+      <code
+        id={id}
+        className={`${styles.command} ${localStyles.commandText}`}
+        data-collapsed={long && !expanded ? '' : undefined}
+      >
+        {text}
+      </code>
+      {long && (
+        <button
+          type="button"
+          className={localStyles.toggle}
+          aria-controls={id}
+          aria-expanded={expanded}
+          onClick={() => setExpanded((e) => !e)}
+        >
+          {expanded ? 'Show less' : 'Show all'}
+        </button>
+      )}
+    </>
+  );
+};
+
+const Program = ({ exe, pid, commandLine }: { exe: string; pid: number; commandLine: string }) => (
+  <>
+    <p className={styles.segmentHint}>
+      Listening: <code>{exe}</code> (pid {pid})
+    </p>
+    <CommandLine text={commandLine} />
+  </>
+);
+
+const Note = ({ children }: { children: ReactNode }) => (
+  <p className={`${grantStyles.warning} ${grantStyles.warningCaution}`}>{children}</p>
+);
+
+/** What listens on a port of this computer, as the full card shows it. */
+export const LocalListenerDetails = ({
+  listener,
+  port,
+}: {
+  listener: LocalListenerView;
+  port: number;
+}) => {
+  switch (listener.kind) {
+    case 'program':
+      return (
+        <div className={localStyles.details}>
+          <Program exe={listener.exe} pid={listener.pid} commandLine={listener.commandLine} />
+          {listener.interpreter && (
+            <Note>
+              <code>{listener.exe}</code> runs many programs, so allowing it allows any of them on
+              port {port}.
+            </Note>
+          )}
+        </div>
+      );
+    case 'otherUser':
+      return (
+        <div className={localStyles.details}>
+          <p className={styles.segmentHint}>
+            Listening: a program of user <strong>{listener.userName}</strong> (uid {listener.uid}).
+            CLAI cannot see which program, because it runs as another user.
+          </p>
+          <Note>
+            Any program of user {listener.userName} on port {port} will be allowed, for this run or
+            always.
+          </Note>
+        </div>
+      );
+    case 'runOnly':
+      return (
+        <div className={localStyles.details}>
+          <p className={styles.segmentHint}>{RUN_ONLY_REASONS[listener.reason](port)}</p>
+          {listener.holders.length > 0 && (
+            <ul className={localStyles.holders}>
+              {listener.holders.map((holder, i) => (
+                <li key={`${holder.pid}-${i}`} className={localStyles.details}>
+                  <Program exe={holder.exe} pid={holder.pid} commandLine={holder.commandLine} />
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      );
+  }
+};
