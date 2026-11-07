@@ -229,12 +229,18 @@ impl SandboxEnv {
         );
     }
 
-    /// Whether the command is given a session bus address to dial.
+    /// Whether the command is given a session bus address to dial. An
+    /// empty address, or one whose entries are all `autolaunch:`, names
+    /// none: godbus autolaunches a private bus from `""` and `autolaunch:`.
     #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub fn names_session_bus(&self) -> bool {
         self.vars
             .get("DBUS_SESSION_BUS_ADDRESS")
-            .is_some_and(|address| !address.is_empty())
+            .is_some_and(|address| {
+                address
+                    .split(';')
+                    .any(|entry| !entry.is_empty() && !entry.starts_with("autolaunch:"))
+            })
     }
 
     // Read only by the Unix sandbox backends when applying the env to the

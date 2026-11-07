@@ -1524,22 +1524,43 @@ mod tests {
         let off_path = SESSION_BUS_OFF_ADDRESS.strip_prefix("unix:path=").unwrap();
         assert!(!args.iter().any(|arg| arg == off_path), "{args:?}");
 
+        // An empty or `autolaunch:` host address names no bus either; the
+        // off address comes after it and replaces it.
+        for host in ["", "autolaunch:"] {
+            command.profile.env = SandboxEnv::filtered_from_iter(
+                [("DBUS_SESSION_BUS_ADDRESS", host)],
+                &command.cwd,
+                SandboxSessionBusMode::Allow,
+            );
+            let args = rendered(&with_dbus_env(Some(host), Some(runtime.path()), || {
+                bwrap_args(&command).unwrap()
+            }));
+            let last = args
+                .windows(3)
+                .rfind(|w| w[0] == "--setenv" && w[1] == "DBUS_SESSION_BUS_ADDRESS")
+                .map(|w| w[2].as_str());
+            assert_eq!(last, Some(SESSION_BUS_OFF_ADDRESS), "{host:?}: {args:?}");
+        }
+
         // An address the host does give, such as an abstract bus that a
         // sandbox on the host network reaches, is left alone.
-        command.profile.env = SandboxEnv::filtered_from_iter(
-            [("DBUS_SESSION_BUS_ADDRESS", "unix:abstract=/tmp/dbus-x")],
-            &command.cwd,
-            SandboxSessionBusMode::Allow,
-        );
-        let args = rendered(&with_dbus_env(
-            Some("unix:abstract=/tmp/dbus-x"),
-            Some(runtime.path()),
-            || bwrap_args(&command).unwrap(),
-        ));
-        assert!(
-            !args.iter().any(|arg| arg == SESSION_BUS_OFF_ADDRESS),
-            "{args:?}"
-        );
+        for host in [
+            "unix:abstract=/tmp/dbus-x",
+            "autolaunch:;unix:abstract=/tmp/dbus-x",
+        ] {
+            command.profile.env = SandboxEnv::filtered_from_iter(
+                [("DBUS_SESSION_BUS_ADDRESS", host)],
+                &command.cwd,
+                SandboxSessionBusMode::Allow,
+            );
+            let args = rendered(&with_dbus_env(Some(host), Some(runtime.path()), || {
+                bwrap_args(&command).unwrap()
+            }));
+            assert!(
+                !args.iter().any(|arg| arg == SESSION_BUS_OFF_ADDRESS),
+                "{host:?}: {args:?}"
+            );
+        }
     }
 
     #[test]
