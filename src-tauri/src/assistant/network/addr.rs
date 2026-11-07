@@ -84,7 +84,7 @@ fn is_private_web_fetch_ipv6(ip: Ipv6Addr) -> bool {
 /// under the NAT64 well-known prefix 64:ff9b::/96, whose low 32 bits are the
 /// address a translator connects to (`64:ff9b::7f00:1` reaches 127.0.0.1).
 /// Both filters judge the embedded address, not the IPv6 literal.
-fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
+pub(crate) fn embedded_ipv4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     if let Some(mapped) = ip.to_ipv4_mapped() {
         return Some(mapped);
     }

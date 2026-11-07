@@ -12,6 +12,8 @@
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+use super::addr::embedded_ipv4;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostDecision {
     Allowed,
@@ -185,8 +187,14 @@ pub fn parse_entry(raw: &str) -> Result<HostEntry, &'static str> {
 /// text that names this computer is not one. `127.0.0.1:<port>` and
 /// `[::1]:<port>` are accepted spellings of the same port: a grant is for
 /// the program on the port, whichever loopback address a client tries
-/// first. `Ok(None)` means the text does not name this computer, so it can
-/// only be a host entry ([`parse_entry`]).
+/// first. Every other spelling of this computer is refused: `localhost`, a
+/// `*.localhost` name, or a loopback or unspecified IP, recognised after the
+/// normalisation [`parse_entry`] applies (case, trailing dot, Unicode).
+/// `Ok(None)` means the text is none of those, so it can only be a host
+/// entry. Names that reach this computer only through name resolution, such
+/// as `localhost.localdomain` or `ip6-localhost` in /etc/hosts, return
+/// `Ok(None)`; the network proxy and the web tools refuse loopback addresses
+/// when they connect.
 #[cfg_attr(
     not(test),
     expect(
@@ -212,7 +220,7 @@ pub fn parse_local_port(raw: &str) -> Result<Option<u16>, &'static str> {
         match rest.strip_prefix(':') {
             Some(port) => (host, true, Some(port)),
             None if rest.is_empty() => (host, true, None),
-            None => return Ok(None),
+            None => (value.as_str(), false, None),
         }
     } else {
         match value.split_once(':') {
@@ -253,15 +261,22 @@ pub fn parse_local_port(raw: &str) -> Result<Option<u16>, &'static str> {
 
 const PORT_RANGE: &str = "the port is a number from 1 to 65535";
 
-/// Any name or address that reaches this computer: `*.localhost`, all of
-/// 127.0.0.0/8, `::1` and the unspecified addresses, which connect locally.
+/// Whether `host`, read as [`parse_entry`] reads it, is `localhost`, a
+/// `*.localhost` name or an address of this computer.
 fn names_this_computer(host: &str) -> bool {
-    let name = host.strip_suffix('.').unwrap_or(host);
-    name == "localhost" || name.ends_with(".localhost") || host.parse().is_ok_and(is_this_computer)
+    parse_entry(host).is_ok_and(|entry| match entry.host {
+        Host::Domain(name) => name == "localhost" || name.ends_with(".localhost"),
+        Host::Ip(ip) => is_this_computer(ip),
+    })
 }
 
+/// All of 127.0.0.0/8, `::1` and the unspecified addresses, which connect
+/// locally, also when an IPv6 address embeds one ([`embedded_ipv4`]).
 fn is_this_computer(ip: IpAddr) -> bool {
-    let ip = ip.to_canonical();
+    let ip = match ip {
+        IpAddr::V6(v6) => embedded_ipv4(v6).map_or(ip, IpAddr::V4),
+        IpAddr::V4(_) => ip,
+    };
     ip.is_loopback() || ip.is_unspecified()
 }
 
@@ -711,6 +726,7 @@ mod tests {
         let range = "the port is a number from 1 to 65535";
         let one_port = "allow one port at a time, without ranges or wildcards";
         let use_localhost = "write this computer as localhost, as in localhost:5432";
+        let brackets = "put the IPv6 address in brackets, as in [::1]:5432";
         for (entry, reason) in [
             ("localhost", no_port),
             ("[::1]:", no_port),
@@ -719,10 +735,12 @@ mod tests {
             ("localhost:05432", "write the port without leading zeros"),
             ("localhost:1-9", one_port),
             ("localhost:*", one_port),
-            (
-                "::1:5432",
-                "put the IPv6 address in brackets, as in [::1]:5432",
-            ),
+            ("::1:5432", brackets),
+            (":::80", brackets),
+            ("64:ff9b::7f00:1:80", brackets),
+            ("127.0.0.1.", use_localhost),
+            ("[::1].", use_localhost),
+            ("[0:0:0:0:0:0:0:1]:80", use_localhost),
             ("127.0.0.2:80", use_localhost),
             ("0.0.0.0:80", use_localhost),
             ("*.localhost:80", use_localhost),
