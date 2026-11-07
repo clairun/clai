@@ -2516,6 +2516,7 @@ print(os.readlink("/var/run"), *sorted(os.listdir("/var/run")))
                 mode: crate::config::NetworkMode::Allowlist,
                 allow_domains: vec!["allowed.test".to_string()],
                 deny_domains: Vec::new(),
+                local_ports: Vec::new(),
             });
         let session = crate::assistant::network::proxy::ProxySession::start(
             &endpoint.socket,

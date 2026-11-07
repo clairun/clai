@@ -1506,6 +1506,7 @@ mod tests {
                     mode,
                     allow_domains: vec!["github.com".to_string(), "*.npmjs.org".to_string()],
                     deny_domains: Vec::new(),
+                    local_ports: Vec::new(),
                 };
                 let prompt = sandbox_prompt(backend, &network, SandboxSessionBusConfig::Deny);
                 let case = format!("{backend:?} {mode:?}: {}", prompt.sandbox);

@@ -2290,6 +2290,7 @@ mod tests {
             mode: NetworkMode::Allowlist,
             allow_domains: allow.iter().map(|entry| entry.to_string()).collect(),
             deny_domains: deny.iter().map(|entry| entry.to_string()).collect(),
+            local_ports: Vec::new(),
         }
     }
 
@@ -2709,6 +2710,7 @@ mod tests {
             mode,
             allow_domains: Vec::new(),
             deny_domains: Vec::new(),
+            local_ports: Vec::new(),
         }
     }
 

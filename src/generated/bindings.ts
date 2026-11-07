@@ -232,6 +232,16 @@ export type GrantOrigin = { "kind": "manual" } | { "kind": "credentialsPreset" }
  */
 export type HostLogEntry = { host: string, port: number | null, allowed: boolean, };
 
+/**
+ * A port on the loopback of this computer that an agent in Allowlist may
+ * reach while the granted program or user serves it.
+ */
+export type LocalPortGrant = { "kind": "program", port: number, program: string, } | { "kind": "user", port: number, uid: number, 
+/**
+ * Display only, captured at grant time; never matched.
+ */
+user?: string, };
+
 export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 
 /**
@@ -363,7 +373,12 @@ allowDomains: Array<string>,
 /**
  * Checked before the allow list.
  */
-denyDomains: Array<string>, };
+denyDomains: Array<string>, 
+/**
+ * Ports on the loopback of this computer, and what must serve them.
+ * Read only in Allowlist. Not stored when empty.
+ */
+localPorts?: Array<LocalPortGrant>, };
 
 export type PathGrantAttentionUpdate = { workspaceId: string | null, pendingCount: number, };
 
