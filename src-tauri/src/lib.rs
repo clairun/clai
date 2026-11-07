@@ -339,24 +339,20 @@ pub fn run() {
     };
 
     // Build and run the Tauri application
-    let builder = tauri::Builder::default();
-    // Register Tauri plugins. Single-instance goes first: a second launch
-    // exits inside `Builder::build`, so it never runs the setup hook, which
-    // writes auto-detected providers to config.json and opens the workspace
-    // databases, whose restart recovery would mark this instance's live
-    // runs failed and its tasks stopped. Everything above this point in
-    // `run()` does run in the second process; of it, only
-    // `ConfigManager::new` writes, and only when it migrates config.json. A
-    // custom `CLAI_HOME` has its own config and databases, so it skips the
-    // check and runs alongside.
-    let builder = if paths::uses_default_home() {
-        builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+    tauri::Builder::default()
+        // Register Tauri plugins. Single-instance goes first: a second launch
+        // exits inside `Builder::build`, so it never runs the setup hook, which
+        // writes auto-detected providers to config.json and opens the workspace
+        // databases, whose restart recovery would mark this instance's live
+        // runs failed and its tasks stopped. Everything above this point in
+        // `run()` does run in the second process; of it, only
+        // `ConfigManager::new` writes, and only when it migrates config.json.
+        // Every launch, including `tauri dev` with a different `CLAI_HOME`,
+        // focuses the running window and exits, because workspace databases
+        // live outside `CLAI_HOME`.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             main_window::show_main_window(app);
         }))
-    } else {
-        builder
-    };
-    builder
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
