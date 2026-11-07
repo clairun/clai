@@ -21,7 +21,7 @@ use tokio_util::sync::CancellationToken;
 use super::connect::{ConnectError, Connector, LocalConnector};
 use super::http::{parse_request, read_head, Request, HEAD_TIMEOUT};
 use super::local_listener::{Listener, ListenerInspector, Loopback};
-use super::matcher::{canonical_host, is_local_name, HostDecision};
+use super::matcher::{canonical_host, is_local_name, HostDecision, LOCALHOST};
 use super::run_state::{LocalDecision, RefusedTargets, RunNetwork};
 
 /// Open connections one command may hold through the proxy. Each holds
@@ -204,10 +204,6 @@ async fn host_upstream<S: AsyncWrite + Unpin>(
         }
     }
 }
-
-/// How the proxy names a port on this computer, whichever name the client
-/// used.
-const LOCALHOST: &str = "localhost";
 
 /// The connection to `port` on this computer, once the deny list and the
 /// local ports of the run allow what listens there. Nothing is dialled

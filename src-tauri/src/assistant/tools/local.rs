@@ -16,19 +16,18 @@ use crate::assistant::network::addr::{
 #[cfg(target_os = "linux")]
 use crate::assistant::network::local_listener::{Listener, ListenerInspector, Loopback};
 use crate::assistant::network::matcher::{
-    canonical_host, parse_entry, parse_local_port, HostDecision,
+    canonical_host, parse_entry, parse_local_port, HostDecision, LOCALHOST,
 };
 #[cfg(target_os = "linux")]
-use crate::assistant::network::run_state::{LocalBinding, LocalDecision, LocalRule};
+use crate::assistant::network::run_state::{LocalDecision, LocalRule};
 use crate::assistant::network::run_state::{RefusedTargets, RunNetwork};
 use crate::assistant::sandbox::{
     keyring_only_unavailable_note, run_command, ProxyEndpoint, SandboxCommand,
     SandboxCommandOutput, SandboxEnv, SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode,
     SessionBusProxy, SocketPolicy,
 };
-use crate::commands::network_access::LocalSnapshot;
 #[cfg(target_os = "linux")]
-use crate::commands::network_access::{LocalListenerView, NetworkAccessDecision};
+use crate::commands::network_access::{LocalListenerCard, LocalSnapshot, NetworkAccessDecision};
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
     SandboxSessionBusConfig, ShellAccessMode,
@@ -1419,7 +1418,7 @@ async fn execute_net_request_access(
         params.reason,
         context.run_network.host_log(),
     );
-    let decision = await_network_access_decision(deps, context, request, None).await?;
+    let decision = await_network_access_decision(deps, context, request).await?;
     apply_network_decision(context, &host, decision)
 }
 
@@ -1434,11 +1433,11 @@ enum Ask {
     LocalPort(LocalAsk),
 }
 
+/// A port on this computer, which the request names as [`LOCALHOST`]
+/// whatever its spelling, so a re-ask spelled `127.0.0.1` or `[::1]`
+/// replaces a pending request for the port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct LocalAsk {
-    /// What the request names: always `localhost`, so a re-ask spelled
-    /// `127.0.0.1` or `[::1]` replaces a pending request for the port.
-    host: &'static str,
     port: u16,
     /// The name the agent used, which decides the loopback address looked
     /// at, as in the network proxy.
@@ -1458,20 +1457,17 @@ async fn local_port_access(
     use tauri::Manager;
 
     let inspector = crate::assistant::network::local_listener::host_inspector();
-    request_local_port(context, inspector, local, |snapshot, view| async move {
-        let request = NetworkAccessRequest {
-            local_listener: Some(view),
-            ..NetworkAccessRequest::for_agent(
-                &deps.app.state::<crate::AppState>(),
-                Some(deps.workspace_id.clone()),
-                context.run_context.automation_id.clone(),
-                local.host.to_string(),
-                Some(local.port),
-                reason,
-                context.run_network.host_log(),
-            )
-        };
-        await_network_access_decision(deps, context, request, Some(snapshot)).await
+    request_local_port(context, inspector, local, |listener| async move {
+        let request = NetworkAccessRequest::for_local_port(
+            &deps.app.state::<crate::AppState>(),
+            Some(deps.workspace_id.clone()),
+            context.run_context.automation_id.clone(),
+            local.port,
+            reason,
+            context.run_network.host_log(),
+            listener,
+        );
+        await_network_access_decision(deps, context, request).await
     })
     .await
 }
@@ -1484,8 +1480,8 @@ fn local_port_access(
     _reason: String,
 ) -> std::future::Ready<Result<serde_json::Value, String>> {
     std::future::ready(Err(format!(
-        "`{}:{}` cannot be requested on this PC.",
-        local.host, local.port
+        "`{LOCALHOST}:{}` cannot be requested on this PC.",
+        local.port
     )))
 }
 
@@ -1501,7 +1497,7 @@ async fn request_local_port<F, Fut>(
     ask: F,
 ) -> Result<serde_json::Value, String>
 where
-    F: FnOnce(LocalSnapshot, LocalListenerView) -> Fut,
+    F: FnOnce(LocalListenerCard) -> Fut,
     Fut: std::future::Future<Output = Result<NetworkAccessDecision, String>>,
 {
     let network = &context.run_network;
@@ -1519,12 +1515,12 @@ where
     if network.decide_local(port, &listener) == LocalDecision::Allowed {
         return Ok(serde_json::json!({
             "granted": true,
-            "host": local.host,
+            "host": LOCALHOST,
             "port": port,
             "scope": "already-allowed",
         }));
     }
-    let Some((snapshot, view)) = LocalSnapshot::of(&listener) else {
+    let Some(card) = LocalListenerCard::of(&listener) else {
         return Err(if listener == Listener::Clai {
             format!(
                 "Port {port} on this computer is served by CLAI or a program it started, \
@@ -1538,7 +1534,8 @@ where
             )
         });
     };
-    let decision = ask(snapshot.clone(), view).await?;
+    let snapshot = card.snapshot().clone();
+    let decision = ask(card).await?;
     apply_local_decision(context, local, &snapshot, decision)
 }
 
@@ -1560,7 +1557,7 @@ fn first_listener(
 }
 
 /// Applies the answer for a port on this computer to the run, bound to
-/// `snapshot`: “Allow this run” adds the program, or the sockets; “Always”,
+/// `snapshot`: “Allow this run” adds its run bindings; “Always”,
 /// already saved on the agent, adds the saved grant. A denial is the tool
 /// error and the run's warning. The result names the port only, never the
 /// listener the card showed.
@@ -1571,7 +1568,7 @@ fn apply_local_decision(
     snapshot: &LocalSnapshot,
     decision: NetworkAccessDecision,
 ) -> Result<serde_json::Value, String> {
-    let entry = format!("{}:{}", local.host, local.port);
+    let entry = format!("{LOCALHOST}:{}", local.port);
     let (rules, scope, note) = match decision {
         NetworkAccessDecision::AllowRun => (
             run_rules(local.port, snapshot),
@@ -1594,7 +1591,7 @@ fn apply_local_decision(
     }
     Ok(serde_json::json!({
         "granted": true,
-        "host": local.host,
+        "host": LOCALHOST,
         "port": local.port,
         "entry": entry,
         "scope": scope,
@@ -1602,18 +1599,11 @@ fn apply_local_decision(
     }))
 }
 
-/// The rules “Allow this run” adds: the program, or each socket CLAI could
-/// not tie to a program.
+/// The rules “Allow this run” adds on `port`.
 #[cfg(target_os = "linux")]
 fn run_rules(port: u16, snapshot: &LocalSnapshot) -> Vec<LocalRule> {
-    let bindings = match snapshot {
-        LocalSnapshot::Program { exe } => vec![LocalBinding::Program(exe.clone())],
-        LocalSnapshot::OtherUser { sockets, .. } | LocalSnapshot::RunOnly { sockets } => sockets
-            .iter()
-            .map(|inode| LocalBinding::Socket(*inode))
-            .collect(),
-    };
-    bindings
+    snapshot
+        .run_bindings()
         .into_iter()
         .map(|binding| LocalRule { port, binding })
         .collect()
@@ -1642,11 +1632,7 @@ fn requested_host(
                     .to_string(),
             );
         }
-        return Ok(Ask::LocalPort(LocalAsk {
-            host: "localhost",
-            port,
-            dialled,
-        }));
+        return Ok(Ask::LocalPort(LocalAsk { port, dialled }));
     }
     // An entry, so that what reaches the card is what “Allow this run” can
     // apply: `parse_entry` refuses `%` (`%2a` would decode to a wildcard)
@@ -1793,7 +1779,6 @@ async fn await_network_access_decision(
     deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
     request: crate::commands::network_access::NetworkAccessRequest,
-    local: Option<LocalSnapshot>,
 ) -> Result<crate::commands::network_access::NetworkAccessDecision, String> {
     use crate::commands::network_access::{
         emit_attention, emit_network_access_resolved, PendingNetworkOutcome,
@@ -1817,7 +1802,7 @@ async fn await_network_access_decision(
 
     let (rx, count) = app_state
         .pending_network_requests
-        .register(request.clone(), context.run_id.clone(), local)
+        .register(request.clone(), context.run_id.clone())
         .await;
     if let Err(e) = deps.app.emit(NETWORK_ACCESS_REQUEST_EVENT, &request) {
         tracing::warn!("Failed to emit network access request event: {}", e);
@@ -2914,7 +2899,6 @@ mod tests {
 
         fn port_5432() -> LocalAsk {
             LocalAsk {
-                host: "localhost",
                 port: 5432,
                 dialled: "localhost",
             }
@@ -2927,10 +2911,7 @@ mod tests {
             (workspace, context)
         }
 
-        async fn no_card(
-            _: LocalSnapshot,
-            _: LocalListenerView,
-        ) -> Result<NetworkAccessDecision, String> {
+        async fn no_card(_: LocalListenerCard) -> Result<NetworkAccessDecision, String> {
             panic!("no card is shown")
         }
 
@@ -2952,7 +2933,6 @@ mod tests {
                 assert_eq!(
                     ask(raw, port),
                     Ok(Ask::LocalPort(LocalAsk {
-                        host: "localhost",
                         port: 5432,
                         dialled
                     })),
@@ -2982,7 +2962,7 @@ mod tests {
                     workspace_id: Some("ws".to_string()),
                     agent_id: None,
                     agent_name: None,
-                    host: local.host.to_string(),
+                    host: LOCALHOST.to_string(),
                     port: Some(local.port),
                     reason: String::new(),
                     run_hosts: Vec::new(),
@@ -2995,7 +2975,7 @@ mod tests {
             let pending = PendingNetworkRequests::default();
             let mut earlier = request(ask("localhost:5432", None));
             for raw in ["[::1]:5432", "127.0.0.1:5432"] {
-                let _ = pending.register(earlier.clone(), "run".into(), None).await;
+                let _ = pending.register(earlier.clone(), "run".into()).await;
                 let again = request(ask(raw, None));
                 let taken = pending
                     .take_superseded("run", &again.host, again.port)
@@ -3066,17 +3046,11 @@ mod tests {
                     run_only(RunOnly::OtherNamespace, &[11]),
                     run_only(RunOnly::OtherNamespace, &[12]),
                 ),
-                (
-                    other_user(&[11]),
-                    other_user(&[12]),
-                    other_user(&[11]),
-                    other_user(&[12]),
-                ),
             ] {
                 let inspector = FakeInspector::serving(shown);
                 let (_workspace, context) = context_with(allowlist(&[], &[]));
                 let changing = inspector.clone();
-                let result = request_local_port(&context, inspector, port_5432(), |_, _| {
+                let result = request_local_port(&context, inspector, port_5432(), |_| {
                     // The listener changes before the user answers.
                     changing.set(then);
                     async { Ok(NetworkAccessDecision::AllowRun) }
@@ -3092,6 +3066,72 @@ mod tests {
                     LocalDecision::NotGranted
                 );
             }
+        }
+
+        /// As “Always” would save it, “Allow this run” for another user's
+        /// service allows that user on the port: the socket the card did not
+        /// show (the other loopback address) and the service restarted
+        /// mid-run are the same service.
+        #[tokio::test]
+        async fn allow_this_run_for_another_users_service_allows_that_user() {
+            let inspector = FakeInspector::serving(other_user(&[11]));
+            let (_workspace, context) = context_with(allowlist(&[], &[]));
+            let result = request_local_port(&context, inspector, port_5432(), |_| async {
+                Ok(NetworkAccessDecision::AllowRun)
+            })
+            .await
+            .unwrap();
+            assert_eq!(result["scope"], "run");
+            let network = &context.run_network;
+            let ipv4 = other_user(&[11]);
+            let ipv6 = other_user(&[12]);
+            let restarted = other_user(&[13]);
+            for listener in [&ipv4, &ipv6, &restarted] {
+                assert_eq!(
+                    network.decide_local(5432, listener),
+                    LocalDecision::Allowed,
+                    "{listener:?}"
+                );
+            }
+            let someone_else = Listener::OtherUser {
+                // SAFETY: geteuid has no preconditions and cannot fail.
+                uid: unsafe { libc::geteuid() }.wrapping_add(2),
+                name: "redis".to_string(),
+                sockets: vec![11],
+            };
+            assert_eq!(
+                network.decide_local(5432, &someone_else),
+                LocalDecision::Changed
+            );
+            assert_eq!(network.decide_local(6379, &ipv6), LocalDecision::NotGranted);
+        }
+
+        /// A user grant never names the user CLAI runs as: a listener of
+        /// that user is allowed for the run by the sockets the card showed.
+        #[tokio::test]
+        async fn allow_this_run_never_allows_the_user_clai_runs_as() {
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            let own = |sockets: &[u64]| Listener::OtherUser {
+                uid: unsafe { libc::geteuid() },
+                name: "me".to_string(),
+                sockets: sockets.to_vec(),
+            };
+            let inspector = FakeInspector::serving(own(&[11]));
+            let (_workspace, context) = context_with(allowlist(&[], &[]));
+            request_local_port(&context, inspector, port_5432(), |_| async {
+                Ok(NetworkAccessDecision::AllowRun)
+            })
+            .await
+            .unwrap();
+            let network = &context.run_network;
+            assert_eq!(
+                network.decide_local(5432, &own(&[11])),
+                LocalDecision::Allowed
+            );
+            assert_eq!(
+                network.decide_local(5432, &own(&[12])),
+                LocalDecision::Changed
+            );
         }
 
         #[tokio::test]
@@ -3113,8 +3153,8 @@ mod tests {
                 let inspector = FakeInspector::serving(listener);
                 let (_workspace, context) = context_with(allowlist(&[], &[]));
                 let mut shown = Vec::new();
-                let result = request_local_port(&context, inspector, port_5432(), |_, view| {
-                    shown.push(view);
+                let result = request_local_port(&context, inspector, port_5432(), |card| {
+                    shown.push(serde_json::to_value(&card).unwrap());
                     async move { Ok(decision) }
                 })
                 .await
@@ -3137,7 +3177,11 @@ mod tests {
                     context.run_network.decide_local(5432, &later),
                     LocalDecision::Allowed
                 );
-                if let [LocalListenerView::Program { command_line, .. }] = shown.as_slice() {
+                let [card] = shown.as_slice() else {
+                    panic!("one card, got {shown:?}");
+                };
+                if card["kind"] == "program" {
+                    let command_line = card["commandLine"].as_str().unwrap();
                     assert!(command_line.contains(SECRET), "the card shows it");
                 }
             }
@@ -3147,7 +3191,7 @@ mod tests {
         async fn a_denial_is_the_tool_error_and_allows_nothing() {
             let inspector = FakeInspector::serving(program(SSH));
             let (_workspace, context) = context_with(allowlist(&[], &[]));
-            let error = request_local_port(&context, inspector, port_5432(), |_, _| async {
+            let error = request_local_port(&context, inspector, port_5432(), |_| async {
                 Ok(NetworkAccessDecision::Deny {
                     reason: Some("use the staging database".to_string()),
                 })

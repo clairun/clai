@@ -18,11 +18,12 @@
 //!
 //! A port on this computer (`localhost:<port>`) is asked as host
 //! `localhost` with the port, and the card shows what listens there. The
-//! registry keeps a [`LocalSnapshot`] of that listener with the request, and
-//! every answer binds to it, never to what listens when the user answers:
-//! *Allow this run* adds the program, or the sockets, to the run; *Always*
-//! saves the program, or another user CLAI cannot see into, as a local port
-//! grant, and is refused when only this run can be allowed.
+//! request carries a [`LocalSnapshot`] of that listener beside the card's
+//! view, and every answer binds to it, never to what listens when the user
+//! answers: *Allow this run* adds the program, another user CLAI cannot see
+//! into, or else the sockets, to the run; *Always* saves the program or the
+//! other user as a local port grant, and is refused when only this run can
+//! be allowed.
 //!
 //! The flow and the registry mirror the path-grant request
 //! ([`crate::commands::path_grants`]); the registries are kept apart.
@@ -36,9 +37,11 @@ use tokio::sync::{oneshot, Mutex as AsyncMutex};
 #[cfg(target_os = "linux")]
 use crate::assistant::network::local_listener::{Listener, RunOnly};
 use crate::assistant::network::matcher::{
-    approved_entry, is_local_name, parent_wildcard, parse_entry, parse_local_port,
+    approved_entry, is_local_name, parent_wildcard, parse_entry, parse_local_port, LOCALHOST,
 };
 use crate::assistant::network::run_state::HostLogEntry;
+#[cfg(target_os = "linux")]
+use crate::assistant::network::run_state::LocalBinding;
 use crate::assistant::workspace_agents::workspace_agent_display_names;
 use crate::commands::permissions::{normalize_reason, shared_allowance_reach, AttentionUpdate};
 use crate::config::types::LocalPortGrant;
@@ -74,11 +77,11 @@ pub struct NetworkAccessRequest {
     /// The other workspaces that “Always” reaches today.
     pub also_affects_workspaces: Vec<String>,
     /// For a port on this computer (`host` is then `localhost`), what
-    /// listens there, for the card only: an answer binds to the
-    /// [`LocalSnapshot`] the registry keeps with the request.
+    /// listens there: the card shows its view, and every answer binds to
+    /// its snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[ts(optional)]
-    pub local_listener: Option<LocalListenerView>,
+    #[ts(optional, as = "Option<LocalListenerView>")]
+    pub local_listener: Option<LocalListenerCard>,
 }
 
 impl NetworkAccessRequest {
@@ -114,6 +117,106 @@ impl NetworkAccessRequest {
             local_listener: None,
         }
     }
+
+    /// The request an agent waits on for `port` on this computer, with what
+    /// listens there.
+    #[cfg(target_os = "linux")]
+    pub fn for_local_port(
+        state: &AppState,
+        workspace_id: Option<String>,
+        agent_id: Option<String>,
+        port: u16,
+        reason: String,
+        run_hosts: Vec<HostLogEntry>,
+        listener: LocalListenerCard,
+    ) -> Self {
+        Self {
+            local_listener: Some(listener),
+            ..Self::for_agent(
+                state,
+                workspace_id,
+                agent_id,
+                LOCALHOST.to_string(),
+                Some(port),
+                reason,
+                run_hosts,
+            )
+        }
+    }
+}
+
+/// What listened on a port of this computer when the card was made: the
+/// view the card shows and the snapshot every answer binds to, made
+/// together so that neither reaches the registry without the other.
+/// Serialised as the view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalListenerCard {
+    view: LocalListenerView,
+    snapshot: LocalSnapshot,
+}
+
+impl Serialize for LocalListenerCard {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.view.serialize(serializer)
+    }
+}
+
+impl LocalListenerCard {
+    /// The card for `listener`, or `None` when nothing or CLAI listens: no
+    /// card is shown for those.
+    #[cfg(target_os = "linux")]
+    pub fn of(listener: &Listener) -> Option<Self> {
+        let (snapshot, view) = match listener {
+            Listener::Nothing | Listener::Clai => return None,
+            Listener::Program(program) => (
+                LocalSnapshot::Program {
+                    exe: program.exe.clone(),
+                },
+                LocalListenerView::Program {
+                    pid: program.pid,
+                    exe: program.exe.clone(),
+                    command_line: program.cmdline.clone(),
+                    interpreter: program.interpreter,
+                },
+            ),
+            Listener::OtherUser { uid, name, sockets } => (
+                LocalSnapshot::OtherUser {
+                    uid: *uid,
+                    name: name.clone(),
+                    sockets: sockets.clone(),
+                },
+                LocalListenerView::OtherUser {
+                    uid: *uid,
+                    user_name: name.clone(),
+                },
+            ),
+            Listener::RunOnly {
+                reason,
+                sockets,
+                holders,
+            } => (
+                LocalSnapshot::RunOnly {
+                    sockets: sockets.clone(),
+                },
+                LocalListenerView::RunOnly {
+                    reason: (*reason).into(),
+                    holders: holders
+                        .iter()
+                        .map(|holder| LocalHolderView {
+                            pid: holder.pid,
+                            exe: holder.exe.clone(),
+                            command_line: holder.cmdline.clone(),
+                        })
+                        .collect(),
+                },
+            ),
+        };
+        Some(Self { view, snapshot })
+    }
+
+    pub fn snapshot(&self) -> &LocalSnapshot {
+        &self.snapshot
+    }
 }
 
 /// What listened on a port of this computer when the card was made, as the
@@ -125,6 +228,10 @@ impl NetworkAccessRequest {
     rename_all_fields = "camelCase"
 )]
 #[ts(export, export_to = "bindings.ts")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(dead_code, reason = "only Linux finds what listens on a port")
+)]
 pub enum LocalListenerView {
     /// One program: “Always” saves its path.
     Program {
@@ -149,6 +256,10 @@ pub enum LocalListenerView {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(dead_code, reason = "only Linux finds what listens on a port")
+)]
 pub enum LocalRunOnlyReason {
     /// CLAI cannot see the processes behind the sockets (they are its own
     /// user's, or CLAI runs in a Flatpak or container).
@@ -175,8 +286,8 @@ pub struct LocalHolderView {
 
 /// What every answer to a request for a port on this computer binds to:
 /// what listened when the card was made, never what listens when the user
-/// answers. Kept by the registry beside the request and never serialised;
-/// it holds no command line.
+/// answers. Kept in the request's [`LocalListenerCard`] and never
+/// serialised; it holds no command line.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalSnapshot {
     Program {
@@ -193,56 +304,19 @@ pub enum LocalSnapshot {
 }
 
 impl LocalSnapshot {
-    /// The snapshot and the card's view of `listener`, or `None` when
-    /// nothing or CLAI listens: no card is shown for those.
+    /// What “Allow this run” lets the run reach: the program, the other
+    /// user as “Always” would save it, or else each socket CLAI could not
+    /// tie to an owner it may name.
     #[cfg(target_os = "linux")]
-    pub fn of(listener: &Listener) -> Option<(Self, LocalListenerView)> {
-        let found = match listener {
-            Listener::Nothing | Listener::Clai => return None,
-            Listener::Program(program) => (
-                Self::Program {
-                    exe: program.exe.clone(),
-                },
-                LocalListenerView::Program {
-                    pid: program.pid,
-                    exe: program.exe.clone(),
-                    command_line: program.cmdline.clone(),
-                    interpreter: program.interpreter,
-                },
-            ),
-            Listener::OtherUser { uid, name, sockets } => (
-                Self::OtherUser {
-                    uid: *uid,
-                    name: name.clone(),
-                    sockets: sockets.clone(),
-                },
-                LocalListenerView::OtherUser {
-                    uid: *uid,
-                    user_name: name.clone(),
-                },
-            ),
-            Listener::RunOnly {
-                reason,
-                sockets,
-                holders,
-            } => (
-                Self::RunOnly {
-                    sockets: sockets.clone(),
-                },
-                LocalListenerView::RunOnly {
-                    reason: (*reason).into(),
-                    holders: holders
-                        .iter()
-                        .map(|holder| LocalHolderView {
-                            pid: holder.pid,
-                            exe: holder.exe.clone(),
-                            command_line: holder.cmdline.clone(),
-                        })
-                        .collect(),
-                },
-            ),
-        };
-        Some(found)
+    pub fn run_bindings(&self) -> Vec<LocalBinding> {
+        match self {
+            Self::Program { exe } => vec![LocalBinding::Program(exe.clone())],
+            Self::OtherUser { uid, .. } if !is_clai_user(*uid) => vec![LocalBinding::User(*uid)],
+            Self::OtherUser { sockets, .. } | Self::RunOnly { sockets } => sockets
+                .iter()
+                .map(|inode| LocalBinding::Socket(*inode))
+                .collect(),
+        }
     }
 
     /// The grant “Always” saves for `port`: the program, or the other user.
@@ -322,8 +396,6 @@ pub struct PendingNetworkEntry {
     /// The run waiting on the decision, so a re-asked request supersedes it.
     pub run_id: String,
     pub request: NetworkAccessRequest,
-    /// For a port on this computer, what every answer binds to.
-    pub local: Option<LocalSnapshot>,
 }
 
 pub struct SupersededNetworkRequest {
@@ -374,13 +446,11 @@ impl PendingInner {
 
 impl PendingNetworkRequests {
     /// Returns the receiver the tool waits on and the workspace's pending
-    /// count. `local` is the listener a request for a port on this computer
-    /// binds to.
+    /// count.
     pub async fn register(
         &self,
         request: NetworkAccessRequest,
         run_id: String,
-        local: Option<LocalSnapshot>,
     ) -> (oneshot::Receiver<PendingNetworkOutcome>, u32) {
         let (sender, receiver) = oneshot::channel();
         let count = self.inner.lock().await.insert(PendingNetworkEntry {
@@ -388,7 +458,6 @@ impl PendingNetworkRequests {
             workspace_id: request.workspace_id.clone(),
             run_id,
             request,
-            local,
         });
         (receiver, count)
     }
@@ -448,16 +517,12 @@ impl PendingNetworkRequests {
         run_ids
     }
 
-    /// The request and the listener it binds to, if any.
-    pub async fn request(
-        &self,
-        request_id: &str,
-    ) -> Option<(NetworkAccessRequest, Option<LocalSnapshot>)> {
+    pub async fn request(&self, request_id: &str) -> Option<NetworkAccessRequest> {
         let inner = self.inner.lock().await;
         inner
             .entries
             .get(request_id)
-            .map(|entry| (entry.request.clone(), entry.local.clone()))
+            .map(|entry| entry.request.clone())
     }
 
     /// Removes the request; returns it with its workspace's new count.
@@ -571,10 +636,10 @@ async fn resolve_network_request(
     back_on_queue: impl FnOnce(&NetworkAccessRequest, u32),
 ) -> Result<(), String> {
     let pending = &state.pending_network_requests;
-    let Some((request, local)) = pending.request(request_id).await else {
+    let Some(request) = pending.request(request_id).await else {
         return Err(no_pending_request(request_id));
     };
-    let (decision, grant) = validate_decision(&request, local.as_ref(), decision)?;
+    let (decision, grant) = validate_decision(&request, decision)?;
     let Some((entry, remaining)) = pending.take(request_id).await else {
         return Err(no_pending_request(request_id));
     };
@@ -590,7 +655,7 @@ async fn resolve_network_request(
             _ => Err("no agent to save it on; allow it for this run instead".to_string()),
         };
         if let Err(error) = saved {
-            tracing::warn!("Could not save `{allowed}` on the allow list: {error}");
+            tracing::warn!("Could not save `{allowed}` on the agent: {error}");
             let request = entry.request.clone();
             match pending.restore(entry).await {
                 Some(count) => back_on_queue(&request, count),
@@ -611,13 +676,16 @@ fn no_pending_request(request_id: &str) -> String {
 /// An “Always” entry must be one [`approved_entry`] accepts (stored in the
 /// matcher's form). For a port on this computer it must name that port,
 /// is delivered as `localhost:<port>`, and comes with the grant to save,
-/// taken from `local`, the listener the card showed. A denial reason is
-/// trimmed and bounded.
+/// taken from the listener the card showed. A denial reason is trimmed and
+/// bounded.
 fn validate_decision(
     request: &NetworkAccessRequest,
-    local: Option<&LocalSnapshot>,
     decision: NetworkAccessDecision,
 ) -> Result<(NetworkAccessDecision, Option<LocalPortGrant>), String> {
+    let local = request
+        .local_listener
+        .as_ref()
+        .map(LocalListenerCard::snapshot);
     match decision {
         NetworkAccessDecision::AllowRun => Ok((decision, None)),
         NetworkAccessDecision::AllowAlways { entry } => match local.zip(request.port) {
@@ -629,7 +697,7 @@ fn validate_decision(
                     ));
                 }
                 let grant = local.always_grant(port)?;
-                let entry = format!("localhost:{port}");
+                let entry = format!("{LOCALHOST}:{port}");
                 Ok((NetworkAccessDecision::AllowAlways { entry }, Some(grant)))
             }
             // Only a request made with the listener on the port can save
@@ -822,13 +890,10 @@ mod tests {
         let second = request(Some("ws"), None, "b.example.org");
         let other = request(Some("other"), None, "c.example.org");
         let anonymous = request(None, None, "d.example.org");
-        assert_eq!(
-            pending.register(first.clone(), "run".into(), None).await.1,
-            1
-        );
-        assert_eq!(pending.register(second, "run".into(), None).await.1, 2);
-        let _ = pending.register(other, "run".into(), None).await;
-        let _ = pending.register(anonymous, "run".into(), None).await;
+        assert_eq!(pending.register(first.clone(), "run".into()).await.1, 1);
+        assert_eq!(pending.register(second, "run".into()).await.1, 2);
+        let _ = pending.register(other, "run".into()).await;
+        let _ = pending.register(anonymous, "run".into()).await;
 
         let counts = pending.counts_snapshot().await;
         assert_eq!(counts.len(), 2, "requests without a workspace are left out");
@@ -846,16 +911,10 @@ mod tests {
         let pending = PendingNetworkRequests::default();
         let stale = request(Some("ws"), None, "a.example.org");
         let other_host = request(Some("ws"), None, "b.example.org");
-        let (stale_rx, _) = pending.register(stale.clone(), "run-1".into(), None).await;
-        let _other_host = pending
-            .register(other_host.clone(), "run-1".into(), None)
-            .await;
+        let (stale_rx, _) = pending.register(stale.clone(), "run-1".into()).await;
+        let _other_host = pending.register(other_host.clone(), "run-1".into()).await;
         let _other_run = pending
-            .register(
-                request(Some("ws"), None, "a.example.org"),
-                "run-2".into(),
-                None,
-            )
+            .register(request(Some("ws"), None, "a.example.org"), "run-2".into())
             .await;
 
         // The port of a host does not matter.
@@ -882,10 +941,8 @@ mod tests {
         };
         let stale = on_port(5432);
         let other_port = on_port(6379);
-        let _ = pending.register(stale.clone(), "run-1".into(), None).await;
-        let _ = pending
-            .register(other_port.clone(), "run-1".into(), None)
-            .await;
+        let _ = pending.register(stale.clone(), "run-1".into()).await;
+        let _ = pending.register(other_port.clone(), "run-1".into()).await;
 
         let taken = pending
             .take_superseded("run-1", "localhost", Some(5432))
@@ -899,11 +956,7 @@ mod tests {
     async fn purge_cancels_the_run_before_dropping_the_request() {
         let pending = PendingNetworkRequests::default();
         let (mut rx, _) = pending
-            .register(
-                request(Some("ws-1"), None, "a.example.org"),
-                "run-1".into(),
-                None,
-            )
+            .register(request(Some("ws-1"), None, "a.example.org"), "run-1".into())
             .await;
         let mut cancelled = Vec::new();
 
@@ -931,9 +984,7 @@ mod tests {
         decision: NetworkAccessDecision,
     ) -> Result<NetworkAccessDecision, String> {
         let pending = &fixture.state.pending_network_requests;
-        let (rx, _) = pending
-            .register(request.clone(), "run-1".into(), None)
-            .await;
+        let (rx, _) = pending.register(request.clone(), "run-1".into()).await;
         resolve_network_request(
             &fixture.state,
             &request.request_id,
@@ -1099,9 +1150,7 @@ mod tests {
         let fixture = Fixture::new();
         let request = request(Some(WORKSPACE_ID), Some(MAIN_ID), "mirror.example.org");
         let pending = &fixture.state.pending_network_requests;
-        let (mut rx, _) = pending
-            .register(request.clone(), "run-1".into(), None)
-            .await;
+        let (mut rx, _) = pending.register(request.clone(), "run-1".into()).await;
 
         for entry in ["*.org", "example.org", "*.other.org"] {
             let error = resolve_network_request(
@@ -1134,9 +1183,7 @@ mod tests {
         // No agent by this id: the save fails.
         let request = request(Some(WORKSPACE_ID), Some("nobody"), "mirror.example.org");
         let pending = &fixture.state.pending_network_requests;
-        let (mut rx, _) = pending
-            .register(request.clone(), "run-1".into(), None)
-            .await;
+        let (mut rx, _) = pending.register(request.clone(), "run-1".into()).await;
         let mut left = Vec::new();
         let mut back = Vec::new();
 
@@ -1185,9 +1232,7 @@ mod tests {
         let fixture = Fixture::new();
         let request = request(Some(WORKSPACE_ID), None, "mirror.example.org");
         let pending = &fixture.state.pending_network_requests;
-        let (mut rx, _) = pending
-            .register(request.clone(), "run-1".into(), None)
-            .await;
+        let (mut rx, _) = pending.register(request.clone(), "run-1".into()).await;
         let mut back = Vec::new();
 
         let error = resolve_network_request(
@@ -1217,9 +1262,7 @@ mod tests {
         let fixture = Fixture::new();
         let request = request(Some(WORKSPACE_ID), Some("nobody"), "mirror.example.org");
         let pending = &fixture.state.pending_network_requests;
-        let (rx, _) = pending
-            .register(request.clone(), "run-1".into(), None)
-            .await;
+        let (rx, _) = pending.register(request.clone(), "run-1".into()).await;
         drop(rx);
         let mut left = Vec::new();
 
@@ -1345,16 +1388,25 @@ mod tests {
             }
         }
 
-        fn snapshot(listener: &Listener) -> LocalSnapshot {
-            LocalSnapshot::of(listener).expect("a card").0
+        fn card(listener: &Listener) -> LocalListenerCard {
+            LocalListenerCard::of(listener).expect("a card")
         }
 
-        fn local_request(agent: &str) -> NetworkAccessRequest {
-            NetworkAccessRequest {
-                port: Some(5432),
-                suggested_wildcard: None,
-                ..request(Some(WORKSPACE_ID), Some(agent), "localhost")
-            }
+        /// The request for port 5432, as `net_request_access` makes it.
+        fn local_request(
+            fixture: &Fixture,
+            agent: &str,
+            listener: &Listener,
+        ) -> NetworkAccessRequest {
+            NetworkAccessRequest::for_local_port(
+                &fixture.state,
+                Some(WORKSPACE_ID.to_string()),
+                Some(agent.to_string()),
+                5432,
+                "tests".to_string(),
+                Vec::new(),
+                card(listener),
+            )
         }
 
         fn always(entry: &str) -> NetworkAccessDecision {
@@ -1366,13 +1418,10 @@ mod tests {
         async fn decide_local(
             fixture: &Fixture,
             request: &NetworkAccessRequest,
-            local: LocalSnapshot,
             decision: NetworkAccessDecision,
         ) -> Result<NetworkAccessDecision, String> {
             let pending = &fixture.state.pending_network_requests;
-            let (rx, _) = pending
-                .register(request.clone(), "run-1".into(), Some(local))
-                .await;
+            let (rx, _) = pending.register(request.clone(), "run-1".into()).await;
             resolve_network_request(
                 &fixture.state,
                 &request.request_id,
@@ -1408,18 +1457,18 @@ mod tests {
 
         #[test]
         fn the_card_shows_the_listener_and_the_snapshot_keeps_no_command_line() {
-            assert_eq!(LocalSnapshot::of(&Listener::Nothing), None);
-            assert_eq!(LocalSnapshot::of(&Listener::Clai), None);
+            assert_eq!(LocalListenerCard::of(&Listener::Nothing), None);
+            assert_eq!(LocalListenerCard::of(&Listener::Clai), None);
 
-            let (snapshot, view) = LocalSnapshot::of(&ssh()).unwrap();
+            let shown = card(&ssh());
             assert_eq!(
-                snapshot,
-                LocalSnapshot::Program {
+                shown.snapshot(),
+                &LocalSnapshot::Program {
                     exe: "/usr/bin/ssh".to_string()
                 }
             );
             assert_eq!(
-                serde_json::to_value(&view).unwrap(),
+                serde_json::to_value(&shown).unwrap(),
                 serde_json::json!({
                     "kind": "program",
                     "pid": 4321,
@@ -1428,10 +1477,13 @@ mod tests {
                     "interpreter": false,
                 })
             );
-            let (snapshot, view) = LocalSnapshot::of(&run_only(RunOnly::OtherNamespace)).unwrap();
-            assert_eq!(snapshot, LocalSnapshot::RunOnly { sockets: vec![11] });
+            let shown = card(&run_only(RunOnly::OtherNamespace));
             assert_eq!(
-                serde_json::to_value(&view).unwrap(),
+                shown.snapshot(),
+                &LocalSnapshot::RunOnly { sockets: vec![11] }
+            );
+            assert_eq!(
+                serde_json::to_value(&shown).unwrap(),
                 serde_json::json!({
                     "kind": "runOnly",
                     "reason": "otherNamespace",
@@ -1442,32 +1494,21 @@ mod tests {
                     }],
                 })
             );
-            let (_, view) = LocalSnapshot::of(&postgres()).unwrap();
+            // The request shows the view only: no snapshot, no sockets.
+            let fixture = Fixture::new();
+            let asked =
+                serde_json::to_value(local_request(&fixture, MAIN_ID, &postgres())).unwrap();
+            assert_eq!(asked["host"], "localhost");
+            assert_eq!(asked["port"], 5432);
             assert_eq!(
-                serde_json::to_value(&view).unwrap(),
+                asked["localListener"],
                 serde_json::json!({
                     "kind": "otherUser",
                     "uid": own_uid().wrapping_add(1),
                     "userName": "postgres",
                 })
             );
-
-            let fixture = Fixture::new();
-            let card = NetworkAccessRequest {
-                local_listener: Some(view),
-                ..NetworkAccessRequest::for_agent(
-                    &fixture.state,
-                    Some(WORKSPACE_ID.to_string()),
-                    Some(MAIN_ID.to_string()),
-                    "localhost".to_string(),
-                    Some(5432),
-                    "tests".to_string(),
-                    Vec::new(),
-                )
-            };
-            let card = serde_json::to_value(&card).unwrap();
-            assert_eq!(card["localListener"]["kind"], "otherUser");
-            assert_eq!(card["suggestedWildcard"], serde_json::Value::Null);
+            assert_eq!(asked["suggestedWildcard"], serde_json::Value::Null);
             let host = serde_json::to_value(request(None, None, "example.org")).unwrap();
             assert!(host.get("localListener").is_none(), "{host}");
         }
@@ -1479,8 +1520,7 @@ mod tests {
 
             let delivered = decide_local(
                 &fixture,
-                &local_request(ASSIGNMENT_ID),
-                snapshot(&ssh()),
+                &local_request(&fixture, ASSIGNMENT_ID, &ssh()),
                 always("127.0.0.1:5432"),
             )
             .await
@@ -1508,8 +1548,7 @@ mod tests {
             for _ in 0..2 {
                 decide_local(
                     &fixture,
-                    &local_request(MAIN_ID),
-                    snapshot(&postgres()),
+                    &local_request(&fixture, MAIN_ID, &postgres()),
                     always("localhost:5432"),
                 )
                 .await
@@ -1532,20 +1571,18 @@ mod tests {
         async fn always_for_a_run_only_listener_is_refused_and_stays_pending() {
             let fixture = Fixture::new();
             let pending = &fixture.state.pending_network_requests;
-            for local in [
-                snapshot(&run_only(RunOnly::Unseen)),
-                snapshot(&run_only(RunOnly::OtherNamespace)),
-                snapshot(&run_only(RunOnly::Replaced)),
-                LocalSnapshot::OtherUser {
+            for listener in [
+                run_only(RunOnly::Unseen),
+                run_only(RunOnly::OtherNamespace),
+                run_only(RunOnly::Replaced),
+                Listener::OtherUser {
                     uid: own_uid(),
                     name: "me".to_string(),
                     sockets: vec![11],
                 },
             ] {
-                let request = local_request(MAIN_ID);
-                let (mut rx, _) = pending
-                    .register(request.clone(), "run-1".into(), Some(local.clone()))
-                    .await;
+                let request = local_request(&fixture, MAIN_ID, &listener);
+                let (mut rx, _) = pending.register(request.clone(), "run-1".into()).await;
                 let error = resolve_network_request(
                     &fixture.state,
                     &request.request_id,
@@ -1555,7 +1592,7 @@ mod tests {
                 )
                 .await
                 .expect_err("refused");
-                assert!(error.contains("this run only"), "{local:?}: {error}");
+                assert!(error.contains("this run only"), "{listener:?}: {error}");
                 assert!(matches!(
                     rx.try_recv(),
                     Err(oneshot::error::TryRecvError::Empty)
@@ -1585,10 +1622,8 @@ mod tests {
         async fn always_for_a_local_port_saves_only_that_port() {
             let fixture = Fixture::new();
             let pending = &fixture.state.pending_network_requests;
-            let asked = local_request(MAIN_ID);
-            let _rx = pending
-                .register(asked.clone(), "run-1".into(), Some(snapshot(&ssh())))
-                .await;
+            let asked = local_request(&fixture, MAIN_ID, &ssh());
+            let _rx = pending.register(asked.clone(), "run-1".into()).await;
             for entry in [
                 "localhost:6379",
                 "[::1]:6379",
@@ -1611,7 +1646,7 @@ mod tests {
             // A request for this computer without the listener on the port
             // saves no host entry for it.
             let bare = request(Some(WORKSPACE_ID), Some(MAIN_ID), "localhost");
-            let _rx = pending.register(bare.clone(), "run-1".into(), None).await;
+            let _rx = pending.register(bare.clone(), "run-1".into()).await;
             let error = resolve_network_request(
                 &fixture.state,
                 &bare.request_id,

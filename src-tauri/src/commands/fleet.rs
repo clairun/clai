@@ -740,7 +740,7 @@ mod tests {
         );
         let _waiting = state
             .pending_network_requests
-            .register(request, "run".to_string(), None)
+            .register(request, "run".to_string())
             .await;
         let top = snapshot(&state, Some(1), None).await.expect("snapshot");
         assert_eq!(top.len(), 2);

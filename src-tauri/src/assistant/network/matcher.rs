@@ -257,7 +257,11 @@ const PORT_RANGE: &str = "the port is a number from 1 to 65535";
 /// The names a client reaches a port on this computer by, as [`canonical_host`]
 /// writes them. The network proxy serves them from the run's local ports,
 /// and a deny entry for any of them refuses every local port.
-pub const LOCAL_NAMES: [&str; 3] = ["localhost", "127.0.0.1", "::1"];
+pub const LOCAL_NAMES: [&str; 3] = [LOCALHOST, "127.0.0.1", "::1"];
+
+/// How CLAI names a port on this computer, whichever of [`LOCAL_NAMES`] the
+/// client used: in the run's log and in a request for the port.
+pub const LOCALHOST: &str = "localhost";
 
 /// Whether `host`, canonical, is one of [`LOCAL_NAMES`].
 pub fn is_local_name(host: &str) -> bool {

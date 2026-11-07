@@ -381,8 +381,8 @@ persistsToSharedAgent: boolean,
 alsoAffectsWorkspaces: Array<string>, 
 /**
  * For a port on this computer (`host` is then `localhost`), what
- * listens there, for the card only: an answer binds to the
- * [`LocalSnapshot`] the registry keeps with the request.
+ * listens there: the card shows its view, and every answer binds to
+ * its snapshot.
  */
 localListener?: LocalListenerView, };
 

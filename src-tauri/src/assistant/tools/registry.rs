@@ -222,7 +222,7 @@ fn net_request_access_def() -> ToolDefinition {
             "type": "object",
             "properties": {
                 "host": { "type": "string", "description": "Host name or IP address only, such as `mirror.example.org`: no scheme, path or port, except `localhost:<port>` for a port on this computer." },
-                "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Port you will connect to, shown to the user. Optional; an allowed host is allowed on every port." },
+                "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Port you will connect to, shown to the user. Required for a port on this computer (`localhost`, `127.0.0.1` or `[::1]`), in `host` or here; optional otherwise, as an allowed host is allowed on every port." },
                 "reason": { "type": "string", "description": "Brief explanation shown to the user. Be specific about what you need the host for." }
             },
             "required": ["host", "reason"],
