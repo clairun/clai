@@ -178,6 +178,21 @@ describe('AppUpdateBadge', () => {
     expect(await screen.findByRole('button', { name: /Restarting/ })).toBeDisabled();
   });
 
+  it('asks only once when the restart action is clicked twice quickly', async () => {
+    mockBackend(statusWith(DOWNLOADED), undefined, 1);
+    // The question stays on screen for both clicks.
+    mockAsk.mockReturnValue(new Promise(() => {}));
+    render(<AppUpdateBadge />);
+    const action = await screen.findByRole('button', { name: /Restart to install/ });
+
+    await userEvent.click(action);
+    await userEvent.click(action);
+
+    await waitFor(() => expect(mockAsk).toHaveBeenCalled());
+    expect(mockAsk).toHaveBeenCalledTimes(1);
+    expect(action).toBeDisabled();
+  });
+
   it('surfaces a failed install instead of silently doing nothing', async () => {
     mockBackend(statusWith(DOWNLOADED), () => Promise.reject('Permission denied'));
     render(<AppUpdateBadge />);
