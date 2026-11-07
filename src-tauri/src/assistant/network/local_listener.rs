@@ -6,6 +6,7 @@
 //! describe a process table instead.
 
 use std::collections::BTreeSet;
+use std::ffi::CStr;
 use std::fs;
 use std::io::{self, Read};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -20,6 +21,11 @@ const MAX_ANCESTORS: usize = 64;
 const MAX_CMDLINE: u64 = 2048;
 /// What `/proc/<pid>/exe` appends once the file is unlinked.
 const DELETED: &str = " (deleted)";
+/// The uid `/proc` shows for every user not mapped into the user namespace
+/// of CLAI, as in a Flatpak: the default `/proc/sys/kernel/overflowuid`.
+const OVERFLOW_UID: u32 = 65534;
+/// The largest buffer offered to `getpwuid_r`.
+const MAX_PASSWD_BUF: usize = 1 << 20;
 /// The first read of `/proc/net/tcp`: about 400 sockets.
 const NET_TCP_CHUNK: usize = 64 * 1024;
 
@@ -59,8 +65,13 @@ pub enum Listener {
     /// One program, at a path a saved grant can name.
     Program(Program),
     /// Sockets of another user whose processes CLAI cannot see: a saved
-    /// grant can name the user, never a program.
-    OtherUser { uid: u32, sockets: Vec<u64> },
+    /// grant can name the user, by uid, never a program.
+    OtherUser {
+        uid: u32,
+        /// For display.
+        name: String,
+        sockets: Vec<u64>,
+    },
     /// Nothing a saved grant could name: only these sockets, for one run.
     RunOnly {
         reason: RunOnly,
@@ -75,8 +86,6 @@ pub struct Program {
     pub exe: String,
     /// The lowest pid holding the socket: a forking server has several.
     pub pid: u32,
-    /// The owner of the listening socket.
-    pub uid: u32,
     pub cmdline: String,
     /// The program runs whatever script, or relays wherever, it is told
     /// (python, node, socat), so its path says little about the listener.
@@ -86,9 +95,10 @@ pub struct Program {
 /// Why no saved grant can name the listener.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunOnly {
-    /// CLAI cannot see the process behind a socket of its own user (as a
-    /// Flatpak, it sees no host processes), or the sockets on the port
-    /// belong to several users.
+    /// CLAI cannot see every process behind the sockets, and they are not
+    /// those of one other user it can name: they belong to its own user (as
+    /// a Flatpak, CLAI sees no host processes), to a uid its user runs
+    /// containers as, to a uid without a user name, or to several users.
     Unseen,
     /// A holder runs in another pid or mount namespace, such as a container
     /// or another sandbox, where its path names a different file.
@@ -156,8 +166,14 @@ impl From<&Seen> for Holder {
 trait ProcSource {
     /// `/proc/self/net/tcp`, or `tcp6`.
     fn net_tcp(&self, v6: bool) -> io::Result<String>;
-    fn self_pid(&self) -> u32;
+    /// The pid `/proc/self` names, so CLAI is found in the same `/proc` as
+    /// the holders.
+    fn self_pid(&self) -> Option<u32>;
     fn euid(&self) -> u32;
+    /// The name of user `uid` in the user database.
+    fn user_name(&self, uid: u32) -> Option<String>;
+    /// The text of `/etc/subuid`; empty when it cannot be read.
+    fn subuid(&self) -> String;
     fn pids(&self) -> Vec<u32>;
     /// The socket inodes among the fds of `pid`; none when unreadable.
     fn socket_inodes(&self, pid: u32) -> Vec<u64>;
@@ -177,13 +193,16 @@ fn lookup(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<Liste
     if sockets.is_empty() {
         return Ok(Listener::Nothing);
     }
-    let clai = proc.self_pid();
+    let clai = proc
+        .self_pid()
+        .ok_or_else(|| io::Error::other("cannot read the pid of CLAI"))?;
     let clai_namespaces = proc
         .namespaces(clai)
         .ok_or_else(|| io::Error::other("cannot read the namespaces of CLAI"))?;
     let inodes: BTreeSet<u64> = sockets.iter().map(|socket| socket.inode).collect();
     let mut seen = Vec::new();
     let mut seen_inodes = BTreeSet::new();
+    let mut unreadable = false;
     let mut pids = proc.pids();
     pids.sort_unstable();
     for pid in pids {
@@ -199,6 +218,7 @@ fn lookup(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<Liste
             return Ok(Listener::Clai);
         }
         let (Some(namespaces), Some(exe)) = (proc.namespaces(pid), proc.exe(pid)) else {
+            unreadable = true;
             continue;
         };
         // The pid may have exited and been reused since its fds were read.
@@ -216,6 +236,10 @@ fn lookup(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<Liste
             namespaces,
             cmdline: proc.cmdline(pid),
         });
+    }
+    // A holder that is exiting, or that CLAI may not inspect.
+    if unreadable {
+        return Ok(run_only(RunOnly::Unseen, &sockets, &seen));
     }
     Ok(classify(
         proc,
@@ -240,16 +264,18 @@ fn classify(
     {
         return run_only(RunOnly::OtherNamespace, sockets, seen);
     }
-    let uid = sockets[0].uid;
     if sockets
         .iter()
         .any(|socket| !seen_inodes.contains(&socket.inode))
     {
-        if seen.is_empty() && uid != proc.euid() && sockets.iter().all(|socket| socket.uid == uid) {
-            return Listener::OtherUser {
-                uid,
-                sockets: inodes(sockets),
-            };
+        if seen.is_empty() {
+            if let Some((uid, name)) = other_user(proc, sockets) {
+                return Listener::OtherUser {
+                    uid,
+                    name,
+                    sockets: inodes(sockets),
+                };
+            }
         }
         return run_only(RunOnly::Unseen, sockets, seen);
     }
@@ -264,11 +290,44 @@ fn classify(
             interpreter: is_interpreter(&exe),
             exe,
             pid: first.pid,
-            uid,
             cmdline: first.cmdline.clone(),
         }),
         Err(reason) => run_only(reason, sockets, seen),
     }
+}
+
+/// The other user all `sockets` belong to, by uid and name. A saved grant
+/// names that uid, so it must be a user the user of CLAI does not control:
+/// not a uid its rootless containers run as (`/etc/subuid`), and only a uid
+/// with a user name, which subordinate uids rarely have. A Flatpak may see
+/// few users, so there such sockets stay run-only.
+fn other_user(proc: &impl ProcSource, sockets: &[Socket]) -> Option<(u32, String)> {
+    let uid = sockets[0].uid;
+    let euid = proc.euid();
+    if uid == euid || uid == OVERFLOW_UID || sockets.iter().any(|socket| socket.uid != uid) {
+        return None;
+    }
+    let user = proc.user_name(euid);
+    if subordinate(&proc.subuid(), user.as_deref(), euid, uid) {
+        return None;
+    }
+    Some((uid, proc.user_name(uid)?))
+}
+
+/// Whether `/etc/subuid` gives `uid` to the user, named there by name or by
+/// uid, as shadow-utils reads it.
+fn subordinate(subuid: &str, user: Option<&str>, euid: u32, uid: u32) -> bool {
+    let euid = euid.to_string();
+    subuid
+        .lines()
+        .filter_map(|line| {
+            let mut fields = line.trim().split(":");
+            let owner = fields.next()?;
+            let start: u64 = fields.next()?.parse().ok()?;
+            let count: u64 = fields.next()?.parse().ok()?;
+            (Some(owner) == user || owner == euid).then_some(start..start.saturating_add(count))
+        })
+        .any(|range| range.contains(&u64::from(uid)))
 }
 
 fn run_only(reason: RunOnly, sockets: &[Socket], seen: &[Seen]) -> Listener {
@@ -295,7 +354,8 @@ fn is_clai(proc: &impl ProcSource, mut pid: u32, clai: u32) -> bool {
             _ => return false,
         }
     }
-    false
+    // Too deep to tell.
+    true
 }
 
 /// The path a grant can store: valid UTF-8 and naming the file the process
@@ -312,11 +372,11 @@ fn program_path(proc: &impl ProcSource, holder: &Seen) -> Result<String, RunOnly
 }
 
 fn is_interpreter(exe: &str) -> bool {
-    const NAMES: [&str; 16] = [
+    const NAMES: [&str; 18] = [
         "node", "nodejs", "bun", "deno", "java", "dotnet", "Rscript", "julia", "bash", "sh",
-        "dash", "zsh", "fish", "socat", "ncat", "nc",
+        "dash", "zsh", "fish", "socat", "ncat", "nc", "busybox", "toybox",
     ];
-    const PREFIXES: [&str; 5] = ["python", "ruby", "perl", "php", "lua"];
+    const PREFIXES: [&str; 6] = ["python", "pypy", "ruby", "perl", "php", "lua"];
     let name = exe.rsplit("/").next().unwrap_or(exe);
     NAMES.contains(&name) || PREFIXES.iter().any(|prefix| name.starts_with(prefix))
 }
@@ -381,13 +441,47 @@ impl ProcSource for HostProc {
         Ok(text)
     }
 
-    fn self_pid(&self) -> u32 {
-        std::process::id()
+    fn self_pid(&self) -> Option<u32> {
+        fs::read_link("/proc/self").ok()?.to_str()?.parse().ok()
     }
 
     fn euid(&self) -> u32 {
         // SAFETY: geteuid has no preconditions and cannot fail.
         unsafe { libc::geteuid() }
+    }
+
+    fn user_name(&self, uid: u32) -> Option<String> {
+        let mut buf = vec![0u8; 1024];
+        loop {
+            // SAFETY: an all-zero passwd is valid: null pointers and zeros.
+            let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+            let mut found = std::ptr::null_mut();
+            // SAFETY: every pointer is valid for the call, and the buffer
+            // holds buf.len() bytes.
+            let error = unsafe {
+                libc::getpwuid_r(
+                    uid,
+                    &mut entry,
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                    &mut found,
+                )
+            };
+            if error == libc::ERANGE && buf.len() < MAX_PASSWD_BUF {
+                buf.resize(buf.len() * 2, 0);
+                continue;
+            }
+            if error != 0 || found.is_null() {
+                return None;
+            }
+            // SAFETY: on success pw_name points to a C string inside buf.
+            let name = unsafe { CStr::from_ptr(entry.pw_name) };
+            return name.to_str().ok().map(str::to_owned);
+        }
+    }
+
+    fn subuid(&self) -> String {
+        fs::read_to_string("/etc/subuid").unwrap_or_default()
     }
 
     fn pids(&self) -> Vec<u32> {
@@ -548,6 +642,9 @@ mod tests {
             ("/usr/bin/node", true),
             ("/usr/bin/socat", true),
             ("/usr/bin/bash", true),
+            ("/usr/bin/busybox", true),
+            ("/bin/toybox", true),
+            ("/usr/bin/pypy3", true),
             ("/usr/bin/ssh", false),
             ("/usr/sbin/nginx", false),
             ("/opt/python/bin/ssh", false),
@@ -566,13 +663,18 @@ mod tests {
         /// Holds its sockets for the first read of its fds only.
         exits: bool,
         fd_reads: Cell<u32>,
+        hides_namespaces: bool,
+        hides_exe: bool,
     }
 
-    /// CLAI (pid 100) under init, and the sockets listening on [`PORT`].
+    /// CLAI (pid 100) under init, the sockets listening on [`PORT`], and
+    /// the user database.
     struct Fake {
         tcp: Vec<String>,
         tcp6: Vec<String>,
         processes: BTreeMap<u32, FakeProcess>,
+        users: BTreeMap<u32, String>,
+        subuid: String,
     }
 
     fn namespaces(pid: &str, mnt: &str) -> Namespaces {
@@ -588,6 +690,16 @@ mod tests {
                 tcp: Vec::new(),
                 tcp6: Vec::new(),
                 processes: BTreeMap::new(),
+                users: [
+                    (0, "root"),
+                    (26, "postgres"),
+                    (EUID, "me"),
+                    (OVERFLOW_UID, "nobody"),
+                ]
+                .into_iter()
+                .map(|(uid, name)| (uid, name.to_string()))
+                .collect(),
+                subuid: "me:100000:65536\n".to_string(),
             }
             .holder(1, 0, "/usr/lib/systemd/systemd", &[])
             .holder(CLAI, 1, "/usr/bin/clai", &[])
@@ -625,6 +737,8 @@ mod tests {
                     runs: vec![PathBuf::from(exe)],
                     exits: false,
                     fd_reads: Cell::new(0),
+                    hides_namespaces: false,
+                    hides_exe: false,
                 },
             );
             self
@@ -632,6 +746,16 @@ mod tests {
 
         fn with(mut self, pid: u32, change: impl FnOnce(&mut FakeProcess)) -> Self {
             change(self.processes.get_mut(&pid).unwrap());
+            self
+        }
+
+        fn user(mut self, uid: u32, name: &str) -> Self {
+            self.users.insert(uid, name.to_string());
+            self
+        }
+
+        fn with_subuid(mut self, text: &str) -> Self {
+            self.subuid = text.to_string();
             self
         }
     }
@@ -645,12 +769,20 @@ mod tests {
                 .join("\n"))
         }
 
-        fn self_pid(&self) -> u32 {
-            CLAI
+        fn self_pid(&self) -> Option<u32> {
+            Some(CLAI)
         }
 
         fn euid(&self) -> u32 {
             EUID
+        }
+
+        fn user_name(&self, uid: u32) -> Option<String> {
+            self.users.get(&uid).cloned()
+        }
+
+        fn subuid(&self) -> String {
+            self.subuid.clone()
         }
 
         fn pids(&self) -> Vec<u32> {
@@ -672,11 +804,13 @@ mod tests {
         }
 
         fn namespaces(&self, pid: u32) -> Option<Namespaces> {
-            Some(self.processes.get(&pid)?.namespaces.clone())
+            let process = self.processes.get(&pid)?;
+            (!process.hides_namespaces).then(|| process.namespaces.clone())
         }
 
         fn exe(&self, pid: u32) -> Option<PathBuf> {
-            Some(self.processes.get(&pid)?.exe.clone())
+            let process = self.processes.get(&pid)?;
+            (!process.hides_exe).then(|| process.exe.clone())
         }
 
         fn runs(&self, pid: u32, path: &Path) -> bool {
@@ -692,7 +826,6 @@ mod tests {
         Listener::Program(Program {
             exe: exe.to_string(),
             pid,
-            uid: EUID,
             cmdline: cmdline.to_string(),
             interpreter: is_interpreter(exe),
         })
@@ -719,6 +852,17 @@ mod tests {
     /// A socket on 127.0.0.1:5432 of this user, inode 11.
     fn tunnel() -> Fake {
         Fake::new().listening("127.0.0.1", PORT, EUID, 11)
+    }
+
+    /// The tunnel held by a process `depth` processes deep below init.
+    fn nested(depth: u32) -> Fake {
+        let parent = |pid: u32| if pid == 1000 { 1 } else { pid - 1 };
+        let holder = 1000 + depth - 1;
+        (1000..holder)
+            .fold(tunnel(), |fake, pid| {
+                fake.holder(pid, parent(pid), "/usr/bin/sh", &[])
+            })
+            .holder(holder, parent(holder), SSH, &[11])
     }
 
     fn assert_cases<const N: usize>(cases: [(&str, Fake, Listener); N]) {
@@ -764,6 +908,11 @@ mod tests {
                     .holder(301, 300, SSH, &[11]),
                 program(SSH, 300, "/usr/bin/ssh -N"),
             ),
+            (
+                "a program deep below init",
+                nested(63),
+                program(SSH, 1062, "/usr/bin/ssh -N"),
+            ),
         ]);
     }
 
@@ -788,6 +937,19 @@ mod tests {
                     .holder(200, CLAI, PYTHON, &[11])
                     .holder(300, 1, SSH, &[11])
                     .with(300, |p| p.namespaces = namespaces("pid:[2]", "mnt:[2]")),
+                Listener::Clai,
+            ),
+            (
+                "CLAI wins over a holder it cannot read",
+                tunnel()
+                    .holder(150, 1, SSH, &[11])
+                    .with(150, |p| p.hides_exe = true)
+                    .holder(200, CLAI, PYTHON, &[11]),
+                Listener::Clai,
+            ),
+            (
+                "a holder too deep below init to tell",
+                nested(64),
                 Listener::Clai,
             ),
         ]);
@@ -839,6 +1001,7 @@ mod tests {
                 Fake::new().listening("127.0.0.1", PORT, 26, 11),
                 Listener::OtherUser {
                     uid: 26,
+                    name: "postgres".to_string(),
                     sockets: vec![11],
                 },
             ),
@@ -862,6 +1025,76 @@ mod tests {
                     .holder(300, 1, SSH, &[11])
                     .with(300, |p| p.exits = true),
                 run_only(RunOnly::Unseen, &[11], &[]),
+            ),
+            (
+                "a holder whose namespaces cannot be read, beside a program",
+                tunnel()
+                    .holder(300, 1, SSH, &[11])
+                    .holder(301, 300, SSH, &[11])
+                    .with(301, |p| p.hides_namespaces = true),
+                run_only(RunOnly::Unseen, &[11], &[(300, SSH)]),
+            ),
+            (
+                "a holder whose program cannot be read, beside a program",
+                tunnel()
+                    .holder(300, 1, SSH, &[11])
+                    .holder(301, 300, SSH, &[11])
+                    .with(301, |p| p.hides_exe = true),
+                run_only(RunOnly::Unseen, &[11], &[(300, SSH)]),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn only_a_named_user_outside_the_control_of_clai_is_another_user() {
+        let other = |uid, name: &str| Listener::OtherUser {
+            uid,
+            name: name.to_string(),
+            sockets: vec![11],
+        };
+        let unseen = || run_only(RunOnly::Unseen, &[11], &[]);
+        let socket_of = |uid| Fake::new().listening("127.0.0.1", PORT, uid, 11);
+        assert_cases([
+            ("a named user", socket_of(26), other(26, "postgres")),
+            (
+                "a uid the user runs containers as",
+                socket_of(100_998).user(100_998, "container"),
+                unseen(),
+            ),
+            (
+                "the first uid the user runs containers as",
+                socket_of(100_000).user(100_000, "container"),
+                unseen(),
+            ),
+            (
+                "the uid after those the user runs containers as",
+                socket_of(165_536).user(165_536, "service"),
+                other(165_536, "service"),
+            ),
+            ("a uid without a user name", socket_of(27), unseen()),
+            (
+                "a uid without a user name, and no subordinate uids",
+                socket_of(100_998).with_subuid(""),
+                unseen(),
+            ),
+            (
+                "subordinate uids listed by the uid of the user",
+                socket_of(200_005)
+                    .user(200_005, "container")
+                    .with_subuid("1000:200000:65536\n"),
+                unseen(),
+            ),
+            (
+                "subordinate uids of other users only",
+                socket_of(100_998)
+                    .user(100_998, "service")
+                    .with_subuid("postgres:100000:65536\n2000:100000:65536\nme:300000:65536\n"),
+                other(100_998, "service"),
+            ),
+            (
+                "the uid of every user outside the user namespace of CLAI",
+                socket_of(OVERFLOW_UID),
+                unseen(),
             ),
         ]);
     }
@@ -979,8 +1212,14 @@ mod tests {
         };
         assert_eq!(program.pid, pid);
         assert_eq!(program.cmdline, "sleep 30");
-        assert_eq!(program.uid, HostProc.euid());
         assert!(!program.interpreter);
         assert_eq!(Path::new(&program.exe), exe);
+    }
+
+    #[test]
+    fn the_host_names_this_process_and_its_users() {
+        assert_eq!(HostProc.self_pid(), Some(std::process::id()));
+        assert_eq!(HostProc.user_name(0).as_deref(), Some("root"));
+        assert_eq!(HostProc.user_name(u32::MAX), None);
     }
 }
