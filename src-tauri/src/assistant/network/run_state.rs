@@ -196,10 +196,6 @@ impl RunNetwork {
 
     /// Allows `rule` for the rest of the run. The deny list still wins.
     #[cfg(target_os = "linux")]
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "net_request_access will call it")
-    )]
     pub fn allow_local(&self, rule: LocalRule) {
         let mut local = self.local.write().unwrap_or_else(PoisonError::into_inner);
         if !local.contains(&rule) {

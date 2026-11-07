@@ -286,7 +286,7 @@ async fn local_upstream<S: AsyncWrite + Unpin>(
 
 /// The loopback addresses tried for a local name, in order: `localhost`
 /// also reaches a listener on IPv6 only.
-fn dials(host: &str) -> &'static [Loopback] {
+pub(crate) fn dials(host: &str) -> &'static [Loopback] {
     match host {
         "127.0.0.1" => &[Loopback::V4],
         "::1" => &[Loopback::V6],

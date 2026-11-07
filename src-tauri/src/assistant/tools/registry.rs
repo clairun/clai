@@ -217,11 +217,11 @@ fn fs_request_grant_def() -> ToolDefinition {
 fn net_request_access_def() -> ToolDefinition {
     ToolDefinition {
         name: "net_request_access".to_string(),
-        description: "Ask the user to let this agent reach a host that is not on its network allowlist. Call it when a shell command or web_fetch is refused because the host is not on the allowlist, before retrying. Ask for the one host you need (no wildcard); the user can allow it for this run, add it (or its parent domain) to the agent's allowlist, or deny. A host in the agent's denied hosts cannot be requested. If the host is already allowed, the tool returns immediately without asking.".to_string(),
+        description: "Ask the user to let this agent reach a host that is not on its network allowlist. Call it when a shell command or web_fetch is refused because the host is not on the allowlist, before retrying. Ask for the one host you need (no wildcard); the user can allow it for this run, add it (or its parent domain) to the agent's allowlist, or deny. A host in the agent's denied hosts cannot be requested. If the host is already allowed, the tool returns immediately without asking. For a service on this computer's localhost (an SSH tunnel, a local database), ask for `localhost:<port>`: the user sees which program listens there, and it is refused when nothing does.".to_string(),
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "host": { "type": "string", "description": "Host name or IP address only, such as `mirror.example.org`: no scheme, path or port." },
+                "host": { "type": "string", "description": "Host name or IP address only, such as `mirror.example.org`: no scheme, path or port, except `localhost:<port>` for a port on this computer." },
                 "port": { "type": "integer", "minimum": 1, "maximum": 65535, "description": "Port you will connect to, shown to the user. Optional; an allowed host is allowed on every port." },
                 "reason": { "type": "string", "description": "Brief explanation shown to the user. Be specific about what you need the host for." }
             },

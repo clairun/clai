@@ -16,6 +16,14 @@
 //! - *Deny*: the optional reason reaches the agent in the tool error and is
 //!   not saved.
 //!
+//! A port on this computer (`localhost:<port>`) is asked as host
+//! `localhost` with the port, and the card shows what listens there. The
+//! registry keeps a [`LocalSnapshot`] of that listener with the request, and
+//! every answer binds to it, never to what listens when the user answers:
+//! *Allow this run* adds the program, or the sockets, to the run; *Always*
+//! saves the program, or another user CLAI cannot see into, as a local port
+//! grant, and is refused when only this run can be allowed.
+//!
 //! The flow and the registry mirror the path-grant request
 //! ([`crate::commands::path_grants`]); the registries are kept apart.
 
@@ -25,12 +33,15 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, State};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
 
+#[cfg(target_os = "linux")]
+use crate::assistant::network::local_listener::{Listener, RunOnly};
 use crate::assistant::network::matcher::{
-    approved_entry, is_local_name, parent_wildcard, parse_entry,
+    approved_entry, is_local_name, parent_wildcard, parse_entry, parse_local_port,
 };
 use crate::assistant::network::run_state::HostLogEntry;
 use crate::assistant::workspace_agents::workspace_agent_display_names;
 use crate::commands::permissions::{normalize_reason, shared_allowance_reach, AttentionUpdate};
+use crate::config::types::LocalPortGrant;
 use crate::config::{workspace_config, NetworkPolicy};
 use crate::AppState;
 
@@ -62,6 +73,12 @@ pub struct NetworkAccessRequest {
     pub persists_to_shared_agent: bool,
     /// The other workspaces that “Always” reaches today.
     pub also_affects_workspaces: Vec<String>,
+    /// For a port on this computer (`host` is then `localhost`), what
+    /// listens there, for the card only: an answer binds to the
+    /// [`LocalSnapshot`] the registry keeps with the request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub local_listener: Option<LocalListenerView>,
 }
 
 impl NetworkAccessRequest {
@@ -94,8 +111,184 @@ impl NetworkAccessRequest {
             run_hosts,
             persists_to_shared_agent: reach.is_some(),
             also_affects_workspaces: reach.unwrap_or_default(),
+            local_listener: None,
         }
     }
+}
+
+/// What listened on a port of this computer when the card was made, as the
+/// card shows it. Never sent to the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+#[ts(export, export_to = "bindings.ts")]
+pub enum LocalListenerView {
+    /// One program: “Always” saves its path.
+    Program {
+        pid: u32,
+        exe: String,
+        command_line: String,
+        /// It runs whatever script, or relays wherever, it is told, so its
+        /// path says little about the listener.
+        interpreter: bool,
+    },
+    /// A service of another user, whose processes CLAI cannot see:
+    /// “Always” saves the user.
+    OtherUser { uid: u32, user_name: String },
+    /// Nothing a saved grant can name: “Allow this run” only.
+    RunOnly {
+        reason: LocalRunOnlyReason,
+        holders: Vec<LocalHolderView>,
+    },
+}
+
+/// Why a listener can be allowed for one run only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub enum LocalRunOnlyReason {
+    /// CLAI cannot see the processes behind the sockets (they are its own
+    /// user's, or CLAI runs in a Flatpak or container).
+    Unseen,
+    /// A holder runs in a container or another sandbox.
+    OtherNamespace,
+    /// Different programs hold sockets on the port.
+    SeveralPrograms,
+    /// The program's file was replaced or deleted since it started.
+    Replaced,
+    /// The program path is not UTF-8.
+    PathNotUtf8,
+}
+
+/// A process holding a socket of a run-only listener.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub struct LocalHolderView {
+    pub pid: u32,
+    pub exe: String,
+    pub command_line: String,
+}
+
+/// What every answer to a request for a port on this computer binds to:
+/// what listened when the card was made, never what listens when the user
+/// answers. Kept by the registry beside the request and never serialised;
+/// it holds no command line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LocalSnapshot {
+    Program {
+        exe: String,
+    },
+    OtherUser {
+        uid: u32,
+        name: String,
+        sockets: Vec<u64>,
+    },
+    RunOnly {
+        sockets: Vec<u64>,
+    },
+}
+
+impl LocalSnapshot {
+    /// The snapshot and the card's view of `listener`, or `None` when
+    /// nothing or CLAI listens: no card is shown for those.
+    #[cfg(target_os = "linux")]
+    pub fn of(listener: &Listener) -> Option<(Self, LocalListenerView)> {
+        let found = match listener {
+            Listener::Nothing | Listener::Clai => return None,
+            Listener::Program(program) => (
+                Self::Program {
+                    exe: program.exe.clone(),
+                },
+                LocalListenerView::Program {
+                    pid: program.pid,
+                    exe: program.exe.clone(),
+                    command_line: program.cmdline.clone(),
+                    interpreter: program.interpreter,
+                },
+            ),
+            Listener::OtherUser { uid, name, sockets } => (
+                Self::OtherUser {
+                    uid: *uid,
+                    name: name.clone(),
+                    sockets: sockets.clone(),
+                },
+                LocalListenerView::OtherUser {
+                    uid: *uid,
+                    user_name: name.clone(),
+                },
+            ),
+            Listener::RunOnly {
+                reason,
+                sockets,
+                holders,
+            } => (
+                Self::RunOnly {
+                    sockets: sockets.clone(),
+                },
+                LocalListenerView::RunOnly {
+                    reason: (*reason).into(),
+                    holders: holders
+                        .iter()
+                        .map(|holder| LocalHolderView {
+                            pid: holder.pid,
+                            exe: holder.exe.clone(),
+                            command_line: holder.cmdline.clone(),
+                        })
+                        .collect(),
+                },
+            ),
+        };
+        Some(found)
+    }
+
+    /// The grant “Always” saves for `port`: the program, or the other user.
+    /// Refused when only this run can be allowed, including for a listener
+    /// of the user CLAI runs as, which a user grant must never name.
+    pub fn always_grant(&self, port: u16) -> Result<LocalPortGrant, String> {
+        match self {
+            Self::Program { exe } => Ok(LocalPortGrant::Program {
+                port,
+                program: exe.clone(),
+            }),
+            Self::OtherUser { uid, name, .. } if !is_clai_user(*uid) => Ok(LocalPortGrant::User {
+                port,
+                uid: *uid,
+                user: Some(name.clone()),
+            }),
+            _ => Err(format!(
+                "Port {port} on this computer can be allowed for this run only: CLAI \
+                 cannot name the program listening there."
+            )),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<RunOnly> for LocalRunOnlyReason {
+    fn from(reason: RunOnly) -> Self {
+        match reason {
+            RunOnly::Unseen => Self::Unseen,
+            RunOnly::OtherNamespace => Self::OtherNamespace,
+            RunOnly::SeveralPrograms => Self::SeveralPrograms,
+            RunOnly::Replaced => Self::Replaced,
+            RunOnly::PathNotUtf8 => Self::PathNotUtf8,
+        }
+    }
+}
+
+#[cfg(unix)]
+fn is_clai_user(uid: u32) -> bool {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    uid == unsafe { libc::geteuid() }
+}
+
+#[cfg(not(unix))]
+fn is_clai_user(_uid: u32) -> bool {
+    true
 }
 
 /// The user's answer to a [`NetworkAccessRequest`].
@@ -129,6 +322,8 @@ pub struct PendingNetworkEntry {
     /// The run waiting on the decision, so a re-asked request supersedes it.
     pub run_id: String,
     pub request: NetworkAccessRequest,
+    /// For a port on this computer, what every answer binds to.
+    pub local: Option<LocalSnapshot>,
 }
 
 pub struct SupersededNetworkRequest {
@@ -179,11 +374,13 @@ impl PendingInner {
 
 impl PendingNetworkRequests {
     /// Returns the receiver the tool waits on and the workspace's pending
-    /// count.
+    /// count. `local` is the listener a request for a port on this computer
+    /// binds to.
     pub async fn register(
         &self,
         request: NetworkAccessRequest,
         run_id: String,
+        local: Option<LocalSnapshot>,
     ) -> (oneshot::Receiver<PendingNetworkOutcome>, u32) {
         let (sender, receiver) = oneshot::channel();
         let count = self.inner.lock().await.insert(PendingNetworkEntry {
@@ -191,6 +388,7 @@ impl PendingNetworkRequests {
             workspace_id: request.workspace_id.clone(),
             run_id,
             request,
+            local,
         });
         (receiver, count)
     }
@@ -250,12 +448,16 @@ impl PendingNetworkRequests {
         run_ids
     }
 
-    pub async fn request(&self, request_id: &str) -> Option<NetworkAccessRequest> {
+    /// The request and the listener it binds to, if any.
+    pub async fn request(
+        &self,
+        request_id: &str,
+    ) -> Option<(NetworkAccessRequest, Option<LocalSnapshot>)> {
         let inner = self.inner.lock().await;
         inner
             .entries
             .get(request_id)
-            .map(|entry| entry.request.clone())
+            .map(|entry| (entry.request.clone(), entry.local.clone()))
     }
 
     /// Removes the request; returns it with its workspace's new count.
@@ -369,10 +571,10 @@ async fn resolve_network_request(
     back_on_queue: impl FnOnce(&NetworkAccessRequest, u32),
 ) -> Result<(), String> {
     let pending = &state.pending_network_requests;
-    let Some(request) = pending.request(request_id).await else {
+    let Some((request, local)) = pending.request(request_id).await else {
         return Err(no_pending_request(request_id));
     };
-    let decision = validate_decision(&request, decision)?;
+    let (decision, grant) = validate_decision(&request, local.as_ref(), decision)?;
     let Some((entry, remaining)) = pending.take(request_id).await else {
         return Err(no_pending_request(request_id));
     };
@@ -381,9 +583,10 @@ async fn resolve_network_request(
             entry.workspace_id.as_deref(),
             entry.request.agent_id.as_deref(),
         ) {
-            (Some(workspace_id), Some(agent_id)) => {
-                persist_network_allow(state, workspace_id, agent_id, allowed)
-            }
+            (Some(workspace_id), Some(agent_id)) => match &grant {
+                Some(grant) => persist_local_port(state, workspace_id, agent_id, grant),
+                None => persist_network_allow(state, workspace_id, agent_id, allowed),
+            },
             _ => Err("no agent to save it on; allow it for this run instead".to_string()),
         };
         if let Err(error) = saved {
@@ -405,33 +608,57 @@ fn no_pending_request(request_id: &str) -> String {
     format!("No pending network access request `{request_id}` (already resolved or cleared)")
 }
 
-/// An “Always” entry must be one [`approved_entry`] accepts (stored
-/// in the matcher's form); a denial reason is trimmed and bounded.
+/// An “Always” entry must be one [`approved_entry`] accepts (stored in the
+/// matcher's form). For a port on this computer it must name that port,
+/// is delivered as `localhost:<port>`, and comes with the grant to save,
+/// taken from `local`, the listener the card showed. A denial reason is
+/// trimmed and bounded.
 fn validate_decision(
     request: &NetworkAccessRequest,
+    local: Option<&LocalSnapshot>,
     decision: NetworkAccessDecision,
-) -> Result<NetworkAccessDecision, String> {
+) -> Result<(NetworkAccessDecision, Option<LocalPortGrant>), String> {
     match decision {
-        NetworkAccessDecision::AllowRun => Ok(decision),
-        NetworkAccessDecision::AllowAlways { entry } => {
-            let entry = approved_entry(&request.host, &entry)?.normalized();
-            Ok(NetworkAccessDecision::AllowAlways { entry })
-        }
-        NetworkAccessDecision::Deny { reason } => Ok(NetworkAccessDecision::Deny {
-            reason: match reason {
-                Some(reason) => normalize_reason(&reason)?,
-                None => None,
+        NetworkAccessDecision::AllowRun => Ok((decision, None)),
+        NetworkAccessDecision::AllowAlways { entry } => match local.zip(request.port) {
+            Some((local, port)) => {
+                if parse_local_port(&entry) != Ok(Some(port)) {
+                    return Err(format!(
+                        "`{entry}` is not port {port} on this computer, which is what \
+                         “Always” saves."
+                    ));
+                }
+                let grant = local.always_grant(port)?;
+                let entry = format!("localhost:{port}");
+                Ok((NetworkAccessDecision::AllowAlways { entry }, Some(grant)))
+            }
+            // Only a request made with the listener on the port can save
+            // one; a host entry for this computer would be a stored no-op.
+            None if is_local_name(&request.host) => Err(format!(
+                "`{}` is this computer; “Always” saves one of its ports from a request \
+                 that names it.",
+                request.host
+            )),
+            None => {
+                let entry = approved_entry(&request.host, &entry)?.normalized();
+                Ok((NetworkAccessDecision::AllowAlways { entry }, None))
+            }
+        },
+        NetworkAccessDecision::Deny { reason } => Ok((
+            NetworkAccessDecision::Deny {
+                reason: match reason {
+                    Some(reason) => normalize_reason(&reason)?,
+                    None => None,
+                },
             },
-        }),
+            None,
+        )),
     }
 }
 
-/// Adds `entry` to the agent's allow list where its settings live: a
-/// teammate's shared definition, as its ask-first list (a host is about
-/// the agent's job, not this project), or the workspace's Main. Either
-/// write marks the agent changed (the definition's revision, the Main's
-/// `updated_at`), so a settings form opened before it cannot save over it.
-/// Idempotent: an entry already on the list changes nothing.
+/// Adds `entry` to the agent's allow list where its settings live (see
+/// [`persist_on_agent`]). Idempotent: an entry already on the list changes
+/// nothing.
 pub fn persist_network_allow(
     state: &AppState,
     workspace_id: &str,
@@ -441,6 +668,38 @@ pub fn persist_network_allow(
     let entry = &parse_entry(entry)
         .map_err(|reason| format!("`{entry}` is not a valid host entry: {reason}"))?
         .normalized();
+    persist_on_agent(state, workspace_id, agent_id, |policy| {
+        add_allow_entry(policy, entry)
+    })
+}
+
+/// Adds `grant` to the agent's local ports where its settings live (see
+/// [`persist_on_agent`]). Idempotent: a grant already listed changes
+/// nothing.
+fn persist_local_port(
+    state: &AppState,
+    workspace_id: &str,
+    agent_id: &str,
+    grant: &LocalPortGrant,
+) -> Result<(), String> {
+    grant.check()?;
+    persist_on_agent(state, workspace_id, agent_id, |policy| {
+        add_local_port(policy, grant)
+    })
+}
+
+/// Applies `add` to the agent's network policy where its settings live: a
+/// teammate's shared definition, as its ask-first list (network access is
+/// about the agent's job, not this project), or the workspace's Main.
+/// When `add` reports a change, the write marks the agent changed (the
+/// definition's revision, the Main's `updated_at`), so a settings form
+/// opened before it cannot save over it.
+fn persist_on_agent(
+    state: &AppState,
+    workspace_id: &str,
+    agent_id: &str,
+    add: impl Fn(&mut NetworkPolicy) -> bool,
+) -> Result<(), String> {
     let root = state
         .workspace_root(workspace_id)
         .ok_or_else(|| format!("Workspace not found: {workspace_id}"))?;
@@ -451,7 +710,7 @@ pub fn persist_network_allow(
             &assignment.agent_definition_id,
             |definition| {
                 let behavior = &mut definition.behavior;
-                if add_allow_entry(&mut behavior.execution.sandbox.network_access, entry) {
+                if add(&mut behavior.execution.sandbox.network_access) {
                     definition.revision += 1;
                     behavior.updated_at = chrono::Utc::now().timestamp_millis();
                 }
@@ -467,7 +726,7 @@ pub fn persist_network_allow(
         else {
             return Err(format!("Workspace agent not found: {agent_id}"));
         };
-        if add_allow_entry(&mut agent.execution.sandbox.network_access, entry) {
+        if add(&mut agent.execution.sandbox.network_access) {
             let now = chrono::Utc::now().timestamp_millis();
             agent.touch(now);
             config.updated_at = now;
@@ -487,6 +746,19 @@ fn add_allow_entry(policy: &mut NetworkPolicy, entry: &str) -> bool {
         .any(|existing| parse_entry(existing).is_ok_and(|existing| existing.normalized() == entry));
     if !listed {
         policy.allow_domains.push(entry.to_string());
+    }
+    !listed
+}
+
+/// Appends `grant` unless the same grant is listed (a user grant under
+/// another display name included). Returns whether the list changed.
+fn add_local_port(policy: &mut NetworkPolicy, grant: &LocalPortGrant) -> bool {
+    let listed = policy
+        .local_ports
+        .iter()
+        .any(|existing| existing.same_grant(grant));
+    if !listed {
+        policy.local_ports.push(grant.clone());
     }
     !listed
 }
@@ -533,6 +805,7 @@ mod tests {
             suggested_wildcard: parent_wildcard(host),
             persists_to_shared_agent: false,
             also_affects_workspaces: Vec::new(),
+            local_listener: None,
         }
     }
 
@@ -549,10 +822,13 @@ mod tests {
         let second = request(Some("ws"), None, "b.example.org");
         let other = request(Some("other"), None, "c.example.org");
         let anonymous = request(None, None, "d.example.org");
-        assert_eq!(pending.register(first.clone(), "run".into()).await.1, 1);
-        assert_eq!(pending.register(second, "run".into()).await.1, 2);
-        let _ = pending.register(other, "run".into()).await;
-        let _ = pending.register(anonymous, "run".into()).await;
+        assert_eq!(
+            pending.register(first.clone(), "run".into(), None).await.1,
+            1
+        );
+        assert_eq!(pending.register(second, "run".into(), None).await.1, 2);
+        let _ = pending.register(other, "run".into(), None).await;
+        let _ = pending.register(anonymous, "run".into(), None).await;
 
         let counts = pending.counts_snapshot().await;
         assert_eq!(counts.len(), 2, "requests without a workspace are left out");
@@ -570,10 +846,16 @@ mod tests {
         let pending = PendingNetworkRequests::default();
         let stale = request(Some("ws"), None, "a.example.org");
         let other_host = request(Some("ws"), None, "b.example.org");
-        let (stale_rx, _) = pending.register(stale.clone(), "run-1".into()).await;
-        let _other_host = pending.register(other_host.clone(), "run-1".into()).await;
+        let (stale_rx, _) = pending.register(stale.clone(), "run-1".into(), None).await;
+        let _other_host = pending
+            .register(other_host.clone(), "run-1".into(), None)
+            .await;
         let _other_run = pending
-            .register(request(Some("ws"), None, "a.example.org"), "run-2".into())
+            .register(
+                request(Some("ws"), None, "a.example.org"),
+                "run-2".into(),
+                None,
+            )
             .await;
 
         // The port of a host does not matter.
@@ -600,8 +882,10 @@ mod tests {
         };
         let stale = on_port(5432);
         let other_port = on_port(6379);
-        let _ = pending.register(stale.clone(), "run-1".into()).await;
-        let _ = pending.register(other_port.clone(), "run-1".into()).await;
+        let _ = pending.register(stale.clone(), "run-1".into(), None).await;
+        let _ = pending
+            .register(other_port.clone(), "run-1".into(), None)
+            .await;
 
         let taken = pending
             .take_superseded("run-1", "localhost", Some(5432))
@@ -615,7 +899,11 @@ mod tests {
     async fn purge_cancels_the_run_before_dropping_the_request() {
         let pending = PendingNetworkRequests::default();
         let (mut rx, _) = pending
-            .register(request(Some("ws-1"), None, "a.example.org"), "run-1".into())
+            .register(
+                request(Some("ws-1"), None, "a.example.org"),
+                "run-1".into(),
+                None,
+            )
             .await;
         let mut cancelled = Vec::new();
 
@@ -643,7 +931,9 @@ mod tests {
         decision: NetworkAccessDecision,
     ) -> Result<NetworkAccessDecision, String> {
         let pending = &fixture.state.pending_network_requests;
-        let (rx, _) = pending.register(request.clone(), "run-1".into()).await;
+        let (rx, _) = pending
+            .register(request.clone(), "run-1".into(), None)
+            .await;
         resolve_network_request(
             &fixture.state,
             &request.request_id,
@@ -809,7 +1099,9 @@ mod tests {
         let fixture = Fixture::new();
         let request = request(Some(WORKSPACE_ID), Some(MAIN_ID), "mirror.example.org");
         let pending = &fixture.state.pending_network_requests;
-        let (mut rx, _) = pending.register(request.clone(), "run-1".into()).await;
+        let (mut rx, _) = pending
+            .register(request.clone(), "run-1".into(), None)
+            .await;
 
         for entry in ["*.org", "example.org", "*.other.org"] {
             let error = resolve_network_request(
@@ -842,7 +1134,9 @@ mod tests {
         // No agent by this id: the save fails.
         let request = request(Some(WORKSPACE_ID), Some("nobody"), "mirror.example.org");
         let pending = &fixture.state.pending_network_requests;
-        let (mut rx, _) = pending.register(request.clone(), "run-1".into()).await;
+        let (mut rx, _) = pending
+            .register(request.clone(), "run-1".into(), None)
+            .await;
         let mut left = Vec::new();
         let mut back = Vec::new();
 
@@ -891,7 +1185,9 @@ mod tests {
         let fixture = Fixture::new();
         let request = request(Some(WORKSPACE_ID), None, "mirror.example.org");
         let pending = &fixture.state.pending_network_requests;
-        let (mut rx, _) = pending.register(request.clone(), "run-1".into()).await;
+        let (mut rx, _) = pending
+            .register(request.clone(), "run-1".into(), None)
+            .await;
         let mut back = Vec::new();
 
         let error = resolve_network_request(
@@ -921,7 +1217,9 @@ mod tests {
         let fixture = Fixture::new();
         let request = request(Some(WORKSPACE_ID), Some("nobody"), "mirror.example.org");
         let pending = &fixture.state.pending_network_requests;
-        let (rx, _) = pending.register(request.clone(), "run-1".into()).await;
+        let (rx, _) = pending
+            .register(request.clone(), "run-1".into(), None)
+            .await;
         drop(rx);
         let mut left = Vec::new();
 
@@ -1001,6 +1299,337 @@ mod tests {
         assert!(!main.persists_to_shared_agent);
         assert!(main.also_affects_workspaces.is_empty());
         assert_eq!(main.suggested_wildcard, None);
+    }
+
+    // --- ports on this computer ------------------------------------------
+
+    #[cfg(target_os = "linux")]
+    mod local_ports {
+        use super::*;
+        use crate::assistant::network::local_listener::{Holder, Listener, Program, RunOnly};
+
+        /// In every command line: the card shows it, nothing saves it.
+        const SECRET: &str = "secret-host";
+
+        fn own_uid() -> u32 {
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            unsafe { libc::geteuid() }
+        }
+
+        fn ssh() -> Listener {
+            Listener::Program(Program {
+                exe: "/usr/bin/ssh".to_string(),
+                pid: 4321,
+                cmdline: format!("ssh -N -L 5432:db:5432 {SECRET}"),
+                interpreter: false,
+            })
+        }
+
+        fn postgres() -> Listener {
+            Listener::OtherUser {
+                uid: own_uid().wrapping_add(1),
+                name: "postgres".to_string(),
+                sockets: vec![11],
+            }
+        }
+
+        fn run_only(reason: RunOnly) -> Listener {
+            Listener::RunOnly {
+                reason,
+                sockets: vec![11],
+                holders: vec![Holder {
+                    pid: 77,
+                    exe: "/usr/bin/rootlessport".to_string(),
+                    cmdline: format!("rootlessport {SECRET}"),
+                }],
+            }
+        }
+
+        fn snapshot(listener: &Listener) -> LocalSnapshot {
+            LocalSnapshot::of(listener).expect("a card").0
+        }
+
+        fn local_request(agent: &str) -> NetworkAccessRequest {
+            NetworkAccessRequest {
+                port: Some(5432),
+                suggested_wildcard: None,
+                ..request(Some(WORKSPACE_ID), Some(agent), "localhost")
+            }
+        }
+
+        fn always(entry: &str) -> NetworkAccessDecision {
+            NetworkAccessDecision::AllowAlways {
+                entry: entry.to_string(),
+            }
+        }
+
+        async fn decide_local(
+            fixture: &Fixture,
+            request: &NetworkAccessRequest,
+            local: LocalSnapshot,
+            decision: NetworkAccessDecision,
+        ) -> Result<NetworkAccessDecision, String> {
+            let pending = &fixture.state.pending_network_requests;
+            let (rx, _) = pending
+                .register(request.clone(), "run-1".into(), Some(local))
+                .await;
+            resolve_network_request(
+                &fixture.state,
+                &request.request_id,
+                decision,
+                |_, _| {},
+                |_, _| panic!("the request stays off the queue"),
+            )
+            .await?;
+            match rx.await {
+                Ok(PendingNetworkOutcome::Decision(decision)) => Ok(decision),
+                other => panic!("expected a decision, got {other:?}"),
+            }
+        }
+
+        fn main_policy(fixture: &Fixture) -> NetworkPolicy {
+            fixture
+                .config()
+                .main_agent
+                .expect("main")
+                .execution
+                .sandbox
+                .network_access
+        }
+
+        fn definition_policy(fixture: &Fixture) -> NetworkPolicy {
+            fixture
+                .definition()
+                .behavior
+                .execution
+                .sandbox
+                .network_access
+        }
+
+        #[test]
+        fn the_card_shows_the_listener_and_the_snapshot_keeps_no_command_line() {
+            assert_eq!(LocalSnapshot::of(&Listener::Nothing), None);
+            assert_eq!(LocalSnapshot::of(&Listener::Clai), None);
+
+            let (snapshot, view) = LocalSnapshot::of(&ssh()).unwrap();
+            assert_eq!(
+                snapshot,
+                LocalSnapshot::Program {
+                    exe: "/usr/bin/ssh".to_string()
+                }
+            );
+            assert_eq!(
+                serde_json::to_value(&view).unwrap(),
+                serde_json::json!({
+                    "kind": "program",
+                    "pid": 4321,
+                    "exe": "/usr/bin/ssh",
+                    "commandLine": format!("ssh -N -L 5432:db:5432 {SECRET}"),
+                    "interpreter": false,
+                })
+            );
+            let (snapshot, view) = LocalSnapshot::of(&run_only(RunOnly::OtherNamespace)).unwrap();
+            assert_eq!(snapshot, LocalSnapshot::RunOnly { sockets: vec![11] });
+            assert_eq!(
+                serde_json::to_value(&view).unwrap(),
+                serde_json::json!({
+                    "kind": "runOnly",
+                    "reason": "otherNamespace",
+                    "holders": [{
+                        "pid": 77,
+                        "exe": "/usr/bin/rootlessport",
+                        "commandLine": format!("rootlessport {SECRET}"),
+                    }],
+                })
+            );
+            let (_, view) = LocalSnapshot::of(&postgres()).unwrap();
+            assert_eq!(
+                serde_json::to_value(&view).unwrap(),
+                serde_json::json!({
+                    "kind": "otherUser",
+                    "uid": own_uid().wrapping_add(1),
+                    "userName": "postgres",
+                })
+            );
+
+            let fixture = Fixture::new();
+            let card = NetworkAccessRequest {
+                local_listener: Some(view),
+                ..NetworkAccessRequest::for_agent(
+                    &fixture.state,
+                    Some(WORKSPACE_ID.to_string()),
+                    Some(MAIN_ID.to_string()),
+                    "localhost".to_string(),
+                    Some(5432),
+                    "tests".to_string(),
+                    Vec::new(),
+                )
+            };
+            let card = serde_json::to_value(&card).unwrap();
+            assert_eq!(card["localListener"]["kind"], "otherUser");
+            assert_eq!(card["suggestedWildcard"], serde_json::Value::Null);
+            let host = serde_json::to_value(request(None, None, "example.org")).unwrap();
+            assert!(host.get("localListener").is_none(), "{host}");
+        }
+
+        #[tokio::test]
+        async fn a_teammates_always_saves_the_program_the_card_showed() {
+            let fixture = Fixture::new();
+            let before = definition_policy(&fixture).allow_domains;
+
+            let delivered = decide_local(
+                &fixture,
+                &local_request(ASSIGNMENT_ID),
+                snapshot(&ssh()),
+                always("127.0.0.1:5432"),
+            )
+            .await
+            .expect("deliver");
+
+            assert_eq!(delivered, always("localhost:5432"));
+            let saved = definition_policy(&fixture);
+            assert_eq!(
+                saved.local_ports,
+                [LocalPortGrant::Program {
+                    port: 5432,
+                    program: "/usr/bin/ssh".to_string(),
+                }]
+            );
+            assert_eq!(saved.allow_domains, before, "no host entry");
+            assert_eq!(fixture.definition().revision, 2);
+            let stored = serde_json::to_string(&fixture.definition()).unwrap();
+            assert!(!stored.contains(SECRET), "{stored}");
+            assert!(main_policy(&fixture).local_ports.is_empty());
+        }
+
+        #[tokio::test]
+        async fn the_mains_always_saves_another_users_service_once() {
+            let fixture = Fixture::new();
+            for _ in 0..2 {
+                decide_local(
+                    &fixture,
+                    &local_request(MAIN_ID),
+                    snapshot(&postgres()),
+                    always("localhost:5432"),
+                )
+                .await
+                .expect("deliver");
+            }
+            assert_eq!(
+                main_policy(&fixture).local_ports,
+                [LocalPortGrant::User {
+                    port: 5432,
+                    uid: own_uid().wrapping_add(1),
+                    user: Some("postgres".to_string()),
+                }]
+            );
+            assert_eq!(fixture.definition().revision, 1, "no shared definition");
+        }
+
+        /// Only “Allow this run” fits a listener no grant can name, a
+        /// service of the user CLAI runs as included.
+        #[tokio::test]
+        async fn always_for_a_run_only_listener_is_refused_and_stays_pending() {
+            let fixture = Fixture::new();
+            let pending = &fixture.state.pending_network_requests;
+            for local in [
+                snapshot(&run_only(RunOnly::Unseen)),
+                snapshot(&run_only(RunOnly::OtherNamespace)),
+                snapshot(&run_only(RunOnly::Replaced)),
+                LocalSnapshot::OtherUser {
+                    uid: own_uid(),
+                    name: "me".to_string(),
+                    sockets: vec![11],
+                },
+            ] {
+                let request = local_request(MAIN_ID);
+                let (mut rx, _) = pending
+                    .register(request.clone(), "run-1".into(), Some(local.clone()))
+                    .await;
+                let error = resolve_network_request(
+                    &fixture.state,
+                    &request.request_id,
+                    always("localhost:5432"),
+                    |_, _| panic!("the request stays on the queue"),
+                    |_, _| panic!("the request never left the queue"),
+                )
+                .await
+                .expect_err("refused");
+                assert!(error.contains("this run only"), "{local:?}: {error}");
+                assert!(matches!(
+                    rx.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ));
+                assert!(pending.request(&request.request_id).await.is_some());
+
+                resolve_network_request(
+                    &fixture.state,
+                    &request.request_id,
+                    NetworkAccessDecision::AllowRun,
+                    |_, _| {},
+                    |_, _| panic!("the request stays off the queue"),
+                )
+                .await
+                .expect("allow this run");
+                assert!(matches!(
+                    rx.await,
+                    Ok(PendingNetworkOutcome::Decision(
+                        NetworkAccessDecision::AllowRun
+                    ))
+                ));
+            }
+            assert!(main_policy(&fixture).local_ports.is_empty());
+        }
+
+        #[tokio::test]
+        async fn always_for_a_local_port_saves_only_that_port() {
+            let fixture = Fixture::new();
+            let pending = &fixture.state.pending_network_requests;
+            let asked = local_request(MAIN_ID);
+            let _rx = pending
+                .register(asked.clone(), "run-1".into(), Some(snapshot(&ssh())))
+                .await;
+            for entry in [
+                "localhost:6379",
+                "[::1]:6379",
+                "localhost",
+                "*.localhost",
+                "mirror.example.org",
+            ] {
+                let error = resolve_network_request(
+                    &fixture.state,
+                    &asked.request_id,
+                    always(entry),
+                    |_, _| panic!("the request stays on the queue"),
+                    |_, _| panic!("the request never left the queue"),
+                )
+                .await
+                .expect_err("refused");
+                assert!(error.contains("port 5432"), "{entry}: {error}");
+            }
+
+            // A request for this computer without the listener on the port
+            // saves no host entry for it.
+            let bare = request(Some(WORKSPACE_ID), Some(MAIN_ID), "localhost");
+            let _rx = pending.register(bare.clone(), "run-1".into(), None).await;
+            let error = resolve_network_request(
+                &fixture.state,
+                &bare.request_id,
+                always("localhost"),
+                |_, _| panic!("the request stays on the queue"),
+                |_, _| panic!("the request never left the queue"),
+            )
+            .await
+            .expect_err("refused");
+            assert!(error.contains("this computer"), "{error}");
+
+            let policy = main_policy(&fixture);
+            assert!(policy.local_ports.is_empty());
+            assert!(!policy
+                .allow_domains
+                .iter()
+                .any(|entry| entry.contains("localhost")));
+        }
     }
 
     #[test]

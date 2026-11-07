@@ -413,7 +413,7 @@ pub enum LocalPortGrant {
 
 impl LocalPortGrant {
     /// Whether both allow the same thing; the user name is display only.
-    fn same_grant(&self, other: &Self) -> bool {
+    pub(crate) fn same_grant(&self, other: &Self) -> bool {
         match (self, other) {
             (
                 Self::Program { port, program },
@@ -434,7 +434,7 @@ impl LocalPortGrant {
         }
     }
 
-    fn check(&self) -> Result<(), String> {
+    pub(crate) fn check(&self) -> Result<(), String> {
         match self {
             Self::Program { port: 0, .. } | Self::User { port: 0, .. } => {
                 Err("Local ports: port 0 cannot be allowed.".to_string())

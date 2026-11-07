@@ -233,6 +233,22 @@ export type GrantOrigin = { "kind": "manual" } | { "kind": "credentialsPreset" }
 export type HostLogEntry = { host: string, port: number | null, allowed: boolean, };
 
 /**
+ * A process holding a socket of a run-only listener.
+ */
+export type LocalHolderView = { pid: number, exe: string, commandLine: string, };
+
+/**
+ * What listened on a port of this computer when the card was made, as the
+ * card shows it. Never sent to the agent.
+ */
+export type LocalListenerView = { "kind": "program", pid: number, exe: string, commandLine: string, 
+/**
+ * It runs whatever script, or relays wherever, it is told, so its
+ * path says little about the listener.
+ */
+interpreter: boolean, } | { "kind": "otherUser", uid: number, userName: string, } | { "kind": "runOnly", reason: LocalRunOnlyReason, holders: Array<LocalHolderView>, };
+
+/**
  * A port on the loopback of this computer that an agent in Allowlist may
  * reach while the granted program or user serves it.
  */
@@ -241,6 +257,11 @@ export type LocalPortGrant = { "kind": "program", port: number, program: string,
  * Display only, captured at grant time; never matched.
  */
 user?: string, };
+
+/**
+ * Why a listener can be allowed for one run only.
+ */
+export type LocalRunOnlyReason = "unseen" | "otherNamespace" | "severalPrograms" | "replaced" | "pathNotUtf8";
 
 export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 
@@ -357,7 +378,13 @@ persistsToSharedAgent: boolean,
 /**
  * The other workspaces that “Always” reaches today.
  */
-alsoAffectsWorkspaces: Array<string>, };
+alsoAffectsWorkspaces: Array<string>, 
+/**
+ * For a port on this computer (`host` is then `localhost`), what
+ * listens there, for the card only: an answer binds to the
+ * [`LocalSnapshot`] the registry keeps with the request.
+ */
+localListener?: LocalListenerView, };
 
 /**
  * How an agent's shell commands and web tools reach the network.

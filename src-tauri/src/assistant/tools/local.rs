@@ -13,13 +13,22 @@ use crate::assistant::network::addr::{
     is_blocked_web_fetch_hostname, reject_private_web_fetch_addrs, reject_private_web_fetch_ip,
     strip_ipv6_url_brackets,
 };
-use crate::assistant::network::matcher::{canonical_host, parse_entry, HostDecision};
+#[cfg(target_os = "linux")]
+use crate::assistant::network::local_listener::{Listener, ListenerInspector, Loopback};
+use crate::assistant::network::matcher::{
+    canonical_host, parse_entry, parse_local_port, HostDecision,
+};
+#[cfg(target_os = "linux")]
+use crate::assistant::network::run_state::{LocalBinding, LocalDecision, LocalRule};
 use crate::assistant::network::run_state::{RefusedTargets, RunNetwork};
 use crate::assistant::sandbox::{
     keyring_only_unavailable_note, run_command, ProxyEndpoint, SandboxCommand,
     SandboxCommandOutput, SandboxEnv, SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode,
     SessionBusProxy, SocketPolicy,
 };
+use crate::commands::network_access::LocalSnapshot;
+#[cfg(target_os = "linux")]
+use crate::commands::network_access::{LocalListenerView, NetworkAccessDecision};
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
     SandboxSessionBusConfig, ShellAccessMode,
@@ -1380,18 +1389,25 @@ async fn execute_net_request_access(
     use crate::commands::network_access::NetworkAccessRequest;
     use tauri::Manager;
 
-    let host = requested_host(
+    let ask = requested_host(
         &context.run_context.execution,
         crate::assistant::sandbox::status().allowlist_available,
         &context.run_network,
         &params.host,
+        params.port,
     )?;
-    let Some(host) = host else {
-        return Ok(serde_json::json!({
-            "granted": true,
-            "host": canonical_host(&params.host),
-            "scope": "already-allowed",
-        }));
+    let host = match ask {
+        Ask::Allowed => {
+            return Ok(serde_json::json!({
+                "granted": true,
+                "host": canonical_host(&params.host),
+                "scope": "already-allowed",
+            }))
+        }
+        Ask::Host(host) => host,
+        Ask::LocalPort(local) => {
+            return local_port_access(deps, context, local, params.reason).await
+        }
     };
 
     let request = NetworkAccessRequest::for_agent(
@@ -1403,23 +1419,234 @@ async fn execute_net_request_access(
         params.reason,
         context.run_network.host_log(),
     );
-    let decision = await_network_access_decision(deps, context, request).await?;
+    let decision = await_network_access_decision(deps, context, request, None).await?;
     apply_network_decision(context, &host, decision)
 }
 
-/// The host to ask the user about, or `None` when the run already allows
-/// it. Refuses, without a card, where the tool is not offered (a stale tool
-/// list), a host that is not one, and a host on the deny list.
+/// What `net_request_access` asks the user about.
+#[derive(Debug, PartialEq, Eq)]
+enum Ask {
+    /// The run already reaches the host.
+    Allowed,
+    Host(String),
+    /// A port on this computer: what listens there decides next whether a
+    /// card is shown.
+    LocalPort(LocalAsk),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalAsk {
+    /// What the request names: always `localhost`, so a re-ask spelled
+    /// `127.0.0.1` or `[::1]` replaces a pending request for the port.
+    host: &'static str,
+    port: u16,
+    /// The name the agent used, which decides the loopback address looked
+    /// at, as in the network proxy.
+    dialled: &'static str,
+}
+
+/// Asks for a port on this computer, with a card that shows what listens
+/// there.
+#[cfg(target_os = "linux")]
+async fn local_port_access(
+    deps: &crate::assistant::engine::AssistantDeps,
+    context: &ToolExecutionContext,
+    local: LocalAsk,
+    reason: String,
+) -> Result<serde_json::Value, String> {
+    use crate::commands::network_access::NetworkAccessRequest;
+    use tauri::Manager;
+
+    let inspector = crate::assistant::network::local_listener::host_inspector();
+    request_local_port(context, inspector, local, |snapshot, view| async move {
+        let request = NetworkAccessRequest {
+            local_listener: Some(view),
+            ..NetworkAccessRequest::for_agent(
+                &deps.app.state::<crate::AppState>(),
+                Some(deps.workspace_id.clone()),
+                context.run_context.automation_id.clone(),
+                local.host.to_string(),
+                Some(local.port),
+                reason,
+                context.run_network.host_log(),
+            )
+        };
+        await_network_access_decision(deps, context, request, Some(snapshot)).await
+    })
+    .await
+}
+
+#[cfg(not(target_os = "linux"))]
+fn local_port_access(
+    _deps: &crate::assistant::engine::AssistantDeps,
+    _context: &ToolExecutionContext,
+    local: LocalAsk,
+    _reason: String,
+) -> std::future::Ready<Result<serde_json::Value, String>> {
+    std::future::ready(Err(format!(
+        "`{}:{}` cannot be requested on this PC.",
+        local.host, local.port
+    )))
+}
+
+/// Asks the user about a port on this computer, unless the deny list
+/// refuses it, nothing a card could show listens there, or the run already
+/// reaches the listener. Then applies the answer, bound to what listened
+/// when the card was made: `ask` shows the card and waits.
+#[cfg(target_os = "linux")]
+async fn request_local_port<F, Fut>(
+    context: &ToolExecutionContext,
+    inspector: std::sync::Arc<dyn ListenerInspector>,
+    local: LocalAsk,
+    ask: F,
+) -> Result<serde_json::Value, String>
+where
+    F: FnOnce(LocalSnapshot, LocalListenerView) -> Fut,
+    Fut: std::future::Future<Output = Result<NetworkAccessDecision, String>>,
+{
+    let network = &context.run_network;
+    let port = local.port;
+    if let Some((name, denied)) = network.local_denial() {
+        return Err(denied.refusal(name, true).unwrap_or_default());
+    }
+    let dials = crate::assistant::network::proxy::dials(local.dialled);
+    let listener = tokio::task::spawn_blocking(move || first_listener(&*inspector, port, dials))
+        .await
+        .unwrap_or_else(|error| Err(std::io::Error::other(error)))
+        .map_err(|error| {
+            format!("CLAI could not check what listens on port {port} on this computer: {error}")
+        })?;
+    if network.decide_local(port, &listener) == LocalDecision::Allowed {
+        return Ok(serde_json::json!({
+            "granted": true,
+            "host": local.host,
+            "port": port,
+            "scope": "already-allowed",
+        }));
+    }
+    let Some((snapshot, view)) = LocalSnapshot::of(&listener) else {
+        return Err(if listener == Listener::Clai {
+            format!(
+                "Port {port} on this computer is served by CLAI or a program it started, \
+                 which an agent never reaches."
+            )
+        } else {
+            format!(
+                "Nothing listens on port {port} on this computer. Ask the user to start \
+                 the service or tunnel that should serve it, then call \
+                 `net_request_access` again."
+            )
+        });
+    };
+    let decision = ask(snapshot.clone(), view).await?;
+    apply_local_decision(context, local, &snapshot, decision)
+}
+
+/// What listens on `port` at the first of `dials` where anything does, from
+/// a full scan, as a card must show.
+#[cfg(target_os = "linux")]
+fn first_listener(
+    inspector: &dyn ListenerInspector,
+    port: u16,
+    dials: &[Loopback],
+) -> std::io::Result<Listener> {
+    for &dial in dials {
+        let listener = inspector.inspect(port, dial)?;
+        if listener != Listener::Nothing {
+            return Ok(listener);
+        }
+    }
+    Ok(Listener::Nothing)
+}
+
+/// Applies the answer for a port on this computer to the run, bound to
+/// `snapshot`: “Allow this run” adds the program, or the sockets; “Always”,
+/// already saved on the agent, adds the saved grant. A denial is the tool
+/// error and the run's warning. The result names the port only, never the
+/// listener the card showed.
+#[cfg(target_os = "linux")]
+fn apply_local_decision(
+    context: &ToolExecutionContext,
+    local: LocalAsk,
+    snapshot: &LocalSnapshot,
+    decision: NetworkAccessDecision,
+) -> Result<serde_json::Value, String> {
+    let entry = format!("{}:{}", local.host, local.port);
+    let (rules, scope, note) = match decision {
+        NetworkAccessDecision::AllowRun => (
+            run_rules(local.port, snapshot),
+            "run",
+            "Allowed for the rest of this run only, for what listens there now; a later \
+             run has to ask again.",
+        ),
+        NetworkAccessDecision::AllowAlways { .. } => (
+            vec![LocalRule::from(&snapshot.always_grant(local.port)?)],
+            "always",
+            "Saved on this agent for what listens there now.",
+        ),
+        NetworkAccessDecision::Deny { reason } => {
+            context.note_warning();
+            return Err(network_denied_message(&entry, reason.as_deref()));
+        }
+    };
+    for rule in rules {
+        context.run_network.allow_local(rule);
+    }
+    Ok(serde_json::json!({
+        "granted": true,
+        "host": local.host,
+        "port": local.port,
+        "entry": entry,
+        "scope": scope,
+        "note": format!("{note} Connect to `{entry}` from your next command."),
+    }))
+}
+
+/// The rules “Allow this run” adds: the program, or each socket CLAI could
+/// not tie to a program.
+#[cfg(target_os = "linux")]
+fn run_rules(port: u16, snapshot: &LocalSnapshot) -> Vec<LocalRule> {
+    let bindings = match snapshot {
+        LocalSnapshot::Program { exe } => vec![LocalBinding::Program(exe.clone())],
+        LocalSnapshot::OtherUser { sockets, .. } | LocalSnapshot::RunOnly { sockets } => sockets
+            .iter()
+            .map(|inode| LocalBinding::Socket(*inode))
+            .collect(),
+    };
+    bindings
+        .into_iter()
+        .map(|binding| LocalRule { port, binding })
+        .collect()
+}
+
+/// What to ask the user about. Refuses, without a card, where the tool is
+/// not offered (a stale tool list), a host that is not one, a host on the
+/// deny list, and this computer without a port or without the shell.
 fn requested_host(
     execution: &ExecutionCapabilityConfig,
     allowlist_available: bool,
     network: &RunNetwork,
     raw: &str,
-) -> Result<Option<String>, String> {
+    port: Option<u16>,
+) -> Result<Ask, String> {
     if let Some(refusal) =
         super::registry::net_request_access_refusal(execution, allowlist_available)
     {
         return Err(refusal.to_string());
+    }
+    if let Some((port, dialled)) = requested_local_port(raw.trim(), port)? {
+        if matches!(execution.shell.mode, ShellAccessMode::Off) {
+            return Err(
+                "Ports on this computer are reached from `bash_exec`, which this \
+                        agent does not have; web_fetch never reaches them."
+                    .to_string(),
+            );
+        }
+        return Ok(Ask::LocalPort(LocalAsk {
+            host: "localhost",
+            port,
+            dialled,
+        }));
     }
     // An entry, so that what reaches the card is what “Allow this run” can
     // apply: `parse_entry` refuses `%` (`%2a` would decode to a wildcard)
@@ -1439,10 +1666,51 @@ fn requested_host(
     }
     let host = entry.normalized();
     match network.decide(&host) {
-        HostDecision::Allowed => Ok(None),
-        HostDecision::Unlisted => Ok(Some(host)),
+        HostDecision::Allowed => Ok(Ask::Allowed),
+        HostDecision::Unlisted => Ok(Ask::Host(host)),
         refused => Err(refused.refusal(&host, true).unwrap_or_default()),
     }
+}
+
+/// The port and loopback name of a request for a port on this computer:
+/// `localhost:<port>`, `127.0.0.1:<port>` or `[::1]:<port>`, or the name
+/// alone with `port`. `None` for any other host.
+fn requested_local_port(
+    raw: &str,
+    port: Option<u16>,
+) -> Result<Option<(u16, &'static str)>, String> {
+    let named = match parse_local_port(raw) {
+        Ok(None) => return Ok(None),
+        Ok(Some(named)) => named,
+        Err(reason) => {
+            let with_port = |port: u16| match raw.parse::<std::net::Ipv6Addr>() {
+                Ok(_) => format!("[{raw}]:{port}"),
+                Err(_) => format!("{raw}:{port}"),
+            };
+            match port {
+                Some(port) if parse_local_port(&with_port(port)) == Ok(Some(port)) => port,
+                _ => {
+                    return Err(format!(
+                        "`{raw}` is not a port on this computer ({reason}). Ask for \
+                         `localhost:<port>`, such as `localhost:5432`."
+                    ))
+                }
+            }
+        }
+    };
+    if let Some(port) = port.filter(|port| *port != named) {
+        return Err(format!(
+            "`{raw}` names port {named}, but `port` is {port}; give the port once."
+        ));
+    }
+    let dialled = if raw.starts_with('[') || raw.parse::<std::net::Ipv6Addr>().is_ok() {
+        "::1"
+    } else if raw.starts_with("127.") {
+        "127.0.0.1"
+    } else {
+        "localhost"
+    };
+    Ok(Some((named, dialled)))
 }
 
 /// Applies the user's answer to the run: an allowed host or entry joins
@@ -1525,6 +1793,7 @@ async fn await_network_access_decision(
     deps: &crate::assistant::engine::AssistantDeps,
     context: &ToolExecutionContext,
     request: crate::commands::network_access::NetworkAccessRequest,
+    local: Option<LocalSnapshot>,
 ) -> Result<crate::commands::network_access::NetworkAccessDecision, String> {
     use crate::commands::network_access::{
         emit_attention, emit_network_access_resolved, PendingNetworkOutcome,
@@ -1548,7 +1817,7 @@ async fn await_network_access_decision(
 
     let (rx, count) = app_state
         .pending_network_requests
-        .register(request.clone(), context.run_id.clone())
+        .register(request.clone(), context.run_id.clone(), local)
         .await;
     if let Err(e) = deps.app.emit(NETWORK_ACCESS_REQUEST_EVENT, &request) {
         tracing::warn!("Failed to emit network access request event: {}", e);
@@ -2420,15 +2689,18 @@ mod tests {
     fn a_request_is_refused_without_a_card_where_the_tool_is_not_offered() {
         let network = RunNetwork::default();
         let mut execution = allowlist_execution(&[], &[]);
-        assert!(requested_host(&execution, false, &network, "example.org")
-            .unwrap_err()
-            .contains("not available on this PC"));
+        assert!(
+            requested_host(&execution, false, &network, "example.org", None)
+                .unwrap_err()
+                .contains("not available on this PC")
+        );
         for (mode, says) in [
             (NetworkMode::Off, "Network access is off"),
             (NetworkMode::HostNetwork, "can already reach any host"),
         ] {
             execution.sandbox.network_access.mode = mode;
-            let error = requested_host(&execution, true, &network, "example.org").unwrap_err();
+            let error =
+                requested_host(&execution, true, &network, "example.org", None).unwrap_err();
             assert!(error.contains(says), "{error}");
         }
     }
@@ -2437,14 +2709,21 @@ mod tests {
     fn a_request_names_one_host_the_lists_do_not_decide() {
         let execution = allowlist_execution(&["github.com"], &["*.s3.amazonaws.com"]);
         let network = RunNetwork::new(&execution.sandbox.network_access);
-        let ask = |raw| requested_host(&execution, true, &network, raw);
+        let ask = |raw| requested_host(&execution, true, &network, raw, None);
 
         assert_eq!(
             ask(" Mirror.Example.ORG. "),
-            Ok(Some("mirror.example.org".to_string()))
+            Ok(Ask::Host("mirror.example.org".to_string()))
         );
-        assert_eq!(ask("[2001:db8::1]"), Ok(Some("2001:db8::1".to_string())));
-        assert_eq!(ask("GitHub.com"), Ok(None), "already allowed: no card");
+        assert_eq!(
+            ask("[2001:db8::1]"),
+            Ok(Ask::Host("2001:db8::1".to_string()))
+        );
+        assert_eq!(
+            ask("GitHub.com"),
+            Ok(Ask::Allowed),
+            "already allowed: no card"
+        );
         let denied = ask("bucket.s3.amazonaws.com").unwrap_err();
         assert!(
             denied.contains("denied hosts (entry `*.s3.amazonaws.com`)")
@@ -2472,7 +2751,7 @@ mod tests {
         let network = RunNetwork::new(&execution.sandbox.network_access);
         let errors = [
             check_web_host(WebGate::Allowlist(&network), "github.com", Some(443)).unwrap_err(),
-            requested_host(&execution, true, &network, "example.org").unwrap_err(),
+            requested_host(&execution, true, &network, "example.org", None).unwrap_err(),
         ];
         for error in errors {
             assert!(
@@ -2545,6 +2824,373 @@ mod tests {
             context.run_network.decide("other.example.com"),
             HostDecision::Unlisted
         );
+    }
+
+    /// Ports on this computer: what the card shows, what the answer binds
+    /// to, and what the agent is told.
+    #[cfg(target_os = "linux")]
+    mod local_port_requests {
+        use super::*;
+        use crate::assistant::network::local_listener::{Holder, Program, RunOnly};
+        use crate::commands::network_access::{NetworkAccessRequest, PendingNetworkRequests};
+        use crate::config::types::LocalPortGrant;
+        use std::sync::{Arc, Mutex};
+
+        const SSH: &str = "/usr/bin/ssh";
+        const PYTHON: &str = "/usr/bin/python3";
+        /// In every command line: the card shows it, the agent never sees it.
+        const SECRET: &str = "secret-host";
+
+        struct FakeInspector {
+            listener: Mutex<Result<Listener, String>>,
+            dials: Mutex<Vec<Loopback>>,
+        }
+
+        impl FakeInspector {
+            fn new(listener: Result<Listener, String>) -> Arc<Self> {
+                Arc::new(Self {
+                    listener: Mutex::new(listener),
+                    dials: Mutex::default(),
+                })
+            }
+
+            fn serving(listener: Listener) -> Arc<Self> {
+                Self::new(Ok(listener))
+            }
+
+            fn set(&self, listener: Listener) {
+                *self.listener.lock().unwrap() = Ok(listener);
+            }
+
+            fn dials(&self) -> Vec<Loopback> {
+                self.dials.lock().unwrap().clone()
+            }
+        }
+
+        impl ListenerInspector for FakeInspector {
+            fn inspect(&self, _port: u16, dial: Loopback) -> std::io::Result<Listener> {
+                self.dials.lock().unwrap().push(dial);
+                self.listener
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .map_err(std::io::Error::other)
+            }
+
+            fn still_serves(&self, _port: u16, _dial: Loopback, _programs: &[String]) -> bool {
+                panic!("a card comes from a full scan only")
+            }
+        }
+
+        fn program(exe: &str) -> Listener {
+            Listener::Program(Program {
+                exe: exe.to_string(),
+                pid: 4321,
+                cmdline: format!("{exe} -N -L 5432:db:5432 {SECRET}"),
+                interpreter: false,
+            })
+        }
+
+        fn other_user(sockets: &[u64]) -> Listener {
+            Listener::OtherUser {
+                // SAFETY: geteuid has no preconditions and cannot fail.
+                uid: unsafe { libc::geteuid() }.wrapping_add(1),
+                name: "postgres".to_string(),
+                sockets: sockets.to_vec(),
+            }
+        }
+
+        fn run_only(reason: RunOnly, sockets: &[u64]) -> Listener {
+            Listener::RunOnly {
+                reason,
+                sockets: sockets.to_vec(),
+                holders: vec![Holder {
+                    pid: 77,
+                    exe: "/usr/bin/rootlessport".to_string(),
+                    cmdline: format!("rootlessport {SECRET}"),
+                }],
+            }
+        }
+
+        fn port_5432() -> LocalAsk {
+            LocalAsk {
+                host: "localhost",
+                port: 5432,
+                dialled: "localhost",
+            }
+        }
+
+        fn context_with(policy: NetworkPolicy) -> (tempfile::TempDir, ToolExecutionContext) {
+            let workspace = tempdir().unwrap();
+            let mut context = context_with_grants(workspace.path(), Vec::new());
+            context.run_network = Arc::new(RunNetwork::new(&policy));
+            (workspace, context)
+        }
+
+        async fn no_card(
+            _: LocalSnapshot,
+            _: LocalListenerView,
+        ) -> Result<NetworkAccessDecision, String> {
+            panic!("no card is shown")
+        }
+
+        #[tokio::test]
+        async fn a_port_on_this_computer_is_asked_as_localhost_whatever_its_spelling() {
+            let execution = allowlist_execution(&[], &[]);
+            let network = RunNetwork::new(&execution.sandbox.network_access);
+            let ask = |raw, port| requested_host(&execution, true, &network, raw, port);
+            for (raw, port, dialled) in [
+                ("localhost:5432", None, "localhost"),
+                (" LOCALHOST:5432 ", None, "localhost"),
+                ("127.0.0.1:5432", None, "127.0.0.1"),
+                ("[::1]:5432", None, "::1"),
+                ("localhost", Some(5432), "localhost"),
+                ("localhost:5432", Some(5432), "localhost"),
+                ("::1", Some(5432), "::1"),
+                ("[::1]", Some(5432), "::1"),
+            ] {
+                assert_eq!(
+                    ask(raw, port),
+                    Ok(Ask::LocalPort(LocalAsk {
+                        host: "localhost",
+                        port: 5432,
+                        dialled
+                    })),
+                    "{raw:?} {port:?}"
+                );
+            }
+            for (raw, port, says) in [
+                ("localhost", None, "add the port"),
+                ("127.0.0.1", None, "add the port"),
+                ("localhost:0", None, "1 to 65535"),
+                ("localhost:5432-5433", None, "one port"),
+                ("localhost:5432", Some(6379), "give the port once"),
+                ("127.0.0.2:5432", None, "as localhost"),
+                ("app.localhost:3000", None, "as localhost"),
+            ] {
+                let error = ask(raw, port).unwrap_err();
+                assert!(error.contains(says), "{raw:?}: {error}");
+            }
+
+            // A re-ask under another spelling replaces the pending request.
+            let request = |ask: Result<Ask, String>| {
+                let Ok(Ask::LocalPort(local)) = ask else {
+                    panic!("expected a local port, got {ask:?}");
+                };
+                NetworkAccessRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    workspace_id: Some("ws".to_string()),
+                    agent_id: None,
+                    agent_name: None,
+                    host: local.host.to_string(),
+                    port: Some(local.port),
+                    reason: String::new(),
+                    run_hosts: Vec::new(),
+                    suggested_wildcard: None,
+                    persists_to_shared_agent: false,
+                    also_affects_workspaces: Vec::new(),
+                    local_listener: None,
+                }
+            };
+            let pending = PendingNetworkRequests::default();
+            let mut earlier = request(ask("localhost:5432", None));
+            for raw in ["[::1]:5432", "127.0.0.1:5432"] {
+                let _ = pending.register(earlier.clone(), "run".into(), None).await;
+                let again = request(ask(raw, None));
+                let taken = pending
+                    .take_superseded("run", &again.host, again.port)
+                    .await;
+                assert_eq!(taken.len(), 1, "{raw}");
+                assert_eq!(taken[0].request_id, earlier.request_id);
+                earlier = again;
+            }
+
+            let mut no_shell = allowlist_execution(&[], &[]);
+            no_shell.shell.mode = ShellAccessMode::Off;
+            no_shell.web.enabled = true;
+            let error =
+                requested_host(&no_shell, true, &network, "localhost:5432", None).unwrap_err();
+            assert!(error.contains("bash_exec"), "{error}");
+        }
+
+        #[tokio::test]
+        async fn nothing_clai_or_a_denied_name_is_refused_without_a_card() {
+            for (listener, says) in [
+                (Ok(Listener::Nothing), "Nothing listens on port 5432"),
+                (Ok(Listener::Clai), "served by CLAI"),
+                (Err("permission denied".to_string()), "could not check"),
+            ] {
+                let inspector = FakeInspector::new(listener);
+                let (_workspace, context) = context_with(allowlist(&[], &[]));
+                let error = request_local_port(&context, inspector.clone(), port_5432(), no_card)
+                    .await
+                    .unwrap_err();
+                assert!(error.contains(says), "{error}");
+                assert!(!error.contains(SECRET), "{error}");
+                assert_eq!(
+                    context.run_network.decide_local(5432, &program(SSH)),
+                    LocalDecision::NotGranted
+                );
+            }
+
+            let inspector = FakeInspector::serving(Listener::Nothing);
+            let (_workspace, context) = context_with(allowlist(&[], &[]));
+            let _ = request_local_port(&context, inspector.clone(), port_5432(), no_card).await;
+            assert_eq!(inspector.dials(), [Loopback::V4, Loopback::V6]);
+            let inspector = FakeInspector::serving(Listener::Nothing);
+            let ipv6 = LocalAsk {
+                dialled: "::1",
+                ..port_5432()
+            };
+            let _ = request_local_port(&context, inspector.clone(), ipv6, no_card).await;
+            assert_eq!(inspector.dials(), [Loopback::V6]);
+
+            for denied in ["localhost", "127.0.0.1", "::1"] {
+                let inspector = FakeInspector::serving(program(SSH));
+                let (_workspace, context) = context_with(allowlist(&[], &[denied]));
+                let error = request_local_port(&context, inspector.clone(), port_5432(), no_card)
+                    .await
+                    .unwrap_err();
+                assert!(error.contains("denied hosts"), "{denied}: {error}");
+                assert!(inspector.dials().is_empty(), "not even looked up");
+            }
+        }
+
+        #[tokio::test]
+        async fn the_answer_binds_the_listener_the_card_showed() {
+            for (shown, then, allowed, changed) in [
+                (program(SSH), program(PYTHON), program(SSH), program(PYTHON)),
+                (
+                    run_only(RunOnly::OtherNamespace, &[11]),
+                    run_only(RunOnly::OtherNamespace, &[12]),
+                    run_only(RunOnly::OtherNamespace, &[11]),
+                    run_only(RunOnly::OtherNamespace, &[12]),
+                ),
+                (
+                    other_user(&[11]),
+                    other_user(&[12]),
+                    other_user(&[11]),
+                    other_user(&[12]),
+                ),
+            ] {
+                let inspector = FakeInspector::serving(shown);
+                let (_workspace, context) = context_with(allowlist(&[], &[]));
+                let changing = inspector.clone();
+                let result = request_local_port(&context, inspector, port_5432(), |_, _| {
+                    // The listener changes before the user answers.
+                    changing.set(then);
+                    async { Ok(NetworkAccessDecision::AllowRun) }
+                })
+                .await
+                .unwrap();
+                assert_eq!(result["scope"], "run");
+                let network = &context.run_network;
+                assert_eq!(network.decide_local(5432, &allowed), LocalDecision::Allowed);
+                assert_eq!(network.decide_local(5432, &changed), LocalDecision::Changed);
+                assert_eq!(
+                    network.decide_local(6379, &allowed),
+                    LocalDecision::NotGranted
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn always_adds_the_saved_grant_and_the_result_names_the_port_only() {
+            let always = || NetworkAccessDecision::AllowAlways {
+                entry: "localhost:5432".to_string(),
+            };
+            for (listener, decision, scope, later) in [
+                (
+                    program(SSH),
+                    NetworkAccessDecision::AllowRun,
+                    "run",
+                    program(SSH),
+                ),
+                (program(SSH), always(), "always", program(SSH)),
+                // A user grant covers a restarted service of that user.
+                (other_user(&[11]), always(), "always", other_user(&[12])),
+            ] {
+                let inspector = FakeInspector::serving(listener);
+                let (_workspace, context) = context_with(allowlist(&[], &[]));
+                let mut shown = Vec::new();
+                let result = request_local_port(&context, inspector, port_5432(), |_, view| {
+                    shown.push(view);
+                    async move { Ok(decision) }
+                })
+                .await
+                .unwrap();
+
+                let mut keys: Vec<&str> = result
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                keys.sort_unstable();
+                assert_eq!(keys, ["entry", "granted", "host", "note", "port", "scope"]);
+                assert_eq!(result["host"], "localhost");
+                assert_eq!(result["port"], 5432);
+                assert_eq!(result["entry"], "localhost:5432");
+                assert_eq!(result["scope"], scope);
+                assert!(!result.to_string().contains(SECRET), "{result}");
+                assert_eq!(
+                    context.run_network.decide_local(5432, &later),
+                    LocalDecision::Allowed
+                );
+                if let [LocalListenerView::Program { command_line, .. }] = shown.as_slice() {
+                    assert!(command_line.contains(SECRET), "the card shows it");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_denial_is_the_tool_error_and_allows_nothing() {
+            let inspector = FakeInspector::serving(program(SSH));
+            let (_workspace, context) = context_with(allowlist(&[], &[]));
+            let error = request_local_port(&context, inspector, port_5432(), |_, _| async {
+                Ok(NetworkAccessDecision::Deny {
+                    reason: Some("use the staging database".to_string()),
+                })
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "User denied network access to `localhost:5432`. Reason: use the staging database."
+            );
+            assert!(context.had_warnings());
+            assert_eq!(
+                context.run_network.decide_local(5432, &program(SSH)),
+                LocalDecision::NotGranted
+            );
+        }
+
+        #[tokio::test]
+        async fn a_listener_the_run_already_reaches_needs_no_card() {
+            let mut policy = allowlist(&[], &[]);
+            policy.local_ports = vec![LocalPortGrant::Program {
+                port: 5432,
+                program: SSH.to_string(),
+            }];
+            let (_workspace, context) = context_with(policy);
+            let result = request_local_port(
+                &context,
+                FakeInspector::serving(program(SSH)),
+                port_5432(),
+                no_card,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result,
+                serde_json::json!({
+                    "granted": true,
+                    "host": "localhost",
+                    "port": 5432,
+                    "scope": "already-allowed",
+                })
+            );
+        }
     }
 
     fn network_guard(

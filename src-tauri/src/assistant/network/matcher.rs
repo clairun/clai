@@ -195,13 +195,6 @@ pub fn parse_entry(raw: &str) -> Result<HostEntry, &'static str> {
 /// as `localhost.localdomain` or `ip6-localhost` in /etc/hosts, return
 /// `Ok(None)`; the network proxy and the web tools refuse loopback addresses
 /// when they connect.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "net_request_access and the settings form will parse ports with it"
-    )
-)]
 pub fn parse_local_port(raw: &str) -> Result<Option<u16>, &'static str> {
     let value = raw.trim().to_lowercase();
     // `::1:5432` is itself a valid IPv6 address, so only brackets carry a port.
