@@ -36,9 +36,9 @@
   z-index: 101;
 }
 
-/* Narrow pane (container: Workspace .workspaceBody): a sheet over the whole
+/* Narrow pane (Workspace's .workspaceBody): a sheet over the whole
    pane and the drawer, ending above the composer unless maximized. */
-@container (max-width: 720px) {
+@container workspace-body (max-width: 720px) {
   .panel {
     left: 0;
     right: 0;
