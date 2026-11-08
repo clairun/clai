@@ -240,6 +240,12 @@ mod linux {
             }
         };
         for &port in forward {
+            if port == http_port {
+                eprintln!(
+                    "clai-sandbox-helper: localhost:{port} is CLAI's proxy port inside the sandbox and is not forwarded"
+                );
+                continue;
+            }
             forward_local_port(&socket, port);
         }
         thread::spawn(move || {

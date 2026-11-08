@@ -320,3 +320,33 @@ fn a_port_that_cannot_be_forwarded_still_runs_the_command() {
         "{stderr}"
     );
 }
+
+/// The proxy's own port is not forwarded on either loopback: 127.0.0.1 stays
+/// the proxy and nothing listens on ::1.
+#[test]
+fn the_proxy_port_is_not_forwarded() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port().to_string();
+    let output = Command::new(HELPER)
+        .arg("bridge")
+        .arg("--socket")
+        .arg(dir.path().join("unused.sock"))
+        .args(["--http", &port, "--forward", &port])
+        .args(["--", "python3", "-c", LOOPBACK_CLIENT, &port])
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "127.0.0.1 closed\n::1 refused\n",
+        "{output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains(&format!(
+            "localhost:{port} is CLAI's proxy port inside the sandbox and is not forwarded"
+        )),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("cannot forward"), "{stderr}");
+}

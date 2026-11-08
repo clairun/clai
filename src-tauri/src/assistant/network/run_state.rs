@@ -617,6 +617,20 @@ mod tests {
         }
 
         #[test]
+        fn the_local_ports_are_listed_once_each_in_order() {
+            let redis = LocalPortGrant::Program {
+                port: 6379,
+                program: "/usr/bin/redis-server".to_string(),
+            };
+            let network = network(NetworkMode::Allowlist, vec![redis, program_grant(SSH)], &[]);
+            network.allow_local(LocalRule {
+                port: PORT,
+                binding: LocalBinding::Program(PYTHON.to_string()),
+            });
+            assert_eq!(network.local_ports(), [5432, 6379]);
+        }
+
+        #[test]
         fn a_deny_entry_for_any_local_name_refuses_every_local_port() {
             for name in LOCAL_NAMES {
                 let network = network(NetworkMode::Allowlist, vec![program_grant(SSH)], &[name]);
