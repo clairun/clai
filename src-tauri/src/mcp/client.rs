@@ -23,6 +23,7 @@ use tokio::{
 };
 
 use crate::assistant::auth::McpSecretStorage;
+use crate::assistant::network::spawn_roots::{self, StartedBy};
 use crate::assistant::types::ToolDefinition;
 use crate::config::{ClaiConfig, McpEnvVar, McpServerAuth, McpServerConfig};
 use crate::mcp::oauth;
@@ -121,6 +122,9 @@ struct StdioMcpServerConnection {
     service: McpRunningService,
     #[allow(dead_code)]
     child: Child,
+    /// Kept for as long as the child: an agent can ask for a server the MCP
+    /// server starts.
+    _recorded: spawn_roots::Recorded,
 }
 
 // The variants' sizes differ enough to trip clippy::large_enum_variant only on
@@ -642,6 +646,8 @@ impl McpClientManager {
                         config.name, command, error
                     )
                 })?;
+                let recorded =
+                    spawn_roots::record(child.id(), StartedBy::McpServer(config.name.clone()));
 
                 if let Some(stderr) = child.stderr.take() {
                     spawn_stderr_logger(config.id.clone(), stderr);
@@ -667,6 +673,7 @@ impl McpClientManager {
                 Ok(ConnectedMcpServer::Stdio(StdioMcpServerConnection {
                     service,
                     child,
+                    _recorded: recorded,
                 }))
             }
         }
@@ -778,6 +785,40 @@ mod tests {
             && name
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_stdio_server_is_recorded_while_it_runs() {
+        let config = McpServerConfig {
+            id: "recorded-stdio-server".to_string(),
+            name: "Recorded stdio server".to_string(),
+            enabled: true,
+            // Never answers, so the connection stays in its handshake.
+            transport: crate::config::McpServerTransport::Stdio {
+                command: "sleep".to_string(),
+                args: vec!["30".to_string()],
+                env: Vec::new(),
+            },
+            auth: McpServerAuth::None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let by = StartedBy::McpServer(config.name.clone());
+        let connect =
+            tokio::spawn(
+                async move { McpClientManager::connect_server(&config).await.map(|_| ()) },
+            );
+        assert!(
+            spawn_roots::eventually(|| !spawn_roots::started_by(&by).is_empty()).await,
+            "recorded while it runs"
+        );
+        connect.abort();
+        let _ = connect.await;
+        assert!(
+            spawn_roots::started_by(&by).is_empty(),
+            "gone with the connection"
+        );
     }
 
     #[test]

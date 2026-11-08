@@ -9,11 +9,13 @@
 //!
 //! - `run [--allow-unix <path>]… -- <command>…` then runs the command in its
 //!   place (Off and Host network).
-//! - `bridge --socket <path> --http <port> [--allow-unix <path>]… --
-//!   <command>…` (Allowlist, whose network namespace has only a loopback
-//!   interface) listens on 127.0.0.1:<port>, where `HTTP(S)_PROXY` point,
-//!   forwards each connection to CLAI's network proxy at the socket, runs the
-//!   command and exits as it does.
+//! - `bridge --socket <path> --http <port> [--forward <port>]… [--allow-unix
+//!   <path>]… -- <command>…` (Allowlist, whose network namespace has only a
+//!   loopback interface) listens on 127.0.0.1:<port>, where `HTTP(S)_PROXY`
+//!   point, forwards each connection to CLAI's network proxy at the socket,
+//!   runs the command and exits as it does. Each `--forward` port, a port of
+//!   this computer the run may reach, also answers on 127.0.0.1 and [::1]:
+//!   each connection there asks the proxy for a tunnel to that port.
 //! - `connect --proxy <host:port> <host> <port>` is ssh's `ProxyCommand`: it
 //!   opens a CONNECT tunnel through the proxy and pipes stdin and stdout
 //!   through it.
@@ -37,15 +39,15 @@ mod linux {
     use std::ffi::OsString;
     use std::fs::File;
     use std::io::{self, Read, Write};
-    use std::net::{Shutdown, TcpListener, TcpStream};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
     use std::os::fd::AsFd;
     use std::os::unix::net::UnixStream;
     use std::os::unix::process::{CommandExt, ExitStatusExt};
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::process::Command;
     use std::thread;
 
-    const USAGE: &str = "usage: clai-sandbox-helper run [--allow-unix <path>]... [--host-abstract-unix] -- <command>...\n       clai-sandbox-helper bridge --socket <path> --http <port> [--allow-unix <path>]... -- <command>...\n       clai-sandbox-helper connect --proxy <host:port> <host> <port>";
+    const USAGE: &str = "usage: clai-sandbox-helper run [--allow-unix <path>]... [--host-abstract-unix] -- <command>...\n       clai-sandbox-helper bridge --socket <path> --http <port> [--forward <port>]... [--allow-unix <path>]... -- <command>...\n       clai-sandbox-helper connect --proxy <host:port> <host> <port>";
     const MAX_HEAD_BYTES: usize = 16 * 1024;
     /// What ssh reports for a ProxyCommand that could not connect.
     const CONNECT_FAILED: i32 = 255;
@@ -62,6 +64,8 @@ mod linux {
         Bridge {
             socket: PathBuf,
             http_port: u16,
+            /// Ports of this computer that answer inside the sandbox.
+            forward: Vec<u16>,
             allow_unix: Vec<PathBuf>,
             argv: Vec<OsString>,
         },
@@ -95,9 +99,10 @@ mod linux {
             Mode::Bridge {
                 socket,
                 http_port,
+                forward,
                 argv,
                 ..
-            } => bridge(socket, http_port, &argv),
+            } => bridge(socket, http_port, &forward, &argv),
             Mode::Connect { proxy, host, port } => connect(&proxy, &host, port),
         }
     }
@@ -141,6 +146,7 @@ mod linux {
                 let bridge = name == "bridge";
                 let (mut socket, mut http_port, mut allow_unix) = (None, None, Vec::new());
                 let mut host_abstract_unix = false;
+                let mut forward = Vec::new();
                 loop {
                     let arg = args
                         .next()
@@ -150,6 +156,7 @@ mod linux {
                             socket = args.next().map(PathBuf::from);
                         }
                         Some("--http") if bridge => http_port = Some(port(args.next())?),
+                        Some("--forward") if bridge => forward.push(port(args.next())?),
                         Some("--allow-unix") => allow_unix.push(
                             args.next()
                                 .map(PathBuf::from)
@@ -175,6 +182,7 @@ mod linux {
                 Ok(Mode::Bridge {
                     socket: socket.ok_or("--socket needs a path")?,
                     http_port: http_port.ok_or("--http needs a port")?,
+                    forward,
                     allow_unix,
                     argv,
                 })
@@ -223,7 +231,7 @@ mod linux {
         }
     }
 
-    fn bridge(socket: PathBuf, http_port: u16, argv: &[OsString]) -> i32 {
+    fn bridge(socket: PathBuf, http_port: u16, forward: &[u16], argv: &[OsString]) -> i32 {
         let listener = match TcpListener::bind(("127.0.0.1", http_port)) {
             Ok(listener) => listener,
             Err(error) => {
@@ -231,6 +239,15 @@ mod linux {
                 return 125;
             }
         };
+        for &port in forward {
+            if port == http_port {
+                eprintln!(
+                    "clai-sandbox-helper: localhost:{port} is CLAI's proxy port inside the sandbox and is not forwarded"
+                );
+                continue;
+            }
+            forward_local_port(&socket, port);
+        }
         thread::spawn(move || {
             for client in listener.incoming().flatten() {
                 let socket = socket.clone();
@@ -256,6 +273,45 @@ mod linux {
             // without the helper in between.
             Some(signal) => reraise(signal),
             None => status.code().unwrap_or(1),
+        }
+    }
+
+    /// Listens on 127.0.0.1 and [::1] at `port` and, for each connection,
+    /// asks the proxy at `socket` for a tunnel to `localhost:<port>`: the
+    /// proxy decides whether the run may reach it. An address that cannot be
+    /// bound is reported and skipped, so the command still runs; [::1] is
+    /// skipped silently where the sandbox has no IPv6.
+    fn forward_local_port(socket: &Path, port: u16) {
+        for ip in [
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            IpAddr::V6(Ipv6Addr::LOCALHOST),
+        ] {
+            let listener = match TcpListener::bind((ip, port)) {
+                Ok(listener) => listener,
+                Err(error) if ip.is_ipv6() && error.kind() == io::ErrorKind::AddrNotAvailable => {
+                    continue;
+                }
+                Err(error) => {
+                    let address = SocketAddr::new(ip, port);
+                    eprintln!("clai-sandbox-helper: cannot forward localhost:{port} at {address}: {error}");
+                    continue;
+                }
+            };
+            let socket = socket.to_path_buf();
+            thread::spawn(move || {
+                for client in listener.incoming().flatten() {
+                    let socket = socket.clone();
+                    thread::spawn(move || {
+                        let tunnel = UnixStream::connect(&socket)
+                            .map_err(|error| format!("network proxy: {error}"))
+                            .and_then(|proxy| request_tunnel(proxy, "localhost", port));
+                        match tunnel {
+                            Ok(proxy) => pipe(client, proxy),
+                            Err(error) => eprintln!("clai-sandbox-helper: {error}"),
+                        }
+                    });
+                }
+            });
         }
     }
 
@@ -326,11 +382,17 @@ mod linux {
         0
     }
 
-    /// Asks the proxy for a tunnel to `host:port`. A refusal comes back as
-    /// the proxy's status line and the reason in its body.
+    /// Asks the proxy at `proxy` for a tunnel to `host:port`.
     pub(crate) fn open_tunnel(proxy: &str, host: &str, port: u16) -> Result<TcpStream, String> {
-        let mut stream = TcpStream::connect(proxy)
+        let stream = TcpStream::connect(proxy)
             .map_err(|error| format!("cannot reach the network proxy at {proxy}: {error}"))?;
+        request_tunnel(stream, host, port)
+    }
+
+    /// Asks the proxy at the other end of `stream` for a tunnel to
+    /// `host:port`. A refusal comes back as the proxy's status line and the
+    /// reason in its body.
+    fn request_tunnel<S: Read + Write>(mut stream: S, host: &str, port: u16) -> Result<S, String> {
         let authority = if host.contains(':') {
             format!("[{host}]:{port}")
         } else {
@@ -356,7 +418,7 @@ mod linux {
 
     /// Reads one byte at a time so nothing past the head is consumed: those
     /// bytes belong to the tunnel.
-    fn read_head(stream: &mut TcpStream) -> Result<String, String> {
+    fn read_head(stream: &mut impl Read) -> Result<String, String> {
         let mut head = Vec::new();
         let mut byte = [0_u8; 1];
         while !head.ends_with(b"\r\n\r\n") {
@@ -652,6 +714,7 @@ mod linux {
                 Ok(Mode::Bridge {
                     socket: PathBuf::from("/run/clai/net.sock"),
                     http_port: 3128,
+                    forward: Vec::new(),
                     allow_unix: Vec::new(),
                     argv: args(&["sh", "-c", "true"]),
                 })
@@ -671,6 +734,7 @@ mod linux {
                 Ok(Mode::Bridge {
                     socket: PathBuf::from("/s"),
                     http_port: 3128,
+                    forward: Vec::new(),
                     allow_unix: vec![PathBuf::from("/run/clai/bus")],
                     argv: args(&["sh"]),
                 })
@@ -768,6 +832,29 @@ mod linux {
                 confined(&["connect", "--proxy", "127.0.0.1:3128", "github.com", "22"]),
                 None
             );
+        }
+
+        #[test]
+        fn only_bridge_forwards_local_ports() {
+            let bridge = |extra: &[&str]| {
+                let mut argv = vec!["bridge", "--socket", "/s", "--http", "3128"];
+                argv.extend_from_slice(extra);
+                argv.extend(["--", "sh"]);
+                parse(args(&argv))
+            };
+            assert_eq!(
+                bridge(&["--forward", "5432", "--forward", "6379"]),
+                Ok(Mode::Bridge {
+                    socket: PathBuf::from("/s"),
+                    http_port: 3128,
+                    forward: vec![5432, 6379],
+                    allow_unix: Vec::new(),
+                    argv: args(&["sh"]),
+                })
+            );
+            assert!(bridge(&["--forward", "0"]).is_err());
+            assert!(bridge(&["--forward"]).is_err());
+            assert!(parse(args(&["run", "--forward", "5432", "--", "sh"])).is_err());
         }
 
         #[test]

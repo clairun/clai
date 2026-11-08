@@ -47,6 +47,14 @@
     {
       "entry": "*。com",
       "matched": "*.com"
+    },
+    {
+      "entry": "localhost.example.com",
+      "matched": "localhost.example.com"
+    },
+    {
+      "entry": "127.0.0.1.nip.io",
+      "matched": "127.0.0.1.nip.io"
     }
   ],
   "rejected": [
@@ -81,5 +89,112 @@
     "git hub.com",
     "a..com",
     "gi*thub.com"
+  ],
+  "localPorts": {
+    "accepted": [
+      {
+        "entry": "localhost:5432",
+        "port": 5432
+      },
+      {
+        "entry": " LocalHost:22 ",
+        "port": 22
+      },
+      {
+        "entry": "localhost:1",
+        "port": 1
+      },
+      {
+        "entry": "localhost:65535",
+        "port": 65535
+      },
+      {
+        "entry": "127.0.0.1:8080",
+        "port": 8080
+      },
+      {
+        "entry": "[::1]:5432",
+        "port": 5432
+      },
+      {
+        "entry": "[::1]:443",
+        "port": 443
+      }
+    ],
+    "rejected": [
+      "localhost",
+      "localhost:",
+      "localhost:0",
+      "localhost:65536",
+      "localhost:99999999999",
+      "localhost:05432",
+      "localhost:+80",
+      "localhost: 80",
+      "localhost:80:81",
+      "localhost:*",
+      "localhost:1-9",
+      "localhost:80,443",
+      "127.0.0.1",
+      "127.0.0.1:",
+      "127.0.0.1:0",
+      "::1",
+      "[::1]",
+      "[::1]:",
+      "[::1]:0",
+      "::1:5432",
+      "64:ff9b::7f00:1:80",
+      "127.0.0.2:80",
+      "127.1.2.3",
+      "0.0.0.0:80",
+      "[::]:80",
+      "[::ffff:127.0.0.1]:80",
+      "[localhost]:80",
+      "[127.0.0.1]:80",
+      "*.localhost:80",
+      "app.localhost:3000",
+      "localhost.:80",
+      "127.0.0.1.",
+      "127.0.0.2.",
+      "127.0.0.1.:80",
+      "[::1].",
+      "::1.",
+      "::.",
+      "::ffff:127.0.0.1.",
+      "64:ff9b::7f00:1.",
+      "0:0:0:0:0:0:0:1.",
+      "ｌｏｃａｌｈｏｓｔ",
+      "localhoſt",
+      "app。localhost",
+      "[0:0:0:0:0:0:0:1]:80",
+      "[64:ff9b::7f00:1]:80"
+    ],
+    "notLocal": [
+      "github.com",
+      "github.com:443",
+      "10.0.0.5:80",
+      "[2001:db8::1]:443",
+      "mylocalhost:80",
+      "localhost.example.com:80",
+      "127.0.0.1.nip.io:80"
+    ]
+  },
+  "allowOnlyRejected": [
+    "localhost",
+    " LocalHost. ",
+    "*.localhost",
+    "app.localhost",
+    "app。localhost",
+    "127.0.0.1",
+    "127.1.2.3",
+    "0.0.0.0",
+    "::1",
+    "[::1]",
+    "0:0:0:0:0:0:0:1",
+    "::",
+    "::ffff:127.0.0.1",
+    "64:ff9b::7f00:1",
+    "::ffff:127.1.2.3",
+    "::ffff:0.0.0.0",
+    "64:ff9b::0.0.0.0"
   ]
 }

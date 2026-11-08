@@ -92,6 +92,17 @@
   max-height: 168px;
 }
 
+/* What must serve a local port, quieter than the port before it. */
+.localPortServer,
+.localPortUser {
+  color: var(--color-text-secondary);
+}
+
+/* A user is named in prose, not as a path. */
+.localPortUser {
+  font-family: inherit;
+}
+
 @media (max-width: 960px) {
   .accessBody {
     grid-template-columns: minmax(0, 1fr);

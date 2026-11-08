@@ -62,6 +62,12 @@ describe('PermissionAttentionNotifications', () => {
     expect(screen.queryByText(body)).not.toBeInTheDocument();
   });
 
+  it('names a port of this computer as such', async () => {
+    await renderAt('/workspace/ws-1');
+    fire('network-access://request', { ...network, host: 'localhost', port: 5432 });
+    expect(screen.getByText('Needs network access to port 5432 on this computer')).toBeInTheDocument();
+  });
+
   it('toasts nothing for the workspace on screen', async () => {
     await renderAt('/workspace/ws-2');
     fire('network-access://request', network);

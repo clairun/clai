@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::assistant::network::spawn_roots::{self, StartedBy};
 use crate::providers::{command_exists, get_host_command, is_flatpak};
 use crate::windows_console::HideConsoleWindow;
 
@@ -557,6 +558,12 @@ fn spawn_host_detached(
     let child = command
         .spawn()
         .map_err(|e| format!("Failed to launch `{}`: {}", bin, e))?;
+    // An agent can ask for a server the app starts, until it is reaped.
+    let name = Path::new(bin).file_name().and_then(|name| name.to_str());
+    let app = spawn_roots::record(
+        Some(child.id()),
+        StartedBy::App(name.unwrap_or(bin).to_string()),
+    );
     // Fire-and-forget, but still reap: dropping the `Child` neither waits nor
     // kills on Unix, so a closed editor/terminal (or its `flatpak-spawn` host
     // proxy) would linger as a `<defunct>` zombie parented to us. A detached
@@ -565,6 +572,7 @@ fn spawn_host_detached(
     std::thread::spawn(move || {
         let mut child = child;
         let _ = child.wait();
+        drop(app);
     });
     Ok(())
 }
@@ -784,6 +792,21 @@ pub fn resolve_contained_path(root: &Path, rel_path: Option<&str>) -> Result<Pat
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_opened_app_is_recorded_until_it_is_reaped() {
+        let app = StartedBy::App("sleep".to_string());
+        spawn_host_detached("sleep", &["3".to_string()], None, HostWindow::Visible).unwrap();
+        let pids = spawn_roots::started_by(&app);
+        assert_eq!(pids.len(), 1, "{pids:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(spawn_roots::started_by(&app), pids, "while the app runs");
+        assert!(
+            spawn_roots::eventually(|| spawn_roots::started_by(&app).is_empty()).await,
+            "gone once reaped"
+        );
+    }
 
     #[test]
     fn substitute_replaces_placeholder() {

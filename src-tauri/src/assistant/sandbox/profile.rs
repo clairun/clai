@@ -148,6 +148,9 @@ pub struct ProxyEndpoint {
     pub helper: PathBuf,
     /// The OpenSSH client configuration that sends ssh through the proxy.
     pub ssh_config: PathBuf,
+    /// The ports of this computer the run may reach as the command starts:
+    /// the helper answers on them inside the sandbox, through the proxy.
+    pub forward_ports: Vec<u16>,
 }
 
 /// Whether the sandboxed process can reach the host's session D-Bus.

@@ -11,6 +11,7 @@ use super::{
     SandboxCommand, SandboxCommandOutput, SandboxNetworkMode, SandboxPathAccess,
     SandboxSessionBusMode, SessionBusProxy,
 };
+use crate::assistant::network::spawn_roots;
 
 const BWRAP_BIN: &str = "bwrap";
 const FLATPAK_SPAWN_BIN: &str = "flatpak-spawn";
@@ -66,21 +67,30 @@ pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, St
             format!("Failed to start sandboxed shell: {}", e)
         }
     })?;
-
-    let output = run_spawned_child(
-        child,
-        command.cwd,
-        command.timeout_ms,
-        command.max_output_chars,
-        "Sandboxed shell command",
-    )
-    .await?;
+    let output = run_recorded(child, command).await?;
 
     if looks_like_bwrap_setup_failure(&output) {
         return Err(classify_bwrap_failure(&output.stderr));
     }
 
     Ok(output)
+}
+
+/// Runs the started command to its end. An agent can ask for a server the
+/// command starts until then.
+async fn run_recorded(
+    child: tokio::process::Child,
+    command: SandboxCommand,
+) -> Result<SandboxCommandOutput, String> {
+    let _command = spawn_roots::record_agent_command(child.id());
+    run_spawned_child(
+        child,
+        command.cwd,
+        command.timeout_ms,
+        command.max_output_chars,
+        "Sandboxed shell command",
+    )
+    .await
 }
 
 /// Sets close-on-exec on every descriptor above stdio. bwrap hands the
@@ -291,14 +301,19 @@ fn bwrap_args_with(command: &SandboxCommand, var_run_link: bool) -> Result<Vec<O
 /// leaves the user no way to grant them.
 fn append_helper_entry(args: &mut Vec<OsString>, command: &SandboxCommand, bus: Option<&Path>) {
     args.push(os(BOX_HELPER));
-    match command.profile.network {
-        SandboxNetworkMode::Proxied(_) => args.extend([
-            os("bridge"),
-            os("--socket"),
-            os(BOX_SOCKET),
-            os("--http"),
-            os(BOX_PROXY_PORT.to_string()),
-        ]),
+    match &command.profile.network {
+        SandboxNetworkMode::Proxied(endpoint) => {
+            args.extend([
+                os("bridge"),
+                os("--socket"),
+                os(BOX_SOCKET),
+                os("--http"),
+                os(BOX_PROXY_PORT.to_string()),
+            ]);
+            for port in &endpoint.forward_ports {
+                args.extend([os("--forward"), os(port.to_string())]);
+            }
+        }
         SandboxNetworkMode::Host => args.extend([os("run"), os("--host-abstract-unix")]),
         SandboxNetworkMode::Disabled => args.push(os("run")),
     }
@@ -1001,6 +1016,31 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn an_agent_command_is_recorded_until_it_is_reaped() {
+        use crate::assistant::network::spawn_roots::StartedBy;
+        let ana = || Some("Ana, in linux_bwrap".to_string());
+        let by = StartedBy::Agent(ana());
+        let mut sleep = Command::new("sleep");
+        sleep.arg("3");
+        prepare_stdio(&mut sleep);
+        let child = sleep.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let command = SandboxCommand {
+            timeout_ms: 10_000,
+            ..sample_command()
+        };
+        let run = spawn_roots::as_agent(ana(), run_recorded(child, command));
+        let running = async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            spawn_roots::started_by(&by)
+        };
+        let (output, running) = tokio::join!(run, running);
+        assert_eq!(output.unwrap().exit_code, Some(0));
+        assert_eq!(running, [pid], "while the command runs");
+        assert!(spawn_roots::started_by(&by).is_empty(), "gone once reaped");
+    }
+
     #[test]
     fn launch_argv_runs_bwrap_directly_on_host() {
         let bwrap_args = vec![os("--die-with-parent"), os("--"), os("/bin/sh")];
@@ -1623,7 +1663,16 @@ mod tests {
             socket: dir.join("net.sock"),
             helper: dir.join("clai-sandbox-helper"),
             ssh_config: dir.join("ssh_config"),
+            forward_ports: Vec::new(),
         })
+    }
+
+    fn forwarding(dir: &Path, ports: &[u16]) -> SandboxNetworkMode {
+        let mut network = proxied(dir);
+        if let SandboxNetworkMode::Proxied(endpoint) = &mut network {
+            endpoint.forward_ports = ports.to_vec();
+        }
+        network
     }
 
     #[test]
@@ -1648,6 +1697,9 @@ mod tests {
                 network != SandboxNetworkMode::Host,
                 "{network:?}"
             );
+            // A daemonised command stays under bwrap, so local_listener
+            // still finds CLAI among its ancestors.
+            assert!(args.contains(&"--unshare-pid".to_string()), "{network:?}");
             let has = |needle: &[&str]| args.windows(needle.len()).any(|window| window == needle);
             let binds: [&[&str]; 3] = [
                 &["--bind", "/c/.clai-net/net.sock", "/run/clai/net.sock"],
@@ -1718,7 +1770,7 @@ mod tests {
         for network in [
             SandboxNetworkMode::Disabled,
             SandboxNetworkMode::Host,
-            proxied(Path::new("/c/.clai-net")),
+            forwarding(Path::new("/c/.clai-net"), &[5432, 6379]),
         ] {
             let mut command = sample_command();
             command.profile.network = network.clone();
@@ -1741,6 +1793,10 @@ mod tests {
                     "/run/clai/net.sock",
                     "--http",
                     "3128",
+                    "--forward",
+                    "5432",
+                    "--forward",
+                    "6379",
                     "--allow-unix",
                     &bus,
                     "--",
@@ -1763,6 +1819,11 @@ mod tests {
                 }
             };
             assert_eq!(entry, expected, "{network:?}");
+            assert_eq!(
+                entry.contains(&"--forward"),
+                matches!(network, SandboxNetworkMode::Proxied(_)),
+                "only Allowlist forwards local ports: {network:?}"
+            );
             let helper_binds: Vec<&[String]> = args
                 .windows(3)
                 .filter(|w| w[0] == "--ro-bind" && w[2] == "/run/clai/helper")
@@ -2499,12 +2560,26 @@ print(os.readlink("/var/run"), *sorted(os.listdir("/var/run")))
     }
 
     async fn allowlisted() -> Option<Allowlisted> {
+        allowlisted_with(
+            Vec::new(),
+            crate::assistant::network::local_listener::host_inspector(),
+        )
+        .await
+    }
+
+    /// [`allowlisted`], with the local ports of `grants` forwarded as a
+    /// command run then would, and `inspector` saying what listens there.
+    async fn allowlisted_with(
+        grants: Vec<crate::config::types::LocalPortGrant>,
+        inspector: std::sync::Arc<dyn crate::assistant::network::local_listener::ListenerInspector>,
+    ) -> Option<Allowlisted> {
         let helper = built_helper()?;
         let files = tempfile::tempdir().unwrap();
-        let endpoint = crate::assistant::sandbox::ProxyEndpoint {
+        let mut endpoint = crate::assistant::sandbox::ProxyEndpoint {
             socket: files.path().join("net.sock"),
             helper,
             ssh_config: files.path().join("ssh_config"),
+            forward_ports: Vec::new(),
         };
         std::fs::write(
             &endpoint.ssh_config,
@@ -2516,11 +2591,14 @@ print(os.readlink("/var/run"), *sorted(os.listdir("/var/run")))
                 mode: crate::config::NetworkMode::Allowlist,
                 allow_domains: vec!["allowed.test".to_string()],
                 deny_domains: Vec::new(),
+                local_ports: grants,
             });
+        endpoint.forward_ports = run_network.local_ports();
         let session = crate::assistant::network::proxy::ProxySession::start(
             &endpoint.socket,
             std::sync::Arc::new(run_network),
             std::sync::Arc::new(Echo(echo_server().await)),
+            inspector,
         )
         .unwrap();
         Some(Allowlisted {
@@ -2563,6 +2641,110 @@ print(os.readlink("/var/run"), *sorted(os.listdir("/var/run")))
         assert_eq!(
             box_network.session.refused().targets,
             ["example.invalid:443"]
+        );
+    }
+
+    /// Says `SERVED` listens on every port of this computer.
+    struct Served;
+
+    const SERVED: &str = "/usr/bin/served";
+
+    impl crate::assistant::network::local_listener::ListenerInspector for Served {
+        fn inspect(
+            &self,
+            _port: u16,
+            _dial: crate::assistant::network::local_listener::Loopback,
+        ) -> std::io::Result<crate::assistant::network::local_listener::Listener> {
+            Ok(
+                crate::assistant::network::local_listener::Listener::Program(
+                    crate::assistant::network::local_listener::Program {
+                        exe: SERVED.to_string(),
+                        pid: 1,
+                        cmdline: SERVED.to_string(),
+                        interpreter: false,
+                        started_by: None,
+                    },
+                ),
+            )
+        }
+
+        fn still_serves(
+            &self,
+            _port: u16,
+            _dial: crate::assistant::network::local_listener::Loopback,
+            _programs: &[String],
+        ) -> bool {
+            false
+        }
+    }
+
+    fn port_grant(port: u16, program: &str) -> crate::config::types::LocalPortGrant {
+        crate::config::types::LocalPortGrant::Program {
+            port,
+            program: program.to_string(),
+        }
+    }
+
+    /// Connects to each port given on 127.0.0.1 and on ::1, sends `ping` and
+    /// prints what comes back: the echo, `closed`, or `refused` when nothing
+    /// listens.
+    const LOOPBACK_CLIENT: &str = "import socket, sys
+for port in map(int, sys.argv[1:]):
+    for host in ('127.0.0.1', '::1'):
+        try:
+            with socket.create_connection((host, port), 5) as s:
+                s.sendall(b'ping')
+                print(port, host, s.recv(16).decode() or 'closed')
+        except ConnectionRefusedError:
+            print(port, host, 'refused')
+        except ConnectionResetError:
+            print(port, host, 'closed')
+";
+
+    /// A granted port answers on the sandbox's own 127.0.0.1 and [::1]
+    /// through the proxy, which reaches the host listener; a port granted to
+    /// another program is refused and named; nothing listens on the rest.
+    #[tokio::test]
+    async fn allowlist_forwards_the_granted_local_ports_into_the_box() {
+        let granted = echo_server().await.port();
+        let changed = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let changed = changed.local_addr().unwrap().port();
+        let ungranted = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let ungranted = ungranted.local_addr().unwrap().port();
+        let grants = vec![
+            port_grant(granted, SERVED),
+            port_grant(changed, "/usr/bin/other"),
+        ];
+        let Some(box_network) = allowlisted_with(grants, std::sync::Arc::new(Served)).await else {
+            return;
+        };
+        let workspace = tempfile::tempdir().unwrap();
+        std::fs::write(workspace.path().join("client.py"), LOOPBACK_CLIENT).unwrap();
+        let script = format!("python3 client.py {granted} {changed} {ungranted}");
+        let command = network_command(workspace.path(), box_network.network.clone(), &script);
+        let Some(output) = run_or_skip(command).await else {
+            return;
+        };
+        let lines: Vec<&str> = output.stdout.lines().collect();
+        assert_eq!(
+            lines,
+            [
+                format!("{granted} 127.0.0.1 ping"),
+                format!("{granted} ::1 ping"),
+                format!("{changed} 127.0.0.1 closed"),
+                format!("{changed} ::1 closed"),
+                format!("{ungranted} 127.0.0.1 refused"),
+                format!("{ungranted} ::1 refused"),
+            ],
+            "{output:?}"
+        );
+        assert_eq!(
+            box_network.session.refused().targets,
+            [format!("localhost:{changed}")]
+        );
+        assert!(
+            output.stderr.contains("now served by `/usr/bin/served`"),
+            "{output:?}"
         );
     }
 
@@ -3474,23 +3656,38 @@ else:
     }
 
     /// The command sees only stdin, stdout and stderr, even when this process
-    /// holds a descriptor without close-on-exec.
+    /// holds a descriptor without close-on-exec, and in Allowlist the
+    /// helper's proxy and forwarded port listeners stay in the helper.
     #[tokio::test]
     async fn the_command_inherits_only_stdio() {
+        const SCRIPT: &str = "ls /proc/$$/fd; :";
         let workspace = tempfile::tempdir().unwrap();
         let file = std::fs::File::open(workspace.path()).unwrap();
         // SAFETY: dup returns a new descriptor without close-on-exec.
         let leaked = unsafe { libc::dup(std::os::fd::AsRawFd::as_raw_fd(&file)) };
         assert!(leaked > 2);
-        let command = tmp_e2e_command(workspace.path(), None, "ls /proc/$$/fd; :");
-        let output = run_or_skip(command).await;
+        let off = run_or_skip(tmp_e2e_command(workspace.path(), None, SCRIPT)).await;
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = port.local_addr().unwrap().port();
+        let grants = vec![port_grant(port, SERVED)];
+        let box_network = allowlisted_with(grants, std::sync::Arc::new(Served)).await;
+        let allowlist = match &box_network {
+            Some(box_network) => {
+                let network = box_network.network.clone();
+                assert!(
+                    matches!(&network, SandboxNetworkMode::Proxied(e) if e.forward_ports == [port]),
+                    "{network:?}"
+                );
+                run_or_skip(network_command(workspace.path(), network, SCRIPT)).await
+            }
+            None => None,
+        };
         // SAFETY: closes the descriptor dup returned above.
         unsafe { libc::close(leaked) };
-        let Some(output) = output else {
-            return;
-        };
-        let fds: Vec<&str> = output.stdout.split_whitespace().collect();
-        assert_eq!(fds, ["0", "1", "2"], "{output:?}");
+        for output in [off, allowlist].into_iter().flatten() {
+            let fds: Vec<&str> = output.stdout.split_whitespace().collect();
+            assert_eq!(fds, ["0", "1", "2"], "{output:?}");
+        }
     }
 
     /// Runs `script` in `workspace` with `grants`, the app directory at `app`.

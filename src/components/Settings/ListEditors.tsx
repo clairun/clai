@@ -176,7 +176,7 @@ export const PrefixListEditor = ({
       ) : (
         <ul className={styles.list} aria-label={label} ref={list}>
           {items.map((item) => {
-            // Only a hand edit stores an entry that does not parse.
+            // A hand edit or an older form stores an entry that does not parse.
             const parsed = parse(item);
             const invalid = typeof parsed === 'string' ? null : parsed.error;
             return (

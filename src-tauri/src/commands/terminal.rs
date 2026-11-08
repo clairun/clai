@@ -44,6 +44,7 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
 
+use crate::assistant::network::spawn_roots::{self, StartedBy};
 use crate::AppState;
 
 /// Flush cadence for coalesced PTY output (~60fps).
@@ -296,6 +297,8 @@ fn spawn_io_threads(
         let pending = Arc::clone(&pending);
         let eof = Arc::clone(&eof);
         let exit_code = Arc::clone(&exit_code);
+        // An agent can ask for a server the shell starts, until it is reaped.
+        let shell = spawn_roots::record(child.process_id(), StartedBy::Terminal);
         thread::spawn(move || {
             let mut buf = vec![0u8; READ_BUF];
             loop {
@@ -314,6 +317,7 @@ fn spawn_io_threads(
             if let Ok(status) = child.wait() {
                 *exit_code.lock().expect("terminal exit code poisoned") = Some(status.exit_code());
             }
+            drop(shell);
             eof.store(true, Ordering::SeqCst);
         });
     }
@@ -581,6 +585,39 @@ mod tests {
         assert_eq!(parse_login_shell("   "), None);
         assert_eq!(parse_login_shell("nopasswdline"), None);
         assert_eq!(parse_login_shell("u:x:1:1::/home/u:"), None);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_shell_is_recorded_until_it_is_reaped() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        // Moves its stdio off the pty, so the reader sees EOF while the
+        // shell still runs.
+        let mut shell = CommandBuilder::new("sh");
+        shell.args(["-c", "exec </dev/null >/dev/null 2>&1; sleep 3"]);
+        let child = pair.slave.spawn_command(shell).unwrap();
+        drop(pair.slave);
+        let pid = child.process_id().unwrap();
+        let reader = pair.master.try_clone_reader().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        spawn_io_threads(reader, child, Channel::new(|_| Ok(())), closed);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            spawn_roots::recorded(pid).map(|(_, by)| by),
+            Some(StartedBy::Terminal),
+            "while the shell runs"
+        );
+        assert!(
+            spawn_roots::eventually(|| spawn_roots::recorded(pid).is_none()).await,
+            "gone once reaped"
+        );
     }
 
     #[test]

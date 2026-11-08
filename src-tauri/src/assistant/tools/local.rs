@@ -10,16 +10,24 @@ use serde::Deserialize;
 use tokio::time::Duration;
 
 use crate::assistant::network::addr::{
-    is_blocked_web_fetch_hostname, reject_private_web_fetch_addrs, reject_private_web_fetch_ip,
-    strip_ipv6_url_brackets,
+    embedded_ipv4, is_blocked_web_fetch_hostname, reject_private_web_fetch_addrs,
+    reject_private_web_fetch_ip, strip_ipv6_url_brackets,
 };
-use crate::assistant::network::matcher::{canonical_host, parse_entry, HostDecision};
+#[cfg(target_os = "linux")]
+use crate::assistant::network::local_listener::{Listener, ListenerInspector, Loopback};
+use crate::assistant::network::matcher::{
+    canonical_host, parse_entry, parse_local_port, HostDecision, LOCALHOST,
+};
+#[cfg(target_os = "linux")]
+use crate::assistant::network::run_state::{LocalDecision, LocalRule};
 use crate::assistant::network::run_state::{RefusedTargets, RunNetwork};
 use crate::assistant::sandbox::{
     keyring_only_unavailable_note, run_command, ProxyEndpoint, SandboxCommand,
     SandboxCommandOutput, SandboxEnv, SandboxNetworkMode, SandboxProfile, SandboxSessionBusMode,
     SessionBusProxy, SocketPolicy,
 };
+#[cfg(target_os = "linux")]
+use crate::commands::network_access::{LocalListenerCard, LocalSnapshot, NetworkAccessDecision};
 use crate::config::{
     ExecutionCapabilityConfig, FilesystemPathAccess, FilesystemPathGrant, GrantOrigin, NetworkMode,
     SandboxSessionBusConfig, ShellAccessMode,
@@ -212,6 +220,7 @@ async fn execute_bash_exec(
             max_output_chars: output_limit,
             profile,
         },
+        context.run_context.agent_display_name(),
         &context.run_network,
     )
     .await;
@@ -229,6 +238,7 @@ async fn execute_bash_exec(
     bash_exec_outcome(
         output,
         &run.refused,
+        run.proxied,
         &sockets,
         bus,
         timeout_ms,
@@ -243,16 +253,19 @@ async fn execute_bash_exec(
 struct NetworkRun {
     output: Result<SandboxCommandOutput, String>,
     refused: RefusedTargets,
+    /// Whether the command ran behind a network proxy session (Allowlist).
+    proxied: bool,
     session_bus_unavailable: Option<String>,
 }
 
 /// Runs the command, in Allowlist behind a network proxy session of its
 /// own, and with the keyring-only bus behind a bus proxy of its own. A bus
 /// proxy that does not start leaves the command with no bus, never the
-/// whole one.
+/// whole one. The programs it starts are recorded as commands of `agent`.
 #[cfg(target_os = "linux")]
 async fn run_with_network(
     mut command: SandboxCommand,
+    agent: Option<String>,
     run_network: &std::sync::Arc<RunNetwork>,
 ) -> NetworkRun {
     use crate::assistant::network::{connect::HostConnector, proxy::ProxySession};
@@ -279,30 +292,39 @@ async fn run_with_network(
             tokio::task::spawn_blocking(move || drop(proxy));
         }
     };
-    let session = match &command.profile.network {
-        SandboxNetworkMode::Proxied(endpoint) => match ProxySession::start(
-            &endpoint.socket,
-            std::sync::Arc::clone(run_network),
-            std::sync::Arc::new(HostConnector),
-        ) {
-            Ok(session) => Some(session),
-            Err(error) => {
-                stop_bus_proxy();
-                return NetworkRun {
-                    output: Err(format!(
-                        "Sandboxed shell is unavailable: the network proxy did not start: {error}"
-                    )),
-                    refused: RefusedTargets::default(),
-                    session_bus_unavailable,
-                };
+    let session = match &mut command.profile.network {
+        SandboxNetworkMode::Proxied(endpoint) => {
+            // A port allowed later in the run answers from the next command.
+            endpoint.forward_ports = run_network.local_ports();
+            match ProxySession::start(
+                &endpoint.socket,
+                std::sync::Arc::clone(run_network),
+                std::sync::Arc::new(HostConnector),
+                crate::assistant::network::local_listener::host_inspector(),
+            ) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    stop_bus_proxy();
+                    return NetworkRun {
+                        output: Err(format!(
+                            "Sandboxed shell is unavailable: the network proxy did not start: \
+                             {error}"
+                        )),
+                        refused: RefusedTargets::default(),
+                        proxied: false,
+                        session_bus_unavailable,
+                    };
+                }
             }
-        },
+        }
         _ => None,
     };
-    let output = run_command(command).await;
+    let output =
+        crate::assistant::network::spawn_roots::as_agent(agent, run_command(command)).await;
     stop_bus_proxy();
     NetworkRun {
         output,
+        proxied: session.is_some(),
         refused: session.map(|session| session.refused()).unwrap_or_default(),
         session_bus_unavailable,
     }
@@ -311,12 +333,14 @@ async fn run_with_network(
 #[cfg(not(target_os = "linux"))]
 async fn run_with_network(
     command: SandboxCommand,
+    agent: Option<String>,
     _run_network: &std::sync::Arc<RunNetwork>,
 ) -> NetworkRun {
     let session_bus_unavailable = command.profile.session_bus_unavailable.clone();
     NetworkRun {
-        output: run_command(command).await,
+        output: crate::assistant::network::spawn_roots::as_agent(agent, run_command(command)).await,
         refused: RefusedTargets::default(),
+        proxied: false,
         session_bus_unavailable,
     }
 }
@@ -335,6 +359,7 @@ const SOCKET_HINT: &str = "The sandbox kept the command from reaching these Unix
 fn bash_exec_outcome(
     output: Result<SandboxCommandOutput, String>,
     refused: &RefusedTargets,
+    proxied: bool,
     sockets: &SocketPolicy,
     session_bus_unavailable: Option<&str>,
     timeout_ms: u64,
@@ -344,6 +369,7 @@ fn bash_exec_outcome(
         Ok(output) => Ok(bash_exec_result(
             &output,
             refused,
+            proxied,
             sockets,
             session_bus_unavailable,
         )),
@@ -369,10 +395,13 @@ fn bash_exec_outcome(
 
 /// Many clients hide the proxy's 403 body (curl prints only “CONNECT tunnel
 /// failed, response 403”), so the result itself names the refused hosts, and
-/// the host sockets the command could not reach.
+/// the host sockets the command could not reach. Behind the proxy
+/// (Allowlist), it also points a refused localhost connection at
+/// `net_request_access`.
 fn bash_exec_result(
     output: &SandboxCommandOutput,
     refused: &RefusedTargets,
+    proxied: bool,
     sockets: &SocketPolicy,
     session_bus_unavailable: Option<&str>,
 ) -> serde_json::Value {
@@ -390,6 +419,11 @@ fn bash_exec_result(
         });
         if refused.more > 0 {
             result["network"]["refusedMore"] = refused.more.into();
+        }
+    }
+    if proxied {
+        if let Some(port) = localhost_refusal(output, refused) {
+            result["network"]["localhost"] = localhost_note(port);
         }
     }
     let unreachable = unreachable_sockets(output, sockets);
@@ -474,6 +508,148 @@ fn unreachable_sockets(output: &SandboxCommandOutput, sockets: &SocketPolicy) ->
 #[cfg(not(target_os = "linux"))]
 fn unreachable_sockets(_output: &SandboxCommandOutput, _sockets: &SocketPolicy) -> Vec<String> {
     Vec::new()
+}
+
+/// The `network.localhost` note for a refused localhost connection, naming
+/// the port when the output did.
+fn localhost_note(port: Option<u16>) -> serde_json::Value {
+    let host = port.map_or_else(
+        || "localhost:<port>".to_string(),
+        |port| format!("localhost:{port}"),
+    );
+    let mut note = serde_json::json!({
+        "hint": format!(
+            "A connection to localhost was refused. Inside the sandbox, localhost is the \
+             sandbox's own, not this computer's. If the service runs on this computer, call \
+             `net_request_access` with host `{host}`; once granted, the port answers \
+             from your next command."
+        ),
+    });
+    if let Some(port) = port {
+        note["port"] = port.into();
+    }
+    note
+}
+
+/// The localhost port the command output says a connection was refused on,
+/// `Some(None)` when the refusal names no port. A forwarded port never
+/// refuses (the forwarder accepts, then closes when nothing listens), so a
+/// refusal on an allowed port means it was allowed while the command ran,
+/// and it answers from the next one. A port the proxy refused is already
+/// named in `network.refused`.
+#[cfg(target_os = "linux")]
+fn localhost_refusal(
+    output: &SandboxCommandOutput,
+    refused: &RefusedTargets,
+) -> Option<Option<u16>> {
+    let mut portless = false;
+    for line in output.stderr.lines().chain(output.stdout.lines()) {
+        match refused_localhost_port(line) {
+            Some(Some(port)) if !refused.targets.contains(&format!("localhost:{port}")) => {
+                return Some(Some(port));
+            }
+            Some(None) => portless = true,
+            _ => {}
+        }
+    }
+    portless.then_some(None)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn localhost_refusal(
+    _output: &SandboxCommandOutput,
+    _refused: &RefusedTargets,
+) -> Option<Option<u16>> {
+    None
+}
+
+/// Whether `line` reports a refused connection to `localhost`, `127.0.0.1`
+/// or `::1`, and the port it names: right after the address
+/// (`localhost:3306`, `[::1]:3000`, `('127.0.0.1', 5678)`,
+/// `/dev/tcp/localhost/5678`) or as `port 5432` / `port=8000`. The sandbox
+/// keeps LANG and LC_*, so clients may print glibc's refusal and libpq's
+/// port word localized.
+#[cfg(target_os = "linux")]
+fn refused_localhost_port(line: &str) -> Option<Option<u16>> {
+    const REFUSALS: &[&str] = &[
+        "connection refused",
+        "econnrefused",
+        "connectionrefusederror",
+        "errno 111",
+        "can't connect",
+        "cannot connect",
+        "could not connect",
+        "couldn't connect",
+        "failed to connect",
+        "conexión rehusada",
+        "connexion refusée",
+        "verbindungsaufbau abgelehnt",
+        "connessione rifiutata",
+        "conexão recusada",
+        "ligação recusada",
+        "verbinding is geweigerd",
+        "conexión rexeitada",
+    ];
+    let line = line.to_ascii_lowercase().replace('\u{2019}', "'");
+    if !REFUSALS.iter().any(|refusal| line.contains(refusal)) {
+        return None;
+    }
+    let mut loopback = false;
+    for name in ["localhost", "127.0.0.1", "::1"] {
+        for (at, _) in line.match_indices(name) {
+            let after = &line[at + name.len()..];
+            let mut next = after.chars();
+            let longer = line[..at].chars().next_back().is_some_and(|c| {
+                c.is_ascii_alphanumeric() || "._-".contains(c) || (name == "::1" && c == ':')
+            }) || match next.next() {
+                Some('.') => next.next().is_some_and(|c| c.is_ascii_alphanumeric()),
+                Some(c) => c.is_ascii_alphanumeric() || "_-".contains(c),
+                None => false,
+            };
+            if longer {
+                continue;
+            }
+            loopback = true;
+            if let Some(port) = port_after_address(after) {
+                return Some(Some(port));
+            }
+        }
+    }
+    loopback.then(|| port_keyword(&line))
+}
+
+#[cfg(target_os = "linux")]
+fn port_after_address(after: &str) -> Option<u16> {
+    let after = after.trim_start_matches([']', '\'', '"']);
+    let digits = match after.strip_prefix([':', '/']) {
+        Some(digits) => digits,
+        None => after.strip_prefix(',')?.trim_start(),
+    };
+    leading_port(digits)
+}
+
+#[cfg(target_os = "linux")]
+fn port_keyword(line: &str) -> Option<u16> {
+    ["port", "puerto", "porta"].into_iter().find_map(|keyword| {
+        line.match_indices(keyword).find_map(|(at, word)| {
+            if line[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+            {
+                return None;
+            }
+            leading_port(line[at + word.len()..].trim_start_matches([' ', '=', ':']))
+        })
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn leading_port(text: &str) -> Option<u16> {
+    let end = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    text[..end].parse().ok().filter(|port| *port != 0)
 }
 
 /// Turn a bare sandbox timeout into an actionable error the model can recover
@@ -1379,18 +1555,25 @@ async fn execute_net_request_access(
     use crate::commands::network_access::NetworkAccessRequest;
     use tauri::Manager;
 
-    let host = requested_host(
+    let ask = requested_host(
         &context.run_context.execution,
         crate::assistant::sandbox::status().allowlist_available,
         &context.run_network,
         &params.host,
+        params.port,
     )?;
-    let Some(host) = host else {
-        return Ok(serde_json::json!({
-            "granted": true,
-            "host": canonical_host(&params.host),
-            "scope": "already-allowed",
-        }));
+    let host = match ask {
+        Ask::Allowed => {
+            return Ok(serde_json::json!({
+                "granted": true,
+                "host": canonical_host(&params.host),
+                "scope": "already-allowed",
+            }))
+        }
+        Ask::Host(host) => host,
+        Ask::LocalPort(local) => {
+            return local_port_access(deps, context, local, params.reason).await
+        }
     };
 
     let request = NetworkAccessRequest::for_agent(
@@ -1406,19 +1589,214 @@ async fn execute_net_request_access(
     apply_network_decision(context, &host, decision)
 }
 
-/// The host to ask the user about, or `None` when the run already allows
-/// it. Refuses, without a card, where the tool is not offered (a stale tool
-/// list), a host that is not one, and a host on the deny list.
+/// What `net_request_access` asks the user about.
+#[derive(Debug, PartialEq, Eq)]
+enum Ask {
+    /// The run already reaches the host.
+    Allowed,
+    Host(String),
+    /// A port on this computer: what listens there decides next whether a
+    /// card is shown.
+    LocalPort(LocalAsk),
+}
+
+/// A port on this computer, which the request names as [`LOCALHOST`]
+/// whatever its spelling, so a re-ask spelled `127.0.0.1` or `[::1]`
+/// replaces a pending request for the port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LocalAsk {
+    port: u16,
+    /// The name the agent used, which decides the loopback address looked
+    /// at, as in the network proxy.
+    dialled: &'static str,
+}
+
+/// Asks for a port on this computer, with a card that shows what listens
+/// there.
+#[cfg(target_os = "linux")]
+async fn local_port_access(
+    deps: &crate::assistant::engine::AssistantDeps,
+    context: &ToolExecutionContext,
+    local: LocalAsk,
+    reason: String,
+) -> Result<serde_json::Value, String> {
+    use crate::commands::network_access::NetworkAccessRequest;
+    use tauri::Manager;
+
+    let inspector = crate::assistant::network::local_listener::host_inspector();
+    request_local_port(context, inspector, local, |listener| async move {
+        let request = NetworkAccessRequest::for_local_port(
+            &deps.app.state::<crate::AppState>(),
+            Some(deps.workspace_id.clone()),
+            context.run_context.automation_id.clone(),
+            local.port,
+            reason,
+            context.run_network.host_log(),
+            listener,
+        );
+        await_network_access_decision(deps, context, request).await
+    })
+    .await
+}
+
+#[cfg(not(target_os = "linux"))]
+fn local_port_access(
+    _deps: &crate::assistant::engine::AssistantDeps,
+    _context: &ToolExecutionContext,
+    local: LocalAsk,
+    _reason: String,
+) -> std::future::Ready<Result<serde_json::Value, String>> {
+    std::future::ready(Err(format!(
+        "`{LOCALHOST}:{}` cannot be requested on this PC.",
+        local.port
+    )))
+}
+
+/// Asks the user about a port on this computer, unless the deny list
+/// refuses it, nothing a card could show listens there, or the run already
+/// reaches the listener. Then applies the answer, bound to what listened
+/// when the card was made: `ask` shows the card and waits.
+#[cfg(target_os = "linux")]
+async fn request_local_port<F, Fut>(
+    context: &ToolExecutionContext,
+    inspector: std::sync::Arc<dyn ListenerInspector>,
+    local: LocalAsk,
+    ask: F,
+) -> Result<serde_json::Value, String>
+where
+    F: FnOnce(LocalListenerCard) -> Fut,
+    Fut: std::future::Future<Output = Result<NetworkAccessDecision, String>>,
+{
+    let network = &context.run_network;
+    let port = local.port;
+    if let Some((name, denied)) = network.local_denial() {
+        return Err(denied.refusal(name, true).unwrap_or_default());
+    }
+    let dials = crate::assistant::network::proxy::dials(local.dialled);
+    let listener = tokio::task::spawn_blocking(move || first_listener(&*inspector, port, dials))
+        .await
+        .unwrap_or_else(|error| Err(std::io::Error::other(error)))
+        .map_err(|error| {
+            format!("CLAI could not check what listens on port {port} on this computer: {error}")
+        })?;
+    if network.decide_local(port, &listener) == LocalDecision::Allowed {
+        return Ok(serde_json::json!({
+            "granted": true,
+            "host": LOCALHOST,
+            "port": port,
+            "scope": "already-allowed",
+        }));
+    }
+    let Some(card) = LocalListenerCard::of(&listener) else {
+        return Err(if listener == Listener::Clai {
+            crate::assistant::network::local_listener::served_by_clai(port)
+        } else {
+            format!(
+                "Nothing listens on port {port} on this computer. Ask the user to start \
+                 the service or tunnel that should serve it, then call \
+                 `net_request_access` again."
+            )
+        });
+    };
+    let snapshot = card.snapshot().clone();
+    let decision = ask(card).await?;
+    apply_local_decision(context, local, &snapshot, decision)
+}
+
+/// What listens on `port` at the first of `dials` where anything does, from
+/// a full scan, as a card must show.
+#[cfg(target_os = "linux")]
+fn first_listener(
+    inspector: &dyn ListenerInspector,
+    port: u16,
+    dials: &[Loopback],
+) -> std::io::Result<Listener> {
+    for &dial in dials {
+        let listener = inspector.inspect(port, dial)?;
+        if listener != Listener::Nothing {
+            return Ok(listener);
+        }
+    }
+    Ok(Listener::Nothing)
+}
+
+/// Applies the answer for a port on this computer to the run, bound to
+/// `snapshot`: “Allow this run” adds its run bindings; “Always”,
+/// already saved on the agent, adds the saved grant. A denial is the tool
+/// error and the run's warning. The result names the port only, never the
+/// listener the card showed.
+#[cfg(target_os = "linux")]
+fn apply_local_decision(
+    context: &ToolExecutionContext,
+    local: LocalAsk,
+    snapshot: &LocalSnapshot,
+    decision: NetworkAccessDecision,
+) -> Result<serde_json::Value, String> {
+    let entry = format!("{LOCALHOST}:{}", local.port);
+    let (rules, scope, note) = match decision {
+        NetworkAccessDecision::AllowRun => (
+            run_rules(local.port, snapshot),
+            "run",
+            "Allowed for the rest of this run only, for what listens there now; a later \
+             run has to ask again.",
+        ),
+        NetworkAccessDecision::AllowAlways { .. } => (
+            vec![LocalRule::from(&snapshot.always_grant(local.port)?)],
+            "always",
+            "Saved on this agent for what listens there now.",
+        ),
+        NetworkAccessDecision::Deny { reason } => {
+            context.note_warning();
+            return Err(network_denied_message(&entry, reason.as_deref()));
+        }
+    };
+    for rule in rules {
+        context.run_network.allow_local(rule);
+    }
+    Ok(serde_json::json!({
+        "granted": true,
+        "host": LOCALHOST,
+        "port": local.port,
+        "entry": entry,
+        "scope": scope,
+        "note": format!("{note} Connect to `{entry}` from your next command."),
+    }))
+}
+
+/// The rules “Allow this run” adds on `port`.
+#[cfg(target_os = "linux")]
+fn run_rules(port: u16, snapshot: &LocalSnapshot) -> Vec<LocalRule> {
+    snapshot
+        .run_bindings()
+        .into_iter()
+        .map(|binding| LocalRule { port, binding })
+        .collect()
+}
+
+/// What to ask the user about. Refuses, without a card, where the tool is
+/// not offered (a stale tool list), a host that is not one, a host on the
+/// deny list, and this computer without a port or without the shell.
 fn requested_host(
     execution: &ExecutionCapabilityConfig,
     allowlist_available: bool,
     network: &RunNetwork,
     raw: &str,
-) -> Result<Option<String>, String> {
+    port: Option<u16>,
+) -> Result<Ask, String> {
     if let Some(refusal) =
         super::registry::net_request_access_refusal(execution, allowlist_available)
     {
         return Err(refusal.to_string());
+    }
+    if let Some((port, dialled)) = requested_local_port(raw.trim(), port)? {
+        if matches!(execution.shell.mode, ShellAccessMode::Off) {
+            return Err(
+                "Ports on this computer are reached from `bash_exec`, which this \
+                        agent does not have; web_fetch never reaches them."
+                    .to_string(),
+            );
+        }
+        return Ok(Ask::LocalPort(LocalAsk { port, dialled }));
     }
     // An entry, so that what reaches the card is what “Allow this run” can
     // apply: `parse_entry` refuses `%` (`%2a` would decode to a wildcard)
@@ -1438,10 +1816,51 @@ fn requested_host(
     }
     let host = entry.normalized();
     match network.decide(&host) {
-        HostDecision::Allowed => Ok(None),
-        HostDecision::Unlisted => Ok(Some(host)),
+        HostDecision::Allowed => Ok(Ask::Allowed),
+        HostDecision::Unlisted => Ok(Ask::Host(host)),
         refused => Err(refused.refusal(&host, true).unwrap_or_default()),
     }
+}
+
+/// The port and loopback name of a request for a port on this computer:
+/// `localhost:<port>`, `127.0.0.1:<port>` or `[::1]:<port>`, or the name
+/// alone with `port`. `None` for any other host.
+fn requested_local_port(
+    raw: &str,
+    port: Option<u16>,
+) -> Result<Option<(u16, &'static str)>, String> {
+    let named = match parse_local_port(raw) {
+        Ok(None) => return Ok(None),
+        Ok(Some(named)) => named,
+        Err(reason) => {
+            let with_port = |port: u16| match raw.parse::<std::net::Ipv6Addr>() {
+                Ok(_) => format!("[{raw}]:{port}"),
+                Err(_) => format!("{raw}:{port}"),
+            };
+            match port {
+                Some(port) if parse_local_port(&with_port(port)) == Ok(Some(port)) => port,
+                _ => {
+                    return Err(format!(
+                        "`{raw}` is not a port on this computer ({reason}). Ask for \
+                         `localhost:<port>`, such as `localhost:5432`."
+                    ))
+                }
+            }
+        }
+    };
+    if let Some(port) = port.filter(|port| *port != named) {
+        return Err(format!(
+            "`{raw}` names port {named}, but `port` is {port}; give the port once."
+        ));
+    }
+    let dialled = if raw.starts_with('[') || raw.parse::<std::net::Ipv6Addr>().is_ok() {
+        "::1"
+    } else if raw.starts_with("127.") {
+        "127.0.0.1"
+    } else {
+        "localhost"
+    };
+    Ok(Some((named, dialled)))
 }
 
 /// Applies the user's answer to the run: an allowed host or entry joins
@@ -1538,7 +1957,7 @@ async fn await_network_access_decision(
     // a CLI transport drop; the fresh one replaces it and its card.
     for stale in app_state
         .pending_network_requests
-        .take_superseded(&context.run_id, &request.host)
+        .take_superseded(&context.run_id, &request.host, request.port)
         .await
     {
         emit_network_access_resolved(&deps.app, &stale.request_id);
@@ -1913,6 +2332,16 @@ async fn resolve_public_web_fetch_target(
         .ok_or_else(|| "URL must include a host".to_string())?;
     let host_literal = strip_ipv6_url_brackets(host);
     let normalized_host = host_literal.trim_end_matches('.').to_ascii_lowercase();
+    if is_loopback_web_host(&normalized_host) {
+        let allowed_first = match gate {
+            WebGate::Allowlist(_) => ", once the port is allowed",
+            WebGate::AnyHost => "",
+        };
+        return Err(format!(
+            "Fetching private/local URLs is not allowed: `web_fetch` never reaches this \
+             computer's localhost. Use curl in `bash_exec` instead{allowed_first}."
+        ));
+    }
     if is_blocked_web_fetch_hostname(&normalized_host) {
         return Err("Fetching private/local URLs is not allowed".to_string());
     }
@@ -1939,6 +2368,19 @@ async fn resolve_public_web_fetch_target(
     // Pin the public DNS result into reqwest for this request so a hostname
     // cannot validate as public and then resolve privately during connect.
     Ok(Some((host.to_string(), addrs)))
+}
+
+/// Whether `host` (lower case, without brackets) names this computer.
+fn is_loopback_web_host(host: &str) -> bool {
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || match host.parse::<IpAddr>() {
+            Ok(IpAddr::V4(ip)) => ip.is_loopback(),
+            Ok(IpAddr::V6(ip)) => {
+                ip.is_loopback() || embedded_ipv4(ip).is_some_and(|ip| ip.is_loopback())
+            }
+            Err(_) => false,
+        }
 }
 
 fn web_fetch_body_limit(content_limit: usize) -> usize {
@@ -2290,6 +2732,7 @@ mod tests {
             mode: NetworkMode::Allowlist,
             allow_domains: allow.iter().map(|entry| entry.to_string()).collect(),
             deny_domains: deny.iter().map(|entry| entry.to_string()).collect(),
+            local_ports: Vec::new(),
         }
     }
 
@@ -2385,6 +2828,44 @@ mod tests {
         }
     }
 
+    /// `web_fetch` never reaches this computer, so it points at `bash_exec`,
+    /// not at `net_request_access`, listed or not.
+    #[tokio::test]
+    async fn web_fetch_sends_this_computers_localhost_to_bash_exec() {
+        let listed = run_network(&["localhost", "127.0.0.1"], &[]);
+        let unlisted = run_network(&[], &[]);
+        for raw in [
+            "http://127.0.0.1:5678/",
+            "http://127.1.2.3/",
+            "http://[::1]:5678/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://localhost:5678/",
+            "http://api.localhost/",
+        ] {
+            let url = parse_web_fetch_url(raw).unwrap();
+            for (gate, once) in [
+                (WebGate::Allowlist(&unlisted), true),
+                (WebGate::Allowlist(&listed), true),
+                (WebGate::AnyHost, false),
+            ] {
+                let err = resolve_public_web_fetch_target(&url, gate)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    err.contains("`web_fetch` never reaches this computer's localhost. Use curl in `bash_exec` instead"),
+                    "{raw}: {err}"
+                );
+                assert_eq!(
+                    err.contains(", once the port is allowed."),
+                    once,
+                    "{raw}: {err}"
+                );
+                assert!(!err.contains("net_request_access"), "{raw}: {err}");
+            }
+        }
+        assert!(logged(&unlisted).is_empty());
+    }
+
     #[test]
     fn only_the_allowlist_gate_checks_and_logs_hosts() {
         let network = run_network(&["github.com"], &[]);
@@ -2418,15 +2899,18 @@ mod tests {
     fn a_request_is_refused_without_a_card_where_the_tool_is_not_offered() {
         let network = RunNetwork::default();
         let mut execution = allowlist_execution(&[], &[]);
-        assert!(requested_host(&execution, false, &network, "example.org")
-            .unwrap_err()
-            .contains("not available on this PC"));
+        assert!(
+            requested_host(&execution, false, &network, "example.org", None)
+                .unwrap_err()
+                .contains("not available on this PC")
+        );
         for (mode, says) in [
             (NetworkMode::Off, "Network access is off"),
             (NetworkMode::HostNetwork, "can already reach any host"),
         ] {
             execution.sandbox.network_access.mode = mode;
-            let error = requested_host(&execution, true, &network, "example.org").unwrap_err();
+            let error =
+                requested_host(&execution, true, &network, "example.org", None).unwrap_err();
             assert!(error.contains(says), "{error}");
         }
     }
@@ -2435,14 +2919,21 @@ mod tests {
     fn a_request_names_one_host_the_lists_do_not_decide() {
         let execution = allowlist_execution(&["github.com"], &["*.s3.amazonaws.com"]);
         let network = RunNetwork::new(&execution.sandbox.network_access);
-        let ask = |raw| requested_host(&execution, true, &network, raw);
+        let ask = |raw| requested_host(&execution, true, &network, raw, None);
 
         assert_eq!(
             ask(" Mirror.Example.ORG. "),
-            Ok(Some("mirror.example.org".to_string()))
+            Ok(Ask::Host("mirror.example.org".to_string()))
         );
-        assert_eq!(ask("[2001:db8::1]"), Ok(Some("2001:db8::1".to_string())));
-        assert_eq!(ask("GitHub.com"), Ok(None), "already allowed: no card");
+        assert_eq!(
+            ask("[2001:db8::1]"),
+            Ok(Ask::Host("2001:db8::1".to_string()))
+        );
+        assert_eq!(
+            ask("GitHub.com"),
+            Ok(Ask::Allowed),
+            "already allowed: no card"
+        );
         let denied = ask("bucket.s3.amazonaws.com").unwrap_err();
         assert!(
             denied.contains("denied hosts (entry `*.s3.amazonaws.com`)")
@@ -2470,7 +2961,7 @@ mod tests {
         let network = RunNetwork::new(&execution.sandbox.network_access);
         let errors = [
             check_web_host(WebGate::Allowlist(&network), "github.com", Some(443)).unwrap_err(),
-            requested_host(&execution, true, &network, "example.org").unwrap_err(),
+            requested_host(&execution, true, &network, "example.org", None).unwrap_err(),
         ];
         for error in errors {
             assert!(
@@ -2543,6 +3034,434 @@ mod tests {
             context.run_network.decide("other.example.com"),
             HostDecision::Unlisted
         );
+    }
+
+    /// Ports on this computer: what the card shows, what the answer binds
+    /// to, and what the agent is told.
+    #[cfg(target_os = "linux")]
+    mod local_port_requests {
+        use super::*;
+        use crate::assistant::network::local_listener::{Holder, Program, RunOnly};
+        use crate::commands::network_access::{NetworkAccessRequest, PendingNetworkRequests};
+        use crate::config::types::LocalPortGrant;
+        use std::sync::{Arc, Mutex};
+
+        const SSH: &str = "/usr/bin/ssh";
+        const PYTHON: &str = "/usr/bin/python3";
+        /// In every command line: the card shows it, the agent never sees it.
+        const SECRET: &str = "secret-host";
+
+        struct FakeInspector {
+            listener: Mutex<Result<Listener, String>>,
+            dials: Mutex<Vec<Loopback>>,
+        }
+
+        impl FakeInspector {
+            fn new(listener: Result<Listener, String>) -> Arc<Self> {
+                Arc::new(Self {
+                    listener: Mutex::new(listener),
+                    dials: Mutex::default(),
+                })
+            }
+
+            fn serving(listener: Listener) -> Arc<Self> {
+                Self::new(Ok(listener))
+            }
+
+            fn set(&self, listener: Listener) {
+                *self.listener.lock().unwrap() = Ok(listener);
+            }
+
+            fn dials(&self) -> Vec<Loopback> {
+                self.dials.lock().unwrap().clone()
+            }
+        }
+
+        impl ListenerInspector for FakeInspector {
+            fn inspect(&self, _port: u16, dial: Loopback) -> std::io::Result<Listener> {
+                self.dials.lock().unwrap().push(dial);
+                self.listener
+                    .lock()
+                    .unwrap()
+                    .clone()
+                    .map_err(std::io::Error::other)
+            }
+
+            fn still_serves(&self, _port: u16, _dial: Loopback, _programs: &[String]) -> bool {
+                panic!("a card comes from a full scan only")
+            }
+        }
+
+        fn program(exe: &str) -> Listener {
+            Listener::Program(Program {
+                exe: exe.to_string(),
+                pid: 4321,
+                cmdline: format!("{exe} -N -L 5432:db:5432 {SECRET}"),
+                interpreter: false,
+                started_by: None,
+            })
+        }
+
+        fn other_user(sockets: &[u64]) -> Listener {
+            Listener::OtherUser {
+                // SAFETY: geteuid has no preconditions and cannot fail.
+                uid: unsafe { libc::geteuid() }.wrapping_add(1),
+                name: "postgres".to_string(),
+                sockets: sockets.to_vec(),
+            }
+        }
+
+        fn run_only(reason: RunOnly, sockets: &[u64]) -> Listener {
+            Listener::RunOnly {
+                reason,
+                sockets: sockets.to_vec(),
+                holders: vec![Holder {
+                    pid: 77,
+                    exe: "/usr/bin/rootlessport".to_string(),
+                    cmdline: format!("rootlessport {SECRET}"),
+                }],
+                started_by: None,
+            }
+        }
+
+        fn port_5432() -> LocalAsk {
+            LocalAsk {
+                port: 5432,
+                dialled: "localhost",
+            }
+        }
+
+        fn context_with(policy: NetworkPolicy) -> (tempfile::TempDir, ToolExecutionContext) {
+            let workspace = tempdir().unwrap();
+            let mut context = context_with_grants(workspace.path(), Vec::new());
+            context.run_network = Arc::new(RunNetwork::new(&policy));
+            (workspace, context)
+        }
+
+        async fn no_card(_: LocalListenerCard) -> Result<NetworkAccessDecision, String> {
+            panic!("no card is shown")
+        }
+
+        #[tokio::test]
+        async fn a_port_on_this_computer_is_asked_as_localhost_whatever_its_spelling() {
+            let execution = allowlist_execution(&[], &[]);
+            let network = RunNetwork::new(&execution.sandbox.network_access);
+            let ask = |raw, port| requested_host(&execution, true, &network, raw, port);
+            for (raw, port, dialled) in [
+                ("localhost:5432", None, "localhost"),
+                (" LOCALHOST:5432 ", None, "localhost"),
+                ("127.0.0.1:5432", None, "127.0.0.1"),
+                ("[::1]:5432", None, "::1"),
+                ("localhost", Some(5432), "localhost"),
+                ("localhost:5432", Some(5432), "localhost"),
+                ("::1", Some(5432), "::1"),
+                ("[::1]", Some(5432), "::1"),
+            ] {
+                assert_eq!(
+                    ask(raw, port),
+                    Ok(Ask::LocalPort(LocalAsk {
+                        port: 5432,
+                        dialled
+                    })),
+                    "{raw:?} {port:?}"
+                );
+            }
+            for (raw, port, says) in [
+                ("localhost", None, "add the port"),
+                ("127.0.0.1", None, "add the port"),
+                ("localhost:0", None, "1 to 65535"),
+                ("localhost:5432-5433", None, "one port"),
+                ("localhost:5432", Some(6379), "give the port once"),
+                ("127.0.0.2:5432", None, "as localhost"),
+                ("app.localhost:3000", None, "as localhost"),
+            ] {
+                let error = ask(raw, port).unwrap_err();
+                assert!(error.contains(says), "{raw:?}: {error}");
+            }
+
+            // A re-ask under another spelling replaces the pending request.
+            let request = |ask: Result<Ask, String>| {
+                let Ok(Ask::LocalPort(local)) = ask else {
+                    panic!("expected a local port, got {ask:?}");
+                };
+                NetworkAccessRequest {
+                    request_id: uuid::Uuid::new_v4().to_string(),
+                    workspace_id: Some("ws".to_string()),
+                    agent_id: None,
+                    agent_name: None,
+                    host: LOCALHOST.to_string(),
+                    port: Some(local.port),
+                    reason: String::new(),
+                    run_hosts: Vec::new(),
+                    suggested_wildcard: None,
+                    persists_to_shared_agent: false,
+                    also_affects_workspaces: Vec::new(),
+                    local_listener: None,
+                }
+            };
+            let pending = PendingNetworkRequests::default();
+            let mut earlier = request(ask("localhost:5432", None));
+            for raw in ["[::1]:5432", "127.0.0.1:5432"] {
+                let _ = pending.register(earlier.clone(), "run".into()).await;
+                let again = request(ask(raw, None));
+                let taken = pending
+                    .take_superseded("run", &again.host, again.port)
+                    .await;
+                assert_eq!(taken.len(), 1, "{raw}");
+                assert_eq!(taken[0].request_id, earlier.request_id);
+                earlier = again;
+            }
+
+            let mut no_shell = allowlist_execution(&[], &[]);
+            no_shell.shell.mode = ShellAccessMode::Off;
+            no_shell.web.enabled = true;
+            let error =
+                requested_host(&no_shell, true, &network, "localhost:5432", None).unwrap_err();
+            assert!(error.contains("bash_exec"), "{error}");
+        }
+
+        #[tokio::test]
+        async fn nothing_clai_or_a_denied_name_is_refused_without_a_card() {
+            for (listener, says) in [
+                (Ok(Listener::Nothing), "Nothing listens on port 5432"),
+                (Ok(Listener::Clai), "served by CLAI"),
+                (Err("permission denied".to_string()), "could not check"),
+            ] {
+                let inspector = FakeInspector::new(listener);
+                let (_workspace, context) = context_with(allowlist(&[], &[]));
+                let error = request_local_port(&context, inspector.clone(), port_5432(), no_card)
+                    .await
+                    .unwrap_err();
+                assert!(error.contains(says), "{error}");
+                assert!(!error.contains(SECRET), "{error}");
+                assert_eq!(
+                    context.run_network.decide_local(5432, &program(SSH)),
+                    LocalDecision::NotGranted
+                );
+            }
+
+            let inspector = FakeInspector::serving(Listener::Nothing);
+            let (_workspace, context) = context_with(allowlist(&[], &[]));
+            let _ = request_local_port(&context, inspector.clone(), port_5432(), no_card).await;
+            assert_eq!(inspector.dials(), [Loopback::V4, Loopback::V6]);
+            let inspector = FakeInspector::serving(Listener::Nothing);
+            let ipv6 = LocalAsk {
+                dialled: "::1",
+                ..port_5432()
+            };
+            let _ = request_local_port(&context, inspector.clone(), ipv6, no_card).await;
+            assert_eq!(inspector.dials(), [Loopback::V6]);
+
+            for denied in ["localhost", "127.0.0.1", "::1"] {
+                let inspector = FakeInspector::serving(program(SSH));
+                let (_workspace, context) = context_with(allowlist(&[], &[denied]));
+                let error = request_local_port(&context, inspector.clone(), port_5432(), no_card)
+                    .await
+                    .unwrap_err();
+                assert!(error.contains("denied hosts"), "{denied}: {error}");
+                assert!(inspector.dials().is_empty(), "not even looked up");
+            }
+        }
+
+        #[tokio::test]
+        async fn the_answer_binds_the_listener_the_card_showed() {
+            for (shown, then, allowed, changed) in [
+                (program(SSH), program(PYTHON), program(SSH), program(PYTHON)),
+                (
+                    run_only(RunOnly::OtherNamespace, &[11]),
+                    run_only(RunOnly::OtherNamespace, &[12]),
+                    run_only(RunOnly::OtherNamespace, &[11]),
+                    run_only(RunOnly::OtherNamespace, &[12]),
+                ),
+            ] {
+                let inspector = FakeInspector::serving(shown);
+                let (_workspace, context) = context_with(allowlist(&[], &[]));
+                let changing = inspector.clone();
+                let result = request_local_port(&context, inspector, port_5432(), |_| {
+                    // The listener changes before the user answers.
+                    changing.set(then);
+                    async { Ok(NetworkAccessDecision::AllowRun) }
+                })
+                .await
+                .unwrap();
+                assert_eq!(result["scope"], "run");
+                let network = &context.run_network;
+                assert_eq!(network.decide_local(5432, &allowed), LocalDecision::Allowed);
+                assert_eq!(network.decide_local(5432, &changed), LocalDecision::Changed);
+                assert_eq!(
+                    network.decide_local(6379, &allowed),
+                    LocalDecision::NotGranted
+                );
+            }
+        }
+
+        /// As “Always” would save it, “Allow this run” for another user's
+        /// service allows that user on the port: the socket the card did not
+        /// show (the other loopback address) and the service restarted
+        /// mid-run are the same service.
+        #[tokio::test]
+        async fn allow_this_run_for_another_users_service_allows_that_user() {
+            let inspector = FakeInspector::serving(other_user(&[11]));
+            let (_workspace, context) = context_with(allowlist(&[], &[]));
+            let result = request_local_port(&context, inspector, port_5432(), |_| async {
+                Ok(NetworkAccessDecision::AllowRun)
+            })
+            .await
+            .unwrap();
+            assert_eq!(result["scope"], "run");
+            let network = &context.run_network;
+            let ipv4 = other_user(&[11]);
+            let ipv6 = other_user(&[12]);
+            let restarted = other_user(&[13]);
+            for listener in [&ipv4, &ipv6, &restarted] {
+                assert_eq!(
+                    network.decide_local(5432, listener),
+                    LocalDecision::Allowed,
+                    "{listener:?}"
+                );
+            }
+            let someone_else = Listener::OtherUser {
+                // SAFETY: geteuid has no preconditions and cannot fail.
+                uid: unsafe { libc::geteuid() }.wrapping_add(2),
+                name: "redis".to_string(),
+                sockets: vec![11],
+            };
+            assert_eq!(
+                network.decide_local(5432, &someone_else),
+                LocalDecision::Changed
+            );
+            assert_eq!(network.decide_local(6379, &ipv6), LocalDecision::NotGranted);
+        }
+
+        /// A user grant never names the user CLAI runs as: a listener of
+        /// that user is allowed for the run by the sockets the card showed.
+        #[tokio::test]
+        async fn allow_this_run_never_allows_the_user_clai_runs_as() {
+            // SAFETY: geteuid has no preconditions and cannot fail.
+            let own = |sockets: &[u64]| Listener::OtherUser {
+                uid: unsafe { libc::geteuid() },
+                name: "me".to_string(),
+                sockets: sockets.to_vec(),
+            };
+            let inspector = FakeInspector::serving(own(&[11]));
+            let (_workspace, context) = context_with(allowlist(&[], &[]));
+            request_local_port(&context, inspector, port_5432(), |_| async {
+                Ok(NetworkAccessDecision::AllowRun)
+            })
+            .await
+            .unwrap();
+            let network = &context.run_network;
+            assert_eq!(
+                network.decide_local(5432, &own(&[11])),
+                LocalDecision::Allowed
+            );
+            assert_eq!(
+                network.decide_local(5432, &own(&[12])),
+                LocalDecision::Changed
+            );
+        }
+
+        #[tokio::test]
+        async fn always_adds_the_saved_grant_and_the_result_names_the_port_only() {
+            let always = || NetworkAccessDecision::AllowAlways {
+                entry: "localhost:5432".to_string(),
+            };
+            for (listener, decision, scope, later) in [
+                (
+                    program(SSH),
+                    NetworkAccessDecision::AllowRun,
+                    "run",
+                    program(SSH),
+                ),
+                (program(SSH), always(), "always", program(SSH)),
+                // A user grant covers a restarted service of that user.
+                (other_user(&[11]), always(), "always", other_user(&[12])),
+            ] {
+                let inspector = FakeInspector::serving(listener);
+                let (_workspace, context) = context_with(allowlist(&[], &[]));
+                let mut shown = Vec::new();
+                let result = request_local_port(&context, inspector, port_5432(), |card| {
+                    shown.push(serde_json::to_value(&card).unwrap());
+                    async move { Ok(decision) }
+                })
+                .await
+                .unwrap();
+
+                let mut keys: Vec<&str> = result
+                    .as_object()
+                    .unwrap()
+                    .keys()
+                    .map(String::as_str)
+                    .collect();
+                keys.sort_unstable();
+                assert_eq!(keys, ["entry", "granted", "host", "note", "port", "scope"]);
+                assert_eq!(result["host"], "localhost");
+                assert_eq!(result["port"], 5432);
+                assert_eq!(result["entry"], "localhost:5432");
+                assert_eq!(result["scope"], scope);
+                assert!(!result.to_string().contains(SECRET), "{result}");
+                assert_eq!(
+                    context.run_network.decide_local(5432, &later),
+                    LocalDecision::Allowed
+                );
+                let [card] = shown.as_slice() else {
+                    panic!("one card, got {shown:?}");
+                };
+                if card["kind"] == "program" {
+                    let command_line = card["commandLine"].as_str().unwrap();
+                    assert!(command_line.contains(SECRET), "the card shows it");
+                }
+            }
+        }
+
+        #[tokio::test]
+        async fn a_denial_is_the_tool_error_and_allows_nothing() {
+            let inspector = FakeInspector::serving(program(SSH));
+            let (_workspace, context) = context_with(allowlist(&[], &[]));
+            let error = request_local_port(&context, inspector, port_5432(), |_| async {
+                Ok(NetworkAccessDecision::Deny {
+                    reason: Some("use the staging database".to_string()),
+                })
+            })
+            .await
+            .unwrap_err();
+            assert_eq!(
+                error,
+                "User denied network access to `localhost:5432`. Reason: use the staging database."
+            );
+            assert!(context.had_warnings());
+            assert_eq!(
+                context.run_network.decide_local(5432, &program(SSH)),
+                LocalDecision::NotGranted
+            );
+        }
+
+        #[tokio::test]
+        async fn a_listener_the_run_already_reaches_needs_no_card() {
+            let mut policy = allowlist(&[], &[]);
+            policy.local_ports = vec![LocalPortGrant::Program {
+                port: 5432,
+                program: SSH.to_string(),
+            }];
+            let (_workspace, context) = context_with(policy);
+            let result = request_local_port(
+                &context,
+                FakeInspector::serving(program(SSH)),
+                port_5432(),
+                no_card,
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                result,
+                serde_json::json!({
+                    "granted": true,
+                    "host": "localhost",
+                    "port": 5432,
+                    "scope": "already-allowed",
+                })
+            );
+        }
     }
 
     fn network_guard(
@@ -2709,6 +3628,7 @@ mod tests {
             mode,
             allow_domains: Vec::new(),
             deny_domains: Vec::new(),
+            local_ports: Vec::new(),
         }
     }
 
@@ -2717,6 +3637,7 @@ mod tests {
             socket: PathBuf::from("/c/.clai-net/0123456789ab.sock"),
             helper: PathBuf::from("/opt/clai/clai-sandbox-helper"),
             ssh_config: PathBuf::from("/c/.clai-net/ssh_config"),
+            forward_ports: Vec::new(),
         }
     }
 
@@ -2769,43 +3690,24 @@ mod tests {
         );
     }
 
-    /// The proxy session lives for the command and its refusals reach the
-    /// result. Needs bwrap and the helper `cargo test` builds.
+    /// The sandbox of a command is recorded as started by its agent while
+    /// the command runs, so a server it starts can be asked for. Needs bwrap.
     #[cfg(target_os = "linux")]
     #[tokio::test]
-    async fn an_allowlist_command_runs_behind_its_own_proxy_session() {
-        let exe = std::env::current_exe().unwrap();
-        let helper = exe
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("clai-sandbox-helper");
-        if !helper.is_file() {
-            crate::assistant::sandbox::skip_without_bwrap(&format!(
-                "{} is not built",
-                helper.display()
-            ));
-            return;
-        }
-        let files = tempdir().unwrap();
+    async fn an_agent_command_is_recorded_while_it_runs() {
+        use crate::assistant::network::spawn_roots::{self, StartedBy};
         let workspace = tempdir().unwrap();
-        let endpoint = ProxyEndpoint {
-            socket: files.path().join("net.sock"),
-            helper,
-            ssh_config: files.path().join("ssh_config"),
-        };
-        std::fs::write(&endpoint.ssh_config, "").unwrap();
-        let socket = endpoint.socket.clone();
-        let command = |script: &str, timeout_ms| SandboxCommand {
-            argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+        let agent = || Some("Ana, in bash_exec".to_string());
+        let by = StartedBy::Agent(agent());
+        let command = SandboxCommand {
+            argv: vec!["/bin/sh".into(), "-c".into(), "sleep 1".into()],
             cwd: workspace.path().to_path_buf(),
-            timeout_ms,
+            timeout_ms: 10_000,
             max_output_chars: 10_000,
             profile: SandboxProfile::for_test(
                 workspace.path().to_path_buf(),
                 Vec::new(),
-                SandboxNetworkMode::Proxied(endpoint.clone()),
+                SandboxNetworkMode::Disabled,
                 SandboxSessionBusMode::Deny,
                 SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
@@ -2815,9 +3717,103 @@ mod tests {
                 None,
             ),
         };
+        let network = std::sync::Arc::new(run_network(&[], &[]));
+        let run = run_with_network(command, agent(), &network);
+        let running = spawn_roots::eventually(|| !spawn_roots::started_by(&by).is_empty());
+        let (run, running) = tokio::join!(run, running);
+        assert!(!run.proxied, "no proxy, so no localhost hint");
+        match run.output {
+            Ok(output) => assert_eq!(output.exit_code, Some(0), "{output:?}"),
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        }
+        assert!(running, "recorded while the command runs");
+        assert!(spawn_roots::started_by(&by).is_empty(), "gone once reaped");
+    }
+
+    /// The helper `cargo test` builds next to the test binary.
+    #[cfg(target_os = "linux")]
+    fn built_helper() -> Option<PathBuf> {
+        let exe = std::env::current_exe().unwrap();
+        let helper = exe
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("clai-sandbox-helper");
+        if helper.is_file() {
+            return Some(helper);
+        }
+        crate::assistant::sandbox::skip_without_bwrap(&format!(
+            "{} is not built",
+            helper.display()
+        ));
+        None
+    }
+
+    /// An Allowlist command running `script` in `workspace`, with its proxy
+    /// files in `files`.
+    #[cfg(target_os = "linux")]
+    fn allowlist_command(
+        workspace: &Path,
+        files: &Path,
+        helper: PathBuf,
+        script: &str,
+        timeout_ms: u64,
+    ) -> SandboxCommand {
+        let endpoint = ProxyEndpoint {
+            socket: files.join("net.sock"),
+            helper,
+            ssh_config: files.join("ssh_config"),
+            forward_ports: Vec::new(),
+        };
+        std::fs::write(&endpoint.ssh_config, "").unwrap();
+        SandboxCommand {
+            argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+            cwd: workspace.to_path_buf(),
+            timeout_ms,
+            max_output_chars: 10_000,
+            profile: SandboxProfile::for_test(
+                workspace.to_path_buf(),
+                Vec::new(),
+                SandboxNetworkMode::Proxied(endpoint),
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace,
+                    SandboxSessionBusMode::Deny,
+                ),
+                None,
+            ),
+        }
+    }
+
+    /// The proxy session lives for the command and its refusals reach the
+    /// result. Needs bwrap and the helper `cargo test` builds.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_allowlist_command_runs_behind_its_own_proxy_session() {
+        let Some(helper) = built_helper() else {
+            return;
+        };
+        let files = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let socket = files.path().join("net.sock");
+        let command = |script: &str, timeout_ms| {
+            allowlist_command(
+                workspace.path(),
+                files.path(),
+                helper.clone(),
+                script,
+                timeout_ms,
+            )
+        };
         let refuse = "/run/clai/helper connect --proxy 127.0.0.1:3128 example.org 443 </dev/null";
         let network = std::sync::Arc::new(run_network(&["github.com"], &[]));
-        let run = run_with_network(command(refuse, 20_000), &network).await;
+        let run = run_with_network(command(refuse, 20_000), None, &network).await;
         let (output, refused) = match run.output {
             Ok(output) => (output, run.refused),
             Err(error) if error.contains("Sandboxed shell is unavailable") => {
@@ -2834,7 +3830,12 @@ mod tests {
         );
         assert!(!socket.exists(), "the session ended with the command");
 
-        let run = run_with_network(command(&format!("{refuse}; sleep 30"), 2_000), &network).await;
+        let run = run_with_network(
+            command(&format!("{refuse}; sleep 30"), 2_000),
+            None,
+            &network,
+        )
+        .await;
         let refused = run.refused;
         let error = run.output.unwrap_err();
         assert!(error.contains("timed out after"), "{error}");
@@ -2846,6 +3847,84 @@ mod tests {
         assert!(!socket.exists(), "the session ended with the timeout");
     }
 
+    /// The local ports a command forwards are those of the run as it starts:
+    /// one allowed while it runs still refuses there, so that result gets the
+    /// localhost hint, and answers from the next command. This test
+    /// listens on the port, so the proxy refuses it as CLAI's own; only a
+    /// forwarded port gets that far. Needs bwrap.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_port_allowed_during_a_command_is_forwarded_from_the_next() {
+        use crate::assistant::network::run_state::{LocalBinding, LocalRule};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(helper) = built_helper() else {
+            return;
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let files = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let refusal = format!("connect to 127.0.0.1 port {port} failed: Connection refused");
+        let connect = format!(
+            "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", {port}), 5).recv(1); print(\"connected\")' 2>/dev/null || echo '{refusal}'"
+        );
+        let command = |script: &str| {
+            allowlist_command(
+                workspace.path(),
+                files.path(),
+                helper.clone(),
+                script,
+                20_000,
+            )
+        };
+        let network = std::sync::Arc::new(run_network(&[], &[]));
+        let finished = AtomicBool::new(false);
+        let first = async {
+            let script =
+                format!("touch started; while [ ! -e go ]; do sleep 0.05; done; {connect}");
+            let run = run_with_network(command(&script), None, &network).await;
+            finished.store(true, Ordering::SeqCst);
+            run
+        };
+        let grant = async {
+            while !workspace.path().join("started").exists() && !finished.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            network.allow_local(LocalRule {
+                port,
+                binding: LocalBinding::Program("/usr/bin/served".to_string()),
+            });
+            std::fs::write(workspace.path().join("go"), "").unwrap();
+        };
+        let (first, ()) = tokio::join!(first, grant);
+        let output = match first.output {
+            Ok(output) => output,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(output.stdout, format!("{refusal}\n"), "{output:?}");
+        assert!(first.refused.is_empty(), "{:?}", first.refused);
+        let result = bash_exec_result(
+            &output,
+            &first.refused,
+            first.proxied,
+            &SocketPolicy::default(),
+            None,
+        );
+        assert_eq!(
+            result["network"]["localhost"]["port"], port,
+            "allowed while the command ran, so it refused there: {result}"
+        );
+
+        let next = run_with_network(command(&connect), None, &network).await;
+        let output = next.output.unwrap();
+        assert_eq!(output.stdout, "connected\n", "{output:?}");
+        assert_eq!(next.refused.targets, [format!("localhost:{port}")]);
+    }
+
     #[test]
     fn a_failed_command_still_names_the_hosts_the_proxy_refused() {
         let mut refused = RefusedTargets::default();
@@ -2853,6 +3932,7 @@ mod tests {
         let error = bash_exec_outcome(
             timed_out(),
             &refused,
+            false,
             &SocketPolicy::default(),
             None,
             2_000,
@@ -2867,6 +3947,7 @@ mod tests {
         let error = bash_exec_outcome(
             timed_out(),
             &refused,
+            false,
             &SocketPolicy::default(),
             None,
             2_000,
@@ -2896,6 +3977,7 @@ mod tests {
         assert!(bash_exec_result(
             &output,
             &RefusedTargets::default(),
+            false,
             &SocketPolicy::default(),
             None
         )
@@ -2903,7 +3985,7 @@ mod tests {
         .is_none());
         let mut refused = RefusedTargets::default();
         refused.add("example.org:443".to_string());
-        let result = bash_exec_result(&output, &refused, &SocketPolicy::default(), None);
+        let result = bash_exec_result(&output, &refused, false, &SocketPolicy::default(), None);
         assert_eq!(
             result["network"]["refused"],
             serde_json::json!(["example.org:443"])
@@ -2915,10 +3997,154 @@ mod tests {
 
         refused.more = 3;
         assert_eq!(
-            bash_exec_result(&output, &refused, &SocketPolicy::default(), None)["network"]
+            bash_exec_result(&output, &refused, false, &SocketPolicy::default(), None)["network"]
                 ["refusedMore"],
             3
         );
+    }
+
+    /// One line per client as it reports a refused connection to localhost,
+    /// and the port it names.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_localhost_connection_is_read_from_the_client_output() {
+        for (line, port) in [
+            (r#"psql: error: connection to server at "localhost" (127.0.0.1), port 5432 failed: Connection refused"#, Some(5432)),
+            (r#"psql: error: connection to server at "localhost" (::1), port 5678 failed: Connection refused"#, Some(5678)),
+            ("Could not connect to Redis at 127.0.0.1:6379: Connection refused", Some(6379)),
+            ("curl: (7) Failed to connect to localhost port 8080 after 0 ms: Couldn't connect to server", Some(8080)),
+            ("curl: (7) Failed to connect to ::1 port 8081 after 0 ms: Connection refused", Some(8081)),
+            ("Error: connect ECONNREFUSED 127.0.0.1:3000", Some(3000)),
+            ("Error: connect ECONNREFUSED ::1:3001", Some(3001)),
+            ("ERROR 2003 (HY000): Can't connect to MySQL server on 'localhost:3306' (111)", Some(3306)),
+            ("Can\u{2019}t connect to MySQL server on \u{2019}localhost:3307\u{2019}", Some(3307)),
+            ("ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1' (111)", None),
+            ("requests.exceptions.ConnectionError: HTTPConnectionPool(host='localhost', port=8000): Max retries exceeded with url: / (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f>: Failed to establish a new connection: [Errno 111] Connection refused'))", Some(8000)),
+            ("ConnectionRefusedError: [Errno 111] Connect call failed ('127.0.0.1', 5679)", Some(5679)),
+            ("nc: connect to localhost (127.0.0.1) port 5680 (tcp) failed: Connection refused", Some(5680)),
+            ("bash: line 1: /dev/tcp/localhost/5681: Connection refused", Some(5681)),
+            ("dial tcp [::1]:9000: connect: connection refused", Some(9000)),
+            ("psql: error: falló la conexión al servidor en «localhost» (127.0.0.1), puerto 5678: Conexión rehusada", Some(5678)),
+            ("psql: Fehler: Verbindung zum Server auf »localhost« (127.0.0.1), Port 5432 fehlgeschlagen: Verbindungsaufbau abgelehnt", Some(5432)),
+            ("psql: erreur : la connexion au serveur sur « localhost » (::1), port 5433 a échoué : Connexion refusée", Some(5433)),
+            (r#"psql: erro: a conexão com o servidor em "localhost" (127.0.0.1), porta 5434 falhou: Conexão recusada"#, Some(5434)),
+            ("OSError: Multiple exceptions: [Errno 111] Connect call failed ('::1', 8001, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 8001)", Some(8001)),
+        ] {
+            assert_eq!(refused_localhost_port(line), Some(port), "{line}");
+        }
+        // glibc's ECONNREFUSED text in the locales the detector reads.
+        for refusal in [
+            "Conexión rehusada",
+            "Connexion refusée",
+            "Verbindungsaufbau abgelehnt",
+            "Connessione rifiutata",
+            "Conexão recusada",
+            "Ligação recusada",
+            "Verbinding is geweigerd",
+            "Conexión rexeitada",
+        ] {
+            let line = format!("bash: /dev/tcp/127.0.0.1/5682: {refusal}");
+            assert_eq!(refused_localhost_port(&line), Some(Some(5682)), "{line}");
+        }
+        for line in [
+            r#"psql: error: connection to server at "db.example.org" (10.0.0.5), port 5432 failed: Connection refused"#,
+            "Listening on http://localhost:8080",
+            "connected to 127.0.0.1:6379",
+            "curl: (7) Failed to connect to localhost.example.org port 80: Connection refused",
+            "dial tcp [fe80::1]:9000: connect: connection refused",
+            "Error: connect ECONNREFUSED 127.0.0.10:3000",
+            // Python and Ncat name no host here: out of reach of the hint.
+            "ConnectionRefusedError: [Errno 111] Connection refused",
+            "Ncat: Connection refused.",
+        ] {
+            assert_eq!(refused_localhost_port(line), None, "{line}");
+        }
+    }
+
+    /// Every refused localhost port but one the proxy already named, which
+    /// `network.refused` covers.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_localhost_hint_skips_a_port_the_proxy_named() {
+        let output = |stderr: &str| SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(2),
+            success: false,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        };
+        let psql = |port: u16| {
+            format!(
+                r#"psql: error: connection to server at "localhost" (::1), port {port} failed: Connection refused"#
+            )
+        };
+        let none = RefusedTargets::default();
+        let refused = output(&psql(5678));
+        assert_eq!(localhost_refusal(&refused, &none), Some(Some(5678)));
+        let mut named = RefusedTargets::default();
+        named.add("localhost:5678".to_string());
+        assert_eq!(localhost_refusal(&refused, &named), None);
+
+        let both = output(&format!("{}\n{}", psql(5678), psql(6379)));
+        assert_eq!(localhost_refusal(&both, &named), Some(Some(6379)));
+        let portless =
+            output("ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1' (111)");
+        assert_eq!(localhost_refusal(&portless, &none), Some(None));
+        let on_stdout = SandboxCommandOutput {
+            stdout: psql(5678),
+            ..output("")
+        };
+        assert_eq!(localhost_refusal(&on_stdout, &none), Some(Some(5678)));
+    }
+
+    /// Behind the proxy only (Allowlist), next to the hosts it refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_result_behind_the_proxy_points_a_refused_localhost_at_net_request_access() {
+        let output = SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(1),
+            success: false,
+            stdout: String::new(),
+            stderr: "Error: connect ECONNREFUSED 127.0.0.1:3000".to_string(),
+        };
+        let mut refused = RefusedTargets::default();
+        let sockets = SocketPolicy::default();
+        let result = bash_exec_result(&output, &refused, false, &sockets, None);
+        assert!(
+            result.get("network").is_none(),
+            "Host network or Off: {result}"
+        );
+        let result = bash_exec_result(&output, &refused, true, &sockets, None);
+        assert_eq!(
+            result["network"],
+            serde_json::json!({"localhost": localhost_note(Some(3000))})
+        );
+        refused.add("example.org:443".to_string());
+        let result = bash_exec_result(&output, &refused, true, &sockets, None);
+        assert_eq!(
+            result["network"]["refused"],
+            serde_json::json!(["example.org:443"])
+        );
+        assert_eq!(result["network"]["localhost"], localhost_note(Some(3000)));
+    }
+
+    #[test]
+    fn the_localhost_note_names_the_port_to_ask_for() {
+        let note = localhost_note(Some(5678));
+        assert_eq!(note["port"], 5678);
+        let hint = note["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("call `net_request_access` with host `localhost:5678`"),
+            "{hint}"
+        );
+        assert!(hint.contains("not this computer's"), "{hint}");
+        let note = localhost_note(None);
+        assert!(note.get("port").is_none());
+        assert!(note["hint"]
+            .as_str()
+            .unwrap()
+            .contains("`localhost:<port>`"));
     }
 
     /// The hint leads to the folder-access card, for the socket itself.
@@ -2946,7 +4172,7 @@ mod tests {
             stderr: stderr.to_string(),
         };
         let unreachable = |output: &SandboxCommandOutput, sockets: &SocketPolicy| {
-            bash_exec_result(output, &RefusedTargets::default(), sockets, None)
+            bash_exec_result(output, &RefusedTargets::default(), false, sockets, None)
                 .get("sockets")
                 .map(|sockets| sockets["unreachable"].clone())
         };
@@ -2970,7 +4196,7 @@ mod tests {
             unreachable(&denied, &confined),
             Some(serde_json::json!([path]))
         );
-        let result = bash_exec_result(&denied, &RefusedTargets::default(), &confined, None);
+        let result = bash_exec_result(&denied, &RefusedTargets::default(), false, &confined, None);
         assert_eq!(result["sockets"]["hint"], SOCKET_HINT);
 
         // Without Landlock a refusal comes from the host's permissions.
@@ -3155,11 +4381,11 @@ mod tests {
         };
         let none = SocketPolicy::default();
         let refused = RefusedTargets::default();
-        assert!(bash_exec_result(&output, &refused, &none, None)
+        assert!(bash_exec_result(&output, &refused, false, &none, None)
             .get("sessionBus")
             .is_none());
         let reason = Some("xdg-dbus-proxy is not installed");
-        let note = bash_exec_result(&output, &refused, &none, reason)["sessionBus"]
+        let note = bash_exec_result(&output, &refused, false, &none, reason)["sessionBus"]
             .as_str()
             .unwrap()
             .to_string();
@@ -3169,6 +4395,7 @@ mod tests {
         let error = bash_exec_outcome(
             Err("Command timed out after 2000 ms".to_string()),
             &refused,
+            false,
             &none,
             reason,
             2_000,
@@ -3216,7 +4443,7 @@ mod tests {
             profile,
         };
         let network = std::sync::Arc::new(run_network(&[], &[]));
-        let run = run_with_network(command, &network).await;
+        let run = run_with_network(command, None, &network).await;
         assert!(
             run.session_bus_unavailable.is_some(),
             "the result says why there is no bus"
@@ -3394,7 +4621,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         };
-        let result = bash_exec_result(&output, &RefusedTargets::default(), &sockets, None);
+        let result = bash_exec_result(&output, &RefusedTargets::default(), false, &sockets, None);
         let skipped = result["socketGrantsSkipped"].as_array().unwrap();
         assert_eq!(skipped.len(), 2, "{skipped:?}");
         let dir = dir.path().canonicalize().unwrap();

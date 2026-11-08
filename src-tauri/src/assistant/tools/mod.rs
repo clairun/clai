@@ -166,6 +166,7 @@ mod tests {
                 mode: NetworkMode::Allowlist,
                 allow_domains: vec![allow.to_string()],
                 deny_domains: Vec::new(),
+                local_ports: Vec::new(),
             }))
             .load(Ordering::Relaxed)
         };

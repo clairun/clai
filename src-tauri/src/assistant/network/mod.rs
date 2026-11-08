@@ -8,7 +8,10 @@ pub mod connect;
 pub mod default_lists;
 #[cfg(target_os = "linux")]
 pub mod http;
+#[cfg(target_os = "linux")]
+pub mod local_listener;
 pub mod matcher;
 #[cfg(target_os = "linux")]
 pub mod proxy;
 pub mod run_state;
+pub mod spawn_roots;

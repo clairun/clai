@@ -2,7 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useLocation, useNavigate } from 'react-router';
 import type { NetworkAccessRequest, PathGrantRequest, PermissionRequest } from '../generated/bindings';
-import { hostWithPort, unicodeHost } from '../permissions/hostNames';
+import { isLoopbackHost, requestTarget } from '../permissions/hostNames';
 // Reuse the WorkspaceTaskNotifications stack styles so the global
 // notifications share visual language. The two surfaces are
 // conceptually the same: a toast in the upper-right corner that the
@@ -75,13 +75,16 @@ const buildNetworkAccessNotification = (
   request: NetworkAccessRequest,
 ): NotificationItem | null => {
   if (!request?.workspaceId || !request?.requestId) return null;
+  const target = requestTarget(request.host, request.port);
   return {
     id: `net:${request.requestId}`,
     requestId: request.requestId,
     workspaceId: request.workspaceId,
     title: request.agentName || 'Agent',
     badge: 'Network access',
-    body: `Needs network access to \`${truncate(hostWithPort(unicodeHost(request.host), request.port))}\``,
+    body: isLoopbackHost(request.host)
+      ? `Needs network access to ${target}`
+      : `Needs network access to \`${truncate(target)}\``,
   };
 };
 

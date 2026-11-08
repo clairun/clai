@@ -75,3 +75,18 @@ export const hostWithPort = (host: string, port: number | null | undefined) => {
   const shown = host.includes(':') ? `[${host}]` : host;
   return port ? `${shown}:${port}` : shown;
 };
+
+const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+/** This computer, as the backend sends it: `localhost`, `127.0.0.1` or `::1`. */
+export const isLoopbackHost = (host: string) => LOOPBACK_HOSTS.has(host);
+
+/**
+ * What a request reaches, for reading. A port of this computer reads
+ * “port 5432 on this computer”, since `localhost` alone does not say whose
+ * it is or which service; any other host reads in Unicode, with its port.
+ */
+export const requestTarget = (host: string, port: number | null | undefined) =>
+  port && isLoopbackHost(host)
+    ? `port ${port} on this computer`
+    : hostWithPort(unicodeHost(host), port);

@@ -384,6 +384,83 @@ pub struct NetworkPolicy {
     /// Checked before the allow list.
     #[serde(default)]
     pub deny_domains: Vec<String>,
+    /// Ports on the loopback of this computer, and what must serve them.
+    /// Read only in Allowlist. Not stored when empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(as = "Option<Vec<LocalPortGrant>>", optional)]
+    pub local_ports: Vec<LocalPortGrant>,
+}
+
+/// A port on the loopback of this computer that an agent in Allowlist may
+/// reach while the granted program or user serves it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+pub enum LocalPortGrant {
+    /// The program at this path (as `/proc/<pid>/exe` names it) on the port.
+    Program { port: u16, program: String },
+    /// Any program of this other user on the port: a service CLAI cannot
+    /// see into.
+    User {
+        port: u16,
+        uid: u32,
+        /// Display only, captured at grant time; never matched.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        user: Option<String>,
+    },
+}
+
+impl LocalPortGrant {
+    /// Whether both allow the same thing; the user name is display only.
+    pub(crate) fn same_grant(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                Self::Program { port, program },
+                Self::Program {
+                    port: other_port,
+                    program: other_program,
+                },
+            ) => port == other_port && program == other_program,
+            (
+                Self::User { port, uid, .. },
+                Self::User {
+                    port: other_port,
+                    uid: other_uid,
+                    ..
+                },
+            ) => port == other_port && uid == other_uid,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn check(&self) -> Result<(), String> {
+        match self {
+            Self::Program { port: 0, .. } | Self::User { port: 0, .. } => {
+                Err("Local ports: port 0 cannot be allowed.".to_string())
+            }
+            // A Linux path, the form `/proc/<pid>/exe` gives, on every platform.
+            Self::Program { port, program } if !program.starts_with('/') => Err(format!(
+                "Local ports: the program `{program}` on port {port} is not an absolute path."
+            )),
+            // `/proc/<pid>/exe` never names a directory or has an empty, `.` or
+            // `..` component. Lexical only: symlinks are resolved where a path
+            // is typed in.
+            Self::Program { port, program }
+                if program
+                    .split('/')
+                    .skip(1)
+                    .any(|part| matches!(part, "" | "." | "..")) =>
+            {
+                Err(format!(
+                    "Local ports: the program `{program}` on port {port} is not a plain \
+                     absolute path: write the full path to the program, without `.` or \
+                     `..` parts, doubled slashes or a trailing slash."
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 impl NetworkPolicy {
@@ -396,6 +473,10 @@ impl NetworkPolicy {
     /// an entry (only a hand edit stores one) is kept as it is, so it never
     /// blocks leaving Allowlist; back in Allowlist the save names it, and a
     /// run handles it when the lists are matched (see [`HostLists::new`]).
+    ///
+    /// Repeated local port grants are dropped, the first one kept. In
+    /// Allowlist a grant for port 0, or for a program path `/proc/<pid>/exe`
+    /// never gives (relative, or not plain), refuses the save.
     ///
     /// [`HostLists::new`]: crate::assistant::network::matcher::HostLists::new
     pub fn canonicalize(&mut self) -> Result<(), String> {
@@ -414,6 +495,16 @@ impl NetworkPolicy {
                     }
                     Err(_) => {}
                 }
+            }
+        }
+        if strict {
+            self.local_ports
+                .iter()
+                .try_for_each(LocalPortGrant::check)?;
+        }
+        for grant in std::mem::take(&mut self.local_ports) {
+            if !self.local_ports.iter().any(|kept| kept.same_grant(&grant)) {
+                self.local_ports.push(grant);
             }
         }
         Ok(())
@@ -446,6 +537,7 @@ pub fn network_access_from_legacy(
         mode,
         allow_domains: default_allow_domains(),
         deny_domains: Vec::new(),
+        local_ports: Vec::new(),
     }
 }
 
@@ -1333,6 +1425,7 @@ mod tests {
                     mode: NetworkMode::HostNetwork,
                     allow_domains: vec!["example.org".to_string()],
                     deny_domains: Vec::new(),
+                    local_ports: Vec::new(),
                 },
                 session_bus: SandboxSessionBusConfig::Deny,
             }
@@ -1350,6 +1443,7 @@ mod tests {
                 mode,
                 allow_domains: vec!["github.com".to_string(), "*.example.org".to_string()],
                 deny_domains: vec!["bad.example.org".to_string()],
+                local_ports: Vec::new(),
             },
             session_bus: SandboxSessionBusConfig::Full,
         }
@@ -1488,6 +1582,7 @@ mod tests {
                 mode,
                 allow_domains: ["GitHub.com", "*.*"].map(String::from).to_vec(),
                 deny_domains: ["x/y", "Bücher.example"].map(String::from).to_vec(),
+                local_ports: Vec::new(),
             };
             assert_eq!(policy.canonicalize(), Ok(()), "{mode:?}");
             assert_eq!(policy.allow_domains, ["github.com", "*.*"], "{mode:?}");
@@ -1513,6 +1608,7 @@ mod tests {
             deny_domains: ["[2001:DB8::1]", "s3.*.AmazonAWS.com"]
                 .map(String::from)
                 .to_vec(),
+            local_ports: Vec::new(),
         };
         policy.canonicalize().expect("valid");
         assert_eq!(
@@ -1524,6 +1620,169 @@ mod tests {
             ]
         );
         assert_eq!(policy.deny_domains, ["2001:db8::1", "s3.*.amazonaws.com"]);
+    }
+
+    fn ssh(port: u16) -> LocalPortGrant {
+        LocalPortGrant::Program {
+            port,
+            program: "/usr/bin/ssh".to_string(),
+        }
+    }
+
+    fn postgres(port: u16, user: Option<&str>) -> LocalPortGrant {
+        LocalPortGrant::User {
+            port,
+            uid: 26,
+            user: user.map(String::from),
+        }
+    }
+
+    #[test]
+    fn a_policy_without_local_ports_is_stored_as_before() {
+        let json = serde_json::json!({
+            "mode": "allowlist",
+            "allowDomains": ["github.com"],
+            "denyDomains": ["bad.example.org"],
+        });
+        let network: NetworkPolicy = serde_json::from_value(json.clone()).unwrap();
+        assert!(network.local_ports.is_empty());
+        assert_eq!(serde_json::to_value(&network).unwrap(), json);
+    }
+
+    #[test]
+    fn local_ports_round_trip_in_the_stored_shape() {
+        let mut config = policy(NetworkMode::Allowlist);
+        config.network_access.local_ports = vec![
+            ssh(5432),
+            postgres(5432, Some("postgres")),
+            postgres(6379, None),
+        ];
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            json["networkAccess"]["localPorts"],
+            serde_json::json!([
+                { "kind": "program", "port": 5432, "program": "/usr/bin/ssh" },
+                { "kind": "user", "port": 5432, "uid": 26, "user": "postgres" },
+                { "kind": "user", "port": 6379, "uid": 26 },
+            ])
+        );
+        assert_eq!(sandbox_json(json), config);
+    }
+
+    #[test]
+    fn in_allowlist_saving_refuses_port_0_and_a_program_path_that_never_matches() {
+        let program = |program: &str| LocalPortGrant::Program {
+            port: 5432,
+            program: program.to_string(),
+        };
+        let port_0 = "Local ports: port 0 cannot be allowed.";
+        let mut cases = vec![
+            (ssh(0), port_0.to_string()),
+            (postgres(0, None), port_0.to_string()),
+            (
+                program("bin/ssh"),
+                "Local ports: the program `bin/ssh` on port 5432 is not an absolute path."
+                    .to_string(),
+            ),
+        ];
+        for path in [
+            "/",
+            "/usr/bin/ssh/",
+            "/usr/bin/../bin/ssh",
+            "/usr/./bin/ssh",
+            "//usr/bin/ssh",
+            "/usr//bin/ssh",
+        ] {
+            let error = format!(
+                "Local ports: the program `{path}` on port 5432 is not a plain absolute path: \
+                 write the full path to the program, without `.` or `..` parts, doubled \
+                 slashes or a trailing slash."
+            );
+            cases.push((program(path), error));
+        }
+        for (grant, error) in cases {
+            let mut network = policy(NetworkMode::Allowlist).network_access;
+            network.local_ports = vec![ssh(22), grant.clone()];
+            assert_eq!(network.canonicalize(), Err(error), "{grant:?}");
+            assert_eq!(network.local_ports, [ssh(22), grant.clone()]);
+
+            // Kept as is outside Allowlist, like an invalid host entry.
+            for mode in [NetworkMode::Off, NetworkMode::HostNetwork] {
+                network.mode = mode;
+                assert_eq!(network.canonicalize(), Ok(()), "{mode:?} {grant:?}");
+                assert_eq!(network.local_ports, [ssh(22), grant.clone()], "{mode:?}");
+            }
+        }
+
+        // Dots inside a name are fine.
+        let dotted = program("/opt/my.app/..bin/.ssh.");
+        let mut network = policy(NetworkMode::Allowlist).network_access;
+        network.local_ports = vec![dotted.clone()];
+        assert_eq!(network.canonicalize(), Ok(()));
+        assert_eq!(network.local_ports, [dotted]);
+    }
+
+    #[test]
+    fn saving_drops_repeated_local_port_grants_and_keeps_the_order() {
+        let autossh = LocalPortGrant::Program {
+            port: 5432,
+            program: "/usr/bin/autossh".to_string(),
+        };
+        for mode in [
+            NetworkMode::Allowlist,
+            NetworkMode::Off,
+            NetworkMode::HostNetwork,
+        ] {
+            let mut network = policy(mode).network_access;
+            network.local_ports = vec![
+                ssh(5432),
+                postgres(5432, Some("postgres")),
+                ssh(5432),
+                autossh.clone(),
+                postgres(5432, None),
+                ssh(8080),
+                postgres(5433, None),
+            ];
+            network.canonicalize().expect("valid");
+            assert_eq!(
+                network.local_ports,
+                [
+                    ssh(5432),
+                    postgres(5432, Some("postgres")),
+                    autossh.clone(),
+                    ssh(8080),
+                    postgres(5433, None),
+                ],
+                "{mode:?}"
+            );
+        }
+    }
+
+    /// `NetworkPolicy` as the build before local ports reads it.
+    #[derive(Deserialize, Debug, PartialEq)]
+    #[serde(rename_all = "camelCase")]
+    struct PreviousNetworkPolicy {
+        mode: NetworkMode,
+        allow_domains: Vec<String>,
+        deny_domains: Vec<String>,
+    }
+
+    #[test]
+    fn an_older_build_reads_a_policy_with_local_ports_without_them() {
+        let mut config = policy(NetworkMode::Allowlist);
+        config.network_access.local_ports = vec![ssh(5432), postgres(5432, None)];
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(json["network"], "enabled");
+        let previous: PreviousNetworkPolicy =
+            serde_json::from_value(json["networkAccess"].clone()).unwrap();
+        assert_eq!(
+            previous,
+            PreviousNetworkPolicy {
+                mode: NetworkMode::Allowlist,
+                allow_domains: config.network_access.allow_domains,
+                deny_domains: config.network_access.deny_domains,
+            }
+        );
     }
 
     /// `ExecutionSandboxConfig` as the build before `networkAccess` reads it.

@@ -143,6 +143,7 @@ fn prepare_endpoint(
         socket: dir.join(format!("{}.sock", &id[..12])),
         helper,
         ssh_config,
+        forward_ports: Vec::new(),
     })
 }
 

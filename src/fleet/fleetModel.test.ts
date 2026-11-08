@@ -622,7 +622,7 @@ describe('snapshot', () => {
   it('takes the network access requests of the snapshot, counted with the access requests', () => {
     const network = { requestId: 'n1', workspaceId: WS, agentId: null, host: 'mirror.example.org', port: 443 } as never;
     let s = seedFleet(EMPTY_FLEET, [snapshotOf({ pendingNetworkRequests: [network] })]);
-    expect(card(s).requests['network:n1']).toMatchObject({ kind: 'network', text: 'Reach mirror.example.org', at: 10 });
+    expect(card(s).requests['network:n1']).toMatchObject({ kind: 'network', text: 'Reach mirror.example.org:443', at: 10 });
     expect(cardAttention(card(s))).toMatchObject({ grants: 1, total: 1 });
     s = applyRequestResolved(s, 'network', 'n1');
     expect(cardAttention(card(s)).total).toBe(0);
@@ -632,6 +632,12 @@ describe('snapshot', () => {
     const network = { requestId: 'n2', workspaceId: WS, agentId: null, host: 'xn--bcher-kva.example', port: null } as never;
     const s = seedFleet(EMPTY_FLEET, [snapshotOf({ pendingNetworkRequests: [network] })]);
     expect(card(s).requests['network:n2']).toMatchObject({ text: 'Reach bücher.example' });
+  });
+
+  it('names a port of this computer as such, with its port', () => {
+    const network = { requestId: 'n3', workspaceId: WS, agentId: null, host: 'localhost', port: 5432 } as never;
+    const s = seedFleet(EMPTY_FLEET, [snapshotOf({ pendingNetworkRequests: [network] })]);
+    expect(card(s).requests['network:n3']).toMatchObject({ text: 'Reach port 5432 on this computer' });
   });
 
   it('removes cards missing from the snapshot, e.g. deleted workspaces', () => {

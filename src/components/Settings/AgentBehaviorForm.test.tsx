@@ -20,7 +20,7 @@ import { resetSandboxStatusForTests } from '../../hooks/useSandboxStatus';
 import { StaleAgentError } from '../../api/errors';
 import formStyles from './SettingsForm.module.css';
 import type {
-  ExecutionSandboxConfig, FilesystemPathGrant, NetworkPolicy, ProviderConnection, SandboxStatus,
+  ExecutionSandboxConfig, FilesystemPathGrant, LocalPortGrant, NetworkPolicy, ProviderConnection, SandboxStatus,
 } from '../../generated/bindings';
 
 const connection = (id: string, name: string, extra: Partial<ProviderConnection> = {}): ProviderConnection =>
@@ -786,6 +786,71 @@ describe('AgentBehaviorForm', () => {
       expect(within(denied).getByText('Not valid: Enter the host only, without a path.')).toBeInTheDocument();
       const allowed = screen.getByRole('list', { name: 'Allowed hosts' });
       expect(within(allowed).queryByText(/Not valid/)).toBeNull();
+    });
+
+    describe('local ports', () => {
+      const SSH_PORT: LocalPortGrant = { kind: 'program', port: 5432, program: '/usr/bin/ssh' };
+      const POSTGRES_PORT: LocalPortGrant = { kind: 'user', port: 5433, uid: 120, user: 'postgres' };
+
+      it('lists them in Allowlist only, and saves without one removed', async () => {
+        api.getSandboxStatus.mockResolvedValue(LINUX);
+        api.workspaceGetAgent.mockResolvedValue(
+          withPolicy({ ...NETWORK, mode: 'allowlist', localPorts: [SSH_PORT, POSTGRES_PORT] }),
+        );
+        const { ref } = renderForm({ agentId: 'agent-1' });
+        expect(await screen.findByText('Network: Allowlist (2 hosts, 2 local ports)')).toBeInTheDocument();
+        await openAccess();
+        const ports = await screen.findByRole('list', { name: 'Local ports' });
+        expect(within(ports).getAllByRole('listitem')).toHaveLength(2);
+
+        await userEvent.click(screen.getByRole('button', { name: 'Remove localhost:5432 (/usr/bin/ssh)' }));
+        await submit(ref);
+        expect(sentUpdate().execution.sandbox.networkAccess).toEqual({
+          ...NETWORK, mode: 'allowlist', localPorts: [POSTGRES_PORT],
+        });
+
+        await userEvent.click(networkButton('Off'));
+        expect(screen.queryByRole('list', { name: 'Local ports' })).toBeNull();
+        expect(screen.queryByText(/^Local ports/)).toBeNull();
+        await submit(ref);
+        expect(sentUpdate().execution.sandbox.networkAccess).toEqual({ ...NETWORK, mode: 'off', localPorts: [POSTGRES_PORT] });
+      });
+
+      it('keeps this computer off the allowed hosts and notes a denied localhost', async () => {
+        api.getSandboxStatus.mockResolvedValue(LINUX);
+        api.workspaceGetAgent.mockResolvedValue(withPolicy({
+          mode: 'allowlist', allowDomains: ['github.com', 'localhost'], denyDomains: [], localPorts: [SSH_PORT],
+        }));
+        const { ref } = renderForm({ agentId: 'agent-1' });
+        await openAccess();
+        const thisComputer = 'This computer is allowed one port at a time, as in localhost:5432, under Local ports.';
+        const allowed = await screen.findByRole('list', { name: 'Allowed hosts' });
+        expect(within(allowed).getByText(`Not valid: ${thisComputer}`)).toBeInTheDocument();
+
+        const allowInput = screen.getByRole('textbox', { name: 'New entry for allowed hosts' });
+        await userEvent.type(allowInput, '127.0.0.1{Enter}');
+        expect(screen.getByRole('alert')).toHaveTextContent(thisComputer);
+        await userEvent.clear(allowInput);
+        await userEvent.type(allowInput, 'localhost:5432{Enter}');
+        expect(screen.getByRole('alert'))
+          .toHaveTextContent('Local ports go in the Local ports list, which checks the program listening.');
+        await userEvent.clear(allowInput);
+
+        expect(screen.queryByText(/Denied hosts include/)).toBeNull();
+        const denyInput = screen.getByRole('textbox', { name: 'New entry for denied hosts' });
+        await userEvent.type(denyInput, 'localhost:5432{Enter}');
+        expect(screen.getByRole('alert'))
+          .toHaveTextContent('To refuse a local port, remove it from Local ports; deny localhost to refuse them all.');
+        await userEvent.clear(denyInput);
+        await userEvent.type(denyInput, 'localhost{Enter}');
+        expect(within(screen.getByRole('list', { name: 'Denied hosts' })).getByText('localhost')).toBeInTheDocument();
+        expect(screen.getByText('Denied hosts include localhost, so these ports are refused.')).toBeInTheDocument();
+
+        await submit(ref);
+        expect(sentUpdate().execution.sandbox.networkAccess).toEqual({
+          mode: 'allowlist', allowDomains: ['github.com', 'localhost'], denyDomains: ['localhost'], localPorts: [SSH_PORT],
+        });
+      });
     });
 
     it('says the mode covers only the web tools without a sandbox', async () => {
