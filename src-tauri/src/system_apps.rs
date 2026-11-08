@@ -797,7 +797,7 @@ mod tests {
     #[tokio::test]
     async fn an_opened_app_is_recorded_until_it_is_reaped() {
         let app = StartedBy::App("sleep".to_string());
-        spawn_host_detached("sleep", &["1".to_string()], None, HostWindow::Visible).unwrap();
+        spawn_host_detached("sleep", &["3".to_string()], None, HostWindow::Visible).unwrap();
         let pids = spawn_roots::started_by(&app);
         assert_eq!(pids.len(), 1, "{pids:?}");
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;

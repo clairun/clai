@@ -598,9 +598,11 @@ mod tests {
                 pixel_height: 0,
             })
             .unwrap();
-        let mut sleep = CommandBuilder::new("sleep");
-        sleep.arg("1");
-        let child = pair.slave.spawn_command(sleep).unwrap();
+        // Moves its stdio off the pty, so the reader sees EOF while the
+        // shell still runs.
+        let mut shell = CommandBuilder::new("sh");
+        shell.args(["-c", "exec </dev/null >/dev/null 2>&1; sleep 3"]);
+        let child = pair.slave.spawn_command(shell).unwrap();
         drop(pair.slave);
         let pid = child.process_id().unwrap();
         let reader = pair.master.try_clone_reader().unwrap();

@@ -1017,7 +1017,7 @@ mod tests {
         let ana = || Some("Ana, in linux_bwrap".to_string());
         let by = StartedBy::Agent(ana());
         let mut sleep = Command::new("sleep");
-        sleep.arg("1");
+        sleep.arg("3");
         prepare_stdio(&mut sleep);
         let child = sleep.spawn().unwrap();
         let pid = child.id().unwrap();
