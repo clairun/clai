@@ -3400,8 +3400,8 @@ pub async fn workspace_delete(
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
-    let result = delete_workspace(state.inner(), workspace_id.clone()).await;
-    if state.workspace_root(&workspace_id).is_none() {
+    let (result, removed) = delete_workspace_and_check_removed(state.inner(), &workspace_id).await;
+    if removed {
         if let Err(error) = app.emit(
             "workspace://deleted",
             serde_json::json!({"workspaceId": workspace_id}),
@@ -3410,6 +3410,16 @@ pub async fn workspace_delete(
         }
     }
     result
+}
+
+async fn delete_workspace_and_check_removed(
+    state: &AppState,
+    workspace_id: &str,
+) -> (Result<(), String>, bool) {
+    let existed = state.workspace_root(workspace_id).is_some();
+    let result = delete_workspace(state, workspace_id.to_string()).await;
+    let removed = existed && state.workspace_root(workspace_id).is_none();
+    (result, removed)
 }
 
 async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), String> {
@@ -5287,6 +5297,48 @@ mod tests {
             .await
             .expect("details")
         }
+    }
+
+    #[tokio::test]
+    async fn deletion_broadcast_requires_a_workspace_that_was_present() {
+        let workspace = DetailsWorkspace::new().await;
+        let state = &workspace.state;
+
+        let (missing_result, missing_removed) =
+            delete_workspace_and_check_removed(state, "missing").await;
+        assert!(missing_result.is_err());
+        assert!(!missing_removed, "an absent workspace was not deleted");
+        assert!(state.workspace_root(DETAILS_WORKSPACE_ID).is_some());
+
+        let (delete_result, deleted) =
+            delete_workspace_and_check_removed(state, DETAILS_WORKSPACE_ID).await;
+        assert!(delete_result.is_ok());
+        assert!(deleted, "a removed workspace must be broadcast");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_wipe_that_removes_the_workspace_still_broadcasts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = DetailsWorkspace::new().await;
+        let state = &workspace.state;
+        let root = state.workspace_root(DETAILS_WORKSPACE_ID).unwrap();
+        let parent = root.parent().unwrap();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o555)).unwrap();
+        if fs::create_dir(parent.join("probe")).is_ok() {
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
+            return; // running as root: the mode bits are advisory
+        }
+
+        let (result, removed) =
+            delete_workspace_and_check_removed(state, DETAILS_WORKSPACE_ID).await;
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err(), "the root cannot be removed");
+        assert!(root.exists(), "a partial wipe left its root behind");
+        assert!(workspace_config::load(&root).is_err());
+        assert!(removed, "an unindexed workspace must be broadcast");
     }
 
     #[tokio::test]
