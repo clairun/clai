@@ -1,5 +1,5 @@
 import { useId, useState, type ReactNode } from 'react';
-import type { LocalListenerView, LocalRunOnlyReason } from '../generated/bindings';
+import type { LocalListenerView, LocalRunOnlyReason, LocalStartedBy } from '../generated/bindings';
 import styles from './InlineApprovalCard.module.css';
 import grantStyles from './InlinePathGrantCard.module.css';
 import localStyles from './LocalListenerDetails.module.css';
@@ -33,15 +33,51 @@ export const alwaysTitle = (listener: ProgramListener | UserListener, port: numb
 export const ServedBy = ({ listener }: { listener: ProgramListener | UserListener }) =>
   listener.kind === 'program' ? <code>{listener.exe}</code> : <>user {listener.userName}</>;
 
-/** The listener in one sentence, for the spoken (Fleet) card. */
-export const SpokenListener = ({ listener }: { listener: LocalListenerView }) =>
-  isSavable(listener) ? (
+/** Who started the listener, when CLAI did. It informs only; no grant depends on it. */
+const startedByText = (startedBy: LocalStartedBy) => {
+  switch (startedBy.kind) {
+    case 'terminal':
+      return 'Started in a CLAI terminal.';
+    case 'app':
+      return `Started by ${startedBy.name}, opened from CLAI.`;
+    case 'agent':
+      return startedBy.name ? `Started by a command from agent ${startedBy.name}.` : 'Started by an agent command.';
+    case 'mcpServer':
+      return `Started by MCP server ${startedBy.name}.`;
+  }
+};
+
+const startedByOf = (listener: LocalListenerView) =>
+  listener.kind !== 'otherUser' && listener.startedBy ? startedByText(listener.startedBy) : null;
+
+const StartedBy = ({ listener }: { listener: LocalListenerView }) => {
+  const text = startedByOf(listener);
+  return text ? <p className={styles.segmentHint}>{text}</p> : null;
+};
+
+/**
+ * The listener for the spoken (Fleet) card, after the question. A run-only
+ * listener is left to the run-only line below it.
+ */
+export const SpokenListener = ({ listener }: { listener: LocalListenerView }) => {
+  const served = isSavable(listener) ? (
     <>
       It is served by <ServedBy listener={listener} />.
     </>
-  ) : (
-    <>CLAI cannot name the program serving it.</>
+  ) : null;
+  const startedBy = startedByOf(listener);
+  if (!served && !startedBy) return null;
+  return (
+    <>
+      {' '}
+      <span>
+        {served}
+        {served && startedBy && ' '}
+        {startedBy}
+      </span>
+    </>
   );
+};
 
 const RUN_ONLY_REASONS: Record<LocalRunOnlyReason, (port: number) => string> = {
   unseen: (port) => `CLAI cannot see every program listening on port ${port}.`,
@@ -129,6 +165,7 @@ export const LocalListenerDetails = ({
       return (
         <div className={localStyles.details}>
           <Program exe={listener.exe} pid={listener.pid} commandLine={listener.commandLine} />
+          <StartedBy listener={listener} />
           {listener.interpreter && (
             <Note>
               <code>{listener.exe}</code> runs many programs, so allowing it allows any of them on
@@ -168,6 +205,7 @@ export const LocalListenerDetails = ({
               ))}
             </ul>
           )}
+          <StartedBy listener={listener} />
         </div>
       );
   }

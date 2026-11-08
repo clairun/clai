@@ -51,7 +51,7 @@ const SaveScope = ({ req, workspaceName }: { req: NetworkAccessRequest; workspac
     return <>There is no agent to save an entry on, so the {local ? 'port' : 'host'} can be allowed for this run only.</>;
   }
   if (listener && !isSavable(listener)) {
-    return <>CLAI cannot save a rule for this listener, so the port can be allowed for this run only, until the listener restarts.</>;
+    return <>CLAI cannot save a rule for this listener, so the port can be allowed for this run only, until what listens there changes.</>;
   }
   const list = local ? 'allowed local ports' : 'allowed hosts';
   const saves = local && listener ? (
@@ -180,14 +180,7 @@ export const NetworkAccessCard = ({ req, speaker, requester, workspaceName, onDe
             speaker(
               <>
                 May I reach {isLoopbackHost(req.host) ? shown : <code title={asciiHost ?? undefined}>{shown}</code>}?
-                {local && (
-                  <>
-                    {' '}
-                    <span>
-                      <SpokenListener listener={local.listener} />
-                    </span>
-                  </>
-                )}
+                {local && <SpokenListener listener={local.listener} />}
                 <span className={grantStyles.spokenReason}>{req.reason || '(no reason given)'}</span>
               </>,
             )

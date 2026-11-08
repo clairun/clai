@@ -341,6 +341,7 @@ describe('NetworkAccessCard for a port on this computer', () => {
     expect(command).not.toHaveAttribute('data-collapsed');
     expect(screen.queryByRole('button', { name: 'Show all' })).not.toBeInTheDocument();
     expect(screen.queryByText(/runs many programs/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Started/)).not.toBeInTheDocument();
     expect(screen.getByText(/adds port/)).toHaveTextContent(
       /^“Always” adds port 5432 for \/usr\/bin\/ssh to this agent.s allowed local ports in this workspace only\.$/,
     );
@@ -348,10 +349,41 @@ describe('NetworkAccessCard for a port on this computer', () => {
 
   it('names the port on this computer when collapsed', async () => {
     const user = userEvent.setup();
-    render(<NetworkAccessCard req={localRequest(ssh)} requester={requester} />);
+    render(<NetworkAccessCard req={localRequest({ ...ssh, startedBy: { kind: 'terminal' } })} requester={requester} />);
     await user.click(screen.getByRole('button', { name: 'Collapse request' }));
     expect(screen.getByText('port 5432 on this computer')).toBeInTheDocument();
     expect(screen.queryByText(/localhost/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Started/)).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [{ kind: 'terminal' }, 'Started in a CLAI terminal.'],
+    [{ kind: 'app', name: 'code' }, 'Started by code, opened from CLAI.'],
+    [{ kind: 'agent', name: 'Rust Architect' }, 'Started by a command from agent Rust Architect.'],
+    [{ kind: 'agent' }, 'Started by an agent command.'],
+    [{ kind: 'mcpServer', name: 'netdata' }, 'Started by MCP server netdata.'],
+  ] as const)('says who in CLAI started the program, without changing the choices (%o)', (startedBy, line) => {
+    render(<NetworkAccessCard req={localRequest({ ...ssh, startedBy })} requester={requester} />);
+    expect(screen.getByText(line).tagName).toBe('P');
+    expect(buttons()).toEqual(['▾', 'Allow this run', 'Always for Rust Architect', 'Deny']);
+  });
+
+  it('says who in CLAI started a run-only listener', () => {
+    const startedBy = { kind: 'mcpServer', name: 'netdata' } as const;
+    render(
+      <NetworkAccessCard
+        req={localRequest({ kind: 'runOnly', reason: 'unseen', holders: [], startedBy })}
+        requester={requester}
+      />,
+    );
+    expect(screen.getByText('Started by MCP server netdata.').tagName).toBe('P');
+    expect(buttons()).toEqual(['▾', 'Allow this run', 'Deny']);
+  });
+
+  it('renders markup in who started the program as text', () => {
+    const name = '<img src=x onerror=alert(1)>';
+    render(<NetworkAccessCard req={localRequest({ ...ssh, startedBy: { kind: 'app', name } })} />);
+    expect(screen.getByText(`Started by ${name}, opened from CLAI.`).querySelector('img')).toBeNull();
   });
 
   it('renders markup in a command line as text', () => {
@@ -466,12 +498,20 @@ describe('NetworkAccessCard for a port on this computer', () => {
       expect(screen.getByText(commandLine)).toBeInTheDocument();
     }
     expect(screen.getByText(/this run only/)).toHaveTextContent(
-      /^CLAI cannot save a rule for this listener, so the port can be allowed for this run only, until the listener restarts\.$/,
+      /^CLAI cannot save a rule for this listener, so the port can be allowed for this run only, until what listens there changes\.$/,
     );
     const allowRun = screen.getByRole('button', { name: 'Allow this run' });
     expect(allowRun).toHaveAttribute('title', 'Allows what listens on port 5432 now, until this run ends.');
     await user.click(allowRun);
     expect(submitted()).toEqual([{ requestId: 'net-1', decision: { kind: 'allowRun' } }]);
+  });
+
+  it('says there is no agent to save on, for a run-only listener too', () => {
+    render(<NetworkAccessCard req={localRequest({ kind: 'runOnly', reason: 'unseen', holders: [] }, { agentId: null })} />);
+    expect(buttons()).toEqual(['▾', 'Allow this run', 'Deny']);
+    expect(screen.getByText(/this run only/)).toHaveTextContent(
+      /^There is no agent to save an entry on, so the port can be allowed for this run only\.$/,
+    );
   });
 
   it('says the port can be allowed for this run only when there is no agent to save on', () => {
@@ -485,7 +525,12 @@ describe('NetworkAccessCard for a port on this computer', () => {
   it.each([
     [ssh, 'It is served by /usr/bin/ssh.', ['This run', 'Always', 'Deny']],
     [postgres, 'It is served by user postgres.', ['This run', 'Always', 'Deny']],
-    [{ kind: 'runOnly', reason: 'unseen', holders: [] }, 'CLAI cannot name the program serving it.', ['This run', 'Deny']],
+    [{ ...ssh, startedBy: { kind: 'terminal' } }, 'It is served by /usr/bin/ssh. Started in a CLAI terminal.', ['This run', 'Always', 'Deny']],
+    [
+      { kind: 'runOnly', reason: 'unseen', holders: [], startedBy: { kind: 'agent', name: 'Rust Architect' } },
+      'Started by a command from agent Rust Architect.',
+      ['This run', 'Deny'],
+    ],
   ] as const)('speaks on the Fleet with the listener and short chips (%o)', (listener, line, chips) => {
     render(
       <NetworkAccessCard
@@ -497,6 +542,20 @@ describe('NetworkAccessCard for a port on this computer', () => {
     expect(screen.getByText((_, el) => el?.tagName === 'SPAN' && el.textContent === line)).toBeInTheDocument();
     expect(buttons()).toEqual(chips);
     expect(screen.queryByText(/^Listening:/)).not.toBeInTheDocument();
+  });
+
+  it('says this run only once on the Fleet for a run-only listener', () => {
+    render(
+      <NetworkAccessCard
+        req={localRequest({ kind: 'runOnly', reason: 'unseen', holders: [] })}
+        speaker={(prompt: ReactNode) => <div>{prompt}</div>}
+      />,
+    );
+    expect(screen.getByText('May I reach port 5432 on this computer?')).toBeInTheDocument();
+    expect(screen.queryByText(/cannot name/)).not.toBeInTheDocument();
+    expect(screen.getByText(/this run only/)).toHaveTextContent(
+      /^CLAI cannot save a rule for this listener, so the port can be allowed for this run only, until what listens there changes\.$/,
+    );
   });
 
   it('titles the spoken This run chip with the user it allows', () => {
