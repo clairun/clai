@@ -364,7 +364,7 @@ describe('NetworkAccessCard for a port on this computer', () => {
     [{ kind: 'mcpServer', name: 'netdata' }, 'Started by MCP server netdata.'],
   ] as const)('says who in CLAI started the program, without changing the choices (%o)', (startedBy, line) => {
     render(<NetworkAccessCard req={localRequest({ ...ssh, startedBy })} requester={requester} />);
-    expect(screen.getByText(line).tagName).toBe('P');
+    expect(screen.getByText((_, el) => el?.tagName === 'P' && el.textContent === line)).toBeInTheDocument();
     expect(buttons()).toEqual(['▾', 'Allow this run', 'Always for Rust Architect', 'Deny']);
   });
 
@@ -380,10 +380,13 @@ describe('NetworkAccessCard for a port on this computer', () => {
     expect(buttons()).toEqual(['▾', 'Allow this run', 'Deny']);
   });
 
-  it('renders markup in who started the program as text', () => {
+  it('shows the app that started the program as code, and markup in its name as text', () => {
     const name = '<img src=x onerror=alert(1)>';
     render(<NetworkAccessCard req={localRequest({ ...ssh, startedBy: { kind: 'app', name } })} />);
-    expect(screen.getByText(`Started by ${name}, opened from CLAI.`).querySelector('img')).toBeNull();
+    const app = screen.getByText(name);
+    expect(app.tagName).toBe('CODE');
+    expect(app.parentElement).toHaveTextContent(`Started by ${name}, opened from CLAI.`);
+    expect(app.parentElement!.querySelector('img')).toBeNull();
   });
 
   it('renders markup in a command line as text', () => {
@@ -538,7 +541,10 @@ describe('NetworkAccessCard for a port on this computer', () => {
         speaker={(prompt: ReactNode) => <div>{prompt}</div>}
       />,
     );
-    expect(screen.getByText('May I reach port 5432 on this computer?')).toBeInTheDocument();
+    // The question and the listener are separate sentences of one bubble.
+    const spoken = `May I reach port 5432 on this computer? ${line}`;
+    const bubble = screen.getByText('May I reach port 5432 on this computer?').textContent!;
+    expect(bubble.slice(0, spoken.length)).toBe(spoken);
     expect(screen.getByText((_, el) => el?.tagName === 'SPAN' && el.textContent === line)).toBeInTheDocument();
     expect(buttons()).toEqual(chips);
     expect(screen.queryByText(/^Listening:/)).not.toBeInTheDocument();

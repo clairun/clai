@@ -1,4 +1,4 @@
-import { useId, useState, type ReactNode } from 'react';
+import { useId, useState, type ReactElement, type ReactNode } from 'react';
 import type { LocalListenerView, LocalRunOnlyReason, LocalStartedBy } from '../generated/bindings';
 import styles from './InlineApprovalCard.module.css';
 import grantStyles from './InlinePathGrantCard.module.css';
@@ -33,13 +33,17 @@ export const alwaysTitle = (listener: ProgramListener | UserListener, port: numb
 export const ServedBy = ({ listener }: { listener: ProgramListener | UserListener }) =>
   listener.kind === 'program' ? <code>{listener.exe}</code> : <>user {listener.userName}</>;
 
-/** Who started the listener, when CLAI did. It informs only; no grant depends on it. */
-const startedByText = (startedBy: LocalStartedBy) => {
+/**
+ * Who started the listener, when CLAI did. It informs only; no grant depends
+ * on it. The return type makes a new kind fail to compile until it is named.
+ */
+const startedByText = (startedBy: LocalStartedBy): string | ReactElement => {
   switch (startedBy.kind) {
     case 'terminal':
       return 'Started in a CLAI terminal.';
     case 'app':
-      return `Started by ${startedBy.name}, opened from CLAI.`;
+      // A program name, such as `code`, which reads as a plain word without code style.
+      return <>Started by <code>{startedBy.name}</code>, opened from CLAI.</>;
     case 'agent':
       return startedBy.name ? `Started by a command from agent ${startedBy.name}.` : 'Started by an agent command.';
     case 'mcpServer':
