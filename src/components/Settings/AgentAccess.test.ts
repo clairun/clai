@@ -57,6 +57,8 @@ describe('accessSummary', () => {
 
 const THIS_COMPUTER = 'This computer is allowed one port at a time, as in localhost:5432, under Local ports.';
 const LOCAL_PORT = 'Local ports go in the Local ports list, which checks the program listening.';
+const DENY_LOCAL_PORT = 'To refuse a local port, remove it from Local ports; deny localhost to refuse them all.';
+const BRACKETS = 'Put the IPv6 address in brackets, as in [::1]:5432, under Local ports.';
 
 // The cases `local_ports_are_parsed_by_one_rule` and `entries_are_parsed_by_one_rule`
 // in network/matcher.rs run.
@@ -70,11 +72,20 @@ describe('host entries and local ports', () => {
     }
   });
 
-  it('sends a port of this computer to the local ports, from either host list', () => {
+  it('sends a port of this computer to the local ports, which can only allow it', () => {
     for (const { entry } of hostEntryCases.localPorts.accepted) {
-      expect(parseHostEntry(entry), entry).toEqual({ error: LOCAL_PORT });
       expect(parseAllowEntry(entry), entry).toEqual({ error: LOCAL_PORT });
+      expect(parseHostEntry(entry), entry).toEqual({ error: DENY_LOCAL_PORT });
     }
+  });
+
+  it('takes nothing the backend reads as this computer as an allowed host', () => {
+    for (const entry of hostEntryCases.localPorts.rejected) {
+      expect(parseAllowEntry(entry), entry).toHaveProperty('error');
+    }
+    expect(parseAllowEntry('::1:5432')).toEqual({ error: BRACKETS });
+    expect(parseAllowEntry('64:ff9b::7f00:1:80')).toEqual({ error: BRACKETS });
+    expect(parseAllowEntry('2001:db8::1:80')).toBe('2001:db8::1:80');
   });
 
   it('refuses this computer on the allowed hosts and keeps it for the denied hosts', () => {

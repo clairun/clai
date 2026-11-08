@@ -201,21 +201,39 @@ const isThisComputer = (host: string): boolean => {
   return prefix === '0,0,0,0,0,0' && high === 0 && low <= 1;
 };
 
-const LOCAL_PORT_ELSEWHERE = 'Local ports go in the Local ports list, which checks the program listening.';
+/**
+ * Whether the text is a port of this computer without the brackets IPv6
+ * needs, as in `::1:5432`: itself an IPv6 address, which `parse_local_port`
+ * reads as this computer and a port.
+ */
+const isUnbracketedPort = (raw: string): boolean => {
+  const value = raw.trim().toLowerCase();
+  const colon = value.lastIndexOf(':');
+  const address = colon < 0 ? null : canonicalIpv6(value.slice(0, colon));
+  return address !== null && isThisComputer(address);
+};
 
 /**
  * An entry for the denied hosts, where `localhost` refuses every local
- * port. A port of this computer is not a host entry: the local ports hold it.
+ * port. No port is refused on its own: the local ports only allow.
  */
 export const parseHostEntry = (raw: string): string | { error: string } =>
-  localPortOf(raw) === null ? hostEntry(raw) : { error: LOCAL_PORT_ELSEWHERE };
+  localPortOf(raw) === null
+    ? hostEntry(raw)
+    : { error: 'To refuse a local port, remove it from Local ports; deny localhost to refuse them all.' };
 
 /**
  * An entry for the allowed hosts. They never reach this computer, whose
  * ports are allowed one at a time, by the program serving each.
  */
 export const parseAllowEntry = (raw: string): string | { error: string } => {
-  const entry = parseHostEntry(raw);
+  if (localPortOf(raw) !== null) {
+    return { error: 'Local ports go in the Local ports list, which checks the program listening.' };
+  }
+  if (isUnbracketedPort(raw)) {
+    return { error: 'Put the IPv6 address in brackets, as in [::1]:5432, under Local ports.' };
+  }
+  const entry = hostEntry(raw);
   return typeof entry === 'string' && isThisComputer(entry)
     ? { error: 'This computer is allowed one port at a time, as in localhost:5432, under Local ports.' }
     : entry;

@@ -837,7 +837,12 @@ describe('AgentBehaviorForm', () => {
         await userEvent.clear(allowInput);
 
         expect(screen.queryByText(/Denied hosts include/)).toBeNull();
-        await userEvent.type(screen.getByRole('textbox', { name: 'New entry for denied hosts' }), 'localhost{Enter}');
+        const denyInput = screen.getByRole('textbox', { name: 'New entry for denied hosts' });
+        await userEvent.type(denyInput, 'localhost:5432{Enter}');
+        expect(screen.getByRole('alert'))
+          .toHaveTextContent('To refuse a local port, remove it from Local ports; deny localhost to refuse them all.');
+        await userEvent.clear(denyInput);
+        await userEvent.type(denyInput, 'localhost{Enter}');
         expect(within(screen.getByRole('list', { name: 'Denied hosts' })).getByText('localhost')).toBeInTheDocument();
         expect(screen.getByText('Denied hosts include localhost, so these ports are refused.')).toBeInTheDocument();
 

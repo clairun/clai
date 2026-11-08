@@ -23,12 +23,12 @@ describe('LocalPortsEditor', () => {
     expect(screen.getByText('Local ports · 3')).toBeInTheDocument();
     const rows = within(screen.getByRole('list', { name: 'Local ports' })).getAllByRole('listitem');
     expect(rows.map((row) => row.textContent)).toEqual([
-      'localhost:5432/usr/bin/ssh×',
+      'localhost:5432ssh×',
       'localhost:5433any program of user postgres×',
       'localhost:6379any program of uid 999×',
     ]);
     expect(screen.getByText('any program of user postgres')).toHaveAttribute('title', 'uid 120');
-    expect(screen.getByText('/usr/bin/ssh')).toHaveAttribute('title', '/usr/bin/ssh');
+    expect(screen.getByText('ssh')).toHaveAttribute('title', '/usr/bin/ssh');
   });
 
   it('names each row on its remove button, and saves the list without the row removed', async () => {
@@ -48,8 +48,9 @@ describe('LocalPortsEditor', () => {
     expect(onChange).toHaveBeenCalledExactlyOnceWith([SSH]);
   });
 
-  it('says how a port gets on the list when there is none', () => {
-    renderEditor({ grants: [] });
+  it('says how a port gets on the list when there is none, without a deny note', () => {
+    renderEditor({ grants: [], deniedBy: 'localhost' });
+    expect(screen.queryByText(/Denied hosts/)).toBeNull();
     expect(screen.getByText('Local ports · 0')).toBeInTheDocument();
     expect(screen.getByText('None. Approve an agent’s request to add one.')).toBeInTheDocument();
     expect(screen.queryByRole('list')).toBeNull();

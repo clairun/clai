@@ -92,20 +92,15 @@
   max-height: 168px;
 }
 
-/* A local port row: the port, then the program or user that must serve it. */
-.localPort {
-  flex-shrink: 0;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  color: var(--color-text-primary);
+/* What must serve a local port, quieter than the port before it. */
+.localPortServer,
+.localPortUser {
+  color: var(--color-text-secondary);
 }
 
-.localPortServer {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--color-text-secondary);
+/* A user is named in prose, not as a path. */
+.localPortUser {
+  font-family: inherit;
 }
 
 @media (max-width: 960px) {
