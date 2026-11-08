@@ -203,6 +203,21 @@ impl RunNetwork {
         }
     }
 
+    /// The local ports the run may reach now, in order.
+    #[cfg(target_os = "linux")]
+    pub fn local_ports(&self) -> Vec<u16> {
+        let mut ports: Vec<u16> = self
+            .local
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .map(|rule| rule.port)
+            .collect();
+        ports.sort_unstable();
+        ports.dedup();
+        ports
+    }
+
     /// The programs the run may reach on `port`.
     #[cfg(target_os = "linux")]
     pub fn local_programs(&self, port: u16) -> Vec<String> {

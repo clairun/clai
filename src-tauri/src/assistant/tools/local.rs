@@ -289,25 +289,30 @@ async fn run_with_network(
             tokio::task::spawn_blocking(move || drop(proxy));
         }
     };
-    let session = match &command.profile.network {
-        SandboxNetworkMode::Proxied(endpoint) => match ProxySession::start(
-            &endpoint.socket,
-            std::sync::Arc::clone(run_network),
-            std::sync::Arc::new(HostConnector),
-            crate::assistant::network::local_listener::host_inspector(),
-        ) {
-            Ok(session) => Some(session),
-            Err(error) => {
-                stop_bus_proxy();
-                return NetworkRun {
-                    output: Err(format!(
-                        "Sandboxed shell is unavailable: the network proxy did not start: {error}"
-                    )),
-                    refused: RefusedTargets::default(),
-                    session_bus_unavailable,
-                };
+    let session = match &mut command.profile.network {
+        SandboxNetworkMode::Proxied(endpoint) => {
+            // A port allowed later in the run answers from the next command.
+            endpoint.forward_ports = run_network.local_ports();
+            match ProxySession::start(
+                &endpoint.socket,
+                std::sync::Arc::clone(run_network),
+                std::sync::Arc::new(HostConnector),
+                crate::assistant::network::local_listener::host_inspector(),
+            ) {
+                Ok(session) => Some(session),
+                Err(error) => {
+                    stop_bus_proxy();
+                    return NetworkRun {
+                        output: Err(format!(
+                            "Sandboxed shell is unavailable: the network proxy did not start: \
+                             {error}"
+                        )),
+                        refused: RefusedTargets::default(),
+                        session_bus_unavailable,
+                    };
+                }
             }
-        },
+        }
         _ => None,
     };
     let output =
@@ -3413,6 +3418,7 @@ mod tests {
             socket: PathBuf::from("/c/.clai-net/0123456789ab.sock"),
             helper: PathBuf::from("/opt/clai/clai-sandbox-helper"),
             ssh_config: PathBuf::from("/c/.clai-net/ssh_config"),
+            forward_ports: Vec::new(),
         }
     }
 
@@ -3508,11 +3514,9 @@ mod tests {
         assert!(spawn_roots::started_by(&by).is_empty(), "gone once reaped");
     }
 
-    /// The proxy session lives for the command and its refusals reach the
-    /// result. Needs bwrap and the helper `cargo test` builds.
+    /// The helper `cargo test` builds next to the test binary.
     #[cfg(target_os = "linux")]
-    #[tokio::test]
-    async fn an_allowlist_command_runs_behind_its_own_proxy_session() {
+    fn built_helper() -> Option<PathBuf> {
         let exe = std::env::current_exe().unwrap();
         let helper = exe
             .parent()
@@ -3520,39 +3524,72 @@ mod tests {
             .parent()
             .unwrap()
             .join("clai-sandbox-helper");
-        if !helper.is_file() {
-            crate::assistant::sandbox::skip_without_bwrap(&format!(
-                "{} is not built",
-                helper.display()
-            ));
-            return;
+        if helper.is_file() {
+            return Some(helper);
         }
-        let files = tempdir().unwrap();
-        let workspace = tempdir().unwrap();
+        crate::assistant::sandbox::skip_without_bwrap(&format!(
+            "{} is not built",
+            helper.display()
+        ));
+        None
+    }
+
+    /// An Allowlist command running `script` in `workspace`, with its proxy
+    /// files in `files`.
+    #[cfg(target_os = "linux")]
+    fn allowlist_command(
+        workspace: &Path,
+        files: &Path,
+        helper: PathBuf,
+        script: &str,
+        timeout_ms: u64,
+    ) -> SandboxCommand {
         let endpoint = ProxyEndpoint {
-            socket: files.path().join("net.sock"),
+            socket: files.join("net.sock"),
             helper,
-            ssh_config: files.path().join("ssh_config"),
+            ssh_config: files.join("ssh_config"),
+            forward_ports: Vec::new(),
         };
         std::fs::write(&endpoint.ssh_config, "").unwrap();
-        let socket = endpoint.socket.clone();
-        let command = |script: &str, timeout_ms| SandboxCommand {
+        SandboxCommand {
             argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
-            cwd: workspace.path().to_path_buf(),
+            cwd: workspace.to_path_buf(),
             timeout_ms,
             max_output_chars: 10_000,
             profile: SandboxProfile::for_test(
-                workspace.path().to_path_buf(),
+                workspace.to_path_buf(),
                 Vec::new(),
-                SandboxNetworkMode::Proxied(endpoint.clone()),
+                SandboxNetworkMode::Proxied(endpoint),
                 SandboxSessionBusMode::Deny,
                 SandboxEnv::filtered_from_iter(
                     [("PATH", "/usr/bin:/bin")],
-                    workspace.path(),
+                    workspace,
                     SandboxSessionBusMode::Deny,
                 ),
                 None,
             ),
+        }
+    }
+
+    /// The proxy session lives for the command and its refusals reach the
+    /// result. Needs bwrap and the helper `cargo test` builds.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_allowlist_command_runs_behind_its_own_proxy_session() {
+        let Some(helper) = built_helper() else {
+            return;
+        };
+        let files = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let socket = files.path().join("net.sock");
+        let command = |script: &str, timeout_ms| {
+            allowlist_command(
+                workspace.path(),
+                files.path(),
+                helper.clone(),
+                script,
+                timeout_ms,
+            )
         };
         let refuse = "/run/clai/helper connect --proxy 127.0.0.1:3128 example.org 443 </dev/null";
         let network = std::sync::Arc::new(run_network(&["github.com"], &[]));
@@ -3588,6 +3625,71 @@ mod tests {
             "a timed-out command keeps its refusals"
         );
         assert!(!socket.exists(), "the session ended with the timeout");
+    }
+
+    /// The local ports a command forwards are those of the run as it starts:
+    /// one allowed while it runs answers from the next command. This test
+    /// listens on the port, so the proxy refuses it as CLAI's own; only a
+    /// forwarded port gets that far. Needs bwrap.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_port_allowed_during_a_command_is_forwarded_from_the_next() {
+        use crate::assistant::network::run_state::{LocalBinding, LocalRule};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let Some(helper) = built_helper() else {
+            return;
+        };
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let files = tempdir().unwrap();
+        let workspace = tempdir().unwrap();
+        let connect = format!(
+            "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", {port}), 5).recv(1); print(\"connected\")' 2>/dev/null || echo refused"
+        );
+        let command = |script: &str| {
+            allowlist_command(
+                workspace.path(),
+                files.path(),
+                helper.clone(),
+                script,
+                20_000,
+            )
+        };
+        let network = std::sync::Arc::new(run_network(&[], &[]));
+        let finished = AtomicBool::new(false);
+        let first = async {
+            let script =
+                format!("touch started; while [ ! -e go ]; do sleep 0.05; done; {connect}");
+            let run = run_with_network(command(&script), None, &network).await;
+            finished.store(true, Ordering::SeqCst);
+            run
+        };
+        let grant = async {
+            while !workspace.path().join("started").exists() && !finished.load(Ordering::SeqCst) {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            network.allow_local(LocalRule {
+                port,
+                binding: LocalBinding::Program("/usr/bin/served".to_string()),
+            });
+            std::fs::write(workspace.path().join("go"), "").unwrap();
+        };
+        let (first, ()) = tokio::join!(first, grant);
+        let output = match first.output {
+            Ok(output) => output,
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        };
+        assert_eq!(output.stdout, "refused\n", "{output:?}");
+        assert!(first.refused.is_empty(), "{:?}", first.refused);
+
+        let next = run_with_network(command(&connect), None, &network).await;
+        let output = next.output.unwrap();
+        assert_eq!(output.stdout, "connected\n", "{output:?}");
+        assert_eq!(next.refused.targets, [format!("localhost:{port}")]);
     }
 
     #[test]
