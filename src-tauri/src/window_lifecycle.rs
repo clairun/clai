@@ -1,32 +1,13 @@
-//! The app's single window: bringing it back to the front, and what closing
-//! it does.
+//! Window close handling, including the last-window Quit prompt.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tauri::{AppHandle, Manager, Window, WindowEvent};
+use tauri::{Manager, Window, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
 
 use crate::assistant::runtime::live_run_count;
 
-/// Label of the window declared in `tauri.conf.json`, which sets none.
-pub const MAIN_WINDOW: &str = "main";
-
-/// Shows, unminimizes and focuses the main window.
-pub fn show_main_window(app: &AppHandle) {
-    let Some(window) = app.get_webview_window(MAIN_WINDOW) else {
-        tracing::warn!("Main window not found; cannot bring it to the front");
-        return;
-    };
-    if let Err(e) = window
-        .show()
-        .and_then(|()| window.unminimize())
-        .and_then(|()| window.set_focus())
-    {
-        tracing::warn!("Failed to bring the main window to the front: {}", e);
-    }
-}
-
-/// What closing the main window does.
+/// What closing the last window does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CloseAction {
     /// Hide the window and keep running.
@@ -51,7 +32,7 @@ pub fn close_action(keep_running: bool, can_hide: bool, live_runs: usize) -> Clo
     }
 }
 
-/// What the main window does instead of closing.
+/// What the last window does instead of closing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum KeepOpen {
     Hide,
@@ -100,16 +81,36 @@ impl QuitPrompt {
 
 static QUIT_PROMPT: QuitPrompt = QuitPrompt::new();
 
-/// Handles a close request on the main window: its close button, Alt+F4 or
+/// Handles focus, destruction and a close request on the last window: its close button, Alt+F4 or
 /// the window manager. macOS Cmd+Q and Dock Quit do not send one, so they
 /// quit without asking.
 pub fn on_window_event(window: &Window, event: &WindowEvent) {
-    let WindowEvent::CloseRequested { api, .. } = event else {
-        return;
-    };
-    if window.label() != MAIN_WINDOW {
+    let registry = window
+        .app_handle()
+        .state::<crate::window_core::WindowRegistry>();
+    match event {
+        WindowEvent::Focused(focused) => {
+            registry.focused(window.label(), *focused);
+            return;
+        }
+        WindowEvent::Destroyed => {
+            registry.remove(window.label());
+            window
+                .app_handle()
+                .state::<crate::AppState>()
+                .terminals
+                .close_window(window.label());
+            return;
+        }
+        WindowEvent::CloseRequested { .. } => {}
+        _ => return,
+    }
+    if !is_last_window(window.app_handle().webview_windows().len()) {
         return;
     }
+    let WindowEvent::CloseRequested { api, .. } = event else {
+        unreachable!()
+    };
     let live_runs = live_run_count();
     // There is no setting yet, and nothing that could bring a hidden window
     // back.
@@ -121,7 +122,7 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
     match keep_open {
         KeepOpen::Hide => {
             if let Err(e) = window.hide() {
-                tracing::warn!("Failed to hide the main window: {}", e);
+                tracing::warn!("Failed to hide the last window: {}", e);
             }
         }
         KeepOpen::Ask => ask_to_quit(window, live_runs),
@@ -129,8 +130,11 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
     }
 }
 
-/// Asks whether to quit despite the live runs. Returns at once: the dialog
-/// runs off the event loop and answers through a callback.
+fn is_last_window(count: usize) -> bool {
+    count == 1
+}
+
+/// Asks whether to quit despite the live runs. The dialog answers asynchronously.
 fn ask_to_quit(window: &Window, live_runs: usize) {
     let app = window.app_handle().clone();
     window
@@ -159,6 +163,12 @@ mod tests {
     use std::cell::Cell;
 
     use super::*;
+
+    #[test]
+    fn only_the_last_window_uses_quit_guard() {
+        assert!(!is_last_window(2));
+        assert!(is_last_window(1));
+    }
 
     #[test]
     fn close_action_hides_only_when_asked_to_and_able_to() {

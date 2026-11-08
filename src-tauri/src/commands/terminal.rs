@@ -42,7 +42,7 @@ use base64::Engine as _;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{State, Window};
 
 use crate::assistant::network::spawn_roots::{self, StartedBy};
 use crate::AppState;
@@ -70,6 +70,7 @@ pub enum TerminalEvent {
 /// behind a `Mutex` so the registry can hand out shared references that the
 /// write/resize/close commands serialize against.
 struct TerminalHandle {
+    window_label: String,
     /// Master PTY — kept for `resize`.
     master: Mutex<Box<dyn MasterPty + Send>>,
     /// Write half — keystrokes/commands from the frontend.
@@ -115,6 +116,25 @@ impl TerminalRegistry {
             .lock()
             .expect("terminal registry poisoned")
             .remove(id)
+    }
+
+    /// Stop sessions owned by a destroyed window, leaving other windows alive.
+    pub fn close_window(&self, label: &str) {
+        let handles: Vec<_> = {
+            let mut map = self.inner.lock().expect("terminal registry poisoned");
+            let ids: Vec<_> = map
+                .iter()
+                .filter(|(_, handle)| handle.window_label == label)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter().filter_map(|id| map.remove(&id)).collect()
+        };
+        for handle in handles {
+            handle.closed.store(true, Ordering::SeqCst);
+            if let Ok(mut killer) = handle.killer.lock() {
+                let _ = killer.kill();
+            }
+        }
     }
 
     /// Kill every live session. Called on app teardown (see `lib.rs`'s
@@ -376,6 +396,7 @@ fn spawn_io_threads(
 /// Returns the session id used by the write/resize/close commands.
 #[tauri::command]
 pub async fn terminal_open(
+    window: Window,
     state: State<'_, AppState>,
     workspace_id: Option<String>,
     cwd: Option<String>,
@@ -425,6 +446,7 @@ pub async fn terminal_open(
 
     let closed = Arc::new(AtomicBool::new(false));
     let handle = Arc::new(TerminalHandle {
+        window_label: window.label().to_owned(),
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
         killer: Mutex::new(killer),
@@ -618,6 +640,54 @@ mod tests {
             spawn_roots::eventually(|| spawn_roots::recorded(pid).is_none()).await,
             "gone once reaped"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn closing_one_window_kills_only_its_terminal() {
+        fn open_test_terminal(
+            registry: &TerminalRegistry,
+            id: &str,
+            label: &str,
+        ) -> Arc<AtomicBool> {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let mut command = CommandBuilder::new("sleep");
+            command.arg("30");
+            let child = pair.slave.spawn_command(command).unwrap();
+            drop(pair.slave);
+            let reader = pair.master.try_clone_reader().unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let killer = child.clone_killer();
+            let closed = Arc::new(AtomicBool::new(false));
+            let handle = Arc::new(TerminalHandle {
+                window_label: label.to_owned(),
+                master: Mutex::new(pair.master),
+                writer: Mutex::new(writer),
+                killer: Mutex::new(killer),
+                closed: Arc::clone(&closed),
+                winch_marker: None,
+            });
+            registry.insert(id.to_owned(), handle);
+            spawn_io_threads(reader, child, Channel::new(|_| Ok(())), Arc::clone(&closed));
+            closed
+        }
+
+        let registry = TerminalRegistry::new();
+        let first = open_test_terminal(&registry, "first", "main");
+        let second = open_test_terminal(&registry, "second", "w-1");
+        registry.close_window("main");
+        assert!(first.load(Ordering::SeqCst));
+        assert!(registry.get("first").is_none());
+        assert!(!second.load(Ordering::SeqCst));
+        assert!(registry.get("second").is_some());
+        registry.close_all();
     }
 
     #[test]

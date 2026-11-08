@@ -26,7 +26,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::assistant::sandbox::filesystem::normalize_path;
 use std::sync::RwLock;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State, Window};
 use ts_rs::TS;
 
 const DEFAULT_WORKSPACE_ID: &str = "default";
@@ -2408,13 +2408,14 @@ struct PickedImage {
 /// read (it can only pop the picker), so it can't exfiltrate arbitrary
 /// files (e.g. `~/.ssh/id_rsa`). The commands are async, so
 /// `blocking_pick_file` runs off the main thread (required by the plugin).
-async fn pick_image(app: &AppHandle) -> Result<Option<PickedImage>, String> {
+async fn pick_image(app: &AppHandle, window: &Window) -> Result<Option<PickedImage>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let picked = app
         .dialog()
         .file()
         .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+        .set_parent(window)
         .blocking_pick_file();
 
     let Some(file_path) = picked else {
@@ -2464,12 +2465,13 @@ async fn read_image_file(source: &Path) -> Result<PickedImage, String> {
 /// allowlist, workspace-root sandbox) as the paste path.
 #[tauri::command]
 pub async fn workspace_pick_and_store_image(
+    window: Window,
     workspace_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<ContentPart>, String> {
     let root_path = resolve_agent_workspace_root(state.inner(), &workspace_id)?;
-    let Some(image) = pick_image(&app).await? else {
+    let Some(image) = pick_image(&app, &window).await? else {
         return Ok(None);
     };
     Ok(Some(store_workspace_image(
@@ -2493,13 +2495,18 @@ pub struct PickedImageResponse {
 /// new-workspace prompt). The frontend stores it with `workspace_store_image`
 /// once the workspace is created.
 #[tauri::command]
-pub async fn workspace_pick_image(app: AppHandle) -> Result<Option<PickedImageResponse>, String> {
+pub async fn workspace_pick_image(
+    app: AppHandle,
+    window: Window,
+) -> Result<Option<PickedImageResponse>, String> {
     use base64::Engine as _;
-    Ok(pick_image(&app).await?.map(|image| PickedImageResponse {
-        data_base64: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
-        media_type: image.media_type.to_string(),
-        filename: image.filename,
-    }))
+    Ok(pick_image(&app, &window)
+        .await?
+        .map(|image| PickedImageResponse {
+            data_base64: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+            media_type: image.media_type.to_string(),
+            filename: image.filename,
+        }))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -3155,7 +3162,11 @@ pub async fn workspace_set_schedule_paused(
 /// ticks are suppressed. The choice is persisted to `AppConfig` so it survives
 /// an app restart (restored in `populate_scheduler_from_workspace_agents`).
 #[tauri::command]
-pub async fn set_scheduler_paused(paused: bool, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn set_scheduler_paused(
+    paused: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     // Persist first so the choice survives a restart even if the process dies
     // right after; the in-memory scheduler flip below is idempotent.
     {
@@ -3175,6 +3186,9 @@ pub async fn set_scheduler_paused(paused: bool, state: State<'_, AppState>) -> R
         scheduler.resume();
     }
 
+    drop(scheduler);
+    app.emit("scheduler://paused", paused)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -3381,10 +3395,21 @@ fn remove_workspace_root(
 /// scheduler firing on a vanished config until the next app restart.
 #[tauri::command]
 pub async fn workspace_delete(
+    app: AppHandle,
     workspace_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    delete_workspace(state.inner(), workspace_id).await
+    let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
+    let result = delete_workspace(state.inner(), workspace_id.clone()).await;
+    if state.workspace_root(&workspace_id).is_none() {
+        if let Err(error) = app.emit(
+            "workspace://deleted",
+            serde_json::json!({"workspaceId": workspace_id}),
+        ) {
+            tracing::warn!(%error, "Failed to broadcast workspace deletion");
+        }
+    }
+    result
 }
 
 async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), String> {
@@ -3490,6 +3515,7 @@ async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), 
 /// Rename a workspace.
 #[tauri::command]
 pub async fn workspace_set_title(
+    app: AppHandle,
     workspace_id: String,
     title: String,
     state: State<'_, AppState>,
@@ -3508,6 +3534,7 @@ pub async fn workspace_set_title(
         config.updated_at = now_millis();
         Ok(())
     })?;
+    crate::window_core::retitle_workspace(&app, &workspace_id, trimmed);
 
     Ok(())
 }

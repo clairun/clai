@@ -13,6 +13,7 @@
     "windows": [
       {
         "title": "CLAI",
+        "create": false,
         "width": 1280,
         "height": 800,
         "useHttpsScheme": false,
