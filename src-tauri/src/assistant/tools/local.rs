@@ -10,8 +10,8 @@ use serde::Deserialize;
 use tokio::time::Duration;
 
 use crate::assistant::network::addr::{
-    is_blocked_web_fetch_hostname, reject_private_web_fetch_addrs, reject_private_web_fetch_ip,
-    strip_ipv6_url_brackets,
+    embedded_ipv4, is_blocked_web_fetch_hostname, reject_private_web_fetch_addrs,
+    reject_private_web_fetch_ip, strip_ipv6_url_brackets,
 };
 #[cfg(target_os = "linux")]
 use crate::assistant::network::local_listener::{Listener, ListenerInspector, Loopback};
@@ -235,14 +235,21 @@ async fn execute_bash_exec(
         }
     });
     let bus = run.session_bus_unavailable.as_deref();
-    bash_exec_outcome(
+    let localhost = output.as_ref().ok().and_then(|output| {
+        localhost_refusal(output, run.allowed_local_ports.as_deref(), &run.refused)
+    });
+    let mut outcome = bash_exec_outcome(
         output,
         &run.refused,
         &sockets,
         bus,
         timeout_ms,
         explicit_timeout,
-    )
+    );
+    if let (Ok(result), Some(port)) = (&mut outcome, localhost) {
+        result["network"]["localhost"] = localhost_note(port);
+    }
+    outcome
 }
 
 /// What a command run returned, and what the sandbox kept from it: the
@@ -252,6 +259,9 @@ async fn execute_bash_exec(
 struct NetworkRun {
     output: Result<SandboxCommandOutput, String>,
     refused: RefusedTargets,
+    /// In Allowlist, the localhost ports allowed for the run when the
+    /// command ended; `None` when it ran without the network proxy.
+    allowed_local_ports: Option<Vec<u16>>,
     session_bus_unavailable: Option<String>,
 }
 
@@ -308,6 +318,7 @@ async fn run_with_network(
                              {error}"
                         )),
                         refused: RefusedTargets::default(),
+                        allowed_local_ports: None,
                         session_bus_unavailable,
                     };
                 }
@@ -320,6 +331,7 @@ async fn run_with_network(
     stop_bus_proxy();
     NetworkRun {
         output,
+        allowed_local_ports: session.as_ref().map(|_| run_network.local_ports()),
         refused: session.map(|session| session.refused()).unwrap_or_default(),
         session_bus_unavailable,
     }
@@ -335,6 +347,7 @@ async fn run_with_network(
     NetworkRun {
         output: crate::assistant::network::spawn_roots::as_agent(agent, run_command(command)).await,
         refused: RefusedTargets::default(),
+        allowed_local_ports: None,
         session_bus_unavailable,
     }
 }
@@ -492,6 +505,141 @@ fn unreachable_sockets(output: &SandboxCommandOutput, sockets: &SocketPolicy) ->
 #[cfg(not(target_os = "linux"))]
 fn unreachable_sockets(_output: &SandboxCommandOutput, _sockets: &SocketPolicy) -> Vec<String> {
     Vec::new()
+}
+
+/// The `network.localhost` note for a refused localhost connection, naming
+/// the port when the output did.
+fn localhost_note(port: Option<u16>) -> serde_json::Value {
+    let host = port.map_or_else(
+        || "localhost:<port>".to_string(),
+        |port| format!("localhost:{port}"),
+    );
+    let mut note = serde_json::json!({
+        "hint": format!(
+            "A connection to localhost was refused. Inside the sandbox, localhost is the \
+             sandbox's own, not this computer's. If the service runs on this computer, call \
+             `net_request_access` with host `{host}`; once granted, the port answers \
+             from your next command."
+        ),
+    });
+    if let Some(port) = port {
+        note["port"] = port.into();
+    }
+    note
+}
+
+/// In Allowlist (`allowed` holds the run's allowed localhost ports), the
+/// localhost port the command output says a connection was refused on,
+/// `Some(None)` when the refusal names no port. A connection to an allowed
+/// port reaches the computer, so a refusal there means nothing listens; one
+/// the proxy refused is already named in `network.refused`.
+#[cfg(target_os = "linux")]
+fn localhost_refusal(
+    output: &SandboxCommandOutput,
+    allowed: Option<&[u16]>,
+    refused: &RefusedTargets,
+) -> Option<Option<u16>> {
+    let allowed = allowed?;
+    let mut portless = false;
+    for line in output.stderr.lines().chain(output.stdout.lines()) {
+        match refused_localhost_port(line) {
+            Some(Some(port))
+                if !allowed.contains(&port)
+                    && !refused.targets.contains(&format!("localhost:{port}")) =>
+            {
+                return Some(Some(port));
+            }
+            Some(None) => portless = true,
+            _ => {}
+        }
+    }
+    portless.then_some(None)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn localhost_refusal(
+    _output: &SandboxCommandOutput,
+    _allowed: Option<&[u16]>,
+    _refused: &RefusedTargets,
+) -> Option<Option<u16>> {
+    None
+}
+
+/// Whether `line` reports a refused connection to `localhost`, `127.0.0.1`
+/// or `::1`, and the port it names: right after the address
+/// (`localhost:3306`, `[::1]:3000`, `('127.0.0.1', 5678)`,
+/// `/dev/tcp/localhost/5678`) or as `port 5432` / `port=8000`.
+#[cfg(target_os = "linux")]
+fn refused_localhost_port(line: &str) -> Option<Option<u16>> {
+    const REFUSALS: [&str; 9] = [
+        "connection refused",
+        "econnrefused",
+        "connectionrefusederror",
+        "errno 111",
+        "can't connect",
+        "cannot connect",
+        "could not connect",
+        "couldn't connect",
+        "failed to connect",
+    ];
+    let line = line.to_ascii_lowercase().replace('\u{2019}', "'");
+    if !REFUSALS.iter().any(|refusal| line.contains(refusal)) {
+        return None;
+    }
+    let mut loopback = false;
+    for name in ["localhost", "127.0.0.1", "::1"] {
+        for (at, _) in line.match_indices(name) {
+            let after = &line[at + name.len()..];
+            let mut next = after.chars();
+            let longer = line[..at].chars().next_back().is_some_and(|c| {
+                c.is_ascii_alphanumeric() || "._-".contains(c) || (name == "::1" && c == ':')
+            }) || match next.next() {
+                Some('.') => next.next().is_some_and(|c| c.is_ascii_alphanumeric()),
+                Some(c) => c.is_ascii_alphanumeric() || "_-".contains(c),
+                None => false,
+            };
+            if longer {
+                continue;
+            }
+            loopback = true;
+            if let Some(port) = port_after_address(after) {
+                return Some(Some(port));
+            }
+        }
+    }
+    loopback.then(|| port_keyword(&line))
+}
+
+#[cfg(target_os = "linux")]
+fn port_after_address(after: &str) -> Option<u16> {
+    let after = after.trim_start_matches([']', '\'', '"']);
+    let digits = match after.strip_prefix([':', '/']) {
+        Some(digits) => digits,
+        None => after.strip_prefix(',')?.trim_start(),
+    };
+    leading_port(digits)
+}
+
+#[cfg(target_os = "linux")]
+fn port_keyword(line: &str) -> Option<u16> {
+    line.match_indices("port").find_map(|(at, word)| {
+        if line[..at]
+            .chars()
+            .next_back()
+            .is_some_and(|c| c.is_ascii_alphanumeric())
+        {
+            return None;
+        }
+        leading_port(line[at + word.len()..].trim_start_matches([' ', '=', ':']))
+    })
+}
+
+#[cfg(target_os = "linux")]
+fn leading_port(text: &str) -> Option<u16> {
+    let end = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    text[..end].parse().ok().filter(|port| *port != 0)
 }
 
 /// Turn a bare sandbox timeout into an actionable error the model can recover
@@ -2174,6 +2322,16 @@ async fn resolve_public_web_fetch_target(
         .ok_or_else(|| "URL must include a host".to_string())?;
     let host_literal = strip_ipv6_url_brackets(host);
     let normalized_host = host_literal.trim_end_matches('.').to_ascii_lowercase();
+    if is_loopback_web_host(&normalized_host) {
+        let allowed_first = match gate {
+            WebGate::Allowlist(_) => ", once the port is allowed",
+            WebGate::AnyHost => "",
+        };
+        return Err(format!(
+            "Fetching private/local URLs is not allowed: `web_fetch` never reaches this \
+             computer's localhost. Use curl in `bash_exec` instead{allowed_first}."
+        ));
+    }
     if is_blocked_web_fetch_hostname(&normalized_host) {
         return Err("Fetching private/local URLs is not allowed".to_string());
     }
@@ -2200,6 +2358,19 @@ async fn resolve_public_web_fetch_target(
     // Pin the public DNS result into reqwest for this request so a hostname
     // cannot validate as public and then resolve privately during connect.
     Ok(Some((host.to_string(), addrs)))
+}
+
+/// Whether `host` (lower case, without brackets) names this computer.
+fn is_loopback_web_host(host: &str) -> bool {
+    host == "localhost"
+        || host.ends_with(".localhost")
+        || match host.parse::<IpAddr>() {
+            Ok(IpAddr::V4(ip)) => ip.is_loopback(),
+            Ok(IpAddr::V6(ip)) => {
+                ip.is_loopback() || embedded_ipv4(ip).is_some_and(|ip| ip.is_loopback())
+            }
+            Err(_) => false,
+        }
 }
 
 fn web_fetch_body_limit(content_limit: usize) -> usize {
@@ -2645,6 +2816,44 @@ mod tests {
                 .unwrap_err();
             assert!(err.contains("private/local"), "{raw}: {err}");
         }
+    }
+
+    /// `web_fetch` never reaches this computer, so it points at `bash_exec`,
+    /// not at `net_request_access`, listed or not.
+    #[tokio::test]
+    async fn web_fetch_sends_this_computers_localhost_to_bash_exec() {
+        let listed = run_network(&["localhost", "127.0.0.1"], &[]);
+        let unlisted = run_network(&[], &[]);
+        for raw in [
+            "http://127.0.0.1:5678/",
+            "http://127.1.2.3/",
+            "http://[::1]:5678/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://localhost:5678/",
+            "http://api.localhost/",
+        ] {
+            let url = parse_web_fetch_url(raw).unwrap();
+            for (gate, once) in [
+                (WebGate::Allowlist(&unlisted), true),
+                (WebGate::Allowlist(&listed), true),
+                (WebGate::AnyHost, false),
+            ] {
+                let err = resolve_public_web_fetch_target(&url, gate)
+                    .await
+                    .unwrap_err();
+                assert!(
+                    err.contains("`web_fetch` never reaches this computer's localhost. Use curl in `bash_exec` instead"),
+                    "{raw}: {err}"
+                );
+                assert_eq!(
+                    err.contains(", once the port is allowed."),
+                    once,
+                    "{raw}: {err}"
+                );
+                assert!(!err.contains("net_request_access"), "{raw}: {err}");
+            }
+        }
+        assert!(logged(&unlisted).is_empty());
     }
 
     #[test]
@@ -3502,6 +3711,10 @@ mod tests {
         let run = run_with_network(command, agent(), &network);
         let running = spawn_roots::eventually(|| !spawn_roots::started_by(&by).is_empty());
         let (run, running) = tokio::join!(run, running);
+        assert_eq!(
+            run.allowed_local_ports, None,
+            "no proxy, so no localhost hint"
+        );
         match run.output {
             Ok(output) => assert_eq!(output.exit_code, Some(0), "{output:?}"),
             Err(error) if error.contains("Sandboxed shell is unavailable") => {
@@ -3685,6 +3898,7 @@ mod tests {
         };
         assert_eq!(output.stdout, "refused\n", "{output:?}");
         assert!(first.refused.is_empty(), "{:?}", first.refused);
+        assert_eq!(first.allowed_local_ports, Some(vec![port]));
 
         let next = run_with_network(command(&connect), None, &network).await;
         let output = next.output.unwrap();
@@ -3765,6 +3979,118 @@ mod tests {
                 ["refusedMore"],
             3
         );
+    }
+
+    /// One line per client as it reports a refused connection to localhost,
+    /// and the port it names.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_refused_localhost_connection_is_read_from_the_client_output() {
+        for (line, port) in [
+            (r#"psql: error: connection to server at "localhost" (127.0.0.1), port 5432 failed: Connection refused"#, Some(5432)),
+            (r#"psql: error: connection to server at "localhost" (::1), port 5678 failed: Connection refused"#, Some(5678)),
+            ("Could not connect to Redis at 127.0.0.1:6379: Connection refused", Some(6379)),
+            ("curl: (7) Failed to connect to localhost port 8080 after 0 ms: Couldn't connect to server", Some(8080)),
+            ("curl: (7) Failed to connect to ::1 port 8081 after 0 ms: Connection refused", Some(8081)),
+            ("Error: connect ECONNREFUSED 127.0.0.1:3000", Some(3000)),
+            ("Error: connect ECONNREFUSED ::1:3001", Some(3001)),
+            ("ERROR 2003 (HY000): Can't connect to MySQL server on 'localhost:3306' (111)", Some(3306)),
+            ("Can\u{2019}t connect to MySQL server on \u{2019}localhost:3307\u{2019}", Some(3307)),
+            ("ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1' (111)", None),
+            ("requests.exceptions.ConnectionError: HTTPConnectionPool(host='localhost', port=8000): Max retries exceeded with url: / (Caused by NewConnectionError('<urllib3.connection.HTTPConnection object at 0x7f>: Failed to establish a new connection: [Errno 111] Connection refused'))", Some(8000)),
+            ("ConnectionRefusedError: [Errno 111] Connect call failed ('127.0.0.1', 5679)", Some(5679)),
+            ("nc: connect to localhost (127.0.0.1) port 5680 (tcp) failed: Connection refused", Some(5680)),
+            ("bash: line 1: /dev/tcp/localhost/5681: Connection refused", Some(5681)),
+            ("dial tcp [::1]:9000: connect: connection refused", Some(9000)),
+        ] {
+            assert_eq!(refused_localhost_port(line), Some(port), "{line}");
+        }
+        for line in [
+            r#"psql: error: connection to server at "db.example.org" (10.0.0.5), port 5432 failed: Connection refused"#,
+            "Listening on http://localhost:8080",
+            "connected to 127.0.0.1:6379",
+            "curl: (7) Failed to connect to localhost.example.org port 80: Connection refused",
+            "dial tcp [fe80::1]:9000: connect: connection refused",
+            "Error: connect ECONNREFUSED 127.0.0.10:3000",
+            // Python and Ncat name no host here: out of reach of the hint.
+            "ConnectionRefusedError: [Errno 111] Connection refused",
+            "Ncat: Connection refused.",
+        ] {
+            assert_eq!(refused_localhost_port(line), None, "{line}");
+        }
+    }
+
+    /// In Allowlist only, and not for a port the run allows (nothing listens
+    /// there then) or one the proxy already named.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_localhost_hint_is_for_ports_the_run_does_not_allow() {
+        let output = |stderr: &str| SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(2),
+            success: false,
+            stdout: String::new(),
+            stderr: stderr.to_string(),
+        };
+        let psql = |port: u16| {
+            format!(
+                r#"psql: error: connection to server at "localhost" (::1), port {port} failed: Connection refused"#
+            )
+        };
+        let none = RefusedTargets::default();
+        let refused = output(&psql(5678));
+        assert_eq!(
+            localhost_refusal(&refused, Some(&[]), &none),
+            Some(Some(5678))
+        );
+        assert_eq!(
+            localhost_refusal(&refused, Some(&[5432]), &none),
+            Some(Some(5678))
+        );
+        assert_eq!(localhost_refusal(&refused, Some(&[5678]), &none), None);
+        assert_eq!(
+            localhost_refusal(&refused, None, &none),
+            None,
+            "Host network or Off"
+        );
+        let mut named = RefusedTargets::default();
+        named.add("localhost:5678".to_string());
+        assert_eq!(localhost_refusal(&refused, Some(&[]), &named), None);
+
+        let both = output(&format!("{}\n{}", psql(5432), psql(6379)));
+        assert_eq!(
+            localhost_refusal(&both, Some(&[5432]), &none),
+            Some(Some(6379))
+        );
+        let portless =
+            output("ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1' (111)");
+        assert_eq!(localhost_refusal(&portless, Some(&[]), &none), Some(None));
+        let on_stdout = SandboxCommandOutput {
+            stdout: psql(5678),
+            ..output("")
+        };
+        assert_eq!(
+            localhost_refusal(&on_stdout, Some(&[]), &none),
+            Some(Some(5678))
+        );
+    }
+
+    #[test]
+    fn the_localhost_note_names_the_port_to_ask_for() {
+        let note = localhost_note(Some(5678));
+        assert_eq!(note["port"], 5678);
+        let hint = note["hint"].as_str().unwrap();
+        assert!(
+            hint.contains("call `net_request_access` with host `localhost:5678`"),
+            "{hint}"
+        );
+        assert!(hint.contains("not this computer's"), "{hint}");
+        let note = localhost_note(None);
+        assert!(note.get("port").is_none());
+        assert!(note["hint"]
+            .as_str()
+            .unwrap()
+            .contains("`localhost:<port>`"));
     }
 
     /// The hint leads to the folder-access card, for the socket itself.

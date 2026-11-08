@@ -587,7 +587,7 @@ fn sandbox_prompt(
                     "sandboxed shell on Linux through bubblewrap when `bash_exec` is available (network: {mode}, {bus})"
                 ),
                 allowlist: in_allowlist.then(|| format!(
-                    "- Network allowlist: shell commands and `web_fetch` reach only the hosts matching the {} entries on this agent's allowlist and any the user allows during this run. Shell traffic goes through CLAI's network proxy: `HTTP_PROXY` and `HTTPS_PROXY` are set, so tools that honour them work; DNS lookups fail inside the sandbox and tools that ignore the proxy variables cannot connect. An unlisted host fails with a 403 or a refused connection, and the `bash_exec` result names it under `network.refused`. When the task needs such a host, call `net_request_access` with the host and the reason; do not look for a way around the proxy. `localhost` inside the sandbox is reachable directly. The proxy never connects to loopback or link-local addresses, so services that listen only on the host computer's loopback are not reachable, while a listed host that resolves to a private local-network address is reachable from shell commands (`web_fetch` refuses every non-public address).\n",
+                    "- Network allowlist: shell commands and `web_fetch` reach only the hosts matching the {} entries on this agent's allowlist and any the user allows during this run. Shell traffic goes through CLAI's network proxy: `HTTP_PROXY` and `HTTPS_PROXY` are set, so tools that honour them work; DNS lookups fail inside the sandbox and tools that ignore the proxy variables cannot connect. An unlisted host fails with a 403 or a refused connection, and the `bash_exec` result names it under `network.refused`. When the task needs such a host, call `net_request_access` with the host and the reason; do not look for a way around the proxy. `localhost` inside the sandbox is the sandbox's own, separate from this computer's: `ss`, `ps` and `netstat` there see only the sandbox, and a refused connection to localhost does not mean nothing listens on the computer. To reach a service on this computer's localhost, call `net_request_access` with host `localhost:<port>`; once granted, the port answers on 127.0.0.1 and ::1 from your next command, and it is taken inside the sandbox, so do not start your own server on it. The proxy never connects to a listed host that resolves to a loopback or link-local address, while one that resolves to a private local-network address is reachable from shell commands (`web_fetch` refuses every non-public address).\n",
                     network.allow_domains.len()
                 )),
                 ssh: Some(if in_allowlist {
@@ -1537,7 +1537,21 @@ mod tests {
                     linux_allowlist,
                     "{case}"
                 );
+                assert_eq!(
+                    allowlist.contains("with host `localhost:<port>`"),
+                    linux_allowlist,
+                    "{case}"
+                );
                 if linux_allowlist {
+                    for said in [
+                        "`ss`, `ps` and `netstat` there see only the sandbox",
+                        "a refused connection to localhost does not mean nothing listens",
+                        "answers on 127.0.0.1 and ::1 from your next command",
+                        "do not start your own server on it",
+                    ] {
+                        assert!(allowlist.contains(said), "{allowlist}");
+                    }
+                    assert!(!allowlist.contains("reachable directly"), "{allowlist}");
                     assert!(
                         allowlist.contains("only the hosts matching the 2 entries"),
                         "{allowlist}"
