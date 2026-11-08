@@ -16,6 +16,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
+use super::spawn_roots::{self, StartedBy};
+
 /// `st` of a listening socket in `/proc/net/tcp`.
 const LISTEN: &str = "0A";
 /// How far up the parent chain a holder is checked for CLAI.
@@ -81,7 +83,8 @@ impl Loopback {
 pub enum Listener {
     /// Nothing listens on the port at an address the dial reaches.
     Nothing,
-    /// CLAI or a process it started holds the socket: never connected to.
+    /// CLAI, or a program it runs for its own work such as an agent engine,
+    /// holds the socket: never connected to.
     Clai,
     /// One program, at a path a saved grant can name.
     Program(Program),
@@ -98,6 +101,8 @@ pub enum Listener {
         reason: RunOnly,
         sockets: Vec<u64>,
         holders: Vec<Holder>,
+        /// Who started the holders, when CLAI did. For display only.
+        started_by: Option<StartedBy>,
     },
 }
 
@@ -111,6 +116,8 @@ pub struct Program {
     /// The program runs whatever script, or relays wherever, it is told
     /// (python, node, socat), so its path says little about the listener.
     pub interpreter: bool,
+    /// Who started it, when CLAI did. For display only.
+    pub started_by: Option<StartedBy>,
 }
 
 /// Why no saved grant can name the listener.
@@ -305,6 +312,7 @@ struct Seen {
     exe: PathBuf,
     namespaces: Namespaces,
     cmdline: String,
+    started_by: Option<StartedBy>,
 }
 
 impl From<&Seen> for Holder {
@@ -335,6 +343,11 @@ trait ProcSource {
     /// The socket inodes among the fds of `pid`; none when unreadable.
     fn socket_inodes(&self, pid: u32) -> Vec<u64>;
     fn parent(&self, pid: u32) -> Option<u32>;
+    /// When `pid` started, which tells it from a later process given its pid.
+    fn start_time(&self, pid: u32) -> Option<u64>;
+    /// The start time of the program CLAI recorded at `pid`, and who started
+    /// it.
+    fn recorded(&self, pid: u32) -> Option<(u64, StartedBy)>;
     fn namespaces(&self, pid: u32) -> Option<Namespaces>;
     /// The target of `/proc/<pid>/exe`, as the kernel prints it.
     fn exe(&self, pid: u32) -> Option<PathBuf>;
@@ -378,9 +391,11 @@ fn scan(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<(Listen
         if held.is_empty() {
             continue;
         }
-        if is_clai(proc, pid, clai) {
-            return Ok((Listener::Clai, inodes.iter().copied().collect()));
-        }
+        let started_by = match origin(proc, pid, clai) {
+            Origin::Clai => return Ok((Listener::Clai, inodes.iter().copied().collect())),
+            Origin::StartedBy(by) => Some(by),
+            Origin::Apart => None,
+        };
         let (Some(namespaces), Some(exe)) = (proc.namespaces(pid), proc.exe(pid)) else {
             unreadable = true;
             continue;
@@ -399,6 +414,7 @@ fn scan(proc: &impl ProcSource, port: u16, dial: Loopback) -> io::Result<(Listen
             exe,
             namespaces,
             cmdline: proc.cmdline(pid),
+            started_by,
         });
     }
     // A holder that is exiting, or that CLAI may not inspect.
@@ -451,6 +467,7 @@ fn classify(
             exe,
             pid: first.pid,
             cmdline: first.cmdline.clone(),
+            started_by: started_by(seen),
         }),
         Err(reason) => run_only(reason, sockets, seen),
     }
@@ -512,7 +529,17 @@ fn run_only(reason: RunOnly, sockets: &[Socket], seen: &[Seen]) -> Listener {
         reason,
         sockets: inodes(sockets),
         holders: seen.iter().map(Holder::from).collect(),
+        started_by: started_by(seen),
     }
+}
+
+/// Who started the holders, when CLAI started them all the same way.
+fn started_by(seen: &[Seen]) -> Option<StartedBy> {
+    let (first, rest) = seen.split_first()?;
+    rest.iter()
+        .all(|holder| holder.started_by == first.started_by)
+        .then(|| first.started_by.clone())
+        .flatten()
 }
 
 fn inodes(sockets: &[Socket]) -> Vec<u64> {
@@ -520,19 +547,39 @@ fn inodes(sockets: &[Socket]) -> Vec<u64> {
     unique.into_iter().collect()
 }
 
-/// Whether `pid` is CLAI or one of its descendants.
-fn is_clai(proc: &impl ProcSource, mut pid: u32, clai: u32) -> bool {
+/// Where a holder comes from, by its parent chain.
+enum Origin {
+    /// CLAI, or a program it runs for its own work: an agent engine, a
+    /// helper, anything it did not record as started for the user.
+    Clai,
+    /// A program CLAI started for the user (see [`spawn_roots`]), or a
+    /// process under it.
+    StartedBy(StartedBy),
+    /// Not under CLAI, or no longer: a daemon leaves the chain.
+    Apart,
+}
+
+/// The nearest program CLAI recorded on the parent chain of `pid` started
+/// it; reaching CLAI first means CLAI runs it for its own work. A record
+/// names a pid only while the start time matches, so a reused pid never
+/// takes it over.
+fn origin(proc: &impl ProcSource, mut pid: u32, clai: u32) -> Origin {
     for _ in 0..MAX_ANCESTORS {
+        if let Some((start, by)) = proc.recorded(pid) {
+            if proc.start_time(pid) == Some(start) {
+                return Origin::StartedBy(by);
+            }
+        }
         if pid == clai {
-            return true;
+            return Origin::Clai;
         }
         match proc.parent(pid) {
             Some(parent) if parent != 0 => pid = parent,
-            _ => return false,
+            _ => return Origin::Apart,
         }
     }
     // Too deep to tell.
-    true
+    Origin::Clai
 }
 
 /// The path a grant can store: valid UTF-8 and naming the file the process
@@ -735,6 +782,14 @@ impl ProcSource for HostProc {
         rest.split_whitespace().nth(1)?.parse().ok()
     }
 
+    fn start_time(&self, pid: u32) -> Option<u64> {
+        spawn_roots::start_time(pid)
+    }
+
+    fn recorded(&self, pid: u32) -> Option<(u64, StartedBy)> {
+        spawn_roots::recorded(pid)
+    }
+
     fn namespaces(&self, pid: u32) -> Option<Namespaces> {
         Some(Namespaces {
             pid: fs::read_link(format!("/proc/{pid}/ns/pid")).ok()?,
@@ -888,6 +943,7 @@ mod tests {
         fd_reads: Cell<u32>,
         hides_namespaces: bool,
         hides_exe: bool,
+        start: u64,
     }
 
     /// CLAI (pid 100) under init, the sockets listening on [`PORT`], and
@@ -899,6 +955,8 @@ mod tests {
         users: BTreeMap<u32, String>,
         subuid: String,
         uid_map: Option<String>,
+        /// The programs CLAI recorded, by pid: start time and who started it.
+        recorded: BTreeMap<u32, (u64, StartedBy)>,
     }
 
     fn namespaces(pid: &str, mnt: &str) -> Namespaces {
@@ -925,6 +983,7 @@ mod tests {
                 .collect(),
                 subuid: "me:100000:65536\n".to_string(),
                 uid_map: Some(INITIAL_UID_MAP.to_string()),
+                recorded: BTreeMap::new(),
             }
             .holder(1, 0, "/usr/lib/systemd/systemd", &[])
             .holder(CLAI, 1, "/usr/bin/clai", &[])
@@ -964,8 +1023,16 @@ mod tests {
                     fd_reads: Cell::new(0),
                     hides_namespaces: false,
                     hides_exe: false,
+                    start: u64::from(pid) * 10,
                 },
             );
+            self
+        }
+
+        /// Records `pid` as CLAI records a program it starts for the user.
+        fn started(mut self, pid: u32, by: StartedBy) -> Self {
+            let start = self.processes[&pid].start;
+            self.recorded.insert(pid, (start, by));
             self
         }
 
@@ -1037,6 +1104,14 @@ mod tests {
             Some(self.processes.get(&pid)?.parent)
         }
 
+        fn start_time(&self, pid: u32) -> Option<u64> {
+            Some(self.processes.get(&pid)?.start)
+        }
+
+        fn recorded(&self, pid: u32) -> Option<(u64, StartedBy)> {
+            self.recorded.get(&pid).cloned()
+        }
+
         fn namespaces(&self, pid: u32) -> Option<Namespaces> {
             let process = self.processes.get(&pid)?;
             (!process.hides_namespaces).then(|| process.namespaces.clone())
@@ -1062,7 +1137,30 @@ mod tests {
             pid,
             cmdline: cmdline.to_string(),
             interpreter: is_interpreter(exe),
+            started_by: None,
         })
+    }
+
+    /// `listener`, started as `by` says.
+    fn started(listener: Listener, by: StartedBy) -> Listener {
+        match listener {
+            Listener::Program(program) => Listener::Program(Program {
+                started_by: Some(by),
+                ..program
+            }),
+            Listener::RunOnly {
+                reason,
+                sockets,
+                holders,
+                ..
+            } => Listener::RunOnly {
+                reason,
+                sockets,
+                holders,
+                started_by: Some(by),
+            },
+            other => panic!("{other:?} has no label"),
+        }
     }
 
     fn run_only(reason: RunOnly, sockets: &[u64], holders: &[(u32, &str)]) -> Listener {
@@ -1077,6 +1175,7 @@ mod tests {
                     cmdline: format!("{exe} -N"),
                 })
                 .collect(),
+            started_by: None,
         }
     }
 
@@ -1320,8 +1419,10 @@ mod tests {
         ]);
     }
 
+    const CLAUDE: &str = "/home/me/.local/bin/claude";
+
     #[test]
-    fn clai_and_its_descendants_are_never_programs() {
+    fn clai_and_what_it_runs_for_its_own_work_are_never_programs() {
         assert_cases([
             (
                 "CLAI itself",
@@ -1329,9 +1430,31 @@ mod tests {
                 Listener::Clai,
             ),
             (
-                "a CLAI descendant",
+                "an agent engine",
+                tunnel().holder(200, CLAI, CLAUDE, &[11]),
+                Listener::Clai,
+            ),
+            (
+                "a process under an agent engine",
                 tunnel()
-                    .holder(200, CLAI, "/usr/bin/bwrap", &[])
+                    .holder(200, CLAI, CLAUDE, &[])
+                    .holder(201, 200, PYTHON, &[11]),
+                Listener::Clai,
+            ),
+            (
+                "an agent engine beside a program CLAI started for the user",
+                tunnel()
+                    .holder(200, CLAI, "/usr/bin/bash", &[])
+                    .started(200, StartedBy::Terminal)
+                    .holder(201, CLAI, CLAUDE, &[11]),
+                Listener::Clai,
+            ),
+            (
+                "a pid CLAI recorded, now another child of CLAI",
+                tunnel()
+                    .holder(200, CLAI, "/usr/bin/bash", &[])
+                    .started(200, StartedBy::Terminal)
+                    .with(200, |p| p.start += 1)
                     .holder(201, 200, PYTHON, &[11]),
                 Listener::Clai,
             ),
@@ -1363,6 +1486,114 @@ mod tests {
                 "a holder too deep below init to tell",
                 nested(64),
                 Listener::Clai,
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_program_clai_started_for_the_user_says_who() {
+        let agent = || StartedBy::Agent(Some("Ana".to_string()));
+        let terminal = || {
+            tunnel()
+                .holder(200, CLAI, "/usr/bin/bash", &[])
+                .started(200, StartedBy::Terminal)
+        };
+        assert_cases([
+            (
+                "a server in the CLAI terminal",
+                terminal().holder(201, 200, PYTHON, &[11]),
+                started(
+                    program(PYTHON, 201, "/usr/bin/python3.12 -N"),
+                    StartedBy::Terminal,
+                ),
+            ),
+            (
+                "the shell itself",
+                terminal().with(200, |p| p.sockets = vec![11]),
+                started(
+                    program("/usr/bin/bash", 200, "/usr/bin/bash -N"),
+                    StartedBy::Terminal,
+                ),
+            ),
+            (
+                "an agent engine the user runs in the CLAI terminal",
+                terminal().holder(201, 200, CLAUDE, &[11]),
+                started(
+                    program(CLAUDE, 201, "/home/me/.local/bin/claude -N"),
+                    StartedBy::Terminal,
+                ),
+            ),
+            (
+                "a forking server in the CLAI terminal",
+                terminal()
+                    .holder(201, 200, SSH, &[11])
+                    .holder(202, 201, SSH, &[11]),
+                started(program(SSH, 201, "/usr/bin/ssh -N"), StartedBy::Terminal),
+            ),
+            (
+                "a tunnel typed in a terminal app opened from CLAI",
+                tunnel()
+                    .holder(200, CLAI, "/usr/bin/kitty", &[])
+                    .started(200, StartedBy::App("kitty".to_string()))
+                    .holder(201, 200, "/usr/bin/zsh", &[])
+                    .holder(202, 201, SSH, &[11]),
+                started(
+                    program(SSH, 202, "/usr/bin/ssh -N"),
+                    StartedBy::App("kitty".to_string()),
+                ),
+            ),
+            (
+                "an agent command in Host network",
+                tunnel()
+                    .holder(200, CLAI, "/usr/bin/bwrap", &[])
+                    .started(200, agent())
+                    .holder(201, 200, PYTHON, &[11])
+                    .with(201, |p| p.namespaces = namespaces("pid:[2]", "mnt:[2]")),
+                started(
+                    run_only(RunOnly::OtherNamespace, &[11], &[(201, PYTHON)]),
+                    agent(),
+                ),
+            ),
+            (
+                "a browser an MCP server started",
+                tunnel()
+                    .holder(200, CLAI, "/usr/bin/node", &[])
+                    .started(200, StartedBy::McpServer("browser".to_string()))
+                    .holder(201, 200, "/usr/bin/chromium", &[11]),
+                started(
+                    program("/usr/bin/chromium", 201, "/usr/bin/chromium -N"),
+                    StartedBy::McpServer("browser".to_string()),
+                ),
+            ),
+            (
+                "holders started in different ways",
+                terminal()
+                    .holder(201, 200, SSH, &[11])
+                    .holder(300, 1, SSH, &[11]),
+                program(SSH, 201, "/usr/bin/ssh -N"),
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_server_that_left_the_program_clai_started_has_no_label() {
+        assert_cases([
+            (
+                "a daemon re-parented to init while the shell runs",
+                tunnel()
+                    .holder(200, CLAI, "/usr/bin/bash", &[])
+                    .started(200, StartedBy::Terminal)
+                    .holder(300, 1, SSH, &[11]),
+                program(SSH, 300, "/usr/bin/ssh -N"),
+            ),
+            (
+                "a recorded pid now used by a process apart from CLAI",
+                tunnel()
+                    .holder(200, 1, "/usr/bin/bash", &[])
+                    .started(200, StartedBy::Terminal)
+                    .with(200, |p| p.start += 1)
+                    .holder(201, 200, SSH, &[11]),
+                program(SSH, 201, "/usr/bin/ssh -N"),
             ),
         ]);
     }
@@ -1605,6 +1836,7 @@ mod tests {
                         exe: "/opt/\u{fffd}/ssh".to_string(),
                         cmdline: "/opt/\u{fffd}/ssh -N".to_string(),
                     }],
+                    started_by: None,
                 },
             ),
         ]);
@@ -1630,22 +1862,30 @@ mod tests {
     }
 
     #[test]
-    fn clai_and_the_processes_it_starts_are_never_programs() {
+    fn a_process_clai_starts_is_a_program_only_while_recorded() {
         let (listener, port) = listen();
-        assert_eq!(
-            host_inspector().inspect(port, Loopback::V4).unwrap(),
-            Listener::Clai
-        );
+        let inspect = || host_inspector().inspect(port, Loopback::V4);
+        assert_eq!(inspect().unwrap(), Listener::Clai);
         // Only the child holds the socket once the command is dropped.
         let mut child = Command::new("sleep")
             .arg("30")
             .stdout(Stdio::from(OwnedFd::from(listener)))
             .spawn()
             .unwrap();
-        let listener = host_inspector().inspect(port, Loopback::V4);
+        let unrecorded = inspect();
+        let recorded = spawn_roots::record(Some(child.id()), StartedBy::Terminal);
+        let started = inspect();
+        drop(recorded);
+        let forgotten = inspect();
         child.kill().unwrap();
         child.wait().unwrap();
-        assert_eq!(listener.unwrap(), Listener::Clai);
+        assert_eq!(unrecorded.unwrap(), Listener::Clai);
+        let Ok(Listener::Program(program)) = started else {
+            panic!("{started:?}");
+        };
+        assert_eq!(program.pid, child.id());
+        assert_eq!(program.started_by, Some(StartedBy::Terminal));
+        assert_eq!(forgotten.unwrap(), Listener::Clai);
     }
 
     /// The shell exits once `sleep` starts, so `sleep` is re-parented away

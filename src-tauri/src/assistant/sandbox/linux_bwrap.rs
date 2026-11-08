@@ -11,6 +11,7 @@ use super::{
     SandboxCommand, SandboxCommandOutput, SandboxNetworkMode, SandboxPathAccess,
     SandboxSessionBusMode, SessionBusProxy,
 };
+use crate::assistant::network::spawn_roots;
 
 const BWRAP_BIN: &str = "bwrap";
 const FLATPAK_SPAWN_BIN: &str = "flatpak-spawn";
@@ -66,6 +67,8 @@ pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, St
             format!("Failed to start sandboxed shell: {}", e)
         }
     })?;
+    // An agent can ask for a server the command starts, until it is reaped.
+    let _command = spawn_roots::record_agent_command(child.id());
 
     let output = run_spawned_child(
         child,

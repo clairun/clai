@@ -28,6 +28,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use crate::assistant::network::spawn_roots::{self, StartedBy};
 use crate::providers::{command_exists, get_host_command, is_flatpak};
 use crate::windows_console::HideConsoleWindow;
 
@@ -557,6 +558,12 @@ fn spawn_host_detached(
     let child = command
         .spawn()
         .map_err(|e| format!("Failed to launch `{}`: {}", bin, e))?;
+    // An agent can ask for a server the app starts, until it is reaped.
+    let name = Path::new(bin).file_name().and_then(|name| name.to_str());
+    let app = spawn_roots::record(
+        Some(child.id()),
+        StartedBy::App(name.unwrap_or(bin).to_string()),
+    );
     // Fire-and-forget, but still reap: dropping the `Child` neither waits nor
     // kills on Unix, so a closed editor/terminal (or its `flatpak-spawn` host
     // proxy) would linger as a `<defunct>` zombie parented to us. A detached
@@ -565,6 +572,7 @@ fn spawn_host_detached(
     std::thread::spawn(move || {
         let mut child = child;
         let _ = child.wait();
+        drop(app);
     });
     Ok(())
 }

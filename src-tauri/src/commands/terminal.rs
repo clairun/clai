@@ -44,6 +44,7 @@ use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::State;
 
+use crate::assistant::network::spawn_roots::{self, StartedBy};
 use crate::AppState;
 
 /// Flush cadence for coalesced PTY output (~60fps).
@@ -296,6 +297,8 @@ fn spawn_io_threads(
         let pending = Arc::clone(&pending);
         let eof = Arc::clone(&eof);
         let exit_code = Arc::clone(&exit_code);
+        // An agent can ask for a server the shell starts, until it is reaped.
+        let shell = spawn_roots::record(child.process_id(), StartedBy::Terminal);
         thread::spawn(move || {
             let mut buf = vec![0u8; READ_BUF];
             loop {
@@ -314,6 +317,7 @@ fn spawn_io_threads(
             if let Ok(status) = child.wait() {
                 *exit_code.lock().expect("terminal exit code poisoned") = Some(status.exit_code());
             }
+            drop(shell);
             eof.store(true, Ordering::SeqCst);
         });
     }

@@ -246,7 +246,7 @@ export type LocalListenerView = { "kind": "program", pid: number, exe: string, c
  * It runs whatever script, or relays wherever, it is told, so its
  * path says little about the listener.
  */
-interpreter: boolean, } | { "kind": "otherUser", uid: number, userName: string, } | { "kind": "runOnly", reason: LocalRunOnlyReason, holders: Array<LocalHolderView>, };
+interpreter: boolean, startedBy?: LocalStartedBy, } | { "kind": "otherUser", uid: number, userName: string, } | { "kind": "runOnly", reason: LocalRunOnlyReason, holders: Array<LocalHolderView>, startedBy?: LocalStartedBy, };
 
 /**
  * A port on the loopback of this computer that an agent in Allowlist may
@@ -262,6 +262,12 @@ user?: string, };
  * Why a listener can be allowed for one run only.
  */
 export type LocalRunOnlyReason = "unseen" | "otherNamespace" | "severalPrograms" | "replaced" | "pathNotUtf8";
+
+/**
+ * Who started a listener, when CLAI did: shown on the card, never part of
+ * what an answer binds to.
+ */
+export type LocalStartedBy = { "kind": "terminal" } | { "kind": "app", name: string, } | { "kind": "agent", name?: string, } | { "kind": "mcpServer", name: string, };
 
 export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 

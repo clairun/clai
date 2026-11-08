@@ -439,6 +439,7 @@ mod tests {
                 pid: 300,
                 cmdline: String::new(),
                 interpreter: false,
+                started_by: None,
             })
         }
 
@@ -462,6 +463,7 @@ mod tests {
                         cmdline: String::new(),
                     })
                     .collect(),
+                started_by: None,
             }
         }
 

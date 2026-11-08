@@ -270,8 +270,8 @@ async fn local_upstream<S: AsyncWrite + Unpin>(
              user allowed. Call `net_request_access` with host `{target}` to ask again."
         ),
         LocalDecision::Clai => format!(
-            "Port {port} on this computer belongs to CLAI itself, which the CLAI network \
-             proxy never connects to."
+            "Port {port} on this computer is served by CLAI itself or by an agent engine \
+             CLAI runs, which the CLAI network proxy never connects to."
         ),
     };
     shared.network.record(LOCALHOST, Some(port), false);
@@ -480,6 +480,7 @@ mod tests {
             pid: 300,
             cmdline: format!("{exe} -N -L 5432:db:5432 secret-host"),
             interpreter: false,
+            started_by: None,
         })
     }
 
@@ -849,6 +850,7 @@ mod tests {
             reason: RunOnly::Unseen,
             sockets: vec![inode],
             holders: Vec::new(),
+            started_by: None,
         };
         let inspector = listening(unseen(11));
         let running = start_with(network, Arc::new(HostConnector), inspector.clone());
@@ -909,7 +911,7 @@ mod tests {
         let running = start_with(network, Arc::new(HostConnector), listening(Listener::Clai));
         let response = exchange(&running, &request, b"").await;
         assert!(
-            response.contains("belongs to CLAI itself, which the CLAI network proxy never"),
+            response.contains("agent engine CLAI runs, which the CLAI network proxy never"),
             "{response}"
         );
         assert_eq!(

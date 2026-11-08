@@ -14,3 +14,4 @@ pub mod matcher;
 #[cfg(target_os = "linux")]
 pub mod proxy;
 pub mod run_state;
+pub mod spawn_roots;

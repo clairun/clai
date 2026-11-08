@@ -42,6 +42,8 @@ use crate::assistant::network::matcher::{
 use crate::assistant::network::run_state::HostLogEntry;
 #[cfg(target_os = "linux")]
 use crate::assistant::network::run_state::LocalBinding;
+#[cfg(target_os = "linux")]
+use crate::assistant::network::spawn_roots::StartedBy;
 use crate::assistant::workspace_agents::workspace_agent_display_names;
 use crate::commands::permissions::{normalize_reason, shared_allowance_reach, AttentionUpdate};
 use crate::config::types::LocalPortGrant;
@@ -177,6 +179,7 @@ impl LocalListenerCard {
                     exe: program.exe.clone(),
                     command_line: program.cmdline.clone(),
                     interpreter: program.interpreter,
+                    started_by: program.started_by.clone().map(Into::into),
                 },
             ),
             Listener::OtherUser { uid, name, sockets } => (
@@ -194,6 +197,7 @@ impl LocalListenerCard {
                 reason,
                 sockets,
                 holders,
+                started_by,
             } => (
                 LocalSnapshot::RunOnly {
                     sockets: sockets.clone(),
@@ -208,6 +212,7 @@ impl LocalListenerCard {
                             command_line: holder.cmdline.clone(),
                         })
                         .collect(),
+                    started_by: started_by.clone().map(Into::into),
                 },
             ),
         };
@@ -241,6 +246,9 @@ pub enum LocalListenerView {
         /// It runs whatever script, or relays wherever, it is told, so its
         /// path says little about the listener.
         interpreter: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        started_by: Option<LocalStartedBy>,
     },
     /// A service of another user, whose processes CLAI cannot see:
     /// “Always” saves the user.
@@ -249,7 +257,34 @@ pub enum LocalListenerView {
     RunOnly {
         reason: LocalRunOnlyReason,
         holders: Vec<LocalHolderView>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        started_by: Option<LocalStartedBy>,
     },
+}
+
+/// Who started a listener, when CLAI did: shown on the card, never part of
+/// what an answer binds to.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    expect(dead_code, reason = "only Linux finds what listens on a port")
+)]
+pub enum LocalStartedBy {
+    /// A shell in the CLAI terminal.
+    Terminal,
+    /// An app opened from CLAI, by program name.
+    App { name: String },
+    /// An agent's shell command.
+    Agent {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[ts(optional)]
+        name: Option<String>,
+    },
+    /// An MCP server CLAI runs, by its configured name.
+    McpServer { name: String },
 }
 
 /// Why a listener can be allowed for one run only.
@@ -337,6 +372,18 @@ impl LocalSnapshot {
                 "Port {port} on this computer can be allowed for this run only: CLAI \
                  cannot name the program listening there."
             )),
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl From<StartedBy> for LocalStartedBy {
+    fn from(by: StartedBy) -> Self {
+        match by {
+            StartedBy::Terminal => Self::Terminal,
+            StartedBy::App(name) => Self::App { name },
+            StartedBy::Agent(name) => Self::Agent { name },
+            StartedBy::McpServer(name) => Self::McpServer { name },
         }
     }
 }
@@ -1365,6 +1412,7 @@ mod tests {
                 pid: 4321,
                 cmdline: format!("ssh -N -L 5432:db:5432 {SECRET}"),
                 interpreter: false,
+                started_by: None,
             })
         }
 
@@ -1385,6 +1433,7 @@ mod tests {
                     exe: "/usr/bin/rootlessport".to_string(),
                     cmdline: format!("rootlessport {SECRET}"),
                 }],
+                started_by: None,
             }
         }
 
@@ -1511,6 +1560,61 @@ mod tests {
             assert_eq!(asked["suggestedWildcard"], serde_json::Value::Null);
             let host = serde_json::to_value(request(None, None, "example.org")).unwrap();
             assert!(host.get("localListener").is_none(), "{host}");
+        }
+
+        #[test]
+        fn the_card_says_who_started_the_listener_and_the_snapshot_ignores_it() {
+            use crate::assistant::network::spawn_roots::StartedBy;
+            let started = |listener: Listener, by: StartedBy| match listener {
+                Listener::Program(program) => Listener::Program(Program {
+                    started_by: Some(by),
+                    ..program
+                }),
+                Listener::RunOnly {
+                    reason,
+                    sockets,
+                    holders,
+                    ..
+                } => Listener::RunOnly {
+                    reason,
+                    sockets,
+                    holders,
+                    started_by: Some(by),
+                },
+                other => other,
+            };
+            for (by, shown) in [
+                (
+                    StartedBy::Terminal,
+                    serde_json::json!({ "kind": "terminal" }),
+                ),
+                (
+                    StartedBy::App("kitty".to_string()),
+                    serde_json::json!({ "kind": "app", "name": "kitty" }),
+                ),
+                (
+                    StartedBy::Agent(Some("Ana".to_string())),
+                    serde_json::json!({ "kind": "agent", "name": "Ana" }),
+                ),
+                (
+                    StartedBy::Agent(None),
+                    serde_json::json!({ "kind": "agent" }),
+                ),
+                (
+                    StartedBy::McpServer("browser".to_string()),
+                    serde_json::json!({ "kind": "mcpServer", "name": "browser" }),
+                ),
+            ] {
+                for listener in [ssh(), run_only(RunOnly::OtherNamespace)] {
+                    let labelled = card(&started(listener.clone(), by.clone()));
+                    assert_eq!(labelled.snapshot(), card(&listener).snapshot(), "{by:?}");
+                    let view = serde_json::to_value(&labelled).unwrap();
+                    assert_eq!(view["startedBy"], shown, "{view}");
+                    let mut unlabelled = view.clone();
+                    unlabelled.as_object_mut().unwrap().remove("startedBy");
+                    assert_eq!(unlabelled, serde_json::to_value(card(&listener)).unwrap());
+                }
+            }
         }
 
         #[tokio::test]

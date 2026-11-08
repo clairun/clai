@@ -212,15 +212,18 @@ async fn execute_bash_exec(
         }
     };
 
-    let run = run_with_network(
-        SandboxCommand {
-            argv,
-            cwd,
-            timeout_ms,
-            max_output_chars: output_limit,
-            profile,
-        },
-        &context.run_network,
+    let run = crate::assistant::network::spawn_roots::as_agent(
+        context.run_context.automation_name.clone(),
+        run_with_network(
+            SandboxCommand {
+                argv,
+                cwd,
+                timeout_ms,
+                max_output_chars: output_limit,
+                profile,
+            },
+            &context.run_network,
+        ),
     )
     .await;
     let output = run.output.inspect_err(|error| {
@@ -1523,8 +1526,8 @@ where
     let Some(card) = LocalListenerCard::of(&listener) else {
         return Err(if listener == Listener::Clai {
             format!(
-                "Port {port} on this computer is served by CLAI or a program it started, \
-                 which an agent never reaches."
+                "Port {port} on this computer is served by CLAI itself or by an agent engine \
+                 CLAI runs, which agents never connect to."
             )
         } else {
             format!(
@@ -2873,6 +2876,7 @@ mod tests {
                 pid: 4321,
                 cmdline: format!("{exe} -N -L 5432:db:5432 {SECRET}"),
                 interpreter: false,
+                started_by: None,
             })
         }
 
@@ -2894,6 +2898,7 @@ mod tests {
                     exe: "/usr/bin/rootlessport".to_string(),
                     cmdline: format!("rootlessport {SECRET}"),
                 }],
+                started_by: None,
             }
         }
 

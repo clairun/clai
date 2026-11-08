@@ -23,6 +23,7 @@ use tokio::{
 };
 
 use crate::assistant::auth::McpSecretStorage;
+use crate::assistant::network::spawn_roots::{self, StartedBy};
 use crate::assistant::types::ToolDefinition;
 use crate::config::{ClaiConfig, McpEnvVar, McpServerAuth, McpServerConfig};
 use crate::mcp::oauth;
@@ -121,6 +122,9 @@ struct StdioMcpServerConnection {
     service: McpRunningService,
     #[allow(dead_code)]
     child: Child,
+    /// Kept for as long as the child: an agent can ask for a server the MCP
+    /// server starts.
+    _recorded: spawn_roots::Recorded,
 }
 
 // The variants' sizes differ enough to trip clippy::large_enum_variant only on
@@ -642,6 +646,8 @@ impl McpClientManager {
                         config.name, command, error
                     )
                 })?;
+                let recorded =
+                    spawn_roots::record(child.id(), StartedBy::McpServer(config.name.clone()));
 
                 if let Some(stderr) = child.stderr.take() {
                     spawn_stderr_logger(config.id.clone(), stderr);
@@ -667,6 +673,7 @@ impl McpClientManager {
                 Ok(ConnectedMcpServer::Stdio(StdioMcpServerConnection {
                     service,
                     child,
+                    _recorded: recorded,
                 }))
             }
         }
