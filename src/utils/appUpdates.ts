@@ -1,4 +1,5 @@
 import { Channel, invoke } from '@tauri-apps/api/core';
+import { ask } from '@tauri-apps/plugin-dialog';
 import type { AppUpdateInstallEvent } from '../generated/bindings';
 
 export const APP_UPDATE_AVAILABLE_EVENT = 'app-updates://available';
@@ -32,6 +33,23 @@ export const installEventText = (event: AppUpdateInstallEvent): string => {
     default:
       return '';
   }
+};
+
+/**
+ * Whether to go ahead with installing an update, which restarts the app:
+ * while agent runs are in progress it asks first, because the restart
+ * interrupts them.
+ */
+export const confirmRestartWithLiveRuns = async (): Promise<boolean> => {
+  const count = await invoke<number>('app_live_run_count');
+  if (count === 0) return true;
+  const runs = count === 1 ? '1 run' : `${count} runs`;
+  return ask(`${runs} in progress. Restart anyway?`, {
+    title: 'Restart CLAI?',
+    kind: 'warning',
+    okLabel: 'Restart anyway',
+    cancelLabel: 'Cancel',
+  });
 };
 
 export const installAppUpdate = async (

@@ -11,6 +11,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { AppUpdateCheckResult, AppUpdateStatus } from '../../generated/bindings';
 import {
   LATEST_RELEASE_URL,
+  confirmRestartWithLiveRuns,
   installAppUpdate,
   installEventText,
   updateErrorText,
@@ -34,6 +35,8 @@ const AboutSettings = () => {
   const [updateError, setUpdateError] = useState('');
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
+  // Set while asking about live runs, so that a second click cannot ask again.
+  const [confirming, setConfirming] = useState(false);
   const [installProgress, setInstallProgress] = useState('');
 
   useEffect(() => {
@@ -82,16 +85,20 @@ const AboutSettings = () => {
   };
 
   const installUpdate = async () => {
-    setInstalling(true);
-    setInstallProgress('Starting download...');
     setUpdateError('');
+    setConfirming(true);
     try {
+      if (!(await confirmRestartWithLiveRuns())) return;
+      setInstalling(true);
+      setInstallProgress('Starting download...');
       await installAppUpdate((event) => {
         setInstallProgress(installEventText(event));
       });
     } catch (err) {
       setUpdateError(updateErrorText(err, 'Failed to install update.'));
       setInstalling(false);
+    } finally {
+      setConfirming(false);
     }
   };
 
@@ -205,7 +212,7 @@ const AboutSettings = () => {
                   type="button"
                   className={styles.primaryButton}
                   onClick={installUpdate}
-                  disabled={installing}
+                  disabled={installing || confirming}
                 >
                   {installing
                     ? 'Installing...'

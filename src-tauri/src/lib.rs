@@ -31,6 +31,7 @@ mod assistant;
 mod commands;
 mod config;
 mod db;
+mod main_window;
 mod mcp;
 mod paths;
 mod providers;
@@ -58,7 +59,7 @@ pub use workspace_index::WorkspaceIndex;
 /// module's name signals intent at the use site.
 #[doc(hidden)]
 pub mod runtime {
-    pub use crate::assistant::runtime::{cancel_run, register_run, LiveRunKey};
+    pub use crate::assistant::runtime::{cancel_run, live_run_count, register_run, LiveRunKey};
 }
 
 /// Shared application state accessible from all commands.
@@ -299,55 +300,11 @@ pub fn run() {
     // signals a provider was already installed.
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    // Clear temp directory from previous runs (MCP configs, etc)
-    agents::clear_tmp_dir();
-
     // Initialize config manager (loads config from disk or creates default)
     let config_manager = ConfigManager::new().expect(
         "Failed to initialize configuration manager. \
          Check that the config directory is accessible.",
     );
-
-    // First-run convenience: if the user has no provider connections yet,
-    // auto-detect supported CLI providers and register a connection for each
-    // one found, so the app is usable without a manual trip to Settings. The
-    // model is left empty so the CLI uses its own configured default. Runs
-    // before the default-workspace bootstrap so that first workspace picks the
-    // connection up.
-    if config_manager.get().provider_connections.is_empty() {
-        for provider_id in providers::detect_supported_cli_providers() {
-            let now = chrono::Utc::now().timestamp_millis();
-            let id = uuid::Uuid::new_v4().to_string();
-            let name = crate::assistant::providers::registry::get_provider_descriptor(provider_id)
-                .map(|d| d.display_name)
-                .unwrap_or_else(|| provider_id.to_string());
-            let connection = crate::assistant::types::ProviderConnection {
-                secret_ref: format!("provider-connection::{}", id),
-                id,
-                name,
-                protocol_id: provider_id.to_string(),
-                provider_id: provider_id.to_string(),
-                auth_mode: crate::assistant::types::AuthMode::SubscriptionLogin,
-                base_url: None,
-                model_id: String::new(),
-                account_label: None,
-                enabled: true,
-                created_at: now,
-                updated_at: now,
-            };
-            match config_manager.add_provider_connection(connection) {
-                Ok(()) => tracing::info!(
-                    provider_id,
-                    "Auto-detected supported provider CLI; registered a connection"
-                ),
-                Err(e) => tracing::warn!(
-                    provider_id,
-                    error = %e,
-                    "Failed to register auto-detected provider connection"
-                ),
-            }
-        }
-    }
 
     let initial_config = config_manager.get();
     let workspace_index = WorkspaceIndex::scan(&initial_config);
@@ -383,17 +340,39 @@ pub fn run() {
 
     // Build and run the Tauri application
     tauri::Builder::default()
-        // Register Tauri plugins
+        // Register Tauri plugins. Single-instance goes first: a second launch
+        // exits inside `Builder::build`, so it never runs the setup hook, which
+        // writes auto-detected providers to config.json and opens the workspace
+        // databases, whose restart recovery would mark this instance's live
+        // runs failed and its tasks stopped. Everything above this point in
+        // `run()` does run in the second process; of it, only
+        // `ConfigManager::new` writes, and only when it migrates config.json.
+        // Every launch, including `tauri dev` with a different `CLAI_HOME`,
+        // focuses the running window and exits, because workspace databases
+        // live outside `CLAI_HOME`.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            main_window::show_main_window(app);
+        }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .on_window_event(main_window::on_window_event)
         // Make our state available to all commands
         // Commands can access it via State<'_, AppState>
         .manage(state)
         // Setup hook - runs after app is built, gives us AppHandle
         .setup(move |app| {
+            // Here rather than before the builder, so that a second launch,
+            // which exits in `Builder::build`, never adds connections to
+            // config.json. Runs before the default-workspace bootstrap below so
+            // that the first workspace picks the connection up.
+            match app.state::<AppState>().config_manager.lock() {
+                Ok(config_manager) => register_detected_providers(&config_manager),
+                Err(e) => tracing::warn!("Skipping provider auto-detection: {}", e),
+            }
+
             // Keep the app-managed skills repository current without making
             // startup depend on network availability.
             let app_handle = app.handle().clone();
@@ -436,6 +415,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // App metadata
             commands::app_info::app_version_detail,
+            commands::app_info::app_live_run_count,
             // App update commands
             commands::app_updates::get_app_update_status,
             commands::app_updates::check_for_app_update,
@@ -565,6 +545,47 @@ pub fn run() {
                 app_handle.state::<AppState>().terminals.close_all();
             }
         });
+}
+
+/// First-run convenience: if the user has no provider connections yet,
+/// registers a connection for each supported provider CLI found, so the app
+/// is usable without a manual trip to Settings. The model is left empty so
+/// the CLI uses its own configured default.
+fn register_detected_providers(config_manager: &ConfigManager) {
+    if config_manager.get().provider_connections.is_empty() {
+        for provider_id in providers::detect_supported_cli_providers() {
+            let now = chrono::Utc::now().timestamp_millis();
+            let id = uuid::Uuid::new_v4().to_string();
+            let name = crate::assistant::providers::registry::get_provider_descriptor(provider_id)
+                .map(|d| d.display_name)
+                .unwrap_or_else(|| provider_id.to_string());
+            let connection = crate::assistant::types::ProviderConnection {
+                secret_ref: format!("provider-connection::{}", id),
+                id,
+                name,
+                protocol_id: provider_id.to_string(),
+                provider_id: provider_id.to_string(),
+                auth_mode: crate::assistant::types::AuthMode::SubscriptionLogin,
+                base_url: None,
+                model_id: String::new(),
+                account_label: None,
+                enabled: true,
+                created_at: now,
+                updated_at: now,
+            };
+            match config_manager.add_provider_connection(connection) {
+                Ok(()) => tracing::info!(
+                    provider_id,
+                    "Auto-detected supported provider CLI; registered a connection"
+                ),
+                Err(e) => tracing::warn!(
+                    provider_id,
+                    error = %e,
+                    "Failed to register auto-detected provider connection"
+                ),
+            }
+        }
+    }
 }
 
 async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Result<(), String> {

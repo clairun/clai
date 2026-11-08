@@ -12,6 +12,9 @@ vi.mock('@tauri-apps/api/core', () => ({
   },
 }));
 
+const mockAsk = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: mockAsk }));
+
 // Capture the app-updates://available handler so tests can fire it.
 let listenHandlers: Record<string, (event: { payload: unknown }) => void> = {};
 vi.mock('@tauri-apps/api/event', () => ({
@@ -65,10 +68,12 @@ const statusWith = (
 /** Resolves `get_app_update_status`, and lets each test drive the install. */
 const mockBackend = (
   status: ReturnType<typeof statusWith>,
-  install?: () => Promise<unknown>
+  install?: () => Promise<unknown>,
+  liveRuns = 0
 ) => {
   mockInvoke.mockImplementation((command: string) => {
     if (command === 'get_app_update_status') return Promise.resolve(status);
+    if (command === 'app_live_run_count') return Promise.resolve(liveRuns);
     if (command === 'install_app_update') {
       return install ? install() : new Promise(() => {});
     }
@@ -78,6 +83,7 @@ const mockBackend = (
 
 beforeEach(() => {
   mockInvoke.mockReset();
+  mockAsk.mockReset();
   listenHandlers = {};
 });
 
@@ -140,9 +146,51 @@ describe('AppUpdateBadge', () => {
     await userEvent.click(action);
 
     expect(mockInvoke).toHaveBeenCalledWith('install_app_update', expect.anything());
+    // No run is in progress, so there is nothing to confirm.
+    expect(mockAsk).not.toHaveBeenCalled();
     // The backend restarts the app, so the pending state must stay pending
     // rather than inviting a second click into the same install.
     expect(await screen.findByRole('button', { name: /Restarting/ })).toBeDisabled();
+  });
+
+  it('asks before restarting while runs are in progress, and keeps them if declined', async () => {
+    mockBackend(statusWith(DOWNLOADED), undefined, 2);
+    mockAsk.mockResolvedValue(false);
+    render(<AppUpdateBadge />);
+    await userEvent.click(await screen.findByRole('button', { name: /Restart to install/ }));
+
+    expect(mockAsk).toHaveBeenCalledWith(
+      '2 runs in progress. Restart anyway?',
+      expect.objectContaining({ okLabel: 'Restart anyway', cancelLabel: 'Cancel' })
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith('install_app_update', expect.anything());
+    expect(screen.getByRole('button', { name: /Restart to install/ })).toBeEnabled();
+  });
+
+  it('restarts while runs are in progress once the user confirms', async () => {
+    mockBackend(statusWith(DOWNLOADED), undefined, 1);
+    mockAsk.mockResolvedValue(true);
+    render(<AppUpdateBadge />);
+    await userEvent.click(await screen.findByRole('button', { name: /Restart to install/ }));
+
+    expect(mockAsk).toHaveBeenCalledWith('1 run in progress. Restart anyway?', expect.anything());
+    expect(mockInvoke).toHaveBeenCalledWith('install_app_update', expect.anything());
+    expect(await screen.findByRole('button', { name: /Restarting/ })).toBeDisabled();
+  });
+
+  it('asks only once when the restart action is clicked twice quickly', async () => {
+    mockBackend(statusWith(DOWNLOADED), undefined, 1);
+    // The question stays on screen for both clicks.
+    mockAsk.mockReturnValue(new Promise(() => {}));
+    render(<AppUpdateBadge />);
+    const action = await screen.findByRole('button', { name: /Restart to install/ });
+
+    await userEvent.click(action);
+    await userEvent.click(action);
+
+    await waitFor(() => expect(mockAsk).toHaveBeenCalled());
+    expect(mockAsk).toHaveBeenCalledTimes(1);
+    expect(action).toBeDisabled();
   });
 
   it('surfaces a failed install instead of silently doing nothing', async () => {

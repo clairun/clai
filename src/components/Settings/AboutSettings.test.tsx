@@ -1,8 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 const mockInvoke = vi.hoisted(() => vi.fn());
-vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
+vi.mock('@tauri-apps/api/core', () => ({
+  invoke: mockInvoke,
+  Channel: class {
+    onmessage: unknown = null;
+  },
+}));
+const mockAsk = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: mockAsk }));
 vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn().mockResolvedValue(() => {}) }));
 
 import AboutSettings from './AboutSettings';
@@ -108,6 +116,35 @@ const supportedStatus = {
   lastCheck: { checkedAt: '2026-07-24T00:00:00Z', update: null, error: null },
 };
 
+/** A self-updating build with a downloaded update ready to install. */
+const downloadedStatus = {
+  ...supportedStatus,
+  lastCheck: {
+    checkedAt: '2026-07-24T00:00:00Z',
+    error: null,
+    update: {
+      currentVersion: '26.7.12',
+      version: '26.8.1',
+      date: null,
+      body: null,
+      installable: true,
+      downloaded: true,
+    },
+  },
+};
+
+/** Like `respond`, plus the commands an install makes. The install never
+ *  settles, as the backend restarts the app instead. */
+const respondToInstall = (liveRuns: number) => {
+  mockInvoke.mockImplementation((cmd: string) => {
+    if (cmd === 'app_version_detail') return Promise.resolve('26.7.12-dev');
+    if (cmd === 'get_app_update_status') return Promise.resolve(downloadedStatus);
+    if (cmd === 'app_live_run_count') return Promise.resolve(liveRuns);
+    if (cmd === 'install_app_update') return new Promise(() => {});
+    return Promise.reject(new Error(`unexpected invoke: ${cmd}`));
+  });
+};
+
 describe('AboutSettings updates panel', () => {
   beforeEach(() => {
     mockInvoke.mockReset();
@@ -190,5 +227,42 @@ describe('AboutSettings updates panel', () => {
       )
     ).toBeTruthy();
     expect(screen.getByRole('button', { name: /open release notes/i })).toBeTruthy();
+  });
+});
+
+describe('AboutSettings install', () => {
+  beforeEach(() => {
+    mockInvoke.mockReset();
+    mockAsk.mockReset();
+  });
+
+  it('keeps live runs and installs nothing when the user declines', async () => {
+    respondToInstall(1);
+    mockAsk.mockResolvedValue(false);
+    render(<AboutSettings />);
+    await userEvent.click(await screen.findByRole('button', { name: 'Restart and update' }));
+
+    await waitFor(() =>
+      expect(mockAsk).toHaveBeenCalledWith('1 run in progress. Restart anyway?', expect.anything())
+    );
+    expect(mockInvoke).not.toHaveBeenCalledWith('install_app_update', expect.anything());
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Restart and update' })).toBeEnabled()
+    );
+  });
+
+  it('asks only once when install is clicked twice quickly', async () => {
+    respondToInstall(1);
+    // The question stays on screen for both clicks.
+    mockAsk.mockReturnValue(new Promise(() => {}));
+    render(<AboutSettings />);
+    const install = await screen.findByRole('button', { name: 'Restart and update' });
+
+    await userEvent.click(install);
+    await userEvent.click(install);
+
+    await waitFor(() => expect(mockAsk).toHaveBeenCalled());
+    expect(mockAsk).toHaveBeenCalledTimes(1);
+    expect(install).toBeDisabled();
   });
 });

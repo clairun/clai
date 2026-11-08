@@ -21,12 +21,14 @@
 import React, { useCallback, useState } from 'react';
 import { useAvailableAppUpdate } from '../hooks/useAvailableAppUpdate';
 import { openGlobalSettings } from '../utils/globalSettings';
-import { installAppUpdate, updateErrorText } from '../utils/appUpdates';
+import { confirmRestartWithLiveRuns, installAppUpdate, updateErrorText } from '../utils/appUpdates';
 import styles from './AppUpdateBadge.module.css';
 
 const AppUpdateBadge = () => {
   const { update } = useAvailableAppUpdate();
   const [restarting, setRestarting] = useState(false);
+  // Set while asking about live runs, so that a second click cannot ask again.
+  const [confirming, setConfirming] = useState(false);
   const [error, setError] = useState('');
 
   // A newer version arriving must not inherit the previous version's failed
@@ -41,9 +43,11 @@ const AppUpdateBadge = () => {
   }
 
   const restartToInstall = useCallback(async () => {
-    setRestarting(true);
     setError('');
+    setConfirming(true);
     try {
+      if (!(await confirmRestartWithLiveRuns())) return;
+      setRestarting(true);
       // Progress events are ignored on purpose: the package is already
       // downloaded, so this is an extract-and-relaunch, not a transfer. The
       // backend restarts the app on success, so a resolved promise is not
@@ -53,6 +57,8 @@ const AppUpdateBadge = () => {
     } catch (err) {
       setError(updateErrorText(err, 'Could not install the update.'));
       setRestarting(false);
+    } finally {
+      setConfirming(false);
     }
   }, []);
 
@@ -79,7 +85,7 @@ const AppUpdateBadge = () => {
           type="button"
           className={styles.action}
           onClick={restartToInstall}
-          disabled={restarting}
+          disabled={restarting || confirming}
           // The reason lives in the tooltip and in the live region below:
           // spelling it out inline would grow the top bar by an arbitrary
           // amount of text and squeeze the workspace counters out.
