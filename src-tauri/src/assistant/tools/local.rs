@@ -235,21 +235,15 @@ async fn execute_bash_exec(
         }
     });
     let bus = run.session_bus_unavailable.as_deref();
-    let localhost = output.as_ref().ok().and_then(|output| {
-        localhost_refusal(output, run.allowed_local_ports.as_deref(), &run.refused)
-    });
-    let mut outcome = bash_exec_outcome(
+    bash_exec_outcome(
         output,
         &run.refused,
+        run.proxied,
         &sockets,
         bus,
         timeout_ms,
         explicit_timeout,
-    );
-    if let (Ok(result), Some(port)) = (&mut outcome, localhost) {
-        result["network"]["localhost"] = localhost_note(port);
-    }
-    outcome
+    )
 }
 
 /// What a command run returned, and what the sandbox kept from it: the
@@ -259,9 +253,8 @@ async fn execute_bash_exec(
 struct NetworkRun {
     output: Result<SandboxCommandOutput, String>,
     refused: RefusedTargets,
-    /// In Allowlist, the localhost ports allowed for the run when the
-    /// command ended; `None` when it ran without the network proxy.
-    allowed_local_ports: Option<Vec<u16>>,
+    /// Whether the command ran behind a network proxy session (Allowlist).
+    proxied: bool,
     session_bus_unavailable: Option<String>,
 }
 
@@ -318,7 +311,7 @@ async fn run_with_network(
                              {error}"
                         )),
                         refused: RefusedTargets::default(),
-                        allowed_local_ports: None,
+                        proxied: false,
                         session_bus_unavailable,
                     };
                 }
@@ -331,7 +324,7 @@ async fn run_with_network(
     stop_bus_proxy();
     NetworkRun {
         output,
-        allowed_local_ports: session.as_ref().map(|_| run_network.local_ports()),
+        proxied: session.is_some(),
         refused: session.map(|session| session.refused()).unwrap_or_default(),
         session_bus_unavailable,
     }
@@ -347,7 +340,7 @@ async fn run_with_network(
     NetworkRun {
         output: crate::assistant::network::spawn_roots::as_agent(agent, run_command(command)).await,
         refused: RefusedTargets::default(),
-        allowed_local_ports: None,
+        proxied: false,
         session_bus_unavailable,
     }
 }
@@ -366,6 +359,7 @@ const SOCKET_HINT: &str = "The sandbox kept the command from reaching these Unix
 fn bash_exec_outcome(
     output: Result<SandboxCommandOutput, String>,
     refused: &RefusedTargets,
+    proxied: bool,
     sockets: &SocketPolicy,
     session_bus_unavailable: Option<&str>,
     timeout_ms: u64,
@@ -375,6 +369,7 @@ fn bash_exec_outcome(
         Ok(output) => Ok(bash_exec_result(
             &output,
             refused,
+            proxied,
             sockets,
             session_bus_unavailable,
         )),
@@ -400,10 +395,13 @@ fn bash_exec_outcome(
 
 /// Many clients hide the proxy's 403 body (curl prints only “CONNECT tunnel
 /// failed, response 403”), so the result itself names the refused hosts, and
-/// the host sockets the command could not reach.
+/// the host sockets the command could not reach. Behind the proxy
+/// (Allowlist), it also points a refused localhost connection at
+/// `net_request_access`.
 fn bash_exec_result(
     output: &SandboxCommandOutput,
     refused: &RefusedTargets,
+    proxied: bool,
     sockets: &SocketPolicy,
     session_bus_unavailable: Option<&str>,
 ) -> serde_json::Value {
@@ -421,6 +419,11 @@ fn bash_exec_result(
         });
         if refused.more > 0 {
             result["network"]["refusedMore"] = refused.more.into();
+        }
+    }
+    if proxied {
+        if let Some(port) = localhost_refusal(output, refused) {
+            result["network"]["localhost"] = localhost_note(port);
         }
     }
     let unreachable = unreachable_sockets(output, sockets);
@@ -528,25 +531,21 @@ fn localhost_note(port: Option<u16>) -> serde_json::Value {
     note
 }
 
-/// In Allowlist (`allowed` holds the run's allowed localhost ports), the
-/// localhost port the command output says a connection was refused on,
-/// `Some(None)` when the refusal names no port. A connection to an allowed
-/// port reaches the computer, so a refusal there means nothing listens; one
-/// the proxy refused is already named in `network.refused`.
+/// The localhost port the command output says a connection was refused on,
+/// `Some(None)` when the refusal names no port. A forwarded port never
+/// refuses (the forwarder accepts, then closes when nothing listens), so a
+/// refusal on an allowed port means it was allowed while the command ran,
+/// and it answers from the next one. A port the proxy refused is already
+/// named in `network.refused`.
 #[cfg(target_os = "linux")]
 fn localhost_refusal(
     output: &SandboxCommandOutput,
-    allowed: Option<&[u16]>,
     refused: &RefusedTargets,
 ) -> Option<Option<u16>> {
-    let allowed = allowed?;
     let mut portless = false;
     for line in output.stderr.lines().chain(output.stdout.lines()) {
         match refused_localhost_port(line) {
-            Some(Some(port))
-                if !allowed.contains(&port)
-                    && !refused.targets.contains(&format!("localhost:{port}")) =>
-            {
+            Some(Some(port)) if !refused.targets.contains(&format!("localhost:{port}")) => {
                 return Some(Some(port));
             }
             Some(None) => portless = true,
@@ -559,7 +558,6 @@ fn localhost_refusal(
 #[cfg(not(target_os = "linux"))]
 fn localhost_refusal(
     _output: &SandboxCommandOutput,
-    _allowed: Option<&[u16]>,
     _refused: &RefusedTargets,
 ) -> Option<Option<u16>> {
     None
@@ -568,10 +566,12 @@ fn localhost_refusal(
 /// Whether `line` reports a refused connection to `localhost`, `127.0.0.1`
 /// or `::1`, and the port it names: right after the address
 /// (`localhost:3306`, `[::1]:3000`, `('127.0.0.1', 5678)`,
-/// `/dev/tcp/localhost/5678`) or as `port 5432` / `port=8000`.
+/// `/dev/tcp/localhost/5678`) or as `port 5432` / `port=8000`. The sandbox
+/// keeps LANG and LC_*, so clients may print glibc's refusal and libpq's
+/// port word localized.
 #[cfg(target_os = "linux")]
 fn refused_localhost_port(line: &str) -> Option<Option<u16>> {
-    const REFUSALS: [&str; 9] = [
+    const REFUSALS: &[&str] = &[
         "connection refused",
         "econnrefused",
         "connectionrefusederror",
@@ -581,6 +581,14 @@ fn refused_localhost_port(line: &str) -> Option<Option<u16>> {
         "could not connect",
         "couldn't connect",
         "failed to connect",
+        "conexión rehusada",
+        "connexion refusée",
+        "verbindungsaufbau abgelehnt",
+        "connessione rifiutata",
+        "conexão recusada",
+        "ligação recusada",
+        "verbinding is geweigerd",
+        "conexión rexeitada",
     ];
     let line = line.to_ascii_lowercase().replace('\u{2019}', "'");
     if !REFUSALS.iter().any(|refusal| line.contains(refusal)) {
@@ -622,15 +630,17 @@ fn port_after_address(after: &str) -> Option<u16> {
 
 #[cfg(target_os = "linux")]
 fn port_keyword(line: &str) -> Option<u16> {
-    line.match_indices("port").find_map(|(at, word)| {
-        if line[..at]
-            .chars()
-            .next_back()
-            .is_some_and(|c| c.is_ascii_alphanumeric())
-        {
-            return None;
-        }
-        leading_port(line[at + word.len()..].trim_start_matches([' ', '=', ':']))
+    ["port", "puerto", "porta"].into_iter().find_map(|keyword| {
+        line.match_indices(keyword).find_map(|(at, word)| {
+            if line[..at]
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric())
+            {
+                return None;
+            }
+            leading_port(line[at + word.len()..].trim_start_matches([' ', '=', ':']))
+        })
     })
 }
 
@@ -3711,10 +3721,7 @@ mod tests {
         let run = run_with_network(command, agent(), &network);
         let running = spawn_roots::eventually(|| !spawn_roots::started_by(&by).is_empty());
         let (run, running) = tokio::join!(run, running);
-        assert_eq!(
-            run.allowed_local_ports, None,
-            "no proxy, so no localhost hint"
-        );
+        assert!(!run.proxied, "no proxy, so no localhost hint");
         match run.output {
             Ok(output) => assert_eq!(output.exit_code, Some(0), "{output:?}"),
             Err(error) if error.contains("Sandboxed shell is unavailable") => {
@@ -3841,7 +3848,8 @@ mod tests {
     }
 
     /// The local ports a command forwards are those of the run as it starts:
-    /// one allowed while it runs answers from the next command. This test
+    /// one allowed while it runs still refuses there, so that result gets the
+    /// localhost hint, and answers from the next command. This test
     /// listens on the port, so the proxy refuses it as CLAI's own; only a
     /// forwarded port gets that far. Needs bwrap.
     #[cfg(target_os = "linux")]
@@ -3856,8 +3864,9 @@ mod tests {
         let port = listener.local_addr().unwrap().port();
         let files = tempdir().unwrap();
         let workspace = tempdir().unwrap();
+        let refusal = format!("connect to 127.0.0.1 port {port} failed: Connection refused");
         let connect = format!(
-            "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", {port}), 5).recv(1); print(\"connected\")' 2>/dev/null || echo refused"
+            "python3 -c 'import socket; socket.create_connection((\"127.0.0.1\", {port}), 5).recv(1); print(\"connected\")' 2>/dev/null || echo '{refusal}'"
         );
         let command = |script: &str| {
             allowlist_command(
@@ -3896,9 +3905,19 @@ mod tests {
             }
             Err(error) => panic!("{error}"),
         };
-        assert_eq!(output.stdout, "refused\n", "{output:?}");
+        assert_eq!(output.stdout, format!("{refusal}\n"), "{output:?}");
         assert!(first.refused.is_empty(), "{:?}", first.refused);
-        assert_eq!(first.allowed_local_ports, Some(vec![port]));
+        let result = bash_exec_result(
+            &output,
+            &first.refused,
+            first.proxied,
+            &SocketPolicy::default(),
+            None,
+        );
+        assert_eq!(
+            result["network"]["localhost"]["port"], port,
+            "allowed while the command ran, so it refused there: {result}"
+        );
 
         let next = run_with_network(command(&connect), None, &network).await;
         let output = next.output.unwrap();
@@ -3913,6 +3932,7 @@ mod tests {
         let error = bash_exec_outcome(
             timed_out(),
             &refused,
+            false,
             &SocketPolicy::default(),
             None,
             2_000,
@@ -3927,6 +3947,7 @@ mod tests {
         let error = bash_exec_outcome(
             timed_out(),
             &refused,
+            false,
             &SocketPolicy::default(),
             None,
             2_000,
@@ -3956,6 +3977,7 @@ mod tests {
         assert!(bash_exec_result(
             &output,
             &RefusedTargets::default(),
+            false,
             &SocketPolicy::default(),
             None
         )
@@ -3963,7 +3985,7 @@ mod tests {
         .is_none());
         let mut refused = RefusedTargets::default();
         refused.add("example.org:443".to_string());
-        let result = bash_exec_result(&output, &refused, &SocketPolicy::default(), None);
+        let result = bash_exec_result(&output, &refused, false, &SocketPolicy::default(), None);
         assert_eq!(
             result["network"]["refused"],
             serde_json::json!(["example.org:443"])
@@ -3975,7 +3997,7 @@ mod tests {
 
         refused.more = 3;
         assert_eq!(
-            bash_exec_result(&output, &refused, &SocketPolicy::default(), None)["network"]
+            bash_exec_result(&output, &refused, false, &SocketPolicy::default(), None)["network"]
                 ["refusedMore"],
             3
         );
@@ -4002,8 +4024,27 @@ mod tests {
             ("nc: connect to localhost (127.0.0.1) port 5680 (tcp) failed: Connection refused", Some(5680)),
             ("bash: line 1: /dev/tcp/localhost/5681: Connection refused", Some(5681)),
             ("dial tcp [::1]:9000: connect: connection refused", Some(9000)),
+            ("psql: error: falló la conexión al servidor en «localhost» (127.0.0.1), puerto 5678: Conexión rehusada", Some(5678)),
+            ("psql: Fehler: Verbindung zum Server auf »localhost« (127.0.0.1), Port 5432 fehlgeschlagen: Verbindungsaufbau abgelehnt", Some(5432)),
+            ("psql: erreur : la connexion au serveur sur « localhost » (::1), port 5433 a échoué : Connexion refusée", Some(5433)),
+            (r#"psql: erro: a conexão com o servidor em "localhost" (127.0.0.1), porta 5434 falhou: Conexão recusada"#, Some(5434)),
+            ("OSError: Multiple exceptions: [Errno 111] Connect call failed ('::1', 8001, 0, 0), [Errno 111] Connect call failed ('127.0.0.1', 8001)", Some(8001)),
         ] {
             assert_eq!(refused_localhost_port(line), Some(port), "{line}");
+        }
+        // glibc's ECONNREFUSED text in the locales the detector reads.
+        for refusal in [
+            "Conexión rehusada",
+            "Connexion refusée",
+            "Verbindungsaufbau abgelehnt",
+            "Connessione rifiutata",
+            "Conexão recusada",
+            "Ligação recusada",
+            "Verbinding is geweigerd",
+            "Conexión rexeitada",
+        ] {
+            let line = format!("bash: /dev/tcp/127.0.0.1/5682: {refusal}");
+            assert_eq!(refused_localhost_port(&line), Some(Some(5682)), "{line}");
         }
         for line in [
             r#"psql: error: connection to server at "db.example.org" (10.0.0.5), port 5432 failed: Connection refused"#,
@@ -4020,11 +4061,11 @@ mod tests {
         }
     }
 
-    /// In Allowlist only, and not for a port the run allows (nothing listens
-    /// there then) or one the proxy already named.
+    /// Every refused localhost port but one the proxy already named, which
+    /// `network.refused` covers.
     #[cfg(target_os = "linux")]
     #[test]
-    fn the_localhost_hint_is_for_ports_the_run_does_not_allow() {
+    fn the_localhost_hint_skips_a_port_the_proxy_named() {
         let output = |stderr: &str| SandboxCommandOutput {
             cwd: PathBuf::from("/w"),
             exit_code: Some(2),
@@ -4039,40 +4080,53 @@ mod tests {
         };
         let none = RefusedTargets::default();
         let refused = output(&psql(5678));
-        assert_eq!(
-            localhost_refusal(&refused, Some(&[]), &none),
-            Some(Some(5678))
-        );
-        assert_eq!(
-            localhost_refusal(&refused, Some(&[5432]), &none),
-            Some(Some(5678))
-        );
-        assert_eq!(localhost_refusal(&refused, Some(&[5678]), &none), None);
-        assert_eq!(
-            localhost_refusal(&refused, None, &none),
-            None,
-            "Host network or Off"
-        );
+        assert_eq!(localhost_refusal(&refused, &none), Some(Some(5678)));
         let mut named = RefusedTargets::default();
         named.add("localhost:5678".to_string());
-        assert_eq!(localhost_refusal(&refused, Some(&[]), &named), None);
+        assert_eq!(localhost_refusal(&refused, &named), None);
 
-        let both = output(&format!("{}\n{}", psql(5432), psql(6379)));
-        assert_eq!(
-            localhost_refusal(&both, Some(&[5432]), &none),
-            Some(Some(6379))
-        );
+        let both = output(&format!("{}\n{}", psql(5678), psql(6379)));
+        assert_eq!(localhost_refusal(&both, &named), Some(Some(6379)));
         let portless =
             output("ERROR 2003 (HY000): Can't connect to MySQL server on '127.0.0.1' (111)");
-        assert_eq!(localhost_refusal(&portless, Some(&[]), &none), Some(None));
+        assert_eq!(localhost_refusal(&portless, &none), Some(None));
         let on_stdout = SandboxCommandOutput {
             stdout: psql(5678),
             ..output("")
         };
-        assert_eq!(
-            localhost_refusal(&on_stdout, Some(&[]), &none),
-            Some(Some(5678))
+        assert_eq!(localhost_refusal(&on_stdout, &none), Some(Some(5678)));
+    }
+
+    /// Behind the proxy only (Allowlist), next to the hosts it refused.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_result_behind_the_proxy_points_a_refused_localhost_at_net_request_access() {
+        let output = SandboxCommandOutput {
+            cwd: PathBuf::from("/w"),
+            exit_code: Some(1),
+            success: false,
+            stdout: String::new(),
+            stderr: "Error: connect ECONNREFUSED 127.0.0.1:3000".to_string(),
+        };
+        let mut refused = RefusedTargets::default();
+        let sockets = SocketPolicy::default();
+        let result = bash_exec_result(&output, &refused, false, &sockets, None);
+        assert!(
+            result.get("network").is_none(),
+            "Host network or Off: {result}"
         );
+        let result = bash_exec_result(&output, &refused, true, &sockets, None);
+        assert_eq!(
+            result["network"],
+            serde_json::json!({"localhost": localhost_note(Some(3000))})
+        );
+        refused.add("example.org:443".to_string());
+        let result = bash_exec_result(&output, &refused, true, &sockets, None);
+        assert_eq!(
+            result["network"]["refused"],
+            serde_json::json!(["example.org:443"])
+        );
+        assert_eq!(result["network"]["localhost"], localhost_note(Some(3000)));
     }
 
     #[test]
@@ -4118,7 +4172,7 @@ mod tests {
             stderr: stderr.to_string(),
         };
         let unreachable = |output: &SandboxCommandOutput, sockets: &SocketPolicy| {
-            bash_exec_result(output, &RefusedTargets::default(), sockets, None)
+            bash_exec_result(output, &RefusedTargets::default(), false, sockets, None)
                 .get("sockets")
                 .map(|sockets| sockets["unreachable"].clone())
         };
@@ -4142,7 +4196,7 @@ mod tests {
             unreachable(&denied, &confined),
             Some(serde_json::json!([path]))
         );
-        let result = bash_exec_result(&denied, &RefusedTargets::default(), &confined, None);
+        let result = bash_exec_result(&denied, &RefusedTargets::default(), false, &confined, None);
         assert_eq!(result["sockets"]["hint"], SOCKET_HINT);
 
         // Without Landlock a refusal comes from the host's permissions.
@@ -4327,11 +4381,11 @@ mod tests {
         };
         let none = SocketPolicy::default();
         let refused = RefusedTargets::default();
-        assert!(bash_exec_result(&output, &refused, &none, None)
+        assert!(bash_exec_result(&output, &refused, false, &none, None)
             .get("sessionBus")
             .is_none());
         let reason = Some("xdg-dbus-proxy is not installed");
-        let note = bash_exec_result(&output, &refused, &none, reason)["sessionBus"]
+        let note = bash_exec_result(&output, &refused, false, &none, reason)["sessionBus"]
             .as_str()
             .unwrap()
             .to_string();
@@ -4341,6 +4395,7 @@ mod tests {
         let error = bash_exec_outcome(
             Err("Command timed out after 2000 ms".to_string()),
             &refused,
+            false,
             &none,
             reason,
             2_000,
@@ -4566,7 +4621,7 @@ mod tests {
             stdout: String::new(),
             stderr: String::new(),
         };
-        let result = bash_exec_result(&output, &RefusedTargets::default(), &sockets, None);
+        let result = bash_exec_result(&output, &RefusedTargets::default(), false, &sockets, None);
         let skipped = result["socketGrantsSkipped"].as_array().unwrap();
         assert_eq!(skipped.len(), 2, "{skipped:?}");
         let dir = dir.path().canonicalize().unwrap();
