@@ -10,8 +10,9 @@ import type {
 } from '../../generated/bindings';
 import type { SandboxStatusState } from '../../hooks/useSandboxStatus';
 import { containerEngineWarning } from '../../permissions/containerEngineSocket';
-import { unicodeHost } from '../../permissions/hostNames';
+import { isLoopbackHost, unicodeHost } from '../../permissions/hostNames';
 import { PathGrantEditor, PrefixListEditor, Switch } from './ListEditors';
+import { LocalPortsEditor } from './LocalPortsEditor';
 import form from './SettingsForm.module.css';
 import styles from './AgentBehaviorForm.module.css';
 
@@ -119,7 +120,7 @@ const idnaHost = (value: string): string | null => {
  * entry to store, in the form the backend saves and compares (lower case,
  * punycode), or why the text is not one.
  */
-export const parseHostEntry = (raw: string): string | { error: string } => {
+const hostEntry = (raw: string): string | { error: string } => {
   const value = raw.trim().toLowerCase().replace(/\.$/, '');
   if (!value) return { error: 'Enter a host name.' };
   if (/\s/.test(value)) return { error: 'A host name has no spaces.' };
@@ -159,6 +160,74 @@ export const parseHostEntry = (raw: string): string | { error: string } => {
   return host;
 };
 
+const LOCAL_PORT = /^(?:localhost|127\.0\.0\.1|\[::1\]):([1-9]\d{0,4})$/;
+
+/**
+ * The port in `localhost:5432`, `127.0.0.1:5432` or `[::1]:5432`, or null:
+ * the text `parse_local_port` (network/matcher.rs) accepts, checked against
+ * the same localPorts cases in hostEntryCases.json.
+ */
+export const localPortOf = (raw: string): number | null => {
+  const port = Number(LOCAL_PORT.exec(raw.trim().toLowerCase())?.[1]);
+  return port <= 65535 ? port : null;
+};
+
+/** The eight 16-bit words of an IPv6 address in the form `canonicalIpv6` gives. */
+const ipv6Words = (address: string): number[] => {
+  const words = (part: string) => (part ? part.split(':').map((word) => parseInt(word, 16)) : []);
+  const [head = '', tail] = address.split('::');
+  if (tail === undefined) return words(head);
+  const front = words(head);
+  const back = words(tail);
+  return [...front, ...new Array<number>(8 - front.length - back.length).fill(0), ...back];
+};
+
+/**
+ * Whether a host entry, as `hostEntry` returns it, is `localhost`, a
+ * `*.localhost` name or an address of this computer, as
+ * `names_this_computer` (network/matcher.rs) decides it.
+ */
+const isThisComputer = (host: string): boolean => {
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (isIpv4(host)) return host.startsWith('127.') || host === '0.0.0.0';
+  if (!host.includes(':')) return false;
+  const words = ipv6Words(host);
+  const prefix = words.slice(0, 6).join(',');
+  const [high = 0, low = 0] = words.slice(6);
+  // An IPv4 address mapped into IPv6 (::ffff:0:0/96) or under NAT64 (64:ff9b::/96).
+  if (prefix === '0,0,0,0,0,65535' || prefix === '100,65435,0,0,0,0') {
+    return high >> 8 === 127 || (high === 0 && low === 0);
+  }
+  return prefix === '0,0,0,0,0,0' && high === 0 && low <= 1;
+};
+
+const LOCAL_PORT_ELSEWHERE = 'Local ports go in the Local ports list, which checks the program listening.';
+
+/**
+ * An entry for the denied hosts, where `localhost` refuses every local
+ * port. A port of this computer is not a host entry: the local ports hold it.
+ */
+export const parseHostEntry = (raw: string): string | { error: string } =>
+  localPortOf(raw) === null ? hostEntry(raw) : { error: LOCAL_PORT_ELSEWHERE };
+
+/**
+ * An entry for the allowed hosts. They never reach this computer, whose
+ * ports are allowed one at a time, by the program serving each.
+ */
+export const parseAllowEntry = (raw: string): string | { error: string } => {
+  const entry = parseHostEntry(raw);
+  return typeof entry === 'string' && isThisComputer(entry)
+    ? { error: 'This computer is allowed one port at a time, as in localhost:5432, under Local ports.' }
+    : entry;
+};
+
+/** The denied entry that refuses every local port (`localhost`, `127.0.0.1` or `::1`), if any. */
+export const localPortsDeniedBy = (denyDomains: string[]): string | undefined =>
+  denyDomains.find((entry) => {
+    const host = hostEntry(entry);
+    return typeof host === 'string' && isLoopbackHost(host);
+  });
+
 const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 export const grantOrigin = (grant: FilesystemPathGrant): { text: string; title?: string } | null => {
@@ -192,17 +261,23 @@ const busSummary = (draft: AccessDraft, sandbox: SandboxStatus | null): string =
   return 'Bus: keyring only';
 };
 
+const allowlistSummary = (policy: NetworkPolicy): string => {
+  const hosts = plural(policy.allowDomains.length, 'host');
+  const ports = policy.localPorts?.length ?? 0;
+  return `Allowlist (${ports ? `${hosts}, ${plural(ports, 'local port')}` : hosts})`;
+};
+
 const networkSummary = (policy: NetworkPolicy | null, sandbox: SandboxStatus | null): string => {
   if (!policy) return 'Network: this PC’s default';
   const mode = policy.mode === 'allowlist'
-    ? `Allowlist (${plural(policy.allowDomains.length, 'host')})`
+    ? allowlistSummary(policy)
     : policy.mode === 'off' ? 'Off' : 'Host network';
   // A stored Allowlist stops the shell there too, so it is not web tools only.
   const webToolsOnly = sandbox && !sandbox.available && policy.mode !== 'allowlist';
   return webToolsOnly ? `Network: ${mode} (${WEB_TOOLS_ONLY})` : `Network: ${mode}`;
 };
 
-/** The network mode picker and, in Allowlist, the two host lists. */
+/** The network mode picker and, in Allowlist, the host lists and the local ports. */
 const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
   policy: NetworkPolicy;
   sandbox: SandboxStatusState;
@@ -219,6 +294,7 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
   const hint = NETWORK_MODES.find((m) => m.mode === policy.mode)?.hint;
   const hintId = `${headingId}-hint`;
   const reasonId = `${headingId}-reason`;
+  const showLists = known && policy.mode === 'allowlist';
 
   let statusHint: React.ReactNode;
   if (failed) {
@@ -282,7 +358,7 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
           <p className={form.hint} id={reasonId}>Allowlist: {allowlistReason}.</p>
         )
       )}
-      {known && policy.mode === 'allowlist' && (
+      {showLists && (
         <div className={styles.prefixColumns}>
           <div className={styles.prefixList}>
             <span className={form.label}>Allowed hosts · {policy.allowDomains.length}</span>
@@ -295,7 +371,7 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
               disabled={disabled}
               label="Allowed hosts"
               placeholder="example.com"
-              parse={parseHostEntry}
+              parse={parseAllowEntry}
               display={unicodeHost}
             />
           </div>
@@ -313,6 +389,14 @@ const NetworkSection = ({ policy, sandbox, onChange, disabled, headingId }: {
             />
           </div>
         </div>
+      )}
+      {showLists && (
+        <LocalPortsEditor
+          grants={policy.localPorts ?? []}
+          deniedBy={localPortsDeniedBy(policy.denyDomains)}
+          onChange={(localPorts) => onChange({ ...policy, localPorts })}
+          disabled={disabled}
+        />
       )}
     </>
   );

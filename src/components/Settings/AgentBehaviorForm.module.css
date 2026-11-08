@@ -92,6 +92,22 @@
   max-height: 168px;
 }
 
+/* A local port row: the port, then the program or user that must serve it. */
+.localPort {
+  flex-shrink: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  color: var(--color-text-primary);
+}
+
+.localPortServer {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+}
+
 @media (max-width: 960px) {
   .accessBody {
     grid-template-columns: minmax(0, 1fr);

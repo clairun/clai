@@ -47,6 +47,14 @@
     {
       "entry": "*。com",
       "matched": "*.com"
+    },
+    {
+      "entry": "localhost.example.com",
+      "matched": "localhost.example.com"
+    },
+    {
+      "entry": "127.0.0.1.nip.io",
+      "matched": "127.0.0.1.nip.io"
     }
   ],
   "rejected": [
@@ -168,5 +176,21 @@
       "localhost.example.com:80",
       "127.0.0.1.nip.io:80"
     ]
-  }
+  },
+  "allowOnlyRejected": [
+    "localhost",
+    " LocalHost. ",
+    "*.localhost",
+    "app.localhost",
+    "app。localhost",
+    "127.0.0.1",
+    "127.1.2.3",
+    "0.0.0.0",
+    "::1",
+    "[::1]",
+    "0:0:0:0:0:0:0:1",
+    "::",
+    "::ffff:127.0.0.1",
+    "64:ff9b::7f00:1"
+  ]
 }

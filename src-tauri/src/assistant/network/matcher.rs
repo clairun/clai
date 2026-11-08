@@ -660,9 +660,11 @@ mod tests {
     #[test]
     fn entries_are_parsed_by_one_rule() {
         #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
         struct Cases {
             accepted: Vec<Accepted>,
             rejected: Vec<String>,
+            allow_only_rejected: Vec<String>,
         }
         #[derive(serde::Deserialize)]
         struct Accepted {
@@ -682,6 +684,12 @@ mod tests {
         }
         for entry in cases.rejected {
             assert!(parse_entry(&entry).is_err(), "{entry:?}");
+        }
+        // The form refuses these on the allowed hosts only (`parseAllowEntry`,
+        // AgentAccess.test.ts): denied, they refuse this computer.
+        for entry in cases.allow_only_rejected {
+            assert!(parse_entry(&entry).is_ok(), "{entry:?}");
+            assert!(parse_local_port(&entry).is_err(), "{entry:?}");
         }
     }
 
