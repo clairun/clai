@@ -78,6 +78,14 @@ impl Loopback {
     }
 }
 
+/// Why an agent cannot reach `port` when [`Listener::Clai`] holds it.
+pub fn served_by_clai(port: u16) -> String {
+    format!(
+        "Port {port} on this computer is served by CLAI itself or by a program CLAI runs \
+         for its own work, such as an agent engine, which agents never connect to."
+    )
+}
+
 /// What listens on a localhost port, as CLAI sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Listener {
@@ -1544,13 +1552,16 @@ mod tests {
             ),
             (
                 "an agent command in Host network",
+                // bwrap, its child (pid 1 in the sandbox), then the server.
                 tunnel()
                     .holder(200, CLAI, "/usr/bin/bwrap", &[])
                     .started(200, agent())
-                    .holder(201, 200, PYTHON, &[11])
-                    .with(201, |p| p.namespaces = namespaces("pid:[2]", "mnt:[2]")),
+                    .holder(201, 200, "/usr/bin/bwrap", &[])
+                    .with(201, |p| p.namespaces = namespaces("pid:[2]", "mnt:[2]"))
+                    .holder(202, 201, PYTHON, &[11])
+                    .with(202, |p| p.namespaces = namespaces("pid:[2]", "mnt:[2]")),
                 started(
-                    run_only(RunOnly::OtherNamespace, &[11], &[(201, PYTHON)]),
+                    run_only(RunOnly::OtherNamespace, &[11], &[(202, PYTHON)]),
                     agent(),
                 ),
             ),

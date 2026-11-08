@@ -43,10 +43,11 @@ fn programs() -> MutexGuard<'static, Programs> {
     RECORDED.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Keeps a program recorded until dropped, which must be no later than CLAI
-/// reaps it: until then its pid names no other process.
+/// Keeps a program recorded until dropped, which its owner does when it reaps
+/// the program or lets it go. A later program given the same pid keeps its
+/// own record.
 #[must_use = "dropping it forgets the program"]
-pub struct Recorded(Option<u32>);
+pub struct Recorded(Option<(u32, u64)>);
 
 /// Records `pid`, a child CLAI just started, as started by `by`.
 pub fn record(pid: Option<u32>, by: StartedBy) -> Recorded {
@@ -54,13 +55,20 @@ pub fn record(pid: Option<u32>, by: StartedBy) -> Recorded {
         return Recorded(None);
     };
     programs().insert(pid, (start, by));
-    Recorded(Some(pid))
+    Recorded(Some((pid, start)))
 }
 
 impl Drop for Recorded {
     fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            programs().remove(&pid);
+        let Some((pid, start)) = self.0 else {
+            return;
+        };
+        let mut programs = programs();
+        if programs
+            .get(&pid)
+            .is_some_and(|(recorded, _)| *recorded == start)
+        {
+            programs.remove(&pid);
         }
     }
 }
@@ -87,6 +95,28 @@ pub fn record_agent_command(pid: Option<u32>) -> Recorded {
 )]
 pub fn recorded(pid: u32) -> Option<(u64, StartedBy)> {
     programs().get(&pid).cloned()
+}
+
+/// The pids recorded as started by `by`.
+#[cfg(all(test, target_os = "linux"))]
+pub fn started_by(by: &StartedBy) -> Vec<u32> {
+    programs()
+        .iter()
+        .filter(|(_, (_, recorded))| recorded == by)
+        .map(|(pid, _)| *pid)
+        .collect()
+}
+
+/// Whether `check` holds within five seconds.
+#[cfg(all(test, target_os = "linux"))]
+pub async fn eventually(mut check: impl FnMut() -> bool) -> bool {
+    for _ in 0..250 {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    check()
 }
 
 /// When `pid` started, which tells it from a later process given its pid.
@@ -130,6 +160,21 @@ mod tests {
         let kept = record(Some(pid), StartedBy::Terminal);
         assert_eq!(recorded(pid), Some((start, StartedBy::Terminal)));
         drop(kept);
+        assert_eq!(recorded(pid), None);
+        stop(child);
+    }
+
+    #[test]
+    fn a_late_drop_keeps_a_later_program_given_the_same_pid() {
+        let child = sleep();
+        let pid = child.id();
+        let old = record(Some(pid), StartedBy::Terminal);
+        let later = start_time(pid).expect("a start time") + 1;
+        let app = || StartedBy::App("kitty".to_string());
+        programs().insert(pid, (later, app()));
+        drop(old);
+        assert_eq!(recorded(pid), Some((later, app())));
+        drop(Recorded(Some((pid, later))));
         assert_eq!(recorded(pid), None);
         stop(child);
     }

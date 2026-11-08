@@ -269,10 +269,7 @@ async fn local_upstream<S: AsyncWrite + Unpin>(
             "Port {port} on this computer is now served by {served_by}, not by what the \
              user allowed. Call `net_request_access` with host `{target}` to ask again."
         ),
-        LocalDecision::Clai => format!(
-            "Port {port} on this computer is served by CLAI itself or by an agent engine \
-             CLAI runs, which the CLAI network proxy never connects to."
-        ),
+        LocalDecision::Clai => super::local_listener::served_by_clai(port),
     };
     shared.network.record(LOCALHOST, Some(port), false);
     shared.refuse(target);
@@ -911,7 +908,11 @@ mod tests {
         let running = start_with(network, Arc::new(HostConnector), listening(Listener::Clai));
         let response = exchange(&running, &request, b"").await;
         assert!(
-            response.contains("agent engine CLAI runs, which the CLAI network proxy never"),
+            response.ends_with(&format!(
+                "Port {port} on this computer is served by CLAI itself or by a program CLAI \
+                 runs for its own work, such as an agent engine, which agents never connect \
+                 to.\n"
+            )),
             "{response}"
         );
         assert_eq!(

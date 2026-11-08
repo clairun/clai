@@ -587,6 +587,37 @@ mod tests {
         assert_eq!(parse_login_shell("u:x:1:1::/home/u:"), None);
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_shell_is_recorded_until_it_is_reaped() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut sleep = CommandBuilder::new("sleep");
+        sleep.arg("1");
+        let child = pair.slave.spawn_command(sleep).unwrap();
+        drop(pair.slave);
+        let pid = child.process_id().unwrap();
+        let reader = pair.master.try_clone_reader().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        spawn_io_threads(reader, child, Channel::new(|_| Ok(())), closed);
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(
+            spawn_roots::recorded(pid).map(|(_, by)| by),
+            Some(StartedBy::Terminal),
+            "while the shell runs"
+        );
+        assert!(
+            spawn_roots::eventually(|| spawn_roots::recorded(pid).is_none()).await,
+            "gone once reaped"
+        );
+    }
+
     #[test]
     fn output_event_serializes_to_tagged_camelcase() {
         let json = serde_json::to_string(&TerminalEvent::Output {

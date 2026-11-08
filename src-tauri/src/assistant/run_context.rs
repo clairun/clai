@@ -27,6 +27,18 @@ pub struct RunContext {
     pub workspace_root: PathBuf,
 }
 
+impl RunContext {
+    /// The name of the agent as the workspace shows it, as a permission card
+    /// names it.
+    pub fn agent_display_name(&self) -> Option<String> {
+        let id = self.automation_id.as_deref()?;
+        self.workspace_agents
+            .iter()
+            .find(|agent| agent.id == id)
+            .map(|agent| agent.display_name.clone())
+    }
+}
+
 /// Resolve the run configuration for `agent_id` in `workspace_id`.
 ///
 /// `None` is a manager-less workspace: web access, no MCP servers. An agent
@@ -98,6 +110,27 @@ mod tests {
     use crate::config::workspace_config::{McpRef, WorkspaceAssignment, WorkspaceConfig};
     use crate::config::{AppConfig, FilesystemPathAccess, FilesystemPathGrant, ShellAccessMode};
     use crate::workspace_index::WorkspaceIndex;
+
+    #[test]
+    fn the_agent_is_named_as_the_workspace_shows_it() {
+        let agent = |id: &str, name: &str| crate::assistant::types::WorkspaceAgentSummary {
+            id: id.to_string(),
+            display_name: name.to_string(),
+            is_default: false,
+            description: None,
+        };
+        let context = RunContext {
+            automation_id: Some("b".to_string()),
+            automation_name: Some(" ".to_string()),
+            workspace_agents: vec![agent("a", "Ana"), agent("b", "def-reviewer")],
+            ..RunContext::default()
+        };
+        assert_eq!(
+            context.agent_display_name().as_deref(),
+            Some("def-reviewer")
+        );
+        assert_eq!(RunContext::default().agent_display_name(), None);
+    }
 
     const WS: &str = "77777777-7777-4777-8777-777777777777";
     const MAIN: &str = "88888888-8888-4888-8888-888888888888";

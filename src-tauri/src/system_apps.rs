@@ -793,6 +793,21 @@ pub fn resolve_contained_path(root: &Path, rel_path: Option<&str>) -> Result<Pat
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_opened_app_is_recorded_until_it_is_reaped() {
+        let app = StartedBy::App("sleep".to_string());
+        spawn_host_detached("sleep", &["1".to_string()], None, HostWindow::Visible).unwrap();
+        let pids = spawn_roots::started_by(&app);
+        assert_eq!(pids.len(), 1, "{pids:?}");
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert_eq!(spawn_roots::started_by(&app), pids, "while the app runs");
+        assert!(
+            spawn_roots::eventually(|| spawn_roots::started_by(&app).is_empty()).await,
+            "gone once reaped"
+        );
+    }
+
     #[test]
     fn substitute_replaces_placeholder() {
         assert_eq!(

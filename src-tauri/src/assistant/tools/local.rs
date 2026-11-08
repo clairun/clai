@@ -212,18 +212,16 @@ async fn execute_bash_exec(
         }
     };
 
-    let run = crate::assistant::network::spawn_roots::as_agent(
-        context.run_context.automation_name.clone(),
-        run_with_network(
-            SandboxCommand {
-                argv,
-                cwd,
-                timeout_ms,
-                max_output_chars: output_limit,
-                profile,
-            },
-            &context.run_network,
-        ),
+    let run = run_with_network(
+        SandboxCommand {
+            argv,
+            cwd,
+            timeout_ms,
+            max_output_chars: output_limit,
+            profile,
+        },
+        context.run_context.agent_display_name(),
+        &context.run_network,
     )
     .await;
     let output = run.output.inspect_err(|error| {
@@ -260,10 +258,11 @@ struct NetworkRun {
 /// Runs the command, in Allowlist behind a network proxy session of its
 /// own, and with the keyring-only bus behind a bus proxy of its own. A bus
 /// proxy that does not start leaves the command with no bus, never the
-/// whole one.
+/// whole one. The programs it starts are recorded as commands of `agent`.
 #[cfg(target_os = "linux")]
 async fn run_with_network(
     mut command: SandboxCommand,
+    agent: Option<String>,
     run_network: &std::sync::Arc<RunNetwork>,
 ) -> NetworkRun {
     use crate::assistant::network::{connect::HostConnector, proxy::ProxySession};
@@ -311,7 +310,8 @@ async fn run_with_network(
         },
         _ => None,
     };
-    let output = run_command(command).await;
+    let output =
+        crate::assistant::network::spawn_roots::as_agent(agent, run_command(command)).await;
     stop_bus_proxy();
     NetworkRun {
         output,
@@ -323,11 +323,12 @@ async fn run_with_network(
 #[cfg(not(target_os = "linux"))]
 async fn run_with_network(
     command: SandboxCommand,
+    agent: Option<String>,
     _run_network: &std::sync::Arc<RunNetwork>,
 ) -> NetworkRun {
     let session_bus_unavailable = command.profile.session_bus_unavailable.clone();
     NetworkRun {
-        output: run_command(command).await,
+        output: crate::assistant::network::spawn_roots::as_agent(agent, run_command(command)).await,
         refused: RefusedTargets::default(),
         session_bus_unavailable,
     }
@@ -1525,10 +1526,7 @@ where
     }
     let Some(card) = LocalListenerCard::of(&listener) else {
         return Err(if listener == Listener::Clai {
-            format!(
-                "Port {port} on this computer is served by CLAI itself or by an agent engine \
-                 CLAI runs, which agents never connect to."
-            )
+            crate::assistant::network::local_listener::served_by_clai(port)
         } else {
             format!(
                 "Nothing listens on port {port} on this computer. Ask the user to start \
@@ -3467,6 +3465,49 @@ mod tests {
         );
     }
 
+    /// The sandbox of a command is recorded as started by its agent while
+    /// the command runs, so a server it starts can be asked for. Needs bwrap.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn an_agent_command_is_recorded_while_it_runs() {
+        use crate::assistant::network::spawn_roots::{self, StartedBy};
+        let workspace = tempdir().unwrap();
+        let agent = || Some("Ana, in bash_exec".to_string());
+        let by = StartedBy::Agent(agent());
+        let command = SandboxCommand {
+            argv: vec!["/bin/sh".into(), "-c".into(), "sleep 1".into()],
+            cwd: workspace.path().to_path_buf(),
+            timeout_ms: 10_000,
+            max_output_chars: 10_000,
+            profile: SandboxProfile::for_test(
+                workspace.path().to_path_buf(),
+                Vec::new(),
+                SandboxNetworkMode::Disabled,
+                SandboxSessionBusMode::Deny,
+                SandboxEnv::filtered_from_iter(
+                    [("PATH", "/usr/bin:/bin")],
+                    workspace.path(),
+                    SandboxSessionBusMode::Deny,
+                ),
+                None,
+            ),
+        };
+        let network = std::sync::Arc::new(run_network(&[], &[]));
+        let run = run_with_network(command, agent(), &network);
+        let running = spawn_roots::eventually(|| !spawn_roots::started_by(&by).is_empty());
+        let (run, running) = tokio::join!(run, running);
+        match run.output {
+            Ok(output) => assert_eq!(output.exit_code, Some(0), "{output:?}"),
+            Err(error) if error.contains("Sandboxed shell is unavailable") => {
+                crate::assistant::sandbox::skip_without_bwrap(&error);
+                return;
+            }
+            Err(error) => panic!("{error}"),
+        }
+        assert!(running, "recorded while the command runs");
+        assert!(spawn_roots::started_by(&by).is_empty(), "gone once reaped");
+    }
+
     /// The proxy session lives for the command and its refusals reach the
     /// result. Needs bwrap and the helper `cargo test` builds.
     #[cfg(target_os = "linux")]
@@ -3515,7 +3556,7 @@ mod tests {
         };
         let refuse = "/run/clai/helper connect --proxy 127.0.0.1:3128 example.org 443 </dev/null";
         let network = std::sync::Arc::new(run_network(&["github.com"], &[]));
-        let run = run_with_network(command(refuse, 20_000), &network).await;
+        let run = run_with_network(command(refuse, 20_000), None, &network).await;
         let (output, refused) = match run.output {
             Ok(output) => (output, run.refused),
             Err(error) if error.contains("Sandboxed shell is unavailable") => {
@@ -3532,7 +3573,12 @@ mod tests {
         );
         assert!(!socket.exists(), "the session ended with the command");
 
-        let run = run_with_network(command(&format!("{refuse}; sleep 30"), 2_000), &network).await;
+        let run = run_with_network(
+            command(&format!("{refuse}; sleep 30"), 2_000),
+            None,
+            &network,
+        )
+        .await;
         let refused = run.refused;
         let error = run.output.unwrap_err();
         assert!(error.contains("timed out after"), "{error}");
@@ -3914,7 +3960,7 @@ mod tests {
             profile,
         };
         let network = std::sync::Arc::new(run_network(&[], &[]));
-        let run = run_with_network(command, &network).await;
+        let run = run_with_network(command, None, &network).await;
         assert!(
             run.session_bus_unavailable.is_some(),
             "the result says why there is no bus"

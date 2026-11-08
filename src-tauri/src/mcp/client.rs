@@ -787,6 +787,40 @@ mod tests {
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_stdio_server_is_recorded_while_it_runs() {
+        let config = McpServerConfig {
+            id: "recorded-stdio-server".to_string(),
+            name: "Recorded stdio server".to_string(),
+            enabled: true,
+            // Never answers, so the connection stays in its handshake.
+            transport: crate::config::McpServerTransport::Stdio {
+                command: "sleep".to_string(),
+                args: vec!["30".to_string()],
+                env: Vec::new(),
+            },
+            auth: McpServerAuth::None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        };
+        let by = StartedBy::McpServer(config.name.clone());
+        let connect =
+            tokio::spawn(
+                async move { McpClientManager::connect_server(&config).await.map(|_| ()) },
+            );
+        assert!(
+            spawn_roots::eventually(|| !spawn_roots::started_by(&by).is_empty()).await,
+            "recorded while it runs"
+        );
+        connect.abort();
+        let _ = connect.await;
+        assert!(
+            spawn_roots::started_by(&by).is_empty(),
+            "gone with the connection"
+        );
+    }
+
     #[test]
     fn qualified_name_is_a_valid_function_name_even_for_long_tools() {
         // Full UUID + longest Netdata tool name used to be 65 chars with dots.

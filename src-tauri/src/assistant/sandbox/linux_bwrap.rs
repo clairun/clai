@@ -67,23 +67,30 @@ pub async fn run(mut command: SandboxCommand) -> Result<SandboxCommandOutput, St
             format!("Failed to start sandboxed shell: {}", e)
         }
     })?;
-    // An agent can ask for a server the command starts, until it is reaped.
-    let _command = spawn_roots::record_agent_command(child.id());
-
-    let output = run_spawned_child(
-        child,
-        command.cwd,
-        command.timeout_ms,
-        command.max_output_chars,
-        "Sandboxed shell command",
-    )
-    .await?;
+    let output = run_recorded(child, command).await?;
 
     if looks_like_bwrap_setup_failure(&output) {
         return Err(classify_bwrap_failure(&output.stderr));
     }
 
     Ok(output)
+}
+
+/// Runs the started command to its end. An agent can ask for a server the
+/// command starts until then.
+async fn run_recorded(
+    child: tokio::process::Child,
+    command: SandboxCommand,
+) -> Result<SandboxCommandOutput, String> {
+    let _command = spawn_roots::record_agent_command(child.id());
+    run_spawned_child(
+        child,
+        command.cwd,
+        command.timeout_ms,
+        command.max_output_chars,
+        "Sandboxed shell command",
+    )
+    .await
 }
 
 /// Sets close-on-exec on every descriptor above stdio. bwrap hands the
@@ -1002,6 +1009,31 @@ mod tests {
                 None,
             ),
         }
+    }
+
+    #[tokio::test]
+    async fn an_agent_command_is_recorded_until_it_is_reaped() {
+        use crate::assistant::network::spawn_roots::StartedBy;
+        let ana = || Some("Ana, in linux_bwrap".to_string());
+        let by = StartedBy::Agent(ana());
+        let mut sleep = Command::new("sleep");
+        sleep.arg("1");
+        prepare_stdio(&mut sleep);
+        let child = sleep.spawn().unwrap();
+        let pid = child.id().unwrap();
+        let command = SandboxCommand {
+            timeout_ms: 10_000,
+            ..sample_command()
+        };
+        let run = spawn_roots::as_agent(ana(), run_recorded(child, command));
+        let running = async {
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            spawn_roots::started_by(&by)
+        };
+        let (output, running) = tokio::join!(run, running);
+        assert_eq!(output.unwrap().exit_code, Some(0));
+        assert_eq!(running, [pid], "while the command runs");
+        assert!(spawn_roots::started_by(&by).is_empty(), "gone once reaped");
     }
 
     #[test]
