@@ -659,49 +659,59 @@ async fn dispatch_cli_handoff(app: tauri::AppHandle, args: Vec<String>) {
     };
     let argv: Vec<String> = args.into_iter().skip(1).collect();
     let fresh_index = WorkspaceIndex::scan(&config);
-    let request = cli::argv_request(&argv, &config, &fresh_index);
-    if let Ok(cli::LaunchRequest::Open(id)) = &request {
-        if let Some(locator) = fresh_index.locator(id) {
-            match state.workspace_index.write() {
-                Ok(mut index) => index.insert_locator(locator),
-                Err(error) => {
-                    tracing::warn!(%error, "CLI handoff index lock failed");
-                    return;
-                }
-            }
-        }
-    }
-    match request {
+    match cli::argv_request(&argv, &config, &fresh_index) {
         Ok(cli::LaunchRequest::Focus) => window_core::show_recent_window(&app),
         Ok(cli::LaunchRequest::Open(id)) => {
-            if let Err(error) = window_core::open_window(&app, window_core::Launch::Workspace(id)) {
-                tracing::warn!(%error, "CLI handoff could not open window");
-                window_core::show_recent_window(&app);
-            }
+            dispatch_cli_open(&app, state.inner(), &fresh_index, id);
         }
-        Ok(cli::LaunchRequest::New) => {
-            if let Err(error) = wait_for_workspace_storage(state.inner()).await {
-                tracing::warn!(%error, "CLI handoff storage unavailable");
-                window_core::show_recent_window(&app);
-                return;
-            }
-            match commands::workspace::create_workspace(None, state.inner()).await {
-                Ok(id) => {
-                    if let Err(error) =
-                        window_core::open_window(&app, window_core::Launch::Workspace(id))
-                    {
-                        tracing::warn!(%error, "CLI handoff could not open new workspace window");
-                        window_core::show_recent_window(&app);
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(%error, "CLI handoff could not create workspace");
-                    window_core::show_recent_window(&app);
-                }
-            }
-        }
+        Ok(cli::LaunchRequest::New) => dispatch_cli_new(&app, state.inner()).await,
         Err(error) => tracing::warn!(message = %error.message, "CLI handoff rejected"),
     }
+}
+
+fn refresh_cli_locator(
+    state: &AppState,
+    fresh_index: &WorkspaceIndex,
+    id: &str,
+) -> Result<(), String> {
+    if let Some(locator) = fresh_index.locator(id) {
+        state
+            .workspace_index
+            .write()
+            .map_err(|error| error.to_string())?
+            .insert_locator(locator);
+    }
+    Ok(())
+}
+
+fn dispatch_cli_open(app: &tauri::AppHandle, state: &AppState, index: &WorkspaceIndex, id: String) {
+    if let Err(error) = refresh_cli_locator(state, index, &id) {
+        tracing::warn!(%error, "CLI handoff index lock failed");
+        return;
+    }
+    if let Err(error) = window_core::open_window(app, window_core::Launch::Workspace(id)) {
+        tracing::warn!(%error, "CLI handoff could not open window");
+        window_core::show_recent_window(app);
+    }
+}
+
+async fn dispatch_cli_new(app: &tauri::AppHandle, state: &AppState) {
+    if let Err(error) = create_cli_new(app, state).await {
+        tracing::warn!(%error, "CLI handoff could not open new workspace window");
+        window_core::show_recent_window(app);
+    }
+}
+
+async fn create_cli_new(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    wait_for_workspace_storage(state)
+        .await
+        .map_err(|error| format!("storage unavailable: {error}"))?;
+    let id = commands::workspace::create_workspace(None, state)
+        .await
+        .map_err(|error| format!("could not create workspace: {error}"))?;
+    window_core::open_window(app, window_core::Launch::Workspace(id))
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 async fn wait_for_workspace_storage(state: &AppState) -> Result<(), String> {
@@ -735,7 +745,7 @@ fn build_first_window(app: &tauri::AppHandle, launch: &cli::LaunchRequest) -> ta
         Ok(window) => window,
         Err(error) => {
             registry.remove(&config.label);
-            return Err(error.into());
+            return Err(error);
         }
     };
     if window.is_focused().unwrap_or(false) {
