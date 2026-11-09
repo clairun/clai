@@ -2750,6 +2750,13 @@ pub async fn workspace_create(
     title: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    create_workspace(title, state.inner()).await
+}
+
+pub(crate) async fn create_workspace(
+    title: Option<String>,
+    state: &AppState,
+) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let manager_id = uuid::Uuid::new_v4().to_string();
     let now = now_millis();
@@ -2763,7 +2770,7 @@ pub async fn workspace_create(
     let mut config = WorkspaceConfig::new(id.clone(), display_title.clone(), now, manager_id);
     // Pre-wire the workspace's main agent to an existing provider so the user
     // can start chatting / scheduling without a detour to Settings.
-    config.attach_default_provider(&app_config(state.inner())?.provider_connections, now);
+    config.attach_default_provider(&app_config(state)?.provider_connections, now);
     workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
     let workspace_pool = crate::db::init_workspace_db(&root, &[]).await?;
     state
