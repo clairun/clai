@@ -14,6 +14,15 @@ import { shortTime } from '../fleet/fleetFeed';
 import type { FleetHighlight, FleetWorkspace } from '../generated/bindings';
 
 const mockInvoke = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@tauri-apps/api/window')>()),
+  getCurrentWindow: () => ({
+    isVisible: async () => true,
+    isMinimized: async () => false,
+    onResized: async () => () => {},
+  }),
+}));
+
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 
 vi.mock('../fleet/client', () => ({ fleetSnapshot: vi.fn() }));
@@ -168,7 +177,7 @@ describe('FleetPage', () => {
     expect(useFleetStore.getState().selectedId).toBe('a');
     // Typing goes to the chosen workspace at once.
     expect(terminal).toHaveFocus();
-    expect(mockInvoke).toHaveBeenCalledWith('workspace_mark_opened', { workspaceId: 'a' });
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('workspace_mark_opened', { workspaceId: 'a' }));
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
     // The same as a click: the card is highlighted, nothing moves.
     expect(slots()).toEqual(before);

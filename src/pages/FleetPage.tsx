@@ -14,7 +14,7 @@ import { useMinute } from '../fleet/useMinute';
 import { useFleetToggle } from '../fleet/useFleetToggle';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
-import { markWorkspaceOpened } from '../workspace/client';
+import { useVisibleWorkspaceRead } from '../hooks/useVisibleWorkspaceRead';
 import { openWorkspaceWindow } from '../windowUi';
 
 const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
@@ -108,16 +108,8 @@ const FleetPage = () => {
     return () => window.removeEventListener('keydown', onEscape);
   }, [select]);
 
-  // Selected is seen: the rail's unread dot clears, as on the Workspace page
-  // (see the same stamp there), and again on leaving while Main is working.
   const selectedWorking = useMainRunning(selectedId);
-  useEffect(() => {
-    if (!selectedId) return undefined;
-    markWorkspaceOpened(selectedId).catch(() => {});
-    return () => {
-      markWorkspaceOpened(selectedId).catch(() => {});
-    };
-  }, [selectedId, selectedWorking]);
+  useVisibleWorkspaceRead(selectedId, selectedWorking);
 
   // Cards born from live events (or a workspace just created here) have no
   // title yet: the snapshot has it, once per new set of untitled cards.

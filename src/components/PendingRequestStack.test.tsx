@@ -101,6 +101,16 @@ describe('PendingRequestStack', () => {
     expect(cards()).toEqual(['ping b']);
   });
 
+  it('does not restore a request resolved in another view while its seed is pending', async () => {
+    let finish!: (pending: Ping[]) => void;
+    list.mockImplementation(() => new Promise((resolve) => { finish = resolve; }));
+    render(<Stack workspaceId="ws-1" />);
+    await waitFor(() => expect(list).toHaveBeenCalled());
+    fireResolved('a');
+    await act(async () => { finish([ping('a')]); });
+    expect(cards()).toEqual([]);
+  });
+
   it('drops the card once its decision is accepted', async () => {
     render(<Stack workspaceId="ws-1" />);
     await subscribed();
