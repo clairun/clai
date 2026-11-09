@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { getThemePreference, setThemePreference, type ThemePreference } from '../../theme';
 import styles from './AppearanceSettings.module.css';
 
@@ -10,6 +10,14 @@ const OPTIONS: { value: ThemePreference; label: string; desc: string }[] = [
 
 const AppearanceSettings = () => {
   const [pref, setPref] = useState<ThemePreference>(getThemePreference());
+
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === 'clai.theme' || event.key === null) setPref(getThemePreference());
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, []);
 
   const choose = (next: ThemePreference) => {
     setThemePreference(next);

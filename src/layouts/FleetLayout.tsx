@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { Outlet, useMatch, useNavigate } from 'react-router';
 import {
   listWorkspaces,
@@ -145,10 +146,12 @@ const FleetLayout = () => {
   const [forkBusyId, setForkBusyId] = useState<string | null>(null);
   const [runNowBusyId, setRunNowBusyId] = useState<string | null>(null);
   const [pauseBusyId, setPauseBusyId] = useState<string | null>(null);
-  // Global "pause all" overlay (scheduler-wide). Loaded once on mount; the
-  // toggle persists server-side and survives restarts.
+  // Global pause state is persisted by the backend and broadcast to every window.
   const [schedulerPaused, setSchedulerPausedState] = useState(false);
   const [schedulerPauseBusy, setSchedulerPauseBusy] = useState(false);
+  const [schedulerPauseRefreshing, setSchedulerPauseRefreshing] = useState(true);
+  const [schedulerPauseReadFailed, setSchedulerPauseReadFailed] = useState(false);
+  const schedulerPauseRefreshRef = useRef<(() => void) | null>(null);
   // Delete failures live next to the dialog, not in the page banner -- see
   // handleConfirmDelete for why the banner cannot hold them.
   const [deleteError, setDeleteError] = useState('');
@@ -438,16 +441,54 @@ const FleetLayout = () => {
     [loadWorkspaces],
   );
 
-  // Load the persisted global-pause state once so the rail toggle reflects
-  // it on first paint (a 5s poll is unnecessary — only this UI flips it).
   useEffect(() => {
-    getSchedulerPaused()
-      .then(setSchedulerPausedState)
-      .catch(() => {});
+    let active = true;
+    let revision = 0;
+    const refresh = () => {
+      const requestedAt = ++revision;
+      setSchedulerPauseRefreshing(true);
+      getSchedulerPaused().then((paused) => {
+        if (active && requestedAt === revision) {
+          setSchedulerPausedState(paused);
+          setSchedulerPauseReadFailed(false);
+          setSchedulerPauseRefreshing(false);
+        }
+      }).catch(() => {
+        if (active && requestedAt === revision) {
+          setSchedulerPauseReadFailed(true);
+          setSchedulerPauseRefreshing(false);
+        }
+      });
+    };
+    schedulerPauseRefreshRef.current = refresh;
+    refresh();
+    window.addEventListener('focus', refresh);
+    let unlisten: (() => void) | undefined;
+    void listen<boolean>('scheduler://paused', (event) => {
+      ++revision;
+      if (active) {
+        setSchedulerPausedState(event.payload);
+        setSchedulerPauseReadFailed(false);
+        setSchedulerPauseRefreshing(false);
+      }
+    }).then((stop) => {
+      if (active) unlisten = stop;
+      else stop();
+    }).catch(() => {});
+    return () => {
+      active = false;
+      schedulerPauseRefreshRef.current = null;
+      window.removeEventListener('focus', refresh);
+      unlisten?.();
+    };
   }, []);
 
   const handleToggleSchedulerPaused = useCallback(async () => {
-    if (schedulerPauseBusy) return;
+    if (schedulerPauseBusy || schedulerPauseRefreshing) return;
+    if (schedulerPauseReadFailed) {
+      schedulerPauseRefreshRef.current?.();
+      return;
+    }
     const next = !schedulerPaused;
     setSchedulerPauseBusy(true);
     setSchedulerPausedState(next); // optimistic
@@ -459,7 +500,7 @@ const FleetLayout = () => {
     } finally {
       setSchedulerPauseBusy(false);
     }
-  }, [schedulerPaused, schedulerPauseBusy]);
+  }, [schedulerPaused, schedulerPauseBusy, schedulerPauseRefreshing, schedulerPauseReadFailed]);
 
   // Transient flash toast with a single, cleared timer (no stacked timers).
   const showFlash = useCallback((message: string) => {
@@ -532,7 +573,8 @@ const FleetLayout = () => {
           forkBusyId={forkBusyId}
           pauseBusyId={pauseBusyId}
           schedulerPaused={schedulerPaused}
-          schedulerPauseBusy={schedulerPauseBusy}
+          schedulerPauseReadFailed={schedulerPauseReadFailed}
+          schedulerPauseBusy={schedulerPauseBusy || schedulerPauseRefreshing}
           onToggleSchedulerPaused={handleToggleSchedulerPaused}
           onArtifactDrop={handleArtifactDrop}
         />}

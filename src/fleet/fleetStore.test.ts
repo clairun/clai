@@ -150,6 +150,7 @@ const memoryStorage = () => {
 describe('fleet store dismissals', () => {
   beforeEach(() => {
     vi.stubGlobal('localStorage', memoryStorage());
+    localStorage.setItem('fleet.dismissed', JSON.stringify({ old: 1, b: 40 }));
     useFleetStore.setState({
       fleet: { cards: { a: { ...emptyCardOf('a') }, b: { ...emptyCardOf('b') } } },
       selectedId: 'a',
@@ -168,6 +169,28 @@ describe('fleet store dismissals', () => {
     expect(useFleetStore.getState().selectedId).toBe('a');
     useFleetStore.getState().dismiss('a');
     expect(useFleetStore.getState().selectedId).toBeNull();
+  });
+
+  it('merges sequential actions with another window instead of overwriting its map', () => {
+    vi.spyOn(Date, 'now').mockReturnValue(RECENT_WINDOW_MS + 10);
+    // Another window dismissed x after this store last read storage.
+    localStorage.setItem('fleet.dismissed', JSON.stringify({ x: RECENT_WINDOW_MS + 1 }));
+    useFleetStore.getState().dismiss('a');
+    expect(JSON.parse(localStorage.getItem('fleet.dismissed')!)).toEqual({ x: RECENT_WINDOW_MS + 1, a: RECENT_WINDOW_MS + 10 });
+
+    // Another window dismisses y before this window selects a.
+    localStorage.setItem('fleet.dismissed', JSON.stringify({ x: RECENT_WINDOW_MS + 1, a: RECENT_WINDOW_MS + 10, y: RECENT_WINDOW_MS + 2 }));
+    useFleetStore.getState().select('a');
+    expect(JSON.parse(localStorage.getItem('fleet.dismissed')!)).toEqual({ x: RECENT_WINDOW_MS + 1, y: RECENT_WINDOW_MS + 2 });
+  });
+
+  it('refreshes dismissals from storage for storage and focus signals', () => {
+    localStorage.setItem('fleet.dismissed', JSON.stringify({ x: 50 }));
+    useFleetStore.getState().refreshDismissed();
+    expect(useFleetStore.getState().dismissed).toEqual({ x: 50 });
+    localStorage.setItem('fleet.dismissed', JSON.stringify({ y: 60 }));
+    useFleetStore.getState().refreshDismissed();
+    expect(useFleetStore.getState().dismissed).toEqual({ y: 60 });
   });
 
   it('keeps dismissals across a reload; selecting a card undoes its own', async () => {

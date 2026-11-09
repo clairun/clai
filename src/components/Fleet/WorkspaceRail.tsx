@@ -46,6 +46,7 @@ interface WorkspaceRailProps {
   pauseBusyId: string | null;
   /** Global scheduler pause (overlay across every workspace). */
   schedulerPaused: boolean;
+  schedulerPauseReadFailed: boolean;
   schedulerPauseBusy: boolean;
   onToggleSchedulerPaused: () => void;
   /** Drop handler for an artifact dragged from the artifacts drawer onto a
@@ -173,6 +174,7 @@ const WorkspaceRail = ({
   onSelect,
   onCreate,
   schedulerPaused,
+  schedulerPauseReadFailed,
   schedulerPauseBusy,
   onToggleSchedulerPaused,
   onRunNow,
@@ -647,7 +649,7 @@ const WorkspaceRail = ({
         </button>
         {!collapsed && <span className={styles.railTitle}>Workspaces</span>}
         {!collapsed && <span className={styles.railCount}>{workspaces.length}</span>}
-        {!collapsed && schedulerPaused && (
+        {!collapsed && schedulerPaused && !schedulerPauseReadFailed && (
           <span
             className={styles.pausedPill}
             title="Scheduled runs are paused for every workspace"
@@ -669,18 +671,18 @@ const WorkspaceRail = ({
         </button>
         <button
           type="button"
-          className={`${styles.pauseAllButton} ${schedulerPaused ? styles.pauseAllButtonActive : ''}`}
+          className={`${styles.pauseAllButton} ${schedulerPaused && !schedulerPauseReadFailed ? styles.pauseAllButtonActive : ''}`}
           onClick={onToggleSchedulerPaused}
           disabled={schedulerPauseBusy}
           title={
-            schedulerPaused
+            schedulerPauseReadFailed ? 'Could not read global pause state. Retry' : schedulerPaused
               ? 'Resume all scheduled runs'
               : 'Pause all scheduled runs across every workspace'
           }
-          aria-label={schedulerPaused ? 'Resume all scheduled runs' : 'Pause all scheduled runs'}
+          aria-label={schedulerPauseReadFailed ? 'Retry reading global pause state' : schedulerPaused ? 'Resume all scheduled runs' : 'Pause all scheduled runs'}
         >
-          {schedulerPaused ? <RunIcon /> : <PauseIcon />}
-          {!collapsed && <span>{schedulerPaused ? 'Resume all' : 'Pause all'}</span>}
+          {schedulerPauseReadFailed ? <span aria-hidden="true">↻</span> : schedulerPaused ? <RunIcon /> : <PauseIcon />}
+          {!collapsed && <span>{schedulerPauseReadFailed ? 'Retry pause state' : schedulerPaused ? 'Resume all' : 'Pause all'}</span>}
         </button>
       </div>
 

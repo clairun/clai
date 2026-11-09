@@ -245,6 +245,7 @@ const FleetOutlet = ({ attentionCounts = { b: 1 }, withRail = false }: { attenti
       forkBusyId={null}
       pauseBusyId={null}
       schedulerPaused={false}
+      schedulerPauseReadFailed={false}
       schedulerPauseBusy={false}
       onToggleSchedulerPaused={() => {}}
     />}

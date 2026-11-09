@@ -57,6 +57,8 @@ const scheduleSummary = (details: WorkspaceDetails | null): string => {
 
 // Keep in sync with WorkspaceContextBar: the self-loading context bar
 // listens for this to refetch its workspace details after a settings save.
+import { notifySettingsChanged } from '../../utils/settingsEvents';
+
 const WORKSPACE_SETTINGS_CHANGED_EVENT = 'workspace-settings-changed';
 
 interface WorkspaceSettingsModalProps {
@@ -133,23 +135,33 @@ const SettingsWindow = ({
   }, [page, pageVersion, focusNav]);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
+    let active = true;
+    let revision = 0;
+    const refreshDeps = async () => {
+      const requestedAt = ++revision;
       const [servers, skills, connections, defaults] = await Promise.allSettled([
         getMcpServers(),
         getSkills(),
         assistantClient.listProviderConnections(),
         workspaceAgentDefaultExecution(),
       ]);
-      if (cancelled) return;
+      if (!active || requestedAt !== revision) return;
       setDeps({
         mcpServers: servers.status === 'fulfilled' ? (servers.value || []) : [],
         skills: skills.status === 'fulfilled' ? (skills.value || []) : [],
         providerConnections: connections.status === 'fulfilled' ? (connections.value || []) : [],
         defaultExecution: defaults.status === 'fulfilled' ? (defaults.value || null) : null,
       });
-    })();
-    return () => { cancelled = true; };
+    };
+    const onChanged = () => { void refreshDeps(); };
+    window.addEventListener('mcp-servers-changed', onChanged);
+    window.addEventListener('assistant-provider-connections-changed', onChanged);
+    void refreshDeps();
+    return () => {
+      active = false;
+      window.removeEventListener('mcp-servers-changed', onChanged);
+      window.removeEventListener('assistant-provider-connections-changed', onChanged);
+    };
   }, []);
 
   // Saves the visible page and stays on it. Resolves true on success.
@@ -185,7 +197,7 @@ const SettingsWindow = ({
     } else {
       headingRef.current?.focus();
     }
-    window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
+    notifySettingsChanged(WORKSPACE_SETTINGS_CHANGED_EVENT);
     await Promise.resolve(onChanged?.());
     return true;
   }, [saving, onChanged, showPage]);
@@ -263,7 +275,7 @@ const SettingsWindow = ({
   // The page's record is gone, so there is nothing to keep or ask about.
   const handleAgentRemoved = useCallback(() => {
     showPage(GENERAL, 'nav');
-    window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
+    notifySettingsChanged(WORKSPACE_SETTINGS_CHANGED_EVENT);
     onChanged?.();
   }, [showPage, onChanged]);
 
