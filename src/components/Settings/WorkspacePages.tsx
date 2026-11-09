@@ -68,9 +68,9 @@ export const GeneralPage = ({ ref, workspaceId, details, saving, onDirtyChange }
     },
     submit: async () => {
       try {
-        await setWorkspaceTitle(workspaceId, title.trim());
-        setError(null);
-        return { ok: true };
+        const launcherWarning = await setWorkspaceTitle(workspaceId, title.trim());
+        setError(launcherWarning || null);
+        return { ok: true, warning: launcherWarning || undefined };
       } catch (err) {
         const message = errText(err, 'Failed to save title.');
         setError(message);
