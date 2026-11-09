@@ -62,6 +62,7 @@ import {
 import { shouldCancelRunOnKey } from '../utils/cancelRunHotkey';
 import { fixedRightAlignedMenuStyle, sameFloatingMenuStyle } from '../utils/floatingMenu';
 import styles from './Workspace.module.css';
+import { useWindowUi, openWorkspaceWindow } from '../windowUi';
 
 const DEFAULT_WORKSPACE_ID = 'default';
 const REFRESH_INTERVAL_MS = 5000;
@@ -1063,6 +1064,9 @@ const WorkspaceHeader = ({
   runNowBusy,
   pauseBusy,
   stopBusy,
+  otherAttention,
+  onShowAttention,
+  onOpenWindow,
 }: {
   details: WorkspaceDetails | null;
   workspaceId: string;
@@ -1087,7 +1091,11 @@ const WorkspaceHeader = ({
   runNowBusy: boolean;
   pauseBusy: boolean;
   stopBusy: boolean;
+  otherAttention: number;
+  onShowAttention: () => void;
+  onOpenWindow: () => void;
 }) => {
+  const { railHidden, toggleRail } = useWindowUi();
   const isAgent = details?.kind === 'agent';
   const lastRun = getLastRunInfo(details?.runs);
   const nextRunText = formatNextRun(details?.nextRunInSeconds);
@@ -1221,6 +1229,9 @@ const WorkspaceHeader = ({
   return (
     <div className={styles.header}>
       <div className={styles.headerLeft}>
+        <button type="button" className={styles.headerAction} onClick={toggleRail} aria-label={railHidden ? 'Show workspaces' : 'Hide workspaces'} aria-controls={railHidden ? undefined : 'workspace-rail'} aria-expanded={!railHidden} title="Toggle workspaces (Ctrl+Shift+F)">
+          <img src="/icon.svg" alt="" width="20" height="20" />
+        </button>
         {isEditingTitle ? (
           <input
             ref={titleInputRef}
@@ -1336,6 +1347,8 @@ const WorkspaceHeader = ({
         )}
       </div>
       <div className={styles.headerRight}>
+        {otherAttention > 0 && <button type="button" className={styles.attentionChip} onClick={onShowAttention}>{otherAttention} other workspace{otherAttention === 1 ? '' : 's'} {otherAttention === 1 ? 'needs' : 'need'} you</button>}
+        <button type="button" className={styles.headerAction} onClick={onOpenWindow} title="Open in new window" aria-label="Open in new window">↗</button>
         {isAgent && lastRun && (
           <>
             <span className={styles.metricGroup}>
@@ -1586,7 +1599,7 @@ const Workspace = () => {
   // immediately after changes (e.g. a title rename) instead of waiting for
   // its 5s poll. Optional-chained so the page is resilient if ever rendered
   // outside that layout.
-  const { loadWorkspaces, workspaces } = useOutletContext<FleetOutletContext>() ?? {};
+  const { loadWorkspaces, workspaces, attentionCounts, showAttention } = useOutletContext<FleetOutletContext>() ?? {};
   const workspaceId = params.workspaceId || DEFAULT_WORKSPACE_ID;
   const isGenericWorkspace = workspaceId === DEFAULT_WORKSPACE_ID;
   const [rawDetails, setDetails] = useState<WorkspaceDetails | null>(null);
@@ -2415,6 +2428,9 @@ const Workspace = () => {
         runNowBusy={runNowBusy}
         pauseBusy={pauseBusy}
         stopBusy={stopBusy}
+        otherAttention={Object.entries(attentionCounts ?? {}).filter(([id, count]) => id !== workspaceId && id !== '__null' && count > 0).length}
+        onShowAttention={showAttention ?? (() => {})}
+        onOpenWindow={() => { void openWorkspaceWindow(workspaceId).catch((err) => setError(errorMessage(err, 'Failed to open a new window.'))); }}
       />
 
       {error && <div className={styles.errorBanner}>{error}</div>}

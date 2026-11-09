@@ -15,14 +15,17 @@ import {
 } from '../workspace/client';
 import WorkspaceRail from '../components/Fleet/WorkspaceRail';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
-import AppTopBar from '../components/AppTopBar';
+import AppUpdateBadge from '../components/AppUpdateBadge';
+import { useAvailableAppUpdate } from '../hooks/useAvailableAppUpdate';
+import { openGlobalSettings } from '../utils/globalSettings';
+import { useWindowUi, openWorkspaceWindow } from '../windowUi';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ProgressDialog from '../components/ProgressDialog';
 import { useFleetActivity } from '../hooks/useFleetActivity';
 import { optimisticRunNowId, useFleetActivityStore } from '../stores/fleetActivityStore';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
 import { useMediaQuery } from '../hooks/useMediaQuery';
-import { errText, num } from '../fleet/workspaceStatus';
+import { errText } from '../fleet/workspaceStatus';
 import { cardAttention } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetToggle } from '../fleet/useFleetToggle';
@@ -51,6 +54,8 @@ const NARROW_WINDOW_QUERY = '(max-width: 1106px)';
 export interface FleetOutletContext {
   workspaces: WorkspaceListEntry[];
   loadWorkspaces: () => Promise<void>;
+  attentionCounts: Record<string, number>;
+  showAttention: () => void;
 }
 
 interface SettingsState {
@@ -72,6 +77,12 @@ const SETTINGS_DETAILS_OPTIONS = {
   includeFiles: false,
 };
 
+const CompactUpdateAccess = () => {
+  const { update } = useAvailableAppUpdate();
+  if (!update) return null;
+  return <button type="button" onClick={() => openGlobalSettings({ tab: 'about' })} aria-label={`Update available: CLAI v${update.version}`} title={`Update available: CLAI v${update.version}`}>●</button>;
+};
+
 /**
  * Unified Fleet/Workspace shell: a persistent (collapsible) workspace
  * rail on the left and the selected workspace's full view in the
@@ -81,13 +92,29 @@ const SETTINGS_DETAILS_OPTIONS = {
  * layout).
  *
  * This layout owns the cross-workspace concerns the grid used to: the
- * workspace list + polling, the summary counters, and the create / clone /
+ * workspace list + polling, and the create / clone /
  * delete / settings / run / pause actions plus their modals.
  */
 const FleetLayout = () => {
   const navigate = useNavigate();
   const match = useMatch('/workspace/:workspaceId');
   const selectedId = match?.params.workspaceId ?? null;
+  const { railHidden, setRailHidden, toggleRail } = useWindowUi();
+  const [attentionRequest, setAttentionRequest] = useState(0);
+  const showAttention = useCallback(() => {
+    setRailHidden(false);
+    setAttentionRequest((request) => request + 1);
+  }, [setRailHidden]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey || event.code !== 'KeyF') return;
+      event.preventDefault();
+      event.stopPropagation();
+      toggleRail();
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [toggleRail]);
 
   const [workspaces, setWorkspaces] = useState<WorkspaceListEntry[]>([]);
   const [error, setError] = useState('');
@@ -171,14 +198,14 @@ const FleetLayout = () => {
   // WorkspaceRail.module.css. Cleared on unmount so non-Fleet routes fall back
   // to viewport-centered.
   useEffect(() => {
-    const railWidth = railCollapsed ? '52px' : '248px';
+    const railWidth = railHidden ? '0px' : railCollapsed ? '52px' : '248px';
     document.documentElement.style.setProperty('--fleet-rail-width', railWidth);
     return () => {
       document.documentElement.style.removeProperty('--fleet-rail-width');
     };
-  }, [railCollapsed]);
+  }, [railCollapsed, railHidden]);
 
-  // Publish the content area's top offset (below the top bar + any error
+  // Publish the content area's top offset (including any error
   // banner) so the globally-fixed terminal card can fill the detail pane in
   // fullscreen mode without covering the app chrome. Same publish-as-CSS-var
   // idiom as --fleet-rail-width above; re-measured when the banner toggles.
@@ -212,17 +239,6 @@ const FleetLayout = () => {
     });
   }, [narrow]);
 
-  const counters = useMemo(
-    () => ({
-      total: workspaces.length,
-      periodic: workspaces.filter((w) => w.scheduleEnabled).length,
-      running: workspaces.filter(
-        (w) => num(w.runningTaskCount) > 0 || (activeRunsByWorkspace[w.id] || 0) > 0,
-      ).length,
-      attention: workspaces.filter((w) => (attentionCounts[w.id] || 0) > 0).length,
-    }),
-    [workspaces, activeRunsByWorkspace, attentionCounts],
-  );
 
   const handleSelect = useCallback(
     (id: string) => {
@@ -485,20 +501,6 @@ const FleetLayout = () => {
 
   return (
     <div className={styles.layout}>
-      <AppTopBar nav={{ label: 'Fleet', to: '/fleet' }}>
-        <span>
-          <strong>{counters.total}</strong> workspace{counters.total === 1 ? '' : 's'}
-        </span>
-        <span>
-          <strong>{counters.periodic}</strong> periodic
-        </span>
-        <span>
-          <strong>{counters.running}</strong> running
-        </span>
-        <span data-attention={counters.attention > 0 || undefined}>
-          <strong>{counters.attention}</strong> need attention
-        </span>
-      </AppTopBar>
 
       <div className={styles.body} ref={bodyRef}>
         {(error || flash) && (
@@ -507,10 +509,14 @@ const FleetLayout = () => {
             {flash && <div className={styles.flashBanner}>{flash}</div>}
           </div>
         )}
-        <WorkspaceRail
+        {!railHidden && <WorkspaceRail
+          id="workspace-rail"
+          onOpenWindow={(id) => { void openWorkspaceWindow(id).catch((err) => setError(errText(err, 'Failed to open a new window.'))); }}
+          footer={<>{railCollapsed ? <CompactUpdateAccess /> : <AppUpdateBadge />}<button type="button" onClick={() => openGlobalSettings()} aria-label="Open settings" title="Settings">{railCollapsed ? "⚙" : "Settings"}</button></>}
           workspaces={workspaces}
           selectedId={selectedId}
           attentionCounts={attentionCounts}
+          attentionRequest={attentionRequest}
           activeRuns={activeRunsByWorkspace}
           collapsed={railCollapsed}
           onToggleCollapsed={toggleCollapsed}
@@ -529,9 +535,9 @@ const FleetLayout = () => {
           schedulerPauseBusy={schedulerPauseBusy}
           onToggleSchedulerPaused={handleToggleSchedulerPaused}
           onArtifactDrop={handleArtifactDrop}
-        />
+        />}
         <div className={styles.detail}>
-          <Outlet context={{ workspaces, loadWorkspaces }} />
+          <Outlet context={{ workspaces, loadWorkspaces, attentionCounts, showAttention }} />
         </div>
       </div>
 

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import {
   MemoryRouter,
   Outlet,
@@ -8,6 +8,7 @@ import {
   useParams,
 } from 'react-router';
 import AppRoutes from './Routes';
+import { listen as globalListen } from '@tauri-apps/api/event';
 import { listWorkspaces } from './workspace/client';
 import type { WorkspaceListEntry } from './generated/bindings';
 
@@ -55,6 +56,19 @@ vi.mock('./pages/NotFound', () => ({
   default: () => <div data-testid="not-found" />,
 }));
 
+const windowEvents = vi.hoisted(() => ({ listeners: new Map<string, (event: { payload: { workspaceId: string } }) => void>() }));
+const invoke = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('@tauri-apps/api/core', () => ({ invoke }));
+vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({
+  listen: vi.fn(async (name: string, handler: (event: { payload: { workspaceId: string } }) => void) => {
+    windowEvents.listeners.set(name, handler);
+    return () => windowEvents.listeners.delete(name);
+  }),
+}) }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async (name: string, handler: (event: { payload: { workspaceId: string } }) => void) => {
+  windowEvents.listeners.set(name, handler);
+  return () => windowEvents.listeners.delete(name);
+}) }));
 vi.mock('./workspace/client', () => ({ listWorkspaces: vi.fn() }));
 
 /** A `localStorage` of its own: Node's global one, without a file, has none. */
@@ -97,9 +111,42 @@ const visit = (path: string) => renderAt(path).unmount();
 describe('AppRoutes', () => {
   beforeEach(() => {
     vi.stubGlobal('localStorage', memoryStorage());
+    invoke.mockClear();
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+
+  it('opens the workspace named by the launch query, ahead of the remembered view', async () => {
+    existingWorkspaces('requested');
+    visit('/fleet');
+    renderAt('/?workspace=requested');
+    expect(await screen.findByTestId('workspace')).toHaveTextContent('requested');
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace/requested');
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('window_set_view', { view: { kind: 'workspace', workspaceId: 'requested' } }));
+  });
+
+  it('falls back to Fleet if the requested workspace is gone', async () => {
+    existingWorkspaces('another');
+    renderAt('/?workspace=missing');
+    expect(await screen.findByTestId('fleet-page')).toBeInTheDocument();
+  });
+
+  it('shows a deleted state when the visible workspace is deleted', async () => {
+    renderAt('/workspace/gone');
+    await vi.waitFor(() => expect(windowEvents.listeners.has('workspace://deleted')).toBe(true));
+    act(() => windowEvents.listeners.get('workspace://deleted')!({ payload: { workspaceId: 'gone' } }));
+    expect(await screen.findByRole('heading', { name: 'Workspace deleted' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Open workspaces' })).toBeInTheDocument();
+  });
+
+  it('handles targeted navigation only in the receiving webview', async () => {
+    renderAt('/fleet');
+    await vi.waitFor(() => expect(windowEvents.listeners.has('window://navigate')).toBe(true));
+    expect(globalListen).not.toHaveBeenCalledWith('window://navigate', expect.anything());
+    act(() => windowEvents.listeners.get('window://navigate')!({ payload: { workspaceId: 'chosen' } }));
+    expect(await screen.findByTestId('workspace')).toHaveTextContent('chosen');
   });
 
   it('opens the workspaces page on first launch', () => {
