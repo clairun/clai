@@ -9,18 +9,13 @@ use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowB
 
 use crate::AppState;
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(tag = "kind", content = "workspaceId", rename_all = "camelCase")]
 pub enum View {
+    #[default]
     Other,
     Fleet,
     Workspace(String),
-}
-
-impl Default for View {
-    fn default() -> Self {
-        Self::Other
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -114,6 +109,8 @@ impl WindowRegistry {
 }
 
 pub enum Launch {
+    // The CLI phase will use this path for a new general window.
+    #[allow(dead_code)]
     General,
     Workspace(String),
 }
