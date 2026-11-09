@@ -176,7 +176,10 @@ fn every_registered_command_has_a_frontend_caller() {
         .difference(&invoked_commands())
         .cloned()
         .collect();
-    assert!(unused.is_empty(), "registered commands without frontend callers: {unused:?}");
+    assert!(
+        unused.is_empty(),
+        "registered commands without frontend callers: {unused:?}"
+    );
 }
 
 #[test]
