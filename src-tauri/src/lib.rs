@@ -29,6 +29,7 @@
 mod agent_craft;
 mod agents;
 mod assistant;
+mod cli;
 mod commands;
 mod config;
 mod db;
@@ -46,7 +47,7 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use agents::SharedScheduler;
 use tauri::Manager;
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{watch, Mutex as AsyncMutex};
 
 #[doc(hidden)]
 pub use assistant::run_context::resolve_run_context;
@@ -90,6 +91,7 @@ pub struct AppState {
     pub terminals: commands::terminal::TerminalRegistry,
     /// App update check/install runtime state.
     pub app_updates: commands::app_updates::AppUpdateRuntime,
+    storage_ready: watch::Sender<Option<Result<(), String>>>,
 }
 
 impl AppState {
@@ -115,6 +117,7 @@ impl AppState {
             workspace_index: Arc::new(RwLock::new(workspace_index)),
             terminals: commands::terminal::TerminalRegistry::new(),
             app_updates: commands::app_updates::AppUpdateRuntime::new(),
+            storage_ready: watch::channel(None).0,
         })
     }
 
@@ -303,13 +306,19 @@ pub fn run() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     // Initialize config manager (loads config from disk or creates default)
-    let config_manager = ConfigManager::new().expect(
-        "Failed to initialize configuration manager. \
-         Check that the config directory is accessible.",
-    );
+    let config_manager = ConfigManager::new().unwrap_or_else(|error| {
+        eprintln!("clai: {error}");
+        std::process::exit(1);
+    });
 
     let initial_config = config_manager.get();
     let workspace_index = WorkspaceIndex::scan(&initial_config);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let launch_request = cli::argv_request(&args, &initial_config, &workspace_index)
+        .unwrap_or_else(|error| {
+            eprintln!("{}", error.message);
+            std::process::exit(error.code);
+        });
 
     // Initialize agent scheduler
     let scheduler = agents::create_shared_scheduler();
@@ -338,6 +347,7 @@ pub fn run() {
         workspace_index: Arc::new(RwLock::new(workspace_index)),
         terminals: commands::terminal::TerminalRegistry::new(),
         app_updates: commands::app_updates::AppUpdateRuntime::new(),
+        storage_ready: watch::channel(None).0,
     };
 
     // Build and run the Tauri application
@@ -349,13 +359,12 @@ pub fn run() {
         // runs failed and its tasks stopped. Everything above this point in
         // `run()` does run in the second process; of it, only
         // `ConfigManager::new` writes, and only when it migrates config.json.
-        // Every launch, including `tauri dev` with a different `CLAI_HOME`,
-        // focuses the running window and exits, because workspace databases
-        // live outside `CLAI_HOME`.
-        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+        // Plain launches focus the most recently focused window. Explicit CLI
+        // requests are handled after the handoff callback returns.
+        .plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             let app = app.clone();
             tauri::async_runtime::spawn(async move {
-                window_core::show_recent_window(&app);
+                dispatch_cli_handoff(app, args).await;
             });
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -378,18 +387,14 @@ pub fn run() {
                 tracing::warn!(path = %agents_root.display(), "Failed to create agents directory: {}", e);
             }
 
-            let config = &app.config().app.windows[0];
-            let registry = app.state::<window_core::WindowRegistry>();
-            registry.register(&config.label, window_core::View::Other);
-            let window = match tauri::WebviewWindowBuilder::from_config(app, config)?.build() {
-                Ok(window) => window,
-                Err(error) => {
-                    registry.remove(&config.label);
+            if launch_request != cli::LaunchRequest::New {
+                if let Err(error) = build_first_window(app.handle(), &launch_request) {
+                    if let cli::LaunchRequest::Open(id) = &launch_request {
+                        eprintln!("clai: failed to open workspace {id}: {error}");
+                        std::process::exit(1);
+                    }
                     return Err(error.into());
                 }
-            };
-            if window.is_focused().unwrap_or(false) {
-                registry.focused(window.label(), true);
             }
             // Here rather than before the builder, so that a second launch,
             // which exits in `Builder::build`, never adds connections to
@@ -416,8 +421,42 @@ pub fn run() {
             let app_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Some(state) = app_handle.try_state::<AppState>() {
-                    if let Err(e) = initialize_workspace_storage(&state).await {
-                        tracing::warn!("Failed to initialize workspace storage: {}", e);
+                    let initialized = initialize_workspace_storage(&state).await;
+                    if let Err(error) = &initialized {
+                        tracing::warn!(%error, "Failed to initialize workspace storage");
+                    }
+                    state.storage_ready.send_replace(Some(initialized.clone()));
+                    if launch_request == cli::LaunchRequest::New {
+                        match initialized {
+                            Ok(()) => {
+                                match commands::workspace::create_workspace(None, state.inner())
+                                    .await
+                                {
+                                    Ok(id) => {
+                                        if let Err(error) = build_first_window(
+                                            &app_handle,
+                                            &cli::LaunchRequest::Open(id),
+                                        ) {
+                                            eprintln!(
+                                                "clai: failed to open new workspace: {error}"
+                                            );
+                                            app_handle.exit(1);
+                                            return;
+                                        }
+                                    }
+                                    Err(error) => {
+                                        eprintln!("clai: {error}");
+                                        app_handle.exit(1);
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                eprintln!("clai: {error}");
+                                app_handle.exit(1);
+                                return;
+                            }
+                        }
                     }
                     resume_open_workspaces(&app_handle, state.inner());
                     agents::init::populate_scheduler_from_workspace_agents(
@@ -616,6 +655,112 @@ fn register_detected_providers(config_manager: &ConfigManager) {
             }
         }
     }
+}
+
+async fn dispatch_cli_handoff(app: tauri::AppHandle, args: Vec<String>) {
+    let state = app.state::<AppState>();
+    let config = match state.config_manager.lock() {
+        Ok(manager) => manager.get(),
+        Err(error) => {
+            tracing::warn!(%error, "CLI handoff config lock failed");
+            return;
+        }
+    };
+    let argv: Vec<String> = args.into_iter().skip(1).collect();
+    let fresh_index = WorkspaceIndex::scan(&config);
+    match cli::argv_request(&argv, &config, &fresh_index) {
+        Ok(cli::LaunchRequest::Focus) => window_core::show_recent_window(&app),
+        Ok(cli::LaunchRequest::Open(id)) => {
+            dispatch_cli_open(&app, state.inner(), &fresh_index, id);
+        }
+        Ok(cli::LaunchRequest::New) => dispatch_cli_new(&app, state.inner()).await,
+        Err(error) => tracing::warn!(message = %error.message, "CLI handoff rejected"),
+    }
+}
+
+fn refresh_cli_locator(
+    state: &AppState,
+    fresh_index: &WorkspaceIndex,
+    id: &str,
+) -> Result<(), String> {
+    if let Some(locator) = fresh_index.locator(id) {
+        state
+            .workspace_index
+            .write()
+            .map_err(|error| error.to_string())?
+            .insert_locator(locator);
+    }
+    Ok(())
+}
+
+fn dispatch_cli_open(app: &tauri::AppHandle, state: &AppState, index: &WorkspaceIndex, id: String) {
+    if let Err(error) = refresh_cli_locator(state, index, &id) {
+        tracing::warn!(%error, "CLI handoff index lock failed");
+        return;
+    }
+    if let Err(error) = window_core::open_window(app, window_core::Launch::Workspace(id)) {
+        tracing::warn!(%error, "CLI handoff could not open window");
+        window_core::show_recent_window(app);
+    }
+}
+
+async fn dispatch_cli_new(app: &tauri::AppHandle, state: &AppState) {
+    if let Err(error) = create_cli_new(app, state).await {
+        tracing::warn!(%error, "CLI handoff could not open new workspace window");
+        window_core::show_recent_window(app);
+    }
+}
+
+async fn create_cli_new(app: &tauri::AppHandle, state: &AppState) -> Result<(), String> {
+    wait_for_workspace_storage(state)
+        .await
+        .map_err(|error| format!("storage unavailable: {error}"))?;
+    let id = commands::workspace::create_workspace(None, state)
+        .await
+        .map_err(|error| format!("could not create workspace: {error}"))?;
+    window_core::open_window(app, window_core::Launch::Workspace(id))
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+async fn wait_for_workspace_storage(state: &AppState) -> Result<(), String> {
+    let mut ready = state.storage_ready.subscribe();
+    loop {
+        if let Some(result) = ready.borrow().clone() {
+            return result;
+        }
+        ready.changed().await.map_err(|error| error.to_string())?;
+    }
+}
+
+fn build_first_window(app: &tauri::AppHandle, launch: &cli::LaunchRequest) -> tauri::Result<()> {
+    let mut config = app.config().app.windows[0].clone();
+    let view = match launch {
+        cli::LaunchRequest::Open(id) => {
+            config.url = tauri::WebviewUrl::App(PathBuf::from(format!("/?workspace={id}")));
+            let title = app
+                .state::<AppState>()
+                .resolve_workspace_roster(id)
+                .map(|(workspace, _)| workspace.title)
+                .unwrap_or_else(|_| "CLAI".to_owned());
+            config.title = format!("{title} — CLAI");
+            window_core::View::Workspace(id.clone())
+        }
+        _ => window_core::View::Other,
+    };
+    let registry = app.state::<window_core::WindowRegistry>();
+    registry.register(&config.label, view);
+    let window = match tauri::WebviewWindowBuilder::from_config(app, &config)?.build() {
+        Ok(window) => window,
+        Err(error) => {
+            registry.remove(&config.label);
+            return Err(error);
+        }
+    };
+    if window.is_focused().unwrap_or(false) {
+        registry.focused(window.label(), true);
+    }
+    Ok(())
 }
 
 async fn initialize_workspace_storage(state: &tauri::State<'_, AppState>) -> Result<(), String> {

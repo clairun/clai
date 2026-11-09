@@ -40,7 +40,6 @@ pub struct WorkspaceLoadFailure {
 
 #[derive(Debug, Clone)]
 pub enum LoadFailureReason {
-    BadName,
     IdMismatch { expected: String, actual: String },
     DuplicateId { id: String },
     Unparseable(String),
@@ -53,6 +52,8 @@ pub struct WorkspaceIndex {
     pub by_id: HashMap<String, WorkspaceLocator>,
     pub sorted_by_updated: Vec<String>,
     pub load_failures: Vec<WorkspaceLoadFailure>,
+    /// I/O errors that make name lookup incomplete.
+    pub scan_errors: Vec<String>,
     pools: HashMap<String, SqlitePool>,
 }
 
@@ -63,20 +64,28 @@ impl WorkspaceIndex {
             let entries = match fs::read_dir(&workspace_dir) {
                 Ok(entries) => entries,
                 Err(error) => {
-                    tracing::warn!(
-                        path = %workspace_dir.display(),
-                        "Skipping unreadable workspace dir: {}",
+                    index.scan_errors.push(format!(
+                        "Cannot scan workspace directory {}: {}",
+                        workspace_dir.display(),
                         error
-                    );
+                    ));
                     continue;
                 }
             };
 
-            for entry in entries.flatten() {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        index.scan_errors.push(format!(
+                            "Cannot read workspace directory entry in {}: {}",
+                            workspace_dir.display(),
+                            error
+                        ));
+                        continue;
+                    }
+                };
                 let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
                 let Some(dir_name) = path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -84,19 +93,22 @@ impl WorkspaceIndex {
                 else {
                     continue;
                 };
-                // Dot-prefixed siblings are the app's own bookkeeping, not
-                // malformed workspaces (e.g. `.scratch`, the per-workspace
-                // sandbox temp space). Recording them as load failures would be
-                // noise the user can neither act on nor remove.
-                if dir_name.starts_with('.') {
+                // Only UUID-named entries can be workspaces. Ignore unrelated
+                // files and links before following their metadata.
+                if dir_name.starts_with('.') || Uuid::parse_str(&dir_name).is_err() {
                     continue;
                 }
-                if Uuid::parse_str(&dir_name).is_err() {
-                    index.load_failures.push(WorkspaceLoadFailure {
-                        path,
-                        reason: LoadFailureReason::BadName,
-                    });
-                    continue;
+                match fs::metadata(&path) {
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Ok(_) => continue,
+                    Err(error) => {
+                        index.scan_errors.push(format!(
+                            "Cannot inspect workspace entry {}: {}",
+                            path.display(),
+                            error
+                        ));
+                        continue;
+                    }
                 }
 
                 let workspace_config = match workspace_config::load(&path) {
@@ -133,6 +145,9 @@ impl WorkspaceIndex {
 
                 index.insert_config(path, &workspace_config);
             }
+        }
+        for error in &index.scan_errors {
+            tracing::warn!("{error}");
         }
         index.resort();
         index
@@ -250,5 +265,82 @@ mod tests {
                 interval_minutes: 5
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod cli_scan_tests {
+    use super::*;
+
+    #[test]
+    fn missing_root_is_reported_as_incomplete_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = AppConfig {
+            workspace_dirs: vec![temp.path().join("missing")],
+            ..Default::default()
+        };
+        let index = WorkspaceIndex::scan(&config);
+        assert_eq!(index.scan_errors.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_non_workspace_link_does_not_block_starred_open() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let id = "aaaaaaaa-0000-0000-0000-000000000000";
+        let mut workspace = WorkspaceConfig::new(id.into(), "Ready".into(), 1, "manager".into());
+        workspace.starred_at = 1;
+        workspace_config::save(&temp.path().join(id), &workspace).unwrap();
+        symlink("missing", temp.path().join("notes")).unwrap();
+        let config = AppConfig {
+            workspace_dirs: vec![temp.path().to_path_buf()],
+            ..Default::default()
+        };
+
+        let index = WorkspaceIndex::scan(&config);
+        assert!(index.scan_errors.is_empty());
+        assert_eq!(
+            crate::cli::resolve(crate::cli::Command::Open(id.into()), &config, &index),
+            Ok(crate::cli::LaunchRequest::Open(id.into()))
+        );
+
+        let broken_id = "bbbbbbbb-0000-0000-0000-000000000000";
+        symlink("missing", temp.path().join(broken_id)).unwrap();
+        let incomplete = WorkspaceIndex::scan(&config);
+        assert_eq!(incomplete.scan_errors.len(), 1);
+        assert_eq!(
+            crate::cli::resolve(crate::cli::Command::Open(id.into()), &config, &incomplete)
+                .unwrap_err()
+                .code,
+            1
+        );
+        assert_eq!(
+            crate::cli::resolve(
+                crate::cli::Command::Open(broken_id.into()),
+                &config,
+                &incomplete
+            )
+            .unwrap_err()
+            .code,
+            1
+        );
+    }
+
+    #[test]
+    fn malformed_requested_uuid_is_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = "aaaaaaaa-0000-0000-0000-000000000000";
+        fs::create_dir(temp.path().join(id)).unwrap();
+        let config = AppConfig {
+            workspace_dirs: vec![temp.path().to_path_buf()],
+            ..Default::default()
+        };
+        let index = WorkspaceIndex::scan(&config);
+        assert!(index
+            .load_failures
+            .iter()
+            .any(|failure| failure.path.file_name().unwrap() == id));
     }
 }
