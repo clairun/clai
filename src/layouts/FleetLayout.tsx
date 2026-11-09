@@ -119,6 +119,7 @@ const FleetLayout = () => {
 
   const [workspaces, setWorkspaces] = useState<WorkspaceListEntry[]>([]);
   const [error, setError] = useState('');
+  const [launcherWarning, setLauncherWarning] = useState('');
   const [flash, setFlash] = useState('');
   const flashTimerRef = useRef<number | null>(null);
   const [collapsed, setCollapsed] = useState<boolean>(() => {
@@ -428,10 +429,11 @@ const FleetLayout = () => {
         prev.map((w) => (w.id === id ? { ...w, starred: nextStarred } : w)),
       );
       try {
-        await setWorkspaceStarred(id, nextStarred);
-        setError('');
+        const launcherWarning = await setWorkspaceStarred(id, nextStarred);
         await loadWorkspaces();
+        setLauncherWarning(launcherWarning || '');
       } catch (err) {
+        setLauncherWarning('');
         setError(errText(err, 'Failed to update star.'));
         setWorkspaces((prev) =>
           prev.map((w) => (w.id === id ? { ...w, starred: currentlyStarred } : w)),
@@ -544,9 +546,10 @@ const FleetLayout = () => {
     <div className={styles.layout}>
 
       <div className={styles.body} ref={bodyRef}>
-        {(error || flash) && (
+        {(error || launcherWarning || flash) && (
           <div className={styles.bannerStack}>
             {error && <div className={styles.errorBanner}>{error}</div>}
+            {launcherWarning && <div className={styles.errorBanner}>{launcherWarning}</div>}
             {flash && <div className={styles.flashBanner}>{flash}</div>}
           </div>
         )}
@@ -589,6 +592,7 @@ const FleetLayout = () => {
         workspaceId={settingsState.workspaceId || ''}
         details={settingsState.details}
         onChanged={handleSettingsChanged}
+        onLauncherWarning={(warning) => setLauncherWarning(warning || '')}
       />
 
       <ProgressDialog

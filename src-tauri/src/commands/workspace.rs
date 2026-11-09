@@ -3409,6 +3409,10 @@ pub async fn workspace_delete(
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
     let (result, removed) = delete_workspace_and_check_removed(state.inner(), &workspace_id).await;
     if removed {
+        #[cfg(target_os = "linux")]
+        if let Err(error) = crate::linux_launchers::sync_workspace(state.inner(), &workspace_id) {
+            tracing::warn!(%error, %workspace_id, "Failed to remove workspace launcher");
+        }
         if let Err(error) = app.emit(
             "workspace://deleted",
             serde_json::json!({"workspaceId": workspace_id}),
@@ -3536,7 +3540,7 @@ pub async fn workspace_set_title(
     workspace_id: String,
     title: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let trimmed = title.trim();
     if trimmed.is_empty() {
         return Err("Workspace name cannot be empty.".to_string());
@@ -3552,8 +3556,16 @@ pub async fn workspace_set_title(
         Ok(())
     })?;
     crate::window_core::retitle_workspace(&app, &workspace_id, trimmed);
+    #[cfg(target_os = "linux")]
+    let warning = crate::linux_launchers::warning(
+        &workspace_id,
+        "Workspace title",
+        crate::linux_launchers::sync_workspace(state.inner(), &workspace_id),
+    );
+    #[cfg(not(target_os = "linux"))]
+    let warning = None;
 
-    Ok(())
+    Ok(warning)
 }
 
 /// Record that the user opened (is viewing) a workspace, clearing its
@@ -3587,14 +3599,22 @@ pub async fn workspace_set_starred(
     workspace_id: String,
     starred: bool,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
     state.update_workspace_config(&workspace_id, |config| {
         config.starred_at = if starred { now_millis() } else { 0 };
         Ok(())
     })?;
+    #[cfg(target_os = "linux")]
+    let warning = crate::linux_launchers::warning(
+        &workspace_id,
+        "Workspace star",
+        crate::linux_launchers::sync_workspace(state.inner(), &workspace_id),
+    );
+    #[cfg(not(target_os = "linux"))]
+    let warning = None;
 
-    Ok(())
+    Ok(warning)
 }
 
 async fn running_task_count(pool: &DbPool) -> Result<i64, String> {

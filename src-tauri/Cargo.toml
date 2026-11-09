@@ -191,6 +191,7 @@ ts-rs = { version = "12.0.1", features = ["serde-compat", "serde-json-impl"] }
 # path for the special `default` target only re-reads the alias.
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service = "4.1"
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [
