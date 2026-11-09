@@ -1,6 +1,7 @@
 //! Window close handling, including the last-window Quit prompt.
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 use tauri::{Manager, Window, WindowEvent};
 use tauri_plugin_dialog::{DialogExt, MessageDialogButtons, MessageDialogKind};
@@ -46,18 +47,37 @@ enum KeepOpen {
 /// answered asks again.
 struct QuitPrompt {
     open: AtomicBool,
+    closing: Mutex<Vec<String>>,
 }
 
 impl QuitPrompt {
     const fn new() -> Self {
         Self {
             open: AtomicBool::new(false),
+            closing: Mutex::new(Vec::new()),
         }
     }
 
-    /// `None` lets the window close.
-    fn on_close_requested(&self, action: CloseAction) -> Option<KeepOpen> {
-        match action {
+    /// `None` lets the window close. Accepted closes stay pending until Destroyed,
+    /// since Tauri still counts those windows during later close requests.
+    fn on_close_requested(
+        &self,
+        label: &str,
+        window_count: usize,
+        action: CloseAction,
+    ) -> Option<KeepOpen> {
+        let mut closing = self.closing.lock().expect("quit prompt poisoned");
+        if self.open.load(Ordering::Acquire) {
+            return Some(KeepOpen::Wait);
+        }
+        if closing.iter().any(|pending| pending == label) {
+            return None;
+        }
+        if window_count.saturating_sub(closing.len()) > 1 {
+            closing.push(label.to_owned());
+            return None;
+        }
+        let keep_open = match action {
             CloseAction::Quit => None,
             CloseAction::Hide => Some(KeepOpen::Hide),
             CloseAction::Confirm => {
@@ -67,7 +87,18 @@ impl QuitPrompt {
                     Some(KeepOpen::Ask)
                 }
             }
+        };
+        if keep_open.is_none() {
+            closing.push(label.to_owned());
         }
+        keep_open
+    }
+
+    fn on_destroyed(&self, label: &str) {
+        self.closing
+            .lock()
+            .expect("quit prompt poisoned")
+            .retain(|pending| pending != label);
     }
 
     /// Takes the answer, calling `exit` if the user chose to quit.
@@ -94,6 +125,7 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
             return;
         }
         WindowEvent::Destroyed => {
+            QUIT_PROMPT.on_destroyed(window.label());
             registry.remove(window.label());
             window
                 .app_handle()
@@ -105,17 +137,17 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         WindowEvent::CloseRequested { .. } => {}
         _ => return,
     }
-    if !is_last_window(window.app_handle().webview_windows().len()) {
-        return;
-    }
     let WindowEvent::CloseRequested { api, .. } = event else {
         unreachable!()
     };
     let live_runs = live_run_count();
     // There is no setting yet, and nothing that could bring a hidden window
     // back.
-    let Some(keep_open) = QUIT_PROMPT.on_close_requested(close_action(false, false, live_runs))
-    else {
+    let Some(keep_open) = QUIT_PROMPT.on_close_requested(
+        window.label(),
+        window.app_handle().webview_windows().len(),
+        close_action(false, false, live_runs),
+    ) else {
         return;
     };
     api.prevent_close();
@@ -128,10 +160,6 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         KeepOpen::Ask => ask_to_quit(window, live_runs),
         KeepOpen::Wait => {}
     }
-}
-
-fn is_last_window(count: usize) -> bool {
-    count == 1
 }
 
 /// Asks whether to quit despite the live runs. The dialog answers asynchronously.
@@ -165,9 +193,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_the_last_window_uses_quit_guard() {
-        assert!(!is_last_window(2));
-        assert!(is_last_window(1));
+    fn simultaneous_closes_guard_the_effective_last_window() {
+        let prompt = QuitPrompt::new();
+        assert_eq!(
+            prompt.on_close_requested("a", 2, CloseAction::Confirm),
+            None
+        );
+        // Tauri has not delivered Destroyed for a, so both windows are still counted.
+        assert_eq!(
+            prompt.on_close_requested("b", 2, CloseAction::Confirm),
+            Some(KeepOpen::Ask)
+        );
+        assert_eq!(
+            prompt.on_close_requested("b", 2, CloseAction::Confirm),
+            Some(KeepOpen::Wait)
+        );
+        prompt.on_destroyed("a");
+        prompt.on_answer(false, || panic!("cancel must not exit"));
+        assert_eq!(
+            prompt.on_close_requested("b", 1, CloseAction::Confirm),
+            Some(KeepOpen::Ask)
+        );
+    }
+
+    #[test]
+    fn a_new_window_counts_while_older_closes_are_pending() {
+        let prompt = QuitPrompt::new();
+        assert_eq!(
+            prompt.on_close_requested("a", 2, CloseAction::Confirm),
+            None
+        );
+        assert_eq!(
+            prompt.on_close_requested("b", 3, CloseAction::Confirm),
+            None
+        );
+        assert_eq!(
+            prompt.on_close_requested("c", 3, CloseAction::Confirm),
+            Some(KeepOpen::Ask)
+        );
+    }
+
+    #[test]
+    fn a_prompt_keeps_windows_open_when_another_window_appears() {
+        let prompt = QuitPrompt::new();
+        assert_eq!(
+            prompt.on_close_requested("a", 1, CloseAction::Confirm),
+            Some(KeepOpen::Ask)
+        );
+        assert_eq!(
+            prompt.on_close_requested("b", 2, CloseAction::Confirm),
+            Some(KeepOpen::Wait)
+        );
+        prompt.on_answer(false, || panic!("cancel must not exit"));
+        assert_eq!(
+            prompt.on_close_requested("b", 2, CloseAction::Confirm),
+            None
+        );
     }
 
     #[test]
@@ -196,18 +277,19 @@ mod tests {
     #[test]
     fn close_request_keeps_the_window_open_unless_quitting() {
         let prompt = QuitPrompt::new();
-        assert_eq!(prompt.on_close_requested(CloseAction::Quit), None);
+        assert_eq!(prompt.on_close_requested("a", 1, CloseAction::Quit), None);
+        prompt.on_destroyed("a");
         assert_eq!(
-            prompt.on_close_requested(CloseAction::Hide),
+            prompt.on_close_requested("b", 1, CloseAction::Hide),
             Some(KeepOpen::Hide)
         );
         assert_eq!(
-            prompt.on_close_requested(CloseAction::Confirm),
+            prompt.on_close_requested("b", 1, CloseAction::Confirm),
             Some(KeepOpen::Ask)
         );
         // Closing again while the question is up opens no second one.
         assert_eq!(
-            prompt.on_close_requested(CloseAction::Confirm),
+            prompt.on_close_requested("b", 1, CloseAction::Confirm),
             Some(KeepOpen::Wait)
         );
     }
@@ -216,14 +298,14 @@ mod tests {
     fn cancel_keeps_running_and_the_next_close_asks_again() {
         let prompt = QuitPrompt::new();
         assert_eq!(
-            prompt.on_close_requested(CloseAction::Confirm),
+            prompt.on_close_requested("b", 1, CloseAction::Confirm),
             Some(KeepOpen::Ask)
         );
         let exited = Cell::new(false);
         prompt.on_answer(false, || exited.set(true));
         assert!(!exited.get());
         assert_eq!(
-            prompt.on_close_requested(CloseAction::Confirm),
+            prompt.on_close_requested("b", 1, CloseAction::Confirm),
             Some(KeepOpen::Ask)
         );
     }
@@ -232,7 +314,7 @@ mod tests {
     fn quit_anyway_exits() {
         let prompt = QuitPrompt::new();
         assert_eq!(
-            prompt.on_close_requested(CloseAction::Confirm),
+            prompt.on_close_requested("b", 1, CloseAction::Confirm),
             Some(KeepOpen::Ask)
         );
         let exited = Cell::new(false);
