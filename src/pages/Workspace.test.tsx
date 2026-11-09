@@ -5,6 +5,8 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes, useNavigate } from 'react-router';
 
 import Workspace from './Workspace';
+import { WindowUiProvider, useWindowUi } from '../windowUi';
+import WorkspaceRail from '../components/Fleet/WorkspaceRail';
 import styles from './Workspace.module.css';
 import previewStyles from '../components/WorkspaceFilePreviewPanel.module.css';
 import useAssistantStore from '../assistant/sessionStore';
@@ -214,9 +216,41 @@ const LISTED_WORKSPACES = [
   { id: 'b', title: 'Beta' },
 ] as WorkspaceListEntry[];
 
-const FleetOutlet = () => (
-  <Outlet context={{ workspaces: LISTED_WORKSPACES, loadWorkspaces: async () => {} }} />
-);
+const FleetOutlet = ({ attentionCounts = { b: 1 }, withRail = false }: { attentionCounts?: Record<string, number>; withRail?: boolean }) => {
+  const { railHidden, setRailHidden } = useWindowUi();
+  const [attentionRequest, setAttentionRequest] = React.useState(0);
+  const showAttention = () => {
+    setRailHidden(false);
+    setAttentionRequest((request) => request + 1);
+  };
+  return <>
+    {withRail && !railHidden && <WorkspaceRail
+      id="workspace-rail"
+      workspaces={LISTED_WORKSPACES}
+      selectedId="a"
+      attentionCounts={attentionCounts}
+      attentionRequest={attentionRequest}
+      activeRuns={{}}
+      collapsed={false}
+      onToggleCollapsed={() => {}}
+      onSelect={() => {}}
+      onCreate={() => {}}
+      onRunNow={() => {}}
+      onTogglePause={() => {}}
+      onToggleStar={() => {}}
+      onSettings={() => {}}
+      onFork={() => {}}
+      onDelete={() => {}}
+      runNowBusyId={null}
+      forkBusyId={null}
+      pauseBusyId={null}
+      schedulerPaused={false}
+      schedulerPauseBusy={false}
+      onToggleSchedulerPaused={() => {}}
+    />}
+    <Outlet context={{ workspaces: LISTED_WORKSPACES, loadWorkspaces: async () => {}, attentionCounts, showAttention }} />
+  </>;
+};
 
 const renderSwitchableWorkspace = () =>
   render(
@@ -287,13 +321,15 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   stopRequestedAt: null,
 };
 
-const renderWorkspace = () =>
+const renderWorkspace = (attentionCounts?: Record<string, number>, withRail = false) =>
   render(
-    <MemoryRouter initialEntries={['/workspace/a']}>
+    <WindowUiProvider><MemoryRouter initialEntries={['/workspace/a']}>
       <Routes>
-        <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        <Route element={<FleetOutlet attentionCounts={attentionCounts} withRail={withRail} />}>
+          <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        </Route>
       </Routes>
-    </MemoryRouter>
+    </MemoryRouter></WindowUiProvider>
   );
 
 beforeEach(() => {
@@ -315,6 +351,35 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+describe('Workspace window header', () => {
+  it('clears a rail filter before focusing another workspace that needs attention', async () => {
+    renderWorkspace(undefined, true);
+    const filter = screen.getByRole('textbox', { name: 'Filter workspaces by name' });
+    await userEvent.type(filter, 'Alpha');
+    expect(screen.queryByText('Beta')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '1 other workspace needs you' }));
+    await waitFor(() => expect(screen.getByText('Beta').closest('[data-workspace-id]')).toHaveFocus());
+    expect(filter).toHaveValue('');
+  });
+
+  it('does not count unattributed approvals as another workspace', async () => {
+    renderWorkspace({ __null: 2, b: 1 });
+    expect(await screen.findByRole('button', { name: 'Hide workspaces' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '1 other workspace needs you' })).toBeInTheDocument();
+  });
+
+  it('labels its CLAI rail toggle and opens the rail from the attention chip', async () => {
+    renderWorkspace(undefined, true);
+    expect(await screen.findByRole('button', { name: 'Hide workspaces' })).toHaveAttribute('aria-expanded', 'true');
+    await userEvent.click(screen.getByRole('button', { name: 'Hide workspaces' }));
+    expect(screen.getByRole('button', { name: 'Show workspaces' })).toHaveAttribute('aria-expanded', 'false');
+    await userEvent.click(screen.getByRole('button', { name: '1 other workspace needs you' }));
+    expect(screen.getByRole('button', { name: 'Hide workspaces' })).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(screen.getByText('Beta').closest('[data-workspace-id]')).toHaveFocus());
+    expect(screen.getByRole('button', { name: 'Open in new window' })).toBeInTheDocument();
+  });
 });
 
 describe('Workspace details poll', () => {

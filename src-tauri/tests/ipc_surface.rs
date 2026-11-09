@@ -10,9 +10,7 @@
 //! `invoke('name')` literal but has no importers. That is unused-export
 //! analysis, it lives on the TypeScript side, and it is why
 //! `workspace_write_file` stayed alive long after its last caller. Read the
-//! guarantee here as "the two name lists agree, apart from the temporary
-//! `window_open` and `window_set_view` exceptions", not "every command is
-//! reachable".
+//! guarantee here as "the two name lists agree", not "every command is reachable".
 //!
 //! The check is textual by necessity: it greps the registration macro and
 //! every `invoke('name')` literal under `../src`. That is exact as long as
@@ -173,21 +171,14 @@ fn invoke_call_arguments(text: &str) -> Vec<&str> {
 }
 
 #[test]
-fn only_staged_commands_lack_frontend_callers() {
+fn every_registered_command_has_a_frontend_caller() {
     let unused: BTreeSet<String> = registered_commands()
         .difference(&invoked_commands())
         .cloned()
         .collect();
-    // PR 1 registers these commands; PR 2 adds their frontend callers and removes
-    // this exception. Exact equality makes a stale exception fail at that point.
-    let staged = ["window_open", "window_set_view"]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
-    assert_eq!(
-        unused, staged,
-        "commands registered in generate_handler! must be invoked by the frontend, \
-         except the two commands staged for multi-window PR 2"
+    assert!(
+        unused.is_empty(),
+        "registered commands without frontend callers: {unused:?}"
     );
 }
 

@@ -15,6 +15,7 @@ import { useFleetToggle } from '../fleet/useFleetToggle';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
 import { markWorkspaceOpened } from '../workspace/client';
+import { openWorkspaceWindow } from '../windowUi';
 
 const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
 
@@ -33,6 +34,11 @@ const OPEN_DIALOG = '[role="dialog"]:not([aria-label="Agent question"])';
  * workspace.
  */
 const FleetPage = () => {
+  const [newWindowError, setNewWindowError] = useState('');
+  const openNewWindow = useCallback((id: string) => {
+    setNewWindowError('');
+    void openWorkspaceWindow(id).catch((err) => setNewWindowError(err instanceof Error ? err.message : 'Failed to open a new window.'));
+  }, []);
   const cards = useFleetStore((s) => s.fleet.cards);
   const now = useFleetStore((s) => s.now);
   // Panels are judged against this: freshness, shouts and captions age on the
@@ -121,18 +127,22 @@ const FleetPage = () => {
   // Opening a workspace: the card's icon, Enter, or Ctrl+Shift+F with a card selected.
   const navigate = useNavigate();
   const openWorkspace = useCallback((id: string) => navigate(`/workspace/${id}`), [navigate]);
-  useFleetToggle(useMemo(() => (selectedId ? () => openWorkspace(selectedId) : null), [selectedId, openWorkspace]));
+  useFleetToggle(useCallback(() => {
+    if (selectedId) openWorkspace(selectedId);
+    else navigate('/workspace');
+  }, [selectedId, openWorkspace, navigate]));
   useEffect(() => {
     if (!selectedId) return undefined;
     const onEnter = (e: KeyboardEvent) => {
-      if (e.key !== 'Enter' || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+      if (e.key !== 'Enter' || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
       if ((e.target instanceof Element && e.target.closest(OWNS_ENTER)) || document.querySelector(OPEN_DIALOG)) return;
       e.preventDefault();
-      openWorkspace(selectedId);
+      if (e.shiftKey) openNewWindow(selectedId);
+      else openWorkspace(selectedId);
     };
     window.addEventListener('keydown', onEnter);
     return () => window.removeEventListener('keydown', onEnter);
-  }, [selectedId, openWorkspace]);
+  }, [selectedId, openWorkspace, openNewWindow]);
 
   const switcherOrder = useMemo(() => recentlyOpened(placed, cards), [placed, cards]);
 
@@ -147,7 +157,7 @@ const FleetPage = () => {
         </span>
       </AppTopBar>
       <main className={styles.gridArea} aria-label="Fleet">
-        {loadError && <p className={styles.notice}>{loadError}</p>}
+        {(loadError || newWindowError) && <p className={styles.notice} role="alert">{newWindowError || loadError}</p>}
         {onBoard.length > 0 ? (
           <FleetGrid
             order={onBoard}
@@ -158,6 +168,7 @@ const FleetPage = () => {
             now={clock}
             onSelect={select}
             onOpen={openWorkspace}
+            onOpenWindow={openNewWindow}
             onDismiss={dismiss}
           />
         ) : (

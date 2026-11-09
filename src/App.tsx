@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { BrowserRouter as Router } from 'react-router';
 import AppRoutes from './Routes';
+import { WindowUiProvider } from './windowUi';
 import { usePlatform } from './hooks/usePlatform';
 
 function App() {
@@ -18,7 +19,7 @@ function App() {
 
   return (
     <Router>
-      <AppRoutes />
+      <WindowUiProvider><AppRoutes /></WindowUiProvider>
     </Router>
   );
 }

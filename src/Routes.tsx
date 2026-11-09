@@ -1,11 +1,15 @@
-import React, { useEffect } from 'react';
-import { Routes, Route, Navigate, matchPath, useLocation, useNavigate } from 'react-router';
+import React, { useEffect, useRef } from 'react';
+import { Routes, Route, Navigate, Link, matchPath, useLocation, useNavigate } from 'react-router';
 import MainLayout from './layouts/MainLayout';
 import FleetLayout from './layouts/FleetLayout';
 import NotFound from './pages/NotFound';
 import FleetIndex from './pages/FleetIndex';
 import Workspace from './pages/Workspace';
 import { listWorkspaces } from './workspace/client';
+import { invoke } from '@tauri-apps/api/core';
+import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
+import { listen } from '@tauri-apps/api/event';
+import deletedStyles from './pages/DeletedWorkspace.module.css';
 
 import FleetPage from './pages/FleetPage';
 
@@ -56,13 +60,15 @@ const ReopenWorkspace = ({ workspaceId }: { workspaceId: string }) => {
 };
 
 const StartView = () => {
+  const { search } = useLocation();
+  const requested = new URLSearchParams(search).get('workspace');
   let lastView: string | null = null;
   try {
     lastView = localStorage.getItem(LAST_VIEW_KEY);
   } catch {
     // Nothing remembered.
   }
-  const workspaceId = lastView ? matchPath(WORKSPACE_PATH, lastView)?.params.workspaceId : undefined;
+  const workspaceId = requested || (lastView ? matchPath(WORKSPACE_PATH, lastView)?.params.workspaceId : undefined);
   return workspaceId ? (
     <ReopenWorkspace workspaceId={workspaceId} />
   ) : (
@@ -70,13 +76,50 @@ const StartView = () => {
   );
 };
 
+const WindowRouteEvents = () => {
+  const { pathname } = useLocation();
+  const navigate = useNavigate();
+  const pathnameRef = useRef(pathname);
+  useEffect(() => { pathnameRef.current = pathname; }, [pathname]);
+  const viewUpdates = useRef<Promise<unknown>>(Promise.resolve());
+  useEffect(() => {
+    const id = matchPath(WORKSPACE_PATH, pathname)?.params.workspaceId;
+    const view = id ? { kind: 'workspace', workspaceId: id } : { kind: pathname === FLEET_PATH ? 'fleet' : 'other' };
+    viewUpdates.current = viewUpdates.current.then(() => invoke('window_set_view', { view })).catch(console.error);
+  }, [pathname]);
+  useEffect(() => {
+    let active = true;
+    const unlisteners: Array<() => void> = [];
+    void getCurrentWebviewWindow().listen<{ workspaceId: string }>('window://navigate', (event) => {
+      if (event.payload?.workspaceId) navigate(`/workspace/${event.payload.workspaceId}`);
+    }).then((unlisten) => { if (active) unlisteners.push(unlisten); else unlisten(); });
+    void listen<{ workspaceId: string }>('workspace://deleted', (event) => {
+      if (matchPath(WORKSPACE_PATH, pathnameRef.current)?.params.workspaceId === event.payload?.workspaceId) {
+        navigate('/workspace-deleted', { replace: true });
+      }
+    }).then((unlisten) => { if (active) unlisteners.push(unlisten); else unlisten(); });
+    return () => { active = false; unlisteners.forEach((unlisten) => unlisten()); };
+  }, [navigate]);
+  return null;
+};
+
+const DeletedWorkspace = () => (
+  <main className={deletedStyles.page}>
+    <h1>Workspace deleted</h1>
+    <p>This workspace has been deleted. This window can still open another workspace.</p>
+    <Link to="/workspace">Open workspaces</Link>
+  </main>
+);
+
 const AppRoutes = () => (
   <>
     <RememberView />
+    <WindowRouteEvents />
     <Routes>
       <Route element={<MainLayout />}>
         <Route path="/" element={<StartView />} />
         <Route path={FLEET_PATH} element={<FleetPage />} />
+        <Route path="/workspace-deleted" element={<DeletedWorkspace />} />
         <Route element={<FleetLayout />}>
           <Route path={WORKSPACES_PATH} element={<FleetIndex />} />
           <Route path={WORKSPACE_PATH} element={<Workspace />} />

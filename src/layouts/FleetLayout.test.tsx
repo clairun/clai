@@ -5,10 +5,14 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 
 import FleetLayout from './FleetLayout';
+import { WindowUiProvider } from '../windowUi';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useFleetStore } from '../fleet/fleetStore';
 import { EMPTY_FLEET, emptyCard, type FleetAsk } from '../fleet/fleetModel';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
+
+const mockInvoke = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 
 vi.mock('../workspace/client', () => ({
   listWorkspaces: vi.fn(),
@@ -37,6 +41,7 @@ vi.mock('../hooks/usePermissionAttention', () => ({
 vi.mock('../components/AppUpdateBadge', () => ({
   default: () => null,
 }));
+vi.mock('../hooks/useAvailableAppUpdate', () => ({ useAvailableAppUpdate: () => ({ update: null, support: null }) }));
 
 // Stands in for the real modal so the settings tests can drive the post-save
 // `onChanged` path. Renders nothing while closed, and no `role="dialog"`, so
@@ -89,7 +94,7 @@ const entry = (
 
 const renderFleet = (initialPath = '/workspace/a') =>
   render(
-    <MemoryRouter initialEntries={[initialPath]}>
+    <WindowUiProvider><MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route element={<FleetLayout />}>
           <Route path="/workspace" element={<div data-testid="fleet-index" />} />
@@ -97,7 +102,7 @@ const renderFleet = (initialPath = '/workspace/a') =>
         </Route>
         <Route path="/fleet" element={<div data-testid="fleet" />} />
       </Routes>
-    </MemoryRouter>
+    </MemoryRouter></WindowUiProvider>
   );
 
 // The rail row is a role="button" whose accessible name contains the
@@ -117,6 +122,19 @@ const confirmDelete = async (dialog: HTMLElement) => {
   await userEvent.click(within(dialog).getByRole('button', { name: 'Delete workspace' }));
 };
 
+describe('FleetLayout new window action', () => {
+  it('opens a second window for the chosen rail workspace', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    renderFleet();
+    const row = await screen.findByRole('button', { name: /Alpha/ });
+    await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Open in new window' }));
+    expect(mockInvoke).toHaveBeenCalledWith('window_open', { workspaceId: 'a' });
+    expect(screen.getByTestId('workspace')).toBeInTheDocument();
+  });
+});
+
 describe('FleetLayout attention', () => {
   it('counts a workspace with a pending approval as needing attention', async () => {
     permissionAttention.counts = { a: 1 };
@@ -125,7 +143,7 @@ describe('FleetLayout attention', () => {
     try {
       renderFleet();
       await screen.findByText('Alpha');
-      expect(screen.getByRole('status', { name: 'Summary' })).toHaveTextContent('1 need attention');
+      expect(within(screen.getByRole('button', { name: /Alpha/ })).getAllByTitle('Needs attention').length).toBeGreaterThan(0);
     } finally {
       permissionAttention.counts = {};
     }
@@ -141,7 +159,6 @@ describe('FleetLayout attention', () => {
     try {
       renderFleet();
       await screen.findByText('Alpha');
-      expect(screen.getByRole('status', { name: 'Summary' })).toHaveTextContent('2 need attention');
       const badges = (title: string) =>
         within(screen.getByRole('button', { name: new RegExp(title) })).getAllByTitle('Needs attention').map((el) => el.textContent);
       expect(badges('Alpha')).toContain('2');
@@ -356,14 +373,28 @@ describe('FleetLayout run now', () => {
 });
 
 describe('FleetLayout switch to the Fleet', () => {
-  it('goes to the Fleet on Ctrl+Shift+F with this workspace selected there', async () => {
+  it('starts a workspace launch with no rail width and toggles it in this window', async () => {
+    window.history.replaceState({}, '', '/?workspace=a');
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    renderFleet('/workspace/a');
+    expect(document.documentElement.style.getPropertyValue('--fleet-rail-width')).toBe('0px');
+    expect(screen.queryByRole('navigation', { name: 'Workspaces' })).toBeNull();
+    await userEvent.keyboard('{Control>}{Shift>}F{/Shift}{/Control}');
+    expect(await screen.findByRole('navigation', { name: 'Workspaces' })).toBeInTheDocument();
+    expect(document.documentElement.style.getPropertyValue('--fleet-rail-width')).toBe('248px');
+    expect(screen.getByRole('button', { name: 'Open settings' })).toBeInTheDocument();
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('goes to the Fleet on Ctrl+Shift+M with this workspace selected there', async () => {
     useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null });
     listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);
     getSchedulerPaused.mockResolvedValue(false);
     renderFleet('/workspace/a');
     expect(await screen.findByTestId('workspace')).toBeInTheDocument();
 
-    await userEvent.keyboard('{Control>}{Shift>}F{/Shift}{/Control}');
+    await userEvent.keyboard('{Control>}{Shift>}M{/Shift}{/Control}');
     expect(await screen.findByTestId('fleet')).toBeInTheDocument();
     expect(useFleetStore.getState().selectedId).toBe('a');
   });
