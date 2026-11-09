@@ -32,11 +32,12 @@ mod assistant;
 mod commands;
 mod config;
 mod db;
-mod main_window;
 mod mcp;
 mod paths;
 mod providers;
 mod system_apps;
+mod window_core;
+mod window_lifecycle;
 mod windows_console;
 mod workspace_index;
 
@@ -352,17 +353,21 @@ pub fn run() {
         // focuses the running window and exits, because workspace databases
         // live outside `CLAI_HOME`.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            main_window::show_main_window(app);
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                window_core::show_recent_window(&app);
+            });
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .on_window_event(main_window::on_window_event)
+        .on_window_event(window_lifecycle::on_window_event)
         // Make our state available to all commands
         // Commands can access it via State<'_, AppState>
         .manage(state)
+        .manage(window_core::WindowRegistry::new())
         // Setup hook - runs after app is built, gives us AppHandle
         .setup(move |app| {
             // The sandbox hides the agents' craft folders only once their
@@ -373,6 +378,19 @@ pub fn run() {
                 tracing::warn!(path = %agents_root.display(), "Failed to create agents directory: {}", e);
             }
 
+            let config = &app.config().app.windows[0];
+            let registry = app.state::<window_core::WindowRegistry>();
+            registry.register(&config.label, window_core::View::Other);
+            let window = match tauri::WebviewWindowBuilder::from_config(app, config)?.build() {
+                Ok(window) => window,
+                Err(error) => {
+                    registry.remove(&config.label);
+                    return Err(error.into());
+                }
+            };
+            if window.is_focused().unwrap_or(false) {
+                registry.focused(window.label(), true);
+            }
             // Here rather than before the builder, so that a second launch,
             // which exits in `Builder::build`, never adds connections to
             // config.json. Runs before the default-workspace bootstrap below so
@@ -422,6 +440,9 @@ pub fn run() {
         // Register our custom commands
         // These become available to JS via invoke()
         .invoke_handler(tauri::generate_handler![
+            // Window management
+            window_core::window_set_view,
+            window_core::window_open,
             // App metadata
             commands::app_info::app_version_detail,
             commands::app_info::app_live_run_count,
