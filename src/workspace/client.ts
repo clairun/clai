@@ -301,12 +301,13 @@ export async function setWorkspaceSchedulePaused(
 /**
  * Star or unstar a workspace — the rail pins starred workspaces in a
  * dedicated "Starred" section. Does not bump `updatedAt`, so toggling the
- * star never reorders the recency-sorted list.
+ * star never reorders the recency-sorted list. A returned string warns that
+ * the saved change could not be reflected in the Linux app launcher.
  */
 export async function setWorkspaceStarred(
   workspaceId: string,
   starred: boolean
-): Promise<void> {
+): Promise<string | null> {
   return invoke('workspace_set_starred', { workspaceId, starred });
 }
 
@@ -320,7 +321,8 @@ export async function setSchedulerPaused(paused: boolean): Promise<void> {
   return invoke('set_scheduler_paused', { paused });
 }
 
-export async function setWorkspaceTitle(workspaceId: string, title: string): Promise<void> {
+/** Returns a launcher warning after a saved rename, or null on full success. */
+export async function setWorkspaceTitle(workspaceId: string, title: string): Promise<string | null> {
   return invoke('workspace_set_title', { workspaceId, title });
 }
 

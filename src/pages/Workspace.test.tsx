@@ -44,6 +44,7 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('../workspace/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../workspace/client')>()),
   getWorkspaceDetails: vi.fn(),
+  setWorkspaceTitle: vi.fn(),
   markWorkspaceOpened: vi.fn(async () => {}),
   getOrCreateWorkspaceSession: vi.fn(),
   listWorkspaceDir: vi.fn(async () => []),
@@ -72,6 +73,7 @@ vi.mock('../assistant/client', () => ({
 
 const workspaceClient = await import('../workspace/client');
 const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
+const setWorkspaceTitle = vi.mocked(workspaceClient.setWorkspaceTitle);
 const getOrCreateWorkspaceSession = vi.mocked(workspaceClient.getOrCreateWorkspaceSession);
 const readWorkspaceFile = vi.mocked(workspaceClient.readWorkspaceFile);
 const runWorkspaceNow = vi.mocked(workspaceClient.runWorkspaceNow);
@@ -341,6 +343,7 @@ beforeEach(() => {
   useAssistantStore.setState({ sessions: {}, activeSessionByTab: {}, streamingText: {} });
   useTaskStore.setState({ tasks: {}, seeded: {} });
   getWorkspaceDetails.mockImplementation(async (_workspaceId, options) => detailsFor(options));
+  setWorkspaceTitle.mockReset();
   getOrCreateWorkspaceSession.mockResolvedValue({
     session: sessionFor('a', 10n),
     providerConnectionId: 'conn-1',
@@ -384,6 +387,33 @@ describe('Workspace window header', () => {
 });
 
 describe('Workspace details poll', () => {
+  it('keeps a saved inline rename and launcher warning visible after polling', async () => {
+    const warning = 'Workspace title was saved, but its app launcher could not be updated: permission denied';
+    let savedTitle = 'Alpha';
+    setWorkspaceTitle.mockImplementation(async (_id, title) => {
+      savedTitle = title;
+      return warning;
+    });
+    getWorkspaceDetails.mockImplementation(async (_id, options) => detailsFor(options, { title: savedTitle }));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    renderWorkspace();
+    await screen.findByTitle('Click to rename');
+
+    await user.click(screen.getByTitle('Click to rename'));
+    const title = screen.getByRole('textbox', { name: 'Workspace title' });
+    await user.clear(title);
+    await user.type(title, 'Renamed{Enter}');
+
+    await waitFor(() => expect(screen.getByTitle('Click to rename')).toHaveTextContent('Renamed'));
+    expect(screen.getByRole('alert')).toHaveTextContent(warning);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+
+    expect(getWorkspaceDetails).toHaveBeenCalledTimes(2);
+    expect(screen.getByTitle('Click to rename')).toHaveTextContent('Renamed');
+    expect(screen.getByRole('alert')).toHaveTextContent(warning);
+  });
+
   it('surfaces the workspace files the poll asked for', async () => {
     renderWorkspace();
 

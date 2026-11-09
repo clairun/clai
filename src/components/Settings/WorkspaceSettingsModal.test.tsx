@@ -376,6 +376,38 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
     expect(pageHeading('Team')).toBeInTheDocument();
   });
 
+  it('keeps a launcher warning visible after Save and close unmounts the page', async () => {
+    const user = userEvent.setup();
+    const warning = 'Workspace title was saved, but its app launcher could not be updated: permission denied';
+    vi.mocked(setWorkspaceTitle).mockResolvedValue(warning);
+    const onClose = vi.fn();
+    const Host = () => {
+      const [open, setOpen] = useState(true);
+      const [launcherWarning, setLauncherWarning] = useState<string | null>(null);
+      return <>
+        {launcherWarning && <div role="alert">{launcherWarning}</div>}
+        <WorkspaceSettingsModal
+          isOpen={open}
+          onClose={() => { onClose(); setOpen(false); }}
+          workspaceId="ws-1"
+          details={DETAILS}
+          initialSelection={{ kind: 'general' }}
+          onLauncherWarning={setLauncherWarning}
+        />
+      </>;
+    };
+    render(<Host />);
+    await user.type(screen.getByLabelText(/Title/), ' API');
+    await user.click(screen.getByRole('button', { name: 'Close settings' }));
+    expect(screen.getByText(LEAVE_PROMPT)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('dialog', { name: 'Backend settings' })).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(warning);
+    expect(setWorkspaceTitle).toHaveBeenCalledWith('ws-1', 'Backend API');
+  });
+
   it('saves only the visible page and puts focus on its title', async () => {
     const user = userEvent.setup();
     renderModal({ kind: 'general' });

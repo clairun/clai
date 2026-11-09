@@ -1059,6 +1059,7 @@ const WorkspaceHeader = ({
   onTogglePause,
   onStop,
   onTitleSaved,
+  onLauncherWarning,
   activeRunId,
   hasActiveRun,
   runNowBusy,
@@ -1083,6 +1084,7 @@ const WorkspaceHeader = ({
   activePanel: ActivePanel;
   setActivePanel: React.Dispatch<React.SetStateAction<ActivePanel>>;
   onTitleSaved: (title: string) => void;
+  onLauncherWarning: (warning: string | null) => void;
   onRunNow: () => void | Promise<void>;
   onTogglePause: (paused: boolean) => void | Promise<void>;
   onStop: (runId: string | null) => void | Promise<void>;
@@ -1164,8 +1166,9 @@ const WorkspaceHeader = ({
     }
     setSavingTitle(true);
     try {
-      await setWorkspaceTitle(workspaceId, trimmed);
+      const launcherWarning = await setWorkspaceTitle(workspaceId, trimmed);
       onTitleSaved(trimmed);
+      onLauncherWarning(launcherWarning);
       setIsEditingTitle(false);
       setDraftTitle('');
     } catch {
@@ -1627,6 +1630,7 @@ const Workspace = () => {
   // empty even on a conversation that has history).
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useByWorkspace(workspaceId, '');
+  const [launcherWarning, setLauncherWarning] = useByWorkspace(workspaceId, '');
   // The drawer chip that's open plus its contextual slide-out panel. The
   // Workspace component instance is REUSED across workspace→workspace
   // navigations (both routes resolve to the same element), so a plain useState
@@ -2420,6 +2424,7 @@ const Workspace = () => {
         activePanel={activePanel}
         setActivePanel={setActivePanel}
         onTitleSaved={handleTitleSaved}
+        onLauncherWarning={(warning) => setLauncherWarning(warning || '')}
         onRunNow={handleRunNow}
         onTogglePause={handleTogglePause}
         onStop={handleStop}
@@ -2434,6 +2439,7 @@ const Workspace = () => {
       />
 
       {error && <div className={styles.errorBanner}>{error}</div>}
+      {launcherWarning && <div className={styles.errorBanner} role="alert">{launcherWarning}</div>}
 
 
       <div className={styles.workspaceBody}>
@@ -2748,6 +2754,7 @@ const Workspace = () => {
         details={details}
         initialSelection={settingsSelection}
         onChanged={handleSettingsChanged}
+        onLauncherWarning={(warning) => setLauncherWarning(warning || '')}
       />
     </div>
   );

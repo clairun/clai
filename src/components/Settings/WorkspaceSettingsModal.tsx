@@ -69,6 +69,7 @@ interface WorkspaceSettingsModalProps {
   /** Page to open on; General when omitted. */
   initialSelection?: Selection | null;
   onChanged?: () => void;
+  onLauncherWarning?: (warning: string | null) => void;
 }
 
 type FocusTarget = 'heading' | 'nav';
@@ -87,6 +88,7 @@ const SettingsWindow = ({
   details,
   initialSelection,
   onChanged,
+  onLauncherWarning,
 }: Omit<WorkspaceSettingsModalProps, 'isOpen'>) => {
   const [page, setPage] = useState<Selection>(initialSelection ?? GENERAL);
   // Bumped to remount the page: that is how Discard drops its draft.
@@ -183,6 +185,7 @@ const SettingsWindow = ({
         return false;
       }
       createdId = result.createdId;
+      if (page.kind === 'general') onLauncherWarning?.(result.warning ?? null);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
       return false;
@@ -200,7 +203,7 @@ const SettingsWindow = ({
     notifySettingsChanged(WORKSPACE_SETTINGS_CHANGED_EVENT);
     await Promise.resolve(onChanged?.());
     return true;
-  }, [saving, onChanged, showPage]);
+  }, [saving, onChanged, onLauncherWarning, page.kind, showPage]);
 
   const discardPage = useCallback(() => {
     focusNext.current = 'heading';

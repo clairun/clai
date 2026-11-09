@@ -33,6 +33,8 @@ mod cli;
 mod commands;
 mod config;
 mod db;
+#[cfg(target_os = "linux")]
+mod linux_launchers;
 mod mcp;
 mod paths;
 mod providers;
@@ -424,6 +426,12 @@ pub fn run() {
                     let initialized = initialize_workspace_storage(&state).await;
                     if let Err(error) = &initialized {
                         tracing::warn!(%error, "Failed to initialize workspace storage");
+                    }
+                    #[cfg(target_os = "linux")]
+                    if initialized.is_ok() {
+                        if let Err(error) = linux_launchers::reconcile(state.inner()) {
+                            tracing::warn!(%error, "Failed to reconcile workspace launchers");
+                        }
                     }
                     state.storage_ready.send_replace(Some(initialized.clone()));
                     if launch_request == cli::LaunchRequest::New {

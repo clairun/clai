@@ -130,6 +130,27 @@ const confirmDelete = async (dialog: HTMLElement) => {
   await userEvent.click(within(dialog).getByRole('button', { name: 'Delete workspace' }));
 };
 
+describe('FleetLayout starred launcher warnings', () => {
+  it('keeps a saved star and shows the launcher warning', async () => {
+    let persisted = false;
+    const warning = 'Workspace star was saved, but its app launcher could not be updated: permission denied';
+    listWorkspaces.mockImplementation(async () => [entry('a', 'Alpha', { starred: persisted })]);
+    vi.mocked(workspaceClient.setWorkspaceStarred).mockImplementation(async () => {
+      persisted = true;
+      return warning;
+    });
+    getSchedulerPaused.mockResolvedValue(false);
+
+    renderFleet();
+    const row = await screen.findByRole('button', { name: /Alpha/ });
+    await userEvent.click(within(row).getByRole('button', { name: 'Star workspace' }));
+
+    expect(await screen.findByText(warning)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Unstar workspace' })).toBeInTheDocument();
+    expect(workspaceClient.setWorkspaceStarred).toHaveBeenCalledWith('a', true);
+  });
+});
+
 describe('FleetLayout new window action', () => {
   it('opens a second window for the chosen rail workspace', async () => {
     listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
