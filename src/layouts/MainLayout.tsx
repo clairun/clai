@@ -7,10 +7,17 @@ import GlobalSettingsHost from '../components/Settings/GlobalSettingsHost';
 import { useAssistantEvents } from '../assistant';
 import { useFleetAttentionFeed } from '../fleet/useFleetAttentionFeed';
 import styles from './MainLayout.module.css';
+import { useFleetStore } from '../fleet/fleetStore';
 
 const AssistantEventListener = ({ children }: { children: React.ReactNode }) => {
   useAssistantEvents();
   useFleetAttentionFeed();
+  useEffect(() => {
+    const refresh = () => { void useFleetStore.getState().loadSnapshot(); };
+    refresh();
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
+  }, []);
   return <>{children}</>;
 };
 

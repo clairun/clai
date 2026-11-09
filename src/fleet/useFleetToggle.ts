@@ -1,7 +1,7 @@
 import { useEffect } from 'react';
 
 /**
- * Ctrl+Shift+F (Cmd on macOS) switches between the Fleet and Workspace mode;
+ * Ctrl+Shift+M (Cmd on macOS) switches between the Fleet and Workspace mode;
  * `onToggle` says where to. Capture phase, so a focused terminal doesn't eat
  * it as a control character.
  */
@@ -9,7 +9,7 @@ export const useFleetToggle = (onToggle: (() => void) | null) => {
   useEffect(() => {
     if (!onToggle) return undefined;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey || e.code !== 'KeyF') return;
+      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey || e.code !== 'KeyM') return;
       e.preventDefault();
       e.stopPropagation();
       onToggle();

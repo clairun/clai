@@ -21,10 +21,14 @@ import {
 import styles from './WorkspaceRail.module.css';
 
 interface WorkspaceRailProps {
+  id?: string;
+  footer?: React.ReactNode;
+  onOpenWindow?: (id: string) => void;
   workspaces: WorkspaceListEntry[];
   selectedId: string | null;
   /** Per-workspace pending approval/path-grant count (merged). */
   attentionCounts: Record<string, number>;
+  attentionRequest?: number;
   /** Per-workspace in-flight interactive run count. */
   activeRuns: Record<string, number>;
   collapsed: boolean;
@@ -158,7 +162,11 @@ const rowMenuStyle = (trigger: HTMLElement): React.CSSProperties => {
 const WorkspaceRail = ({
   workspaces,
   selectedId,
+  id,
+  footer,
+  onOpenWindow,
   attentionCounts,
+  attentionRequest = 0,
   activeRuns,
   collapsed,
   onToggleCollapsed,
@@ -202,7 +210,21 @@ const WorkspaceRail = ({
     }
     setOpenMenu(null);
   }, []);
-  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState({ query: '', request: attentionRequest });
+  const query = filter.request === attentionRequest ? filter.query : '';
+  const selectedIdRef = useRef(selectedId);
+  useLayoutEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+  useLayoutEffect(() => {
+    if (attentionRequest === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      const rail = document.getElementById(id ?? '');
+      const rows = rail?.querySelectorAll<HTMLElement>('[data-attention]') ?? [];
+      Array.from(rows).find((row) => row.dataset.workspaceId !== selectedIdRef.current)?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [attentionRequest, id]);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
   // The menu lives at the end of <body>, so Tab from the ⋯ trigger no
@@ -338,6 +360,8 @@ const WorkspaceRail = ({
     return (
       <div
         key={ws.id}
+        data-workspace-id={ws.id}
+        data-attention={attentionCount > 0 || undefined}
         className={`${rowClasses}${
           dropTargetId === ws.id ? ` ${styles.rowDropTarget}` : ''
         }`}
@@ -561,6 +585,11 @@ const WorkspaceRail = ({
                     >
                       Settings
                     </button>
+                    {onOpenWindow && <button type="button" className={styles.menuItem} role="menuitem" onClick={(e) => {
+                      e.stopPropagation();
+                      closeMenu();
+                      onOpenWindow(ws.id);
+                    }}>Open in new window</button>}
                     <button
                       type="button"
                       className={styles.menuItem}
@@ -598,6 +627,7 @@ const WorkspaceRail = ({
 
   return (
     <nav
+      id={id}
       className={`${styles.rail} ${collapsed ? styles.railCollapsed : ''}`}
       aria-label="Workspaces"
     >
@@ -660,7 +690,7 @@ const WorkspaceRail = ({
             type="text"
             className={styles.filterInput}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => setFilter({ query: e.target.value, request: attentionRequest })}
             placeholder="Filter workspaces…"
             aria-label="Filter workspaces by name"
             spellCheck={false}
@@ -670,7 +700,7 @@ const WorkspaceRail = ({
             <button
               type="button"
               className={styles.filterClear}
-              onClick={() => setQuery('')}
+              onClick={() => setFilter({ query: '', request: attentionRequest })}
               title="Clear filter"
               aria-label="Clear filter"
             >
@@ -710,6 +740,7 @@ const WorkspaceRail = ({
           <div className={styles.emptyRail}>No workspaces match “{query.trim()}”.</div>
         )}
       </div>
+      {footer && <div className={styles.railFooter}>{footer}</div>}
     </nav>
   );
 };
