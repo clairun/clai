@@ -49,6 +49,7 @@ function applyResolved(pref: ThemePreference): void {
 }
 
 let mediaListenerAttached = false;
+let storageListenerAttached = false;
 
 /**
  * Apply the stored preference and (once) start following the OS theme while
@@ -56,6 +57,12 @@ let mediaListenerAttached = false;
  */
 export function initTheme(): void {
   applyResolved(getThemePreference());
+  if (!storageListenerAttached && typeof window !== 'undefined') {
+    window.addEventListener('storage', (event) => {
+      if (event.key === STORAGE_KEY || event.key === null) applyResolved(getThemePreference());
+    });
+    storageListenerAttached = true;
+  }
 
   if (
     !mediaListenerAttached &&

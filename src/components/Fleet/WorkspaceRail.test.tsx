@@ -55,6 +55,7 @@ const rail = (
     forkBusyId={null}
     pauseBusyId={null}
     schedulerPaused={false}
+    schedulerPauseReadFailed={false}
     schedulerPauseBusy={false}
     onToggleSchedulerPaused={noop}
     {...overrides}

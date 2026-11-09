@@ -74,6 +74,20 @@ const FleetPage = () => {
     return () => window.removeEventListener('focus', load);
   }, []);
 
+  useEffect(() => {
+    const refresh = () => useFleetStore.getState().refreshDismissed();
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === 'fleet.dismissed' || event.key === null) refresh();
+    };
+    refresh();
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', refresh);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', refresh);
+    };
+  }, []);
+
   // The store's clock, not `clock`: a card leaves the board on an event, not on the minute tick.
   const placed = useMemo(
     () => eligibleCards(Object.values(cards), { now, selectedId, live }),
