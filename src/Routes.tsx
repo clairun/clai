@@ -31,11 +31,17 @@ const RememberView = () => {
   const { pathname } = useLocation();
   useEffect(() => {
     if (pathname !== FLEET_PATH && !matchPath(WORKSPACE_PATH, pathname)) return;
-    try {
-      localStorage.setItem(LAST_VIEW_KEY, pathname);
-    } catch {
-      // Not remembered; the next launch opens the workspaces page.
-    }
+    const remember = () => {
+      if (!document.hasFocus()) return;
+      try {
+        localStorage.setItem(LAST_VIEW_KEY, pathname);
+      } catch {
+        // Not remembered; the next launch opens the workspaces page.
+      }
+    };
+    remember();
+    window.addEventListener('focus', remember);
+    return () => window.removeEventListener('focus', remember);
   }, [pathname]);
   return null;
 };

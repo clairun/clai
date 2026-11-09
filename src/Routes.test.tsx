@@ -91,6 +91,9 @@ const HistoryProbe = () => {
       <button type="button" onClick={() => navigate(-1)}>
         back
       </button>
+      <button type="button" onClick={() => navigate('/workspace/background')}>
+        open background route
+      </button>
     </>
   );
 };
@@ -111,12 +114,26 @@ const visit = (path: string) => renderAt(path).unmount();
 describe('AppRoutes', () => {
   beforeEach(() => {
     vi.stubGlobal('localStorage', memoryStorage());
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
     invoke.mockClear();
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
+
+  it('ignores a background route change and remembers that route on focus', () => {
+    renderAt('/fleet');
+    expect(localStorage.getItem('clai.lastView')).toBe('/fleet');
+    vi.mocked(document.hasFocus).mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'open background route' }));
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace/background');
+    expect(localStorage.getItem('clai.lastView')).toBe('/fleet');
+    vi.mocked(document.hasFocus).mockReturnValue(true);
+    fireEvent.focus(window);
+    expect(localStorage.getItem('clai.lastView')).toBe('/workspace/background');
+  });
 
   it('opens the workspace named by the launch query, ahead of the remembered view', async () => {
     existingWorkspaces('requested');

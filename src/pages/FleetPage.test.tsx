@@ -66,6 +66,12 @@ const renderFleet = () =>
   );
 
 beforeEach(() => {
+  const items = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => { items.set(key, value); },
+    removeItem: (key: string) => { items.delete(key); },
+  });
   useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null, dismissed: {}, loadedAt: null, loadError: null, buffer: null });
   useFleetActivityStore.setState({ activeRunsByWorkspace: {} });
   useTaskStore.setState({ tasks: {}, seeded: {} });
@@ -92,6 +98,18 @@ afterEach(() => {
 });
 
 describe('FleetPage', () => {
+  it('refreshes dismissed cards on storage and focus', async () => {
+    fleetSnapshot.mockResolvedValue([]);
+    renderFleet();
+    await waitFor(() => expect(useFleetStore.getState().loadedAt).not.toBeNull());
+    localStorage.setItem('fleet.dismissed', JSON.stringify({ a: 11 }));
+    act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'fleet.dismissed' })));
+    expect(useFleetStore.getState().dismissed).toEqual({ a: 11 });
+    localStorage.setItem('fleet.dismissed', JSON.stringify({ b: 12 }));
+    await act(async () => fireEvent.focus(window));
+    expect(useFleetStore.getState().dismissed).toEqual({ b: 12 });
+  });
+
   it('reloads the snapshot once for a card born untitled, and not again while it stays untitled', async () => {
     fleetSnapshot.mockResolvedValueOnce([]).mockResolvedValue([workspace('ws-new', '')]);
     renderFleet();

@@ -16,6 +16,8 @@ import modalStyles from './McpServerFormModal.module.css';
 import { openExternal } from '../../utils/openExternal';
 import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 
+import { notifySettingsChanged } from '../../utils/settingsEvents';
+
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
 
 interface ConnectionForm {
@@ -504,7 +506,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
       setEditingId(null);
       setSelectedEntry(null);
       await loadData();
-      window.dispatchEvent(new CustomEvent(CONNECTIONS_CHANGED_EVENT));
+      notifySettingsChanged(CONNECTIONS_CHANGED_EVENT);
     } catch (err) {
       console.error('[AssistantProviderSettings] Save failed:', err);
       setFormError(typeof err === 'string' ? err : err instanceof Error ? err.message : 'Failed to save provider connection.');
@@ -528,7 +530,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
         setEditingId(null);
       }
       await loadData();
-      window.dispatchEvent(new CustomEvent(CONNECTIONS_CHANGED_EVENT));
+      notifySettingsChanged(CONNECTIONS_CHANGED_EVENT);
       setSuccess('Connection deleted.');
     } catch (err) {
       console.error('[AssistantProviderSettings] Delete failed:', err);

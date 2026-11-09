@@ -17,6 +17,8 @@ import type {
 } from '../../generated/bindings';
 import styles from './McpServersSettings.module.css';
 
+import { notifySettingsChanged } from '../../utils/settingsEvents';
+
 const MCP_SERVERS_CHANGED_EVENT = 'mcp-servers-changed';
 
 type McpSection = 'catalog' | 'configured';
@@ -91,28 +93,38 @@ const McpServersSettings = () => {
   const [activeSection, setActiveSection] = useState<McpSection>('catalog');
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/immutability -- One-shot async bootstrap: loadServers is declared below with `const` so the linter cannot prove the closure value at effect registration; the function only reads the initial state via setServers/setLoading/setError, so the TDZ is benign here.
-    loadServers();
+    let active = true;
+    let revision = 0;
+    const loadServers = async () => {
+      const requestedAt = ++revision;
+      setLoading(true);
+      setError(null);
+      try {
+        const [serverResult, catalogResult] = await Promise.all([
+          getMcpServers(),
+          getMcpServerCatalog(),
+        ]);
+        if (active && requestedAt === revision) {
+          setServers(serverResult || []);
+          setCatalog(catalogResult || []);
+        }
+      } catch (loadError) {
+        if (active && requestedAt === revision) {
+          console.error('[McpServersSettings] Failed to load servers:', loadError);
+          setError(errText(loadError, 'Failed to load MCP servers. Please try again.'));
+        }
+      } finally {
+        if (active && requestedAt === revision) setLoading(false);
+      }
+    };
+    const onChanged = () => { void loadServers(); };
+    window.addEventListener(MCP_SERVERS_CHANGED_EVENT, onChanged);
+    void loadServers();
+    return () => {
+      active = false;
+      window.removeEventListener(MCP_SERVERS_CHANGED_EVENT, onChanged);
+    };
   }, []);
-
-  const loadServers = async () => {
-    setLoading(true);
-    setError(null);
-
-    try {
-      const [serverResult, catalogResult] = await Promise.all([
-        getMcpServers(),
-        getMcpServerCatalog(),
-      ]);
-      setServers(serverResult || []);
-      setCatalog(catalogResult || []);
-    } catch (loadError) {
-      console.error('[McpServersSettings] Failed to load servers:', loadError);
-      setError(errText(loadError, 'Failed to load MCP servers. Please try again.'));
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleCreate = () => {
     setEditingServer(null);
@@ -138,7 +150,7 @@ const McpServersSettings = () => {
     try {
       await deleteMcpServer(serverId);
       setServers((current) => current.filter((server) => server.id !== serverId));
-      window.dispatchEvent(new CustomEvent(MCP_SERVERS_CHANGED_EVENT));
+      notifySettingsChanged(MCP_SERVERS_CHANGED_EVENT);
     } catch (deleteError) {
       console.error('[McpServersSettings] Failed to delete server:', deleteError);
       setError(deleteError instanceof Error ? deleteError.message : 'Failed to delete MCP server.');
@@ -156,7 +168,7 @@ const McpServersSettings = () => {
       setServers((current) => current.map((item) => (
         item.id === updated.id ? updated : item
       )));
-      window.dispatchEvent(new CustomEvent(MCP_SERVERS_CHANGED_EVENT));
+      notifySettingsChanged(MCP_SERVERS_CHANGED_EVENT);
     } catch (disconnectError) {
       console.error('[McpServersSettings] Failed to disconnect OAuth:', disconnectError);
       setError(errText(disconnectError, 'Failed to disconnect MCP OAuth.'));
@@ -172,7 +184,7 @@ const McpServersSettings = () => {
       }
       return [...current, saved];
     });
-    window.dispatchEvent(new CustomEvent(MCP_SERVERS_CHANGED_EVENT));
+    notifySettingsChanged(MCP_SERVERS_CHANGED_EVENT);
   };
 
   const handleSubmit = async (formData: McpServerFormPayload): Promise<McpServerResponse> => {

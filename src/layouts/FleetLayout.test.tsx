@@ -11,6 +11,13 @@ import { useFleetStore } from '../fleet/fleetStore';
 import { EMPTY_FLEET, emptyCard, type FleetAsk } from '../fleet/fleetModel';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 
+const schedulerHandlers = vi.hoisted(() => new Map<string, (event: { payload: boolean }) => void>());
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async (event: string, handler: (event: { payload: boolean }) => void) => {
+    schedulerHandlers.set(event, handler);
+    return () => { schedulerHandlers.delete(event); };
+  }),
+}));
 const mockInvoke = vi.hoisted(() => vi.fn(async () => undefined));
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 
@@ -68,6 +75,7 @@ const workspaceClient = await import('../workspace/client');
 const listWorkspaces = vi.mocked(workspaceClient.listWorkspaces);
 const deleteWorkspace = vi.mocked(workspaceClient.deleteWorkspace);
 const getSchedulerPaused = vi.mocked(workspaceClient.getSchedulerPaused);
+const setSchedulerPaused = vi.mocked(workspaceClient.setSchedulerPaused);
 const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
 
 const entry = (
@@ -132,6 +140,77 @@ describe('FleetLayout new window action', () => {
     await userEvent.click(screen.getByRole('menuitem', { name: 'Open in new window' }));
     expect(mockInvoke).toHaveBeenCalledWith('window_open', { workspaceId: 'a' });
     expect(screen.getByTestId('workspace')).toBeInTheDocument();
+  });
+});
+
+describe('FleetLayout global scheduler pause', () => {
+  it('offers safe retries after failed reads and toggles only after a current read succeeds', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('still offline'))
+      .mockResolvedValueOnce(true);
+    renderFleet();
+
+    const retry = await screen.findByRole('button', { name: 'Retry reading global pause state' });
+    expect(retry).toBeEnabled();
+    await userEvent.click(retry);
+    await waitFor(() => expect(getSchedulerPaused).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry reading global pause state' })).toBeEnabled());
+    expect(setSchedulerPaused).not.toHaveBeenCalled();
+
+    await userEvent.click(retry);
+    const resume = await screen.findByRole('button', { name: 'Resume all scheduled runs' });
+    expect(resume).toBeEnabled();
+    expect(setSchedulerPaused).not.toHaveBeenCalled();
+    await userEvent.click(resume);
+    expect(setSchedulerPaused).toHaveBeenCalledWith(false);
+  });
+  it('replaces a stale pause action with retry after a focus read fails', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(true);
+    renderFleet();
+    const pause = await screen.findByRole('button', { name: 'Pause all scheduled runs' });
+    await waitFor(() => expect(pause).toBeEnabled());
+
+    act(() => window.dispatchEvent(new Event('focus')));
+    const retry = await screen.findByRole('button', { name: 'Retry reading global pause state' });
+    expect(screen.queryByRole('button', { name: 'Pause all scheduled runs' })).toBeNull();
+    await userEvent.click(retry);
+    expect(await screen.findByRole('button', { name: 'Resume all scheduled runs' })).toBeEnabled();
+    expect(setSchedulerPaused).not.toHaveBeenCalled();
+  });
+  it('holds the pause control until a focus refresh resolves', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValueOnce(false);
+    renderFleet();
+    const pause = await screen.findByRole('button', { name: 'Pause all scheduled runs' });
+    await waitFor(() => expect(pause).toBeEnabled());
+
+    let resolveRefresh!: (value: boolean) => void;
+    getSchedulerPaused.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveRefresh = resolve; }));
+    act(() => window.dispatchEvent(new Event('focus')));
+    expect(pause).toBeDisabled();
+    await userEvent.click(pause);
+    expect(setSchedulerPaused).not.toHaveBeenCalled();
+
+    await act(async () => resolveRefresh(true));
+    const resume = screen.getByRole('button', { name: 'Resume all scheduled runs' });
+    expect(resume).toBeEnabled();
+    await userEvent.click(resume);
+    expect(setSchedulerPaused).toHaveBeenCalledWith(false);
+  });
+  it('refreshes from the backend event and on focus before the next click', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    renderFleet();
+    await screen.findByRole('button', { name: 'Pause all scheduled runs' });
+    await waitFor(() => expect(schedulerHandlers.has('scheduler://paused')).toBe(true));
+    act(() => schedulerHandlers.get('scheduler://paused')!({ payload: true }));
+    expect(screen.getByRole('button', { name: 'Resume all scheduled runs' })).toBeInTheDocument();
+    getSchedulerPaused.mockResolvedValue(false);
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    expect(screen.getByRole('button', { name: 'Pause all scheduled runs' })).toBeInTheDocument();
   });
 });
 
