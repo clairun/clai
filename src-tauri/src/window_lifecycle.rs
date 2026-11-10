@@ -122,6 +122,10 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
     match event {
         WindowEvent::Focused(focused) => {
             registry.focused(window.label(), *focused);
+            window
+                .app_handle()
+                .state::<crate::attention_notifications::AttentionNotifications>()
+                .reconcile(window.app_handle());
             return;
         }
         WindowEvent::Destroyed => {

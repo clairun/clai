@@ -148,6 +148,12 @@ pub fn emit_event(
     run_id: Option<&str>,
     event: AssistantUiEvent,
 ) -> Result<(), String> {
+    if matches!(
+        event,
+        AssistantUiEvent::AskUserRequested { .. } | AssistantUiEvent::AskUserResolved { .. }
+    ) {
+        crate::attention_notifications::AttentionNotifications::schedule_refresh(app, workspace_id);
+    }
     let envelope = AssistantEventEnvelope {
         session_id: session.id.clone(),
         run_id: run_id.map(str::to_string),

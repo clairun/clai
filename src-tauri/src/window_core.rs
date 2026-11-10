@@ -86,13 +86,38 @@ impl WindowRegistry {
         }
     }
 
+    pub fn focused_workspace(&self) -> Option<String> {
+        let data = self.0.lock().ok()?;
+        let entry = data.windows.get(data.focused.as_deref()?)?;
+        match &entry.view {
+            View::Workspace(id) => Some(id.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn route_click(&self, workspace_id: &str) -> Option<(String, bool)> {
+        let data = self.0.lock().ok()?;
+        let matching = data
+            .windows
+            .iter()
+            .filter(|(_, entry)| matches!(&entry.view, View::Workspace(id) if id == workspace_id))
+            .max_by_key(|(label, entry)| (entry.focus_seq, label.as_str()));
+        if let Some((label, _)) = matching {
+            return Some((label.clone(), false));
+        }
+        data.windows
+            .iter()
+            .max_by_key(|(label, entry)| (entry.focus_seq, label.as_str()))
+            .map(|(label, _)| (label.clone(), true))
+    }
+
     pub fn most_recent(&self) -> Option<String> {
         self.0
             .lock()
             .ok()?
             .windows
             .iter()
-            .max_by_key(|(_, entry)| entry.focus_seq)
+            .max_by_key(|(label, entry)| (entry.focus_seq, label.as_str()))
             .map(|(label, _)| label.clone())
     }
 
@@ -191,7 +216,9 @@ pub fn window_set_view(
 ) -> Result<(), String> {
     let title = title(&view, state.inner());
     registry.set_view(window.label(), view)?;
-    window.set_title(&title).map_err(|e| e.to_string())
+    window.set_title(&title).map_err(|e| e.to_string())?;
+    app_attention_reconcile(&window);
+    Ok(())
 }
 
 #[tauri::command]
@@ -203,6 +230,13 @@ pub async fn window_open(
     let (workspace, _) = state.resolve_workspace_roster(&workspace_id)?;
     let window = open_window(&app, Launch::Workspace(workspace.id))?;
     Ok(window.label().to_owned())
+}
+
+fn app_attention_reconcile(window: &WebviewWindow) {
+    window
+        .app_handle()
+        .state::<crate::attention_notifications::AttentionNotifications>()
+        .reconcile(window.app_handle());
 }
 
 pub fn retitle_workspace(app: &AppHandle, id: &str, title: &str) {
@@ -218,6 +252,33 @@ pub fn retitle_workspace(app: &AppHandle, id: &str, title: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_click_uses_current_views_and_never_creates_a_window() {
+        let registry = WindowRegistry::new();
+        assert_eq!(registry.route_click("ws"), None);
+        registry.register("a", View::Workspace("ws".into()));
+        registry.register("b", View::Fleet);
+        registry.focused("a", true);
+        registry.focused("b", true);
+        assert_eq!(registry.route_click("ws"), Some(("a".into(), false)));
+        registry.set_view("a", View::Fleet).unwrap();
+        assert_eq!(registry.route_click("ws"), Some(("b".into(), true)));
+        registry
+            .set_view("b", View::Workspace("ws".into()))
+            .unwrap();
+        assert_eq!(registry.route_click("ws"), Some(("b".into(), false)));
+        registry
+            .set_view("a", View::Workspace("ws".into()))
+            .unwrap();
+        assert_eq!(registry.route_click("ws"), Some(("b".into(), false)));
+        registry.focused("a", true);
+        assert_eq!(registry.focused_workspace().as_deref(), Some("ws"));
+        assert_eq!(registry.route_click("ws"), Some(("a".into(), false)));
+        registry.remove("b");
+        registry.remove("a");
+        assert_eq!(registry.route_click("ws"), None);
+    }
 
     #[test]
     fn registry_tracks_equal_windows_and_focus_order() {

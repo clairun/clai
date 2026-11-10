@@ -8,8 +8,6 @@ vi.mock('../fleet/fleetStore', () => ({ useFleetStore: { getState: () => ({ load
 vi.mock('../assistant', () => ({ useAssistantEvents: () => {} }));
 vi.mock('../fleet/useFleetAttentionFeed', () => ({ useFleetAttentionFeed: () => {} }));
 vi.mock('../components/TerminalEmulator/TerminalEmulatorWrapper', () => ({ default: () => null }));
-vi.mock('../components/PermissionAttentionNotifications', () => ({ default: () => null }));
-vi.mock('../components/WorkspaceTaskNotifications', () => ({ default: () => null }));
 vi.mock('../components/Settings/GlobalSettingsHost', () => ({ default: () => null }));
 
 describe('MainLayout attention snapshot', () => {

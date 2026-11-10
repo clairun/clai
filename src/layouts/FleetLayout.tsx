@@ -378,6 +378,7 @@ const FleetLayout = () => {
   const handleRunNow = useCallback(
     async (id: string) => {
       if (!id || runNowBusyId) return;
+      useFleetActivityStore.getState().dismissRunNowSkipped(id);
       setRunNowBusyId(id);
       try {
         await runWorkspaceNow(id);

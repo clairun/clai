@@ -14,6 +14,7 @@ import { useReportDirty, type SectionHandle } from './sectionHandle';
 import type { ScheduleKind, WorkspaceDetails } from '../../generated/bindings';
 import form from './SettingsForm.module.css';
 import styles from './WorkspacePages.module.css';
+import { useFleetActivityStore } from '../../stores/fleetActivityStore';
 
 interface PageProps {
   ref: React.Ref<SectionHandle>;
@@ -190,6 +191,7 @@ export const SchedulePage = ({
   const [draft, setDraft] = useState(() => draftFrom(details?.scheduleKind));
   // Pause/Resume and Run now are immediate commands with their own busy state.
   const [commandBusy, setCommandBusy] = useState(false);
+  const runNowSkipped = useFleetActivityStore((state) => state.runNowSkipped.includes(workspaceId));
   const busy = saving || commandBusy;
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<number[]>([]);
@@ -431,38 +433,44 @@ export const SchedulePage = ({
             </header>
             <div className={form.panelBody}>
               {savedOn ? (
-                <div className={styles.status}>
-                  <span className={styles.statusLabel}>
-                    <span
-                      className={`${styles.dot} ${paused ? styles.dotPaused : styles.dotRunning}`}
-                      aria-hidden="true"
-                    />
-                    {paused ? 'Paused' : 'Running'}
-                  </span>
-                  <span className={styles.statusActions}>
-                    {!paused && (
+                <>
+                  <div className={styles.status}>
+                    <span className={styles.statusLabel}>
+                      <span
+                        className={`${styles.dot} ${paused ? styles.dotPaused : styles.dotRunning}`}
+                        aria-hidden="true"
+                      />
+                      {paused ? 'Paused' : 'Running'}
+                    </span>
+                    <span className={styles.statusActions}>
+                      {!paused && (
+                        <button
+                          type="button"
+                          className={form.secondaryButton}
+                          onClick={() => {
+                            useFleetActivityStore.getState().dismissRunNowSkipped(workspaceId);
+                            void runCommand(() => invoke('workspace_run_now', { workspaceId }), 'Failed to trigger run.');
+                          }}
+                          disabled={busy}
+                        >
+                          Run now
+                        </button>
+                      )}
                       <button
                         type="button"
                         className={form.secondaryButton}
-                        onClick={() => runCommand(() => invoke('workspace_run_now', { workspaceId }), 'Failed to trigger run.')}
+                        onClick={() => runCommand(
+                          () => invoke('workspace_set_schedule_paused', { workspaceId, paused: !paused }),
+                          'Failed to update pause state.'
+                        )}
                         disabled={busy}
                       >
-                        Run now
+                        {paused ? 'Resume' : 'Pause'}
                       </button>
-                    )}
-                    <button
-                      type="button"
-                      className={form.secondaryButton}
-                      onClick={() => runCommand(
-                        () => invoke('workspace_set_schedule_paused', { workspaceId, paused: !paused }),
-                        'Failed to update pause state.'
-                      )}
-                      disabled={busy}
-                    >
-                      {paused ? 'Resume' : 'Pause'}
-                    </button>
-                  </span>
-                </div>
+                    </span>
+                  </div>
+                  {runNowSkipped && <p role="status">Run now skipped: session busy</p>}
+                </>
               ) : (
                 <p className={form.lede}>
                   Not scheduled. The main agent runs when you message it.
