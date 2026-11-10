@@ -213,6 +213,17 @@ pub fn take_for_session(session_id: &str) -> Vec<String> {
     ids
 }
 
+/// Removes orphaned questions after their workspace has been deleted.
+/// Active runs prevent deletion before this point.
+pub fn purge_workspace(workspace_id: &str) -> usize {
+    let Ok(mut map) = pending_map().lock() else {
+        return 0;
+    };
+    let before = map.len();
+    map.retain(|_, entry| entry.ask.workspace_id != workspace_id);
+    before - map.len()
+}
+
 /// RAII guard: removes the pending entry if the tool future is dropped
 /// before the channel resolves — run cancellation, or run-end reaping of
 /// a wait orphaned by a CLI transport drop (`BindingGuard` cancels the
@@ -489,6 +500,16 @@ mod tests {
             .into_iter()
             .map(|ask| ask.pending_id)
             .collect()
+    }
+
+    #[test]
+    fn purge_workspace_removes_only_its_questions() {
+        let (_gone, gone_rx) = register("purge-gone", "purge-ws", "purge-s1", 0);
+        let (_kept, _kept_rx) = register("purge-kept", "purge-other", "purge-s2", 0);
+        assert_eq!(purge_workspace("purge-ws"), 1);
+        assert!(pending_ids("purge-ws").is_empty());
+        assert_eq!(pending_ids("purge-other"), vec!["purge-kept"]);
+        assert!(gone_rx.blocking_recv().is_err());
     }
 
     #[test]

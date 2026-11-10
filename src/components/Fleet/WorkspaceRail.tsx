@@ -19,6 +19,7 @@ import {
   sameFloatingMenuStyle,
 } from '../../utils/floatingMenu';
 import styles from './WorkspaceRail.module.css';
+import { useFleetActivityStore } from '../../stores/fleetActivityStore';
 
 interface WorkspaceRailProps {
   id?: string;
@@ -198,6 +199,7 @@ const WorkspaceRail = ({
   const menuTriggerRef = useRef<HTMLElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const openMenuId = openMenu?.id ?? null;
+  const runNowSkipped = useFleetActivityStore((state) => state.runNowSkipped);
 
   // Opening the menu takes focus into it, so closing it hands focus back to
   // the ⋯ trigger — otherwise the focused element just disappears, focus
@@ -428,6 +430,9 @@ const WorkspaceRail = ({
           <>
             <span className={styles.rowBody}>
               <span className={styles.rowTitle}>{ws.title}</span>
+              {runNowSkipped.includes(ws.id) && (
+                <span className={styles.rowMeta} role="status">Run now skipped: session busy</span>
+              )}
               {ws.scheduleEnabled && (
                 <span
                   className={`${styles.rowMeta} ${isPaused ? styles.rowMetaPaused : ''}`}

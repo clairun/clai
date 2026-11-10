@@ -1,10 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import React from 'react';
-import { act, render, renderHook, screen } from '@testing-library/react';
-import { MemoryRouter } from 'react-router';
+import { act, renderHook } from '@testing-library/react';
 import useAssistantStore from './sessionStore';
 import { optimisticRunNowId, useFleetActivityStore } from '../stores/fleetActivityStore';
-import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
 import { useTaskStore } from '../workspace/taskStore';
 import type { AssistantSession } from '../generated/bindings';
 
@@ -184,24 +181,18 @@ describe('useAssistantEvents — run_skipped', () => {
     payload: { reason: 'session_busy', activeRunId: 'run-busy' },
   };
 
-  it('run_skipped shows busy toast and clears optimistic run', async () => {
+  it('run_skipped records inline feedback and clears optimistic run', async () => {
     useFleetActivityStore.getState().markRunStarted('ws-1', optimisticRunNowId('ws-1'));
-    // Rendered before the hook so the hook's listener is the captured one.
-    render(
-      <MemoryRouter>
-        <WorkspaceTaskNotifications />
-      </MemoryRouter>,
-    );
     mount();
     await Promise.resolve();
 
     act(() => fire(RUN_SKIPPED));
 
-    expect(screen.getByRole('status')).toHaveTextContent('Run now skipped: session busy');
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual(['ws-1']);
     expect(useFleetActivityStore.getState().activeRunsByWorkspace).toEqual({});
   });
 
-  it('run_skipped for another workspace keys toast by workspaceId', async () => {
+  it('run_skipped for another workspace keys feedback by workspaceId', async () => {
     const fleet = useFleetActivityStore.getState();
     fleet.markRunStarted('ws-1', optimisticRunNowId('ws-1'));
     fleet.markRunStarted('ws-2', optimisticRunNowId('ws-2'));
