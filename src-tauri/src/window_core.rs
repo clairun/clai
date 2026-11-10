@@ -78,12 +78,14 @@ impl WindowRegistry {
         }
     }
 
-    pub fn remove(&self, label: &str) {
+    /// Returns whether another registered window remains after removal.
+    pub fn remove(&self, label: &str) -> bool {
         let mut data = self.0.lock().expect("window registry poisoned");
         data.windows.remove(label);
         if data.focused.as_deref() == Some(label) {
             data.focused = None;
         }
+        !data.windows.is_empty()
     }
 
     pub fn focused_workspace(&self) -> Option<String> {
@@ -296,6 +298,23 @@ mod tests {
         registry.remove("w-1");
         assert_eq!(registry.most_recent().as_deref(), Some("main"));
         assert_eq!(registry.showing("a"), vec!["main"]);
+    }
+
+    #[test]
+    fn removing_focused_window_reports_survivors_with_or_without_focus_loss() {
+        for focus_lost_first in [false, true] {
+            let registry = WindowRegistry::new();
+            registry.register("closing", View::Workspace("pending".into()));
+            registry.register("survivor", View::Fleet);
+            registry.focused("closing", true);
+            if focus_lost_first {
+                registry.focused("closing", false);
+            }
+            assert!(registry.remove("closing"));
+            assert_eq!(registry.focused_workspace(), None);
+            assert_eq!(registry.most_recent().as_deref(), Some("survivor"));
+            assert!(!registry.remove("survivor"));
+        }
     }
 
     #[test]

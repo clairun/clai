@@ -130,12 +130,18 @@ pub fn on_window_event(window: &Window, event: &WindowEvent) {
         }
         WindowEvent::Destroyed => {
             QUIT_PROMPT.on_destroyed(window.label());
-            registry.remove(window.label());
+            let has_survivor = registry.remove(window.label());
             window
                 .app_handle()
                 .state::<crate::AppState>()
                 .terminals
                 .close_window(window.label());
+            if has_survivor {
+                window
+                    .app_handle()
+                    .state::<crate::attention_notifications::AttentionNotifications>()
+                    .reconcile(window.app_handle());
+            }
             return;
         }
         WindowEvent::CloseRequested { .. } => {}
