@@ -11,6 +11,7 @@ import { GeneralPage, SchedulePage } from './WorkspacePages';
 import { setWorkspaceTitle } from '../../workspace/client';
 import type { SectionHandle } from './sectionHandle';
 import type { WorkspaceDetails } from '../../generated/bindings';
+import { useFleetActivityStore } from '../../stores/fleetActivityStore';
 
 const mockInvoke = vi.mocked(invoke);
 
@@ -31,6 +32,7 @@ const submit = async (ref: React.RefObject<SectionHandle | null>) => {
 
 beforeEach(() => {
   vi.mocked(setWorkspaceTitle).mockReset();
+  useFleetActivityStore.setState({ runNowSkipped: [] });
   mockInvoke.mockReset();
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd === 'workspace_host_timezone') return Promise.resolve('Europe/Madrid');
@@ -68,6 +70,14 @@ describe('GeneralPage', () => {
 });
 
 describe('SchedulePage', () => {
+  it('shows skipped run feedback beside the Run now control and clears it on retry', async () => {
+    useFleetActivityStore.setState({ runNowSkipped: ['ws-1'] });
+    render(<SchedulePage ref={createRef()} workspaceId="ws-1" details={{ ...DETAILS, scheduleEnabled: true } as WorkspaceDetails} saving={false} />);
+    expect(screen.getByRole('status')).toHaveTextContent('Run now skipped: session busy');
+    await userEvent.click(screen.getByRole('button', { name: 'Run now' }));
+    expect(screen.queryByRole('status')).not.toBeInTheDocument();
+  });
+
   it('saves an interval schedule once it is switched on', async () => {
     const user = userEvent.setup();
     const ref = createRef<SectionHandle>();

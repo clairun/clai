@@ -28,12 +28,15 @@
 // Declare our modules
 mod agents;
 mod assistant;
+mod attention_notifications;
 mod cli;
 mod commands;
 mod config;
 mod db;
 #[cfg(target_os = "linux")]
 mod linux_launchers;
+#[cfg(target_os = "linux")]
+mod linux_notifications;
 mod mcp;
 mod paths;
 mod providers;
@@ -370,6 +373,7 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -378,8 +382,18 @@ pub fn run() {
         // Commands can access it via State<'_, AppState>
         .manage(state)
         .manage(window_core::WindowRegistry::new())
+        .manage(attention_notifications::AttentionNotifications::default())
         // Setup hook - runs after app is built, gives us AppHandle
         .setup(move |app| {
+            use tauri_plugin_notification::NotificationExt;
+            let click_app = app.handle().clone();
+            app.notification().on_action(move |action| {
+                if action.action_id() == "tap" {
+                    if let Some(notification) = action.notification() {
+                        attention_notifications::on_click(&click_app, notification.id());
+                    }
+                }
+            })?;
             if launch_request != cli::LaunchRequest::New {
                 if let Err(error) = build_first_window(app.handle(), &launch_request) {
                     if let cli::LaunchRequest::Open(id) = &launch_request {

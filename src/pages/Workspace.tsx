@@ -28,6 +28,7 @@ import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import InlineNetworkAccessCard from '../components/InlineNetworkAccessCard';
 import VirtualizedList from '../components/common/VirtualizedList';
+import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import {
   getOrCreateWorkspaceSession,
   getWorkspaceDetails,
@@ -1098,6 +1099,7 @@ const WorkspaceHeader = ({
   onOpenWindow: () => void;
 }) => {
   const { railHidden, toggleRail } = useWindowUi();
+  const runNowSkipped = useFleetActivityStore((state) => state.runNowSkipped.includes(workspaceId));
   const isAgent = details?.kind === 'agent';
   const lastRun = getLastRunInfo(details?.runs);
   const nextRunText = formatNextRun(details?.nextRunInSeconds);
@@ -1313,6 +1315,7 @@ const WorkspaceHeader = ({
             </svg>
           </button>
         )}
+        {runNowSkipped && <span role="status">Run now skipped: session busy</span>}
         {scheduleEnabled && !schedulePaused && (
           <button
             type="button"
@@ -1982,6 +1985,7 @@ const Workspace = () => {
 
   const handleRunNow = useCallback(async () => {
     if (runNowBusy) return;
+    useFleetActivityStore.getState().dismissRunNowSkipped(workspaceId);
     setRunNowBusy(true);
     try {
       await runWorkspaceNow(workspaceId);

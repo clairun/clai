@@ -457,6 +457,19 @@ describe('FleetLayout workspace settings', () => {
 });
 
 describe('FleetLayout run now', () => {
+  beforeEach(() => useFleetActivityStore.setState({ activeRunsByWorkspace: {}, runNowSkipped: [] }));
+  it('shows skipped feedback in the rail and clears it on retry', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha', { scheduleEnabled: true })]);
+    getSchedulerPaused.mockResolvedValue(false);
+    vi.mocked(workspaceClient.runWorkspaceNow).mockResolvedValue(undefined);
+    useFleetActivityStore.setState({ runNowSkipped: ['a'] });
+
+    renderFleet();
+    const row = await screen.findByRole('button', { name: /Alpha/ });
+    expect(within(row).getByRole('status')).toHaveTextContent('Run now skipped: session busy');
+    await userEvent.click(within(row).getByRole('button', { name: 'Run now' }));
+    await waitFor(() => expect(within(row).queryByRole('status')).not.toBeInTheDocument());
+  });
   it('run now other error keeps failure message', async () => {
     listWorkspaces.mockResolvedValue([entry('a', 'Alpha', { scheduleEnabled: true })]);
     getSchedulerPaused.mockResolvedValue(false);

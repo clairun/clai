@@ -26,7 +26,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::assistant::sandbox::filesystem::normalize_path;
 use std::sync::RwLock;
-use tauri::{AppHandle, Emitter, State, Window};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 use ts_rs::TS;
 
 const DEFAULT_WORKSPACE_ID: &str = "default";
@@ -3409,6 +3409,11 @@ pub async fn workspace_delete(
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
     let (result, removed) = delete_workspace_and_check_removed(state.inner(), &workspace_id).await;
     if removed {
+        crate::assistant::tools::ask_user::purge_workspace(&workspace_id);
+        if let Some(hub) = app.try_state::<crate::attention_notifications::AttentionNotifications>()
+        {
+            hub.clear_deleted(&app, &workspace_id).await;
+        }
         #[cfg(target_os = "linux")]
         if let Err(error) = crate::linux_launchers::sync_workspace(state.inner(), &workspace_id) {
             tracing::warn!(%error, %workspace_id, "Failed to remove workspace launcher");
