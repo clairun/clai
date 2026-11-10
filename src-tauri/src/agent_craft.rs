@@ -4,16 +4,12 @@
 //!
 //! Agents read and write it through the shell; the sandbox exposes only the
 //! running member's own directory. This module lists it for the system
-//! prompt's catalog and the settings UI, and reads, writes and deletes single
-//! files for the UI. Paths given to it are relative to the craft directory
-//! and never leave it.
+//! prompt's catalog.
 
 use std::fs;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
-
-use serde::Serialize;
 
 /// Each description in the catalog is cut to this many characters.
 const MAX_DESCRIPTION_CHARS: usize = 300;
@@ -25,25 +21,17 @@ const MAX_DEPTH: usize = 8;
 const MAX_FILES: usize = 1_000;
 /// Frontmatter must be within the start of a file.
 const FRONTMATTER_BYTES: u64 = 4 * 1024;
-/// The largest file the settings UI reads or writes.
-const MAX_FILE_BYTES: usize = 256 * 1024;
 
-/// One craft file, as the catalog and the settings UI list it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
-#[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "bindings.ts")]
+/// One craft file, as the catalog lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentCraftFile {
     /// Relative to the craft directory, `/`-separated.
     pub path: String,
     pub description: Option<String>,
-    pub updated_at: Option<String>,
-    #[ts(type = "number")]
-    pub size: u64,
     /// The file starts with frontmatter holding a `description` and an
     /// `updated_at` date.
     pub frontmatter_valid: bool,
     /// Newest first: `updated_at`, else the modification time, in seconds.
-    #[serde(skip)]
     sort_key: i64,
 }
 
@@ -158,8 +146,6 @@ fn describe(path: &Path, relative: String) -> Option<AgentCraftFile> {
             && frontmatter.description.is_some()
             && updated.is_some(),
         description: frontmatter.description,
-        updated_at: frontmatter.updated_at,
-        size: meta.len(),
         sort_key: updated.unwrap_or(modified),
     })
 }
@@ -252,37 +238,10 @@ pub fn catalog(files: &[AgentCraftFile]) -> String {
     catalog
 }
 
-/// A path component the UI may name: visible, and free of control characters.
+/// A path component the catalog lists: visible, and free of control
+/// characters.
 fn valid_component(name: &str) -> bool {
     !name.is_empty() && !name.starts_with('.') && !name.chars().any(|c| c.is_control() || c == '\\')
-}
-
-/// `relative` inside `dir`, refusing anything that could leave it: absolute
-/// paths, `..`, hidden components, non-`.md` files and symlinks on the way.
-fn resolve_file(dir: &Path, relative: &str) -> Result<PathBuf, String> {
-    let invalid = || format!("Invalid craft file path: {relative:?}");
-    let path = Path::new(relative);
-    if !relative.ends_with(".md") || path.is_absolute() {
-        return Err(invalid());
-    }
-    let mut resolved = dir.to_path_buf();
-    for component in path.components() {
-        let Component::Normal(name) = component else {
-            return Err(invalid());
-        };
-        let name = name
-            .to_str()
-            .filter(|name| valid_component(name))
-            .ok_or_else(invalid)?;
-        resolved.push(name);
-    }
-    real_dir(dir)?;
-    for ancestor in resolved.ancestors().take_while(|path| *path != dir) {
-        if fs::symlink_metadata(ancestor).is_ok_and(|meta| meta.file_type().is_symlink()) {
-            return Err(invalid());
-        }
-    }
-    Ok(resolved)
 }
 
 /// Opens a regular file without following a symlink at `path`, so one
@@ -308,52 +267,6 @@ fn open_file(path: &Path) -> std::io::Result<(fs::File, fs::Metadata)> {
     }
 }
 
-pub fn read(dir: &Path, relative: &str) -> Result<String, String> {
-    let path = resolve_file(dir, relative)?;
-    let failed = |e: std::io::Error| format!("Failed to read {relative}: {e}");
-    let (file, meta) = open_file(&path).map_err(failed)?;
-    if meta.len() > MAX_FILE_BYTES as u64 {
-        return Err(format!("{relative} is larger than {MAX_FILE_BYTES} bytes"));
-    }
-    let mut content = String::new();
-    file.take(MAX_FILE_BYTES as u64)
-        .read_to_string(&mut content)
-        .map_err(failed)?;
-    Ok(content)
-}
-
-/// Writes through a new file renamed into place, so a symlink planted at the
-/// path is replaced rather than followed.
-pub fn write(dir: &Path, relative: &str, content: &str) -> Result<(), String> {
-    if content.len() > MAX_FILE_BYTES {
-        return Err(format!("Craft files are limited to {MAX_FILE_BYTES} bytes"));
-    }
-    let path = resolve_file(dir, relative)?;
-    let parent = path
-        .parent()
-        .ok_or_else(|| format!("Invalid craft file path: {relative:?}"))?;
-    fs::create_dir_all(parent).map_err(|e| format!("Failed to write {relative}: {e}"))?;
-    if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
-        return Err(format!("{relative} is a directory"));
-    }
-    let temp = parent.join(format!(".{}.tmp", uuid::Uuid::new_v4()));
-    let result = fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temp)
-        .and_then(|mut file| std::io::Write::write_all(&mut file, content.as_bytes()))
-        .and_then(|()| fs::rename(&temp, &path));
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result.map_err(|e| format!("Failed to write {relative}: {e}"))
-}
-
-pub fn delete(dir: &Path, relative: &str) -> Result<(), String> {
-    let path = resolve_file(dir, relative)?;
-    fs::remove_file(&path).map_err(|e| format!("Failed to delete {relative}: {e}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,8 +275,6 @@ mod tests {
         AgentCraftFile {
             path: path.to_string(),
             description: description.map(str::to_string),
-            updated_at: None,
-            size: 0,
             frontmatter_valid: valid,
             sort_key: 0,
         }
@@ -488,7 +399,7 @@ mod tests {
     }
 
     #[test]
-    fn definition_ids_and_file_paths_cannot_leave_the_craft_dir() {
+    fn definition_ids_cannot_leave_the_agents_root() {
         for id in ["", ".", "..", "../x", "a/b", ".hidden", "a b"] {
             assert!(craft_dir(Path::new("/agents"), id).is_err(), "{id:?}");
         }
@@ -496,35 +407,15 @@ mod tests {
             craft_dir(Path::new("/agents"), "8d3bb9d1-a92a_x").unwrap(),
             Path::new("/agents/8d3bb9d1-a92a_x/craft")
         );
+    }
 
+    #[test]
+    fn ensure_craft_dir_is_idempotent_and_starts_empty() {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("craft");
         ensure_craft_dir(&dir).unwrap();
-        for path in [
-            "",
-            "/etc/x.md",
-            "../x.md",
-            "a/../../x.md",
-            "./x.md",
-            ".x.md",
-            "a/.b/x.md",
-            "x.txt",
-            "x.md/",
-            "a\\b.md",
-            "a\nb.md",
-        ] {
-            assert!(write(&dir, path, "x").is_err(), "{path:?}");
-            assert!(read(&dir, path).is_err(), "{path:?}");
-        }
-        write(&dir, "rust/lesson.md", "hello").unwrap();
-        assert_eq!(read(&dir, "rust/lesson.md").unwrap(), "hello");
-        write(&dir, "rust/lesson.md", "again").unwrap();
-        assert_eq!(read(&dir, "rust/lesson.md").unwrap(), "again");
-        assert!(write(&dir, "big.md", &"x".repeat(MAX_FILE_BYTES + 1)).is_err());
-        delete(&dir, "rust/lesson.md").unwrap();
-        assert!(read(&dir, "rust/lesson.md").is_err());
-        // No temp file is left behind.
-        assert_eq!(fs::read_dir(dir.join("rust")).unwrap().count(), 0);
+        ensure_craft_dir(&dir).unwrap();
+        assert!(list(&dir).unwrap().is_empty());
     }
 
     #[cfg(unix)]
@@ -542,21 +433,12 @@ mod tests {
         symlink(outside.join("secret.md"), dir.join("link.md")).unwrap();
         // A symlink swapped in after the listing saw a regular file.
         assert_eq!(describe(&dir.join("link.md"), "link.md".into()), None);
-
-        assert!(read(&dir, "sub/secret.md").is_err());
-        assert!(write(&dir, "sub/secret.md", "x").is_err());
-        assert!(read(&dir, "link.md").is_err());
-        assert!(delete(&dir, "sub/secret.md").is_err());
-        assert_eq!(
-            fs::read_to_string(outside.join("secret.md")).unwrap(),
-            secret
-        );
+        assert!(list(&dir).unwrap().is_empty());
 
         let linked = temp.path().join("linked-craft");
         symlink(&outside, &linked).unwrap();
         assert!(ensure_craft_dir(&linked).is_err());
         assert!(list(&linked).is_err());
-        assert!(read(&linked, "secret.md").is_err());
     }
 
     /// A FIFO swapped in for a file is refused at once: opening it does not
@@ -578,15 +460,15 @@ mod tests {
         std::thread::spawn(move || {
             let _ = sender.send((
                 open_file(&fifo).map(|_| ()).map_err(|e| e.kind()),
-                read(&dir, "pipe.md"),
                 describe(&fifo, "pipe.md".into()),
+                list(&dir).map(|files| files.len()),
             ));
         });
-        let (opened, read, described) = receiver
+        let (opened, described, listed) = receiver
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("opening a FIFO blocked");
         assert_eq!(opened, Err(std::io::ErrorKind::InvalidInput));
-        assert!(read.unwrap_err().contains("not a regular file"));
         assert_eq!(described, None);
+        assert_eq!(listed, Ok(0));
     }
 }

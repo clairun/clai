@@ -649,7 +649,7 @@ fn push_craft(prompt: &mut String, dir: &std::path::Path) {
     let dir_text = agent_path_string(&resolve(dir).unwrap_or_else(|_| dir.to_path_buf()));
     prompt.push_str(&format!(
         "\n## Your Craft\n\
-         `{dir_text}` holds your craft: what you have learnt about how to do your work, carried into every run, in every workspace that assigns you. You reach it through the shell; on Linux and macOS no other agent's shell can, and the user can read and edit it in the CLAI app. The workspace's `.clai/memory/` belongs to its Main and is read-only to you.\n\n\
+         `{dir_text}` holds your craft: what you have learnt about how to do your work, carried into every run, in every workspace that assigns you. You reach it through the shell; on Linux and macOS no other agent's shell can. The workspace's `.clai/memory/` belongs to its Main and is read-only to you.\n\n\
          You are a craftsman striving for mastery, and a humble one. Record only what makes you better at your craft:\n\
          - root causes of your own mistakes;\n\
          - techniques that proved themselves;\n\

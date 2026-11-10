@@ -448,10 +448,6 @@ pub fn run() {
             // Fleet page startup state
             commands::fleet::fleet_snapshot,
             // App-level agent library and workspace assignments.
-            commands::agent_craft::agent_craft_list,
-            commands::agent_craft::agent_craft_read,
-            commands::agent_craft::agent_craft_write,
-            commands::agent_craft::agent_craft_delete,
             commands::global_agents::agent_definitions_list,
             commands::global_agents::agent_definition_save,
             commands::global_agents::workspace_assign_agent,
