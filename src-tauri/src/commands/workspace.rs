@@ -2980,6 +2980,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
         let message_count =
             count_session_messages(&workspace_pool, &locator.default_agent_id).await;
         let running_task_count = running_task_count(&workspace_pool).await?;
+        let unread = locator_is_unread(&locator);
         let schedule = locator.schedule;
         let next_run_in_seconds = schedule
             .wants_countdown()
@@ -2998,8 +2999,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
             schedule_paused: schedule.paused,
             schedule_kind: schedule.kind,
             next_run_in_seconds,
-            unread: locator.last_run_completed_at > 0
-                && locator.last_run_completed_at > locator.last_opened_at,
+            unread,
             starred: locator.starred_at > 0,
             updated_at: locator.updated_at,
         });
@@ -3588,6 +3588,27 @@ pub async fn workspace_mark_opened(
     })?;
 
     Ok(())
+}
+
+fn locator_is_unread(locator: &WorkspaceLocator) -> bool {
+    locator.last_run_completed_at > 0 && locator.last_run_completed_at > locator.last_opened_at
+}
+
+/// Cheap read for visible views to reconcile completions after missed native
+/// minimize/restore events. Uses the same index fields as `workspace_list`.
+#[tauri::command]
+pub fn workspace_is_unread(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
+    let locator = state
+        .workspace_index
+        .read()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .locator(&workspace_id)
+        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+    Ok(locator_is_unread(&locator))
 }
 
 /// Star or unstar a workspace (the rail pins starred workspaces in a
