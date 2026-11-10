@@ -68,6 +68,14 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
       } else {
         fleet.markRunEnded(envelope.workspaceId, event.payload.run.id);
       }
+      if (event.type === 'run_started' || event.type === 'run_failed') {
+        fleet.observeAcceptedRun(
+          envelope.workspaceId,
+          sessionId,
+          event.payload.run.id,
+          event.payload.run.startedAt
+        );
+      }
       break;
     }
 
@@ -118,7 +126,14 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
 
     case 'run_skipped':
       // Only a manual "Run now" on a busy session emits this.
-      useFleetActivityStore.getState().markRunNowSkipped(envelope.workspaceId);
+      useFleetActivityStore
+        .getState()
+        .markRunNowSkipped(
+          envelope.workspaceId,
+          sessionId,
+          event.payload.activeRunId,
+          BigInt(envelope.timestamp)
+        );
       break;
 
     default: {
@@ -139,7 +154,7 @@ export function useAssistantEvents(): void {
         const envelope = tauriEvent.payload;
         if (!envelope || !envelope.event) return;
         handleEvent(envelope);
-      },
+      }
     );
 
     return () => {

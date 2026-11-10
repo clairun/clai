@@ -25,13 +25,19 @@ vi.mock('@tauri-apps/api/event', () => ({
 const { useAssistantEvents } = await import('./useAssistantEvents');
 
 const SESSION = { id: 'sess-1' } as unknown as AssistantSession;
-const fire = (event: unknown, runId: string | null = null, workspaceId = 'ws-1') => {
+const fire = (
+  event: unknown,
+  runId: string | null = null,
+  workspaceId = 'ws-1',
+  timestamp = Date.now(),
+  sessionId = SESSION.id
+) => {
   capturedHandler?.({
     payload: {
-      sessionId: SESSION.id,
+      sessionId,
       runId,
       workspaceId,
-      timestamp: Date.now(),
+      timestamp,
       event,
     },
   });
@@ -39,7 +45,12 @@ const fire = (event: unknown, runId: string | null = null, workspaceId = 'ws-1')
 
 beforeEach(() => {
   useAssistantStore.setState({ sessions: {}, activeSessionByTab: {} });
-  useFleetActivityStore.setState({ activeRunsByWorkspace: {}, runNowSkipped: [] });
+  useFleetActivityStore.setState({
+    activeRunsByWorkspace: {},
+    runNowSkipped: [],
+    skippedRunByWorkspace: {},
+    latestAcceptedRunBySession: {},
+  });
   capturedHandler = null;
   unlisten = vi.fn();
 });
@@ -169,9 +180,7 @@ describe('useAssistantEvents — run lifecycle', () => {
       type: 'assistant_delta',
       payload: { message_id: 'msg-1', text: 'world' },
     });
-    expect(
-      useAssistantStore.getState().streamingText[SESSION.id]!['msg-1'],
-    ).toBe('Hello world');
+    expect(useAssistantStore.getState().streamingText[SESSION.id]!['msg-1']).toBe('Hello world');
   });
 });
 
@@ -190,6 +199,145 @@ describe('useAssistantEvents — run_skipped', () => {
 
     expect(useFleetActivityStore.getState().runNowSkipped).toEqual(['ws-1']);
     expect(useFleetActivityStore.getState().activeRunsByWorkspace).toEqual({});
+  });
+
+  it('clears skipped feedback across windows only when a later run starts', async () => {
+    mount();
+    await Promise.resolve();
+    const skippedAt = Date.now();
+
+    fire(RUN_SKIPPED, null, 'ws-1', skippedAt);
+    fire(RUN_SKIPPED, null, 'ws-2', skippedAt);
+    // The active run's start can arrive late; it did not accept the retry.
+    fire(
+      {
+        type: 'run_started',
+        payload: { run: { id: 'run-busy', startedAt: BigInt(skippedAt - 1) } },
+      },
+      'run-busy',
+      'ws-1',
+      skippedAt + 1
+    );
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual(['ws-2', 'ws-1']);
+    fire(
+      {
+        type: 'run_queued',
+        payload: { run: { id: 'run-retry', startedAt: BigInt(skippedAt + 1) } },
+      },
+      'run-retry',
+      'ws-1',
+      skippedAt + 2
+    );
+    fire(
+      {
+        type: 'run_started',
+        payload: { run: { id: 'other-session', startedAt: BigInt(skippedAt + 1) } },
+      },
+      'other-session',
+      'ws-1',
+      skippedAt + 2,
+      'sess-other'
+    );
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual(['ws-2', 'ws-1']);
+
+    // This event is broadcast to every window after the retry creates a new run.
+    fire(
+      {
+        type: 'run_started',
+        payload: { run: { id: 'run-retry', startedAt: BigInt(skippedAt + 1) } },
+      },
+      'run-retry',
+      'ws-1',
+      skippedAt + 2
+    );
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual(['ws-2']);
+
+    // A later busy retry produces fresh feedback, which remains visible.
+    fire(RUN_SKIPPED, null, 'ws-1', skippedAt + 3);
+    fire(
+      {
+        type: 'run_started',
+        payload: { run: { id: 'older-run', startedAt: BigInt(skippedAt - 1) } },
+      },
+      'older-run',
+      'ws-1',
+      skippedAt + 4
+    );
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual(['ws-1', 'ws-2']);
+  });
+
+  it('clears skipped feedback when an accepted retry fails before starting', async () => {
+    mount();
+    await Promise.resolve();
+    const skippedAt = Date.now();
+    const failedRun = (id: string, startedAt: number) => ({
+      id,
+      sessionId: SESSION.id,
+      status: 'failed',
+      trigger: 'scheduled',
+      connectionId: 'connection',
+      protocolId: 'provider',
+      modelId: 'model',
+      startedAt: BigInt(startedAt),
+      completedAt: BigInt(startedAt + 1),
+      error: 'provider not configured',
+    });
+
+    fire(RUN_SKIPPED, null, 'ws-1', skippedAt);
+    fire({ type: 'run_failed', payload: { run: failedRun('run-busy', skippedAt - 1) } }, 'run-busy', 'ws-1', skippedAt + 1);
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual(['ws-1']);
+
+    fire({ type: 'run_failed', payload: { run: failedRun('run-retry', skippedAt + 2) } }, 'run-retry', 'ws-1', skippedAt + 3);
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual([]);
+
+    fire(RUN_SKIPPED, null, 'ws-1', skippedAt);
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual([]);
+    fire(RUN_SKIPPED, null, 'ws-1', skippedAt + 4);
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual(['ws-1']);
+  });
+
+  it('ignores a delayed skip after its retry already started', async () => {
+    mount();
+    await Promise.resolve();
+    const skippedAt = Date.now();
+
+    fire(
+      {
+        type: 'run_started',
+        payload: { run: { id: 'run-retry', startedAt: BigInt(skippedAt + 1) } },
+      },
+      'run-retry',
+      'ws-1',
+      skippedAt + 2
+    );
+    fire(RUN_SKIPPED, null, 'ws-1', skippedAt);
+    expect(useFleetActivityStore.getState().runNowSkipped).toEqual([]);
+  });
+
+  it('keeps the newer skip when an older skip and start arrive late', async () => {
+    mount();
+    await Promise.resolve();
+    const at = Date.now();
+    const skip = (activeRunId: string) => ({
+      type: 'run_skipped',
+      payload: { reason: 'session_busy', activeRunId },
+    });
+
+    // B is already busy when its skip is delivered. A's older skip arrives afterward.
+    fire(skip('run-b'), null, 'ws-1', at + 20);
+    useFleetActivityStore.getState().markRunStarted('ws-1', optimisticRunNowId('ws-1'));
+    fire(skip('run-a'), null, 'ws-1', at + 10);
+    fire(
+      { type: 'run_started', payload: { run: { id: 'run-b', startedAt: BigInt(at + 15) } } },
+      'run-b',
+      'ws-1',
+      at + 21
+    );
+
+    const state = useFleetActivityStore.getState();
+    expect(state.runNowSkipped).toEqual(['ws-1']);
+    expect(state.skippedRunByWorkspace['ws-1']?.activeRunId).toBe('run-b');
+    expect(state.activeRunsByWorkspace['ws-1']).toContain(optimisticRunNowId('ws-1'));
   });
 
   it('run_skipped for another workspace keys feedback by workspaceId', async () => {
