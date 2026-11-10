@@ -201,10 +201,57 @@ pub(crate) fn local_image_user_input(path: &str) -> Value {
     json!({ "type": "localImage", "path": path })
 }
 
+/// The namespaces Codex may give the tools of the `clai` MCP server configured
+/// in [`thread_config`]: `mcp__clai` by default, or `clai` when the user
+/// enables Codex's experimental `features.non_prefixed_mcp_tool_names`
+/// (globally, or for this server via its `server_names`).
+/// An entry that matches no namespace is ignored.
+const CLAI_TOOL_NAMESPACES: [&str; 2] = ["mcp__clai", "clai"];
+
+/// The first Codex release that reads
+/// `features.code_mode.direct_only_tool_namespaces`. Older servers reject a
+/// `code_mode` table (0.140 and 0.141 deny its unknown fields, earlier ones
+/// read `features` as booleans only) and would fail to start the thread.
+const DIRECT_ONLY_TOOL_NAMESPACES_SINCE: (u64, u64, u64) = (0, 142, 0);
+
+/// The Codex version in an `initialize` result, whose `userAgent` reads
+/// `<client>/<version> (<os>; <arch>) ...`.
+fn server_version(initialize_result: &Value) -> Option<(u64, u64, u64)> {
+    let user_agent = initialize_result.get("userAgent")?.as_str()?;
+    let (_, version) = user_agent.split_whitespace().next()?.rsplit_once('/')?;
+    let mut numbers = version.split(['.', '-', '+']);
+    let mut next = || numbers.next()?.parse::<u64>().ok();
+    Some((next()?, next()?, next()?))
+}
+
+/// Whether the server that sent this `initialize` result can expose CLAI's
+/// MCP tools as direct tools (see [`thread_config`]).
+fn supports_direct_mcp_tools(initialize_result: &Value) -> bool {
+    match server_version(initialize_result) {
+        Some(version) => version >= DIRECT_ONLY_TOOL_NAMESPACES_SINCE,
+        None => {
+            tracing::warn!(
+                "codex app-server version unreadable from userAgent {}; \
+                 CLAI tools stay deferred in code mode",
+                initialize_result
+                    .get("userAgent")
+                    .unwrap_or(&serde_json::Value::Null)
+            );
+            false
+        }
+    }
+}
+
 /// The `config` object mirroring the `-c mcp_servers.clai.*` flags the `exec`
 /// path passes, so the app-server turn can reach the same local MCP server.
-pub(crate) fn thread_config(mcp_url: &str, token_env: &str, tool_timeout_secs: u64) -> Value {
-    json!({
+/// `initialize_result` is the server's answer to [`initialize_request`].
+pub(crate) fn thread_config(
+    mcp_url: &str,
+    token_env: &str,
+    tool_timeout_secs: u64,
+    initialize_result: &Value,
+) -> Value {
+    let mut config = json!({
         // Disable Codex's built-in `shell_tool` (and thus its unmediated native
         // command execution). `--disable shell_tool` on the exec path is
         // documented as `-c features.shell_tool=false`; this is its app-server
@@ -221,7 +268,20 @@ pub(crate) fn thread_config(mcp_url: &str, token_env: &str, tool_timeout_secs: u
                 "tool_timeout_sec": tool_timeout_secs,
             }
         }
-    })
+    });
+    if supports_direct_mcp_tools(initialize_result) {
+        // In code mode Codex calls MCP tools from a script cell that yields
+        // after about 30 s; the model then polls it and may terminate it.
+        // Terminating drops a CLAI call still waiting on the user (an
+        // ask-first approval, a path or network grant, `ask_user`), which
+        // removes the prompt and cancels the run. As direct tools, CLAI's
+        // calls hold the turn until they return, as on every other provider.
+        // Codex 0.167's experimental `code_mode_only_strict_3p_tools` (off by
+        // default) runs after this override and defers MCP tools again.
+        config["features"]["code_mode"] =
+            json!({ "direct_only_tool_namespaces": CLAI_TOOL_NAMESPACES });
+    }
+    config
 }
 
 /// Build `thread/start` params. `approvalPolicy: never` + `sandbox:
@@ -231,21 +291,18 @@ pub(crate) fn thread_config(mcp_url: &str, token_env: &str, tool_timeout_secs: u
 /// `config` (see [`thread_config`]) also disables Codex's native `shell_tool`,
 /// so Codex has *no* unmediated execution path — every command routes through
 /// the permission-gated MCP `bash_exec`, matching the exec path exactly.
-#[allow(clippy::too_many_arguments)]
 pub(crate) fn thread_start_request(
     id: i64,
     cwd: Option<&str>,
     model: Option<&str>,
-    mcp_url: &str,
-    token_env: &str,
-    tool_timeout_secs: u64,
+    config: Value,
     developer_instructions: &str,
 ) -> Value {
     let mut params = json!({
         "approvalPolicy": "never",
         "sandbox": "danger-full-access",
         "developerInstructions": developer_instructions,
-        "config": thread_config(mcp_url, token_env, tool_timeout_secs),
+        "config": config,
     });
     if let Some(cwd) = cwd {
         params["cwd"] = json!(cwd);
@@ -273,9 +330,7 @@ pub(crate) fn thread_resume_request(
     id: i64,
     thread_id: &str,
     model: Option<&str>,
-    mcp_url: &str,
-    token_env: &str,
-    tool_timeout_secs: u64,
+    config: Value,
     developer_instructions: &str,
 ) -> Value {
     let mut params = json!({
@@ -283,7 +338,7 @@ pub(crate) fn thread_resume_request(
         "approvalPolicy": "never",
         "sandbox": "danger-full-access",
         "developerInstructions": developer_instructions,
-        "config": thread_config(mcp_url, token_env, tool_timeout_secs),
+        "config": config,
     });
     if let Some(model) = model {
         params["model"] = json!(model);
@@ -438,9 +493,7 @@ mod tests {
             2,
             Some("/ws"),
             Some("gpt-5.5"),
-            "http://127.0.0.1:9/mcp",
-            "CLAI_MCP_TOKEN",
-            3600,
+            thread_config("http://127.0.0.1:9/mcp", "CLAI_MCP_TOKEN", 3600, &json!({})),
             "Follow CLAI instructions",
         );
         let params = &req["params"];
@@ -466,9 +519,7 @@ mod tests {
             2,
             "thread-1",
             Some("gpt-5.5"),
-            "u",
-            "T",
-            42,
+            thread_config("u", "T", 42, &json!({})),
             "Resume instructions",
         );
         let params = &req["params"];
@@ -491,9 +542,86 @@ mod tests {
 
     #[test]
     fn thread_start_omits_default_model() {
-        let req = thread_start_request(2, None, None, "u", "T", 60, "instructions");
+        let req = thread_start_request(
+            2,
+            None,
+            None,
+            thread_config("u", "T", 60, &json!({})),
+            "instructions",
+        );
         assert!(req["params"].get("model").is_none());
         assert!(req["params"].get("cwd").is_none());
+    }
+
+    /// An `initialize` result as Codex sends it, for a server of `version`.
+    fn initialized(version: &str) -> Value {
+        json!({
+            "userAgent": format!("clai/{version} (Arch Linux Unknown; x86_64) unknown (clai; 26.11.8)"),
+            "codexHome": "/home/u/.codex",
+            "platformFamily": "unix",
+            "platformOs": "linux",
+        })
+    }
+
+    #[test]
+    fn code_mode_servers_get_clai_tools_as_direct_tools() {
+        // Codex 0.167 with a code-mode model: without this, CLAI's tools are
+        // reachable only from `exec` cells the model can terminate while a
+        // call waits on the user.
+        let config = thread_config("u", "T", 60, &initialized("0.167.0"));
+        for req in [
+            thread_start_request(2, None, None, config.clone(), "i"),
+            thread_resume_request(2, "thread-1", None, config, "i"),
+        ] {
+            let features = &req["params"]["config"]["features"];
+            assert_eq!(
+                features["code_mode"]["direct_only_tool_namespaces"],
+                json!(["mcp__clai", "clai"]),
+                "{}",
+                req["method"]
+            );
+            assert_eq!(features["shell_tool"], false);
+        }
+    }
+
+    #[test]
+    fn clai_tool_namespace_names_the_configured_server() {
+        let config = thread_config("u", "T", 60, &initialized("0.167.0"));
+        let servers: Vec<&String> = config["mcp_servers"].as_object().unwrap().keys().collect();
+        assert_eq!(servers, ["clai"]);
+        assert_eq!(
+            CLAI_TOOL_NAMESPACES,
+            [format!("mcp__{}", servers[0]), servers[0].clone()]
+        );
+    }
+
+    #[test]
+    fn code_mode_table_only_reaches_servers_that_read_it() {
+        for (version, want) in [
+            ("0.142.0", true),
+            ("0.167.0", true),
+            ("0.200.1-alpha.2", true),
+            ("1.0.0", true),
+            ("0.141.9", false),
+            ("0.130.0", false),
+        ] {
+            assert_eq!(
+                supports_direct_mcp_tools(&initialized(version)),
+                want,
+                "{version}"
+            );
+        }
+        for result in [
+            json!({}),
+            json!({ "userAgent": "clai" }),
+            json!({ "userAgent": "clai/unknown (linux)" }),
+            json!({ "userAgent": 167 }),
+        ] {
+            assert!(!supports_direct_mcp_tools(&result), "{result}");
+        }
+        // An older server rejects any `code_mode` table, so none is sent.
+        let config = thread_config("u", "T", 60, &initialized("0.141.9"));
+        assert!(config["features"].get("code_mode").is_none());
     }
 
     #[test]
