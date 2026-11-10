@@ -57,36 +57,34 @@ export function usePermissionAttention(): Counts {
     let cancelled = false;
     const unlistenPromises: Promise<() => void>[] = [];
 
-    // Seed before subscribing so we don't miss requests that fired
-    // before mount. A race where an event arrives during the seed is
-    // harmless: each event carries the absolute count, so the latest
-    // value wins.
-    Promise.all([listPendingPermissionCounts(), listPendingPathGrantCounts(), listPendingNetworkAccessCounts()])
+    // A seed may resolve after a newer absolute-count event. Replay events
+    // observed during the read so a resolved request cannot reappear.
+    const updates: [AttentionPayload[], AttentionPayload[], AttentionPayload[]] = [[], [], []];
+    let seeded = false;
+    const update = (index: 0 | 1 | 2, setter: typeof setPermissionCounts) => (event: { payload: AttentionPayload }) => {
+      if (cancelled) return;
+      if (!seeded) updates[index].push(event.payload);
+      setter((current) => applyUpdate(current, event.payload));
+    };
+    unlistenPromises.push(
+      listen<AttentionPayload>(PERMISSION_ATTENTION_EVENT, update(0, setPermissionCounts)),
+      listen<AttentionPayload>(PATH_GRANT_ATTENTION_EVENT, update(1, setPathGrantCounts)),
+      listen<AttentionPayload>(NETWORK_ACCESS_ATTENTION_EVENT, update(2, setNetworkCounts)),
+    );
+    Promise.allSettled(unlistenPromises)
+      .then(() => Promise.all([listPendingPermissionCounts(), listPendingPathGrantCounts(), listPendingNetworkAccessCounts()]))
       .then(([perms, paths, network]) => {
         if (cancelled) return;
-        setPermissionCounts(perms || {});
-        setPathGrantCounts(paths || {});
-        setNetworkCounts(network || {});
+        const replay = (counts: Counts | undefined, events: AttentionPayload[]) =>
+          events.reduce((current, payload) => applyUpdate(current, payload), counts || {});
+        setPermissionCounts(replay(perms, updates[0]));
+        setPathGrantCounts(replay(paths, updates[1]));
+        setNetworkCounts(replay(network, updates[2]));
+        seeded = true;
       })
       .catch(() => {
-        // Non-fatal: live events will still update the badge.
+        seeded = true; // Live events still update the badge.
       });
-
-    unlistenPromises.push(
-      listen<AttentionPayload>(PERMISSION_ATTENTION_EVENT, (event) => {
-        setPermissionCounts((current) => applyUpdate(current, event.payload));
-      }),
-    );
-    unlistenPromises.push(
-      listen<AttentionPayload>(PATH_GRANT_ATTENTION_EVENT, (event) => {
-        setPathGrantCounts((current) => applyUpdate(current, event.payload));
-      }),
-    );
-    unlistenPromises.push(
-      listen<AttentionPayload>(NETWORK_ACCESS_ATTENTION_EVENT, (event) => {
-        setNetworkCounts((current) => applyUpdate(current, event.payload));
-      }),
-    );
 
     return () => {
       cancelled = true;

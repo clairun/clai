@@ -42,6 +42,18 @@ describe('usePermissionAttention', () => {
     expect(result.current).toEqual({ 'ws-1': 7, 'ws-2': 3 });
   });
 
+  it('does not resurrect a count resolved while the snapshot is pending', async () => {
+    let finish!: (counts: Record<string, number>) => void;
+    mockInvoke.mockImplementation((cmd: string) => cmd === 'list_pending_permission_counts'
+      ? new Promise((resolve) => { finish = resolve; })
+      : Promise.resolve({}));
+    const { result } = renderHook(() => usePermissionAttention());
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('list_pending_permission_counts'));
+    fire('permissions://attention', { workspaceId: 'ws-1', pendingCount: 0 });
+    await act(async () => { finish({ 'ws-1': 1 }); });
+    expect(result.current).toEqual({});
+  });
+
   it('keeps the count of each kind apart, so one kind reaching zero leaves the others', async () => {
     const { result } = renderHook(() => usePermissionAttention());
     await waitFor(() => expect(result.current['ws-1']).toBe(7));

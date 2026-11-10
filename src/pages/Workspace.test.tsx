@@ -41,6 +41,15 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 
+vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@tauri-apps/api/window')>()),
+  getCurrentWindow: () => ({
+    isVisible: async () => true,
+    isMinimized: async () => false,
+    onResized: async () => () => {},
+  }),
+}));
+
 vi.mock('../workspace/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../workspace/client')>()),
   getWorkspaceDetails: vi.fn(),

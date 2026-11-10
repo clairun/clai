@@ -334,3 +334,7 @@ export async function setWorkspaceTitle(workspaceId: string, title: string): Pro
 export async function markWorkspaceOpened(workspaceId: string): Promise<void> {
   return invoke('workspace_mark_opened', { workspaceId });
 }
+
+export async function isWorkspaceUnread(workspaceId: string): Promise<boolean> {
+  return invoke('workspace_is_unread', { workspaceId });
+}
