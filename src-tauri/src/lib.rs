@@ -26,6 +26,7 @@
 //! ```
 
 // Declare our modules
+mod agent_memory;
 mod agents;
 mod assistant;
 mod commands;
@@ -439,6 +440,10 @@ pub fn run() {
             // Fleet page startup state
             commands::fleet::fleet_snapshot,
             // App-level agent library and workspace assignments.
+            commands::agent_memory::agent_memory_list,
+            commands::agent_memory::agent_memory_read,
+            commands::agent_memory::agent_memory_write,
+            commands::agent_memory::agent_memory_delete,
             commands::global_agents::agent_definitions_list,
             commands::global_agents::agent_definition_save,
             commands::global_agents::workspace_assign_agent,

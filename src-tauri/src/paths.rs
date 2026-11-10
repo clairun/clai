@@ -38,6 +38,12 @@ pub fn clai_home() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".clai"))
 }
 
+/// Where shared agent definitions keep their own files, such as their
+/// professional memory.
+pub fn clai_agents_root() -> PathBuf {
+    clai_home().join("agents")
+}
+
 pub fn clai_skills_root() -> PathBuf {
     clai_home().join("skills")
 }

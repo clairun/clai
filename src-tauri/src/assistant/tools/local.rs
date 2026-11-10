@@ -685,10 +685,26 @@ fn augment_timeout_error(error: String, timeout_ms: u64, explicit_timeout: bool)
 
 fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesystemPolicy, String> {
     let workspace = ensure_workspace_root(context)?;
+    let agent_memory = context.run_context.agent_memory_dir.as_deref();
+    // The sandbox hides the agents' memories only once their directory
+    // exists: created first, so a member's memory never appears inside a
+    // grant compiled before it.
+    let agents_root = crate::paths::clai_agents_root();
+    if let Err(error) = fs::create_dir_all(&agents_root) {
+        tracing::warn!(%error, path = %agents_root.display(), "Agents directory unavailable");
+    }
+    if let Some(dir) = agent_memory {
+        // Without it the command runs with no professional memory, rather
+        // than not at all.
+        if let Err(error) = crate::agent_memory::ensure_memory_dir(dir) {
+            tracing::warn!(%error, "Agent memory unavailable");
+        }
+    }
     EffectiveFilesystemPolicy::from_config(
         &workspace,
         &path_grants(context),
         crate::paths::real_home().as_deref(),
+        agent_memory,
     )
 }
 
@@ -1217,14 +1233,8 @@ async fn execute_fs_request_grant(
     // This keeps repeated requests cheap and avoids modal spam when the LLM
     // forgets it already has the grant.
     let filesystem = filesystem_policy(context)?;
-    if matches!(params.access, FilesystemPathAccess::ReadWrite)
-        && filesystem.is_read_only_state(&canonical)
-    {
-        return Err(format!(
-            "{canonical_str} is CLAI's own state or a provider CLI's project \
-             configuration, which the shell may only read; \
-             agents write only under their own `.clai/memory/`"
-        ));
+    if let Some(refusal) = grant_refusal(&filesystem, &canonical, params.access) {
+        return Err(refusal);
     }
     if already_granted(&filesystem, &canonical, params.access) {
         return Ok(serde_json::json!({
@@ -1281,6 +1291,41 @@ async fn execute_fs_request_grant(
             }))
         }
     }
+}
+
+/// Why a grant on `path` could never take effect, so the user is not asked
+/// for it: the policy drops grants among the agents' memories and keeps
+/// CLAI's own state read-only.
+fn grant_refusal(
+    filesystem: &EffectiveFilesystemPolicy,
+    path: &Path,
+    access: FilesystemPathAccess,
+) -> Option<String> {
+    let path_str = agent_path_string(path);
+    let own_memory = filesystem
+        .memory
+        .as_deref()
+        .map(|memory| {
+            format!(
+                "; you write CLAI state only under `{}`",
+                agent_path_string(memory)
+            )
+        })
+        .unwrap_or_default();
+    if filesystem.is_agents_memory(path) && !filesystem.covers(path, access) {
+        return Some(format!(
+            "{path_str} holds agents' professional memories, which no grant \
+             reaches{own_memory}"
+        ));
+    }
+    (matches!(access, FilesystemPathAccess::ReadWrite) && filesystem.is_read_only_state(path)).then(
+        || {
+            format!(
+                "{path_str} is CLAI's own state or a provider CLI's project \
+                 configuration, which the shell may only read{own_memory}"
+            )
+        },
+    )
 }
 
 /// Whether the agent's grants answer a request for `path`. On Linux a
@@ -4546,6 +4591,60 @@ mod tests {
         let sockets = sockets_for(workspace.path(), Vec::new(), run_only);
         assert_eq!(sockets.allowed.len(), 1, "{sockets:?}");
         assert_eq!(sockets.allowed[0].host, socket);
+    }
+
+    /// Grants the policy would drop or keep read-only are refused before the
+    /// user is asked, and the refusal names where this agent writes.
+    #[test]
+    fn grants_that_could_never_apply_are_refused_up_front() {
+        use crate::assistant::sandbox::{SandboxPathAccess, SandboxPathGrant};
+        use FilesystemPathAccess::{ReadOnly, ReadWrite};
+        let temp = tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let app = home.join(".clai");
+        let agents = app.join("agents");
+        let own = agents.join("me/memory");
+        let other = agents.join("other/memory");
+        let workspace = app.join("workspaces/ws");
+        let workspace_memory = workspace.join(".clai/memory");
+        for dir in [&own, &other, &workspace_memory] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        let policy = |agent_memory: Option<&Path>| {
+            EffectiveFilesystemPolicy::compile_with(
+                &workspace,
+                &[SandboxPathGrant {
+                    host_path: home.clone(),
+                    access: SandboxPathAccess::ReadOnly,
+                }],
+                Some(&home),
+                Some(&app),
+                agent_memory,
+            )
+            .unwrap()
+        };
+        let writes_under =
+            |dir: &Path| format!("you write CLAI state only under `{}`", dir.display());
+        let (member, main) = (policy(Some(&own)), policy(None));
+
+        for (policy, writable) in [(&member, &own), (&main, &workspace_memory)] {
+            for (path, access) in [(other.join("x.md"), ReadOnly), (agents.clone(), ReadOnly)] {
+                let refusal = grant_refusal(policy, &path, access).unwrap();
+                assert!(refusal.contains("no grant reaches"), "{refusal}");
+                assert!(refusal.contains(&writes_under(writable)), "{refusal}");
+            }
+            let refusal =
+                grant_refusal(policy, &workspace.join(".clai/config.json"), ReadWrite).unwrap();
+            assert!(refusal.contains("may only read"), "{refusal}");
+            assert!(refusal.contains(&writes_under(writable)), "{refusal}");
+            assert_eq!(
+                grant_refusal(policy, &writable.join("x.md"), ReadWrite),
+                None
+            );
+            assert_eq!(grant_refusal(policy, &home.join("docs"), ReadWrite), None);
+        }
+        assert!(grant_refusal(&main, &own.join("x.md"), ReadOnly).is_some());
+        assert!(grant_refusal(&member, &workspace_memory.join("x.md"), ReadWrite).is_some());
     }
 
     /// The hint sends the agent to `fs_request_grant` for a socket; a folder

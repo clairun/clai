@@ -13,6 +13,20 @@ export type AddSkillSourceRequest = { name: string, kind: string | null, path: s
 export type AgentAvatarRef = { seed: string, generatorVersion: number, };
 
 /**
+ * One memory file, as the catalog and the settings UI list it.
+ */
+export type AgentMemoryFile = { 
+/**
+ * Relative to the memory directory, `/`-separated.
+ */
+path: string, description: string | null, updatedAt: string | null, size: number, 
+/**
+ * The file starts with frontmatter holding a `description` and an
+ * `updated_at` date.
+ */
+frontmatterValid: boolean, };
+
+/**
  * An agent as it was when the message was written; never regenerated.
  */
 export type AgentRefSnapshot = { workspaceAgentId: string, agentDefinitionId?: string | null, displayName: string, isDefault: boolean, avatar?: AgentAvatarRef | null, };

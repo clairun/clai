@@ -226,6 +226,18 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
         metadata_filters.insert(PathFilter::Literal("/var".to_string()));
     }
 
+    // A member's professional memory lives outside the workspace.
+    if let Some(memory) = command
+        .profile
+        .filesystem
+        .memory
+        .as_deref()
+        .filter(|memory| !memory.starts_with(workspace))
+    {
+        add_dir_filter(&mut read_filters, &mut metadata_filters, memory)?;
+        add_dir_filter(&mut write_filters, &mut metadata_filters, memory)?;
+    }
+
     for grant in &command.profile.filesystem.path_grants {
         add_grant_filters(
             &mut read_filters,
@@ -253,6 +265,7 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
     append_rule(&mut profile, "file-read*", &read_filters);
     append_rule(&mut profile, "file-write*", &write_filters);
     append_workspace_mask(&mut profile, command)?;
+    append_agents_mask(&mut profile, command)?;
     append_read_only_state(&mut profile, command, private_tmp)?;
     Ok(profile)
 }
@@ -316,6 +329,31 @@ fn append_workspace_mask(profile: &mut String, command: &SandboxCommand) -> Resu
     }
     append_path_rule(profile, "allow file-read*", "subpath", &read);
     append_path_rule(profile, "allow file-write*", "subpath", &write);
+    Ok(())
+}
+
+/// The agents' memories, denied like the workspace container, with a
+/// member's own memory allowed again after the deny.
+fn append_agents_mask(profile: &mut String, command: &SandboxCommand) -> Result<(), String> {
+    let filesystem = &command.profile.filesystem;
+    let Some(hidden) = filesystem.hidden.as_deref() else {
+        return Ok(());
+    };
+    append_path_rule(
+        profile,
+        "deny file-read* file-write*",
+        "subpath",
+        &[path_literal(hidden)?],
+    );
+    if let Some(memory) = filesystem
+        .memory
+        .as_deref()
+        .filter(|m| m.starts_with(hidden))
+    {
+        let memory = [path_literal(memory)?];
+        append_path_rule(profile, "allow file-read*", "subpath", &memory);
+        append_path_rule(profile, "allow file-write*", "subpath", &memory);
+    }
     Ok(())
 }
 
@@ -750,6 +788,73 @@ mod tests {
             reexpose_idx > deny_idx,
             "workspace re-expose must come after the deny; profile:\n{profile}"
         );
+    }
+
+    #[test]
+    fn profile_hides_agents_memories_but_reexposes_the_members_own() {
+        // A $HOME grant exposes every agent's memory under ~/.clai/agents. The
+        // directory is denied after the grant's allows, then the member's own
+        // memory allowed again after the deny (seatbelt is last-match-wins).
+        let temp = tempfile::tempdir().unwrap();
+        let home = fs::canonicalize(temp.path()).unwrap();
+        let app = home.join(".clai");
+        let workspace = app.join("workspaces").join("ws");
+        let agents = app.join("agents");
+        let own = agents.join("me").join("memory");
+        fs::create_dir_all(workspace.join(".clai").join("tmp")).unwrap();
+        fs::create_dir_all(&own).unwrap();
+        fs::create_dir_all(agents.join("other").join("memory")).unwrap();
+        let private_tmp = tempfile::tempdir_in(workspace.join(".clai").join("tmp")).unwrap();
+
+        let mut command = sample_command(&workspace);
+        command.profile.filesystem =
+            super::super::filesystem::EffectiveFilesystemPolicy::compile_with(
+                &workspace,
+                &[SandboxPathGrant {
+                    host_path: home.clone(),
+                    access: SandboxPathAccess::ReadWrite,
+                }],
+                Some(&home),
+                Some(&app),
+                Some(&own),
+            )
+            .unwrap();
+        let profile = seatbelt_profile(&command, private_tmp.path()).unwrap();
+        let literal = |path: &Path| escape_sbpl_string(&path.display().to_string());
+
+        let deny = format!(
+            "(deny file-read* file-write*\n  (subpath \"{}\")\n)",
+            literal(&agents)
+        );
+        let denied = profile
+            .find(&deny)
+            .unwrap_or_else(|| panic!("agents should be denied; profile:\n{profile}"));
+        for operation in ["file-read*", "file-write*"] {
+            let grant_allow = profile
+                .find(&format!("(allow {operation}\n"))
+                .unwrap_or_else(|| panic!("{operation} should be allowed; profile:\n{profile}"));
+            assert!(grant_allow < denied, "{operation}; profile:\n{profile}");
+            let reexposed = profile
+                .rfind(&format!(
+                    "(allow {operation}\n  (subpath \"{}\")\n)",
+                    literal(&own)
+                ))
+                .unwrap_or_else(|| panic!("own memory should be {operation}; profile:\n{profile}"));
+            assert!(reexposed > denied, "{operation}; profile:\n{profile}");
+        }
+        // After the deny, nothing among the agents' memories but the member's
+        // own is allowed again.
+        for (at, _) in profile[denied..].match_indices("(allow ") {
+            let rule = &profile[denied + at..];
+            let rule = &rule[..rule.find("\n)").unwrap()];
+            for quoted in rule.split('"').skip(1).step_by(2) {
+                let path = Path::new(quoted);
+                assert!(
+                    !path.starts_with(&agents) || path == own,
+                    "{quoted}; profile:\n{profile}"
+                );
+            }
+        }
     }
 
     #[test]

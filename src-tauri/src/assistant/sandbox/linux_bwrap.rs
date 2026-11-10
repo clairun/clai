@@ -1157,6 +1157,66 @@ mod tests {
     }
 
     #[test]
+    fn agents_are_masked_and_only_the_members_memory_bound_inside() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let app = home.join(".clai");
+        let workspace = app.join("workspaces").join("ws");
+        let agents = app.join("agents");
+        let own = agents.join("me/memory");
+        for dir in [
+            workspace.join(".clai/memory"),
+            own.clone(),
+            agents.join("other/memory"),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let mut command = sample_command();
+        command.cwd = workspace.clone();
+        command.profile.filesystem =
+            super::super::filesystem::EffectiveFilesystemPolicy::compile_with(
+                &workspace,
+                &[SandboxPathGrant {
+                    host_path: home.clone(),
+                    access: SandboxPathAccess::ReadWrite,
+                }],
+                Some(&home),
+                Some(&app),
+                Some(&own),
+            )
+            .unwrap();
+        let rendered: Vec<String> = bwrap_args(&command)
+            .unwrap()
+            .iter()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        let at = |args: &[&str]| {
+            rendered
+                .windows(args.len())
+                .position(|w| w == args)
+                .unwrap_or_else(|| panic!("expected {args:?}; got {rendered:?}"))
+        };
+        let (app, agents, own, state) = (
+            app.display().to_string(),
+            agents.display().to_string(),
+            own.display().to_string(),
+            workspace.join(".clai").display().to_string(),
+        );
+        assert!(at(&["--ro-bind", &app, &app]) < at(&["--tmpfs", &agents]));
+        assert!(at(&["--tmpfs", &agents]) < at(&["--bind-try", &own, &own]));
+        let memory = format!("{state}/memory");
+        assert!(!rendered.contains(&memory), "{rendered:?}");
+        assert_eq!(
+            rendered
+                .iter()
+                .filter(|arg| arg.starts_with(&agents))
+                .count(),
+            3,
+            "{rendered:?}"
+        );
+    }
+
+    #[test]
     fn an_explicit_container_grant_is_re_exposed_over_the_mask() {
         // A grant on the workspace container itself ties with the container
         // tmpfs on depth. The grant must be emitted last, so everything the
@@ -3606,6 +3666,99 @@ else:
             assert_eq!(std::fs::read_to_string(config).unwrap(), "{}");
         }
         assert!(workspace.join(".clai").is_dir());
+    }
+
+    /// A member writes its own professional memory and nothing else of the
+    /// agents', reads the workspace memory but cannot write it, and cannot
+    /// move its memory aside; under any grant.
+    #[tokio::test]
+    async fn only_the_members_own_memory_is_reachable_inside_the_sandbox() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().canonicalize().unwrap();
+        let app = home.join(".clai");
+        let workspace = app.join("workspaces").join("ws");
+        let own = app.join("agents/me/memory");
+        let other = app.join("agents/other/memory");
+        for dir in [workspace.join(".clai/memory"), own.clone(), other.clone()] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(other.join("secret.md"), "secret").unwrap();
+        std::fs::write(workspace.join(".clai/memory/state.md"), "state").unwrap();
+        let script = format!(
+            "w() {{ if (echo pwned > \"$1\") 2>/dev/null; then echo \"wrote $1\"; \\
+             else echo \"refused $1\"; fi; }}; \\
+             r() {{ if cat \"$1\" >/dev/null 2>&1; then echo \"read $1\"; \\
+             else echo \"hidden $1\"; fi; }}; \\
+             w '{own}/lesson.md'; r '{other}/secret.md'; w '{other}/secret.md'; \\
+             r .clai/memory/state.md; w .clai/memory/state.md; \\
+             mv '{own}' '{own}-moved' 2>/dev/null && echo moved",
+            own = own.display(),
+            other = other.display(),
+        );
+        let grant = |path: &Path, access| SandboxPathGrant {
+            host_path: path.to_path_buf(),
+            access,
+        };
+        for grants in [
+            vec![],
+            vec![grant(&home, SandboxPathAccess::ReadOnly)],
+            vec![grant(&home, SandboxPathAccess::ReadWrite)],
+        ] {
+            let mut command = SandboxCommand {
+                argv: vec![os("/bin/sh"), os("-c"), os(&script)],
+                cwd: workspace.clone(),
+                timeout_ms: 10_000,
+                max_output_chars: 2_000,
+                profile: SandboxProfile::for_test(
+                    workspace.clone(),
+                    vec![],
+                    SandboxNetworkMode::Disabled,
+                    SandboxSessionBusMode::Deny,
+                    SandboxEnv::filtered_from_iter(
+                        [("PATH", "/usr/bin:/bin")],
+                        &home,
+                        SandboxSessionBusMode::Deny,
+                    ),
+                    None,
+                ),
+            };
+            command.profile.filesystem =
+                super::super::filesystem::EffectiveFilesystemPolicy::compile_with(
+                    &workspace,
+                    &grants,
+                    Some(&home),
+                    Some(&app),
+                    Some(&own),
+                )
+                .unwrap();
+            let output = match run(command).await {
+                Ok(output) => output,
+                Err(e) if e.contains("Sandboxed shell is unavailable") => {
+                    crate::assistant::sandbox::skip_without_bwrap(&e);
+                    return;
+                }
+                Err(e) => panic!("sandbox command failed unexpectedly: {e}"),
+            };
+            let expected = format!(
+                "wrote {own}/lesson.md\nhidden {other}/secret.md\nrefused {other}/secret.md\n\
+                 read .clai/memory/state.md\nrefused .clai/memory/state.md",
+                own = own.display(),
+                other = other.display(),
+            );
+            assert_eq!(output.stdout.trim_end(), expected, "grants: {grants:?}");
+        }
+        assert_eq!(
+            std::fs::read_to_string(own.join("lesson.md")).unwrap(),
+            "pwned\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(other.join("secret.md")).unwrap(),
+            "secret"
+        );
+        assert_eq!(
+            std::fs::read_to_string(workspace.join(".clai/memory/state.md")).unwrap(),
+            "state"
+        );
     }
 
     /// E1: a command cannot plant project configuration for the provider
