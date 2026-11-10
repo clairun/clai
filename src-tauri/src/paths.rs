@@ -39,7 +39,7 @@ pub fn clai_home() -> PathBuf {
 }
 
 /// Where shared agent definitions keep their own files, such as their
-/// professional memory.
+/// craft.
 pub fn clai_agents_root() -> PathBuf {
     clai_home().join("agents")
 }

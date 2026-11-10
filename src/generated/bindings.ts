@@ -13,11 +13,11 @@ export type AddSkillSourceRequest = { name: string, kind: string | null, path: s
 export type AgentAvatarRef = { seed: string, generatorVersion: number, };
 
 /**
- * One memory file, as the catalog and the settings UI list it.
+ * One craft file, as the catalog and the settings UI list it.
  */
-export type AgentMemoryFile = { 
+export type AgentCraftFile = { 
 /**
- * Relative to the memory directory, `/`-separated.
+ * Relative to the craft directory, `/`-separated.
  */
 path: string, description: string | null, updatedAt: string | null, size: number, 
 /**

@@ -26,7 +26,7 @@
 //! ```
 
 // Declare our modules
-mod agent_memory;
+mod agent_craft;
 mod agents;
 mod assistant;
 mod commands;
@@ -365,6 +365,14 @@ pub fn run() {
         .manage(state)
         // Setup hook - runs after app is built, gives us AppHandle
         .setup(move |app| {
+            // The sandbox hides the agents' craft folders only once their
+            // directory exists, so it must exist before any run compiles a
+            // grant over it.
+            let agents_root = paths::clai_agents_root();
+            if let Err(e) = std::fs::create_dir_all(&agents_root) {
+                tracing::warn!(path = %agents_root.display(), "Failed to create agents directory: {}", e);
+            }
+
             // Here rather than before the builder, so that a second launch,
             // which exits in `Builder::build`, never adds connections to
             // config.json. Runs before the default-workspace bootstrap below so
@@ -440,10 +448,10 @@ pub fn run() {
             // Fleet page startup state
             commands::fleet::fleet_snapshot,
             // App-level agent library and workspace assignments.
-            commands::agent_memory::agent_memory_list,
-            commands::agent_memory::agent_memory_read,
-            commands::agent_memory::agent_memory_write,
-            commands::agent_memory::agent_memory_delete,
+            commands::agent_craft::agent_craft_list,
+            commands::agent_craft::agent_craft_read,
+            commands::agent_craft::agent_craft_write,
+            commands::agent_craft::agent_craft_delete,
             commands::global_agents::agent_definitions_list,
             commands::global_agents::agent_definition_save,
             commands::global_agents::workspace_assign_agent,

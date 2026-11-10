@@ -25,10 +25,10 @@ pub struct RunContext {
     pub workspace_agents: Vec<WorkspaceAgentSummary>,
     /// The run's workspace directory, resolved with the rest of the config.
     pub workspace_root: PathBuf,
-    /// A member's professional memory, shared by every workspace that assigns
-    /// its definition. `None` for the Main, which keeps the workspace's
+    /// A member's craft, shared by every workspace that assigns its
+    /// definition. `None` for the Main, which keeps the workspace's
     /// `.clai/memory/` instead.
-    pub agent_memory_dir: Option<PathBuf>,
+    pub craft_dir: Option<PathBuf>,
 }
 
 impl RunContext {
@@ -86,9 +86,9 @@ pub fn resolve_run_context(
         .filter(|resolved| !matches!(resolved.source, AgentSource::Unavailable { .. }))
         .ok_or_else(|| format!("Agent {agent_id} is no longer part of workspace {workspace_id}"))?;
     let agent = &resolved.agent;
-    let agent_memory_dir = resolved
+    let craft_dir = resolved
         .definition_id()
-        .map(|id| crate::agent_memory::memory_dir(&crate::paths::clai_agents_root(), id))
+        .map(|id| crate::agent_craft::craft_dir(&crate::paths::clai_agents_root(), id))
         .transpose()?;
     let skill_ids = workspace_config::refs_to_skill_ids(&app_config, &agent.selected_skills);
 
@@ -105,7 +105,7 @@ pub fn resolve_run_context(
         execution: agent.execution.clone(),
         workspace_agents,
         workspace_root: root,
-        agent_memory_dir,
+        craft_dir,
     })
 }
 
@@ -232,7 +232,7 @@ mod tests {
 
         let run = resolve_run_context(&fx.state, WS, Some(MAIN)).expect("resolve");
         assert_eq!(run.mcp_server_ids, vec!["a".to_string()]);
-        assert_eq!(run.agent_memory_dir, None);
+        assert_eq!(run.craft_dir, None);
         assert_eq!(run.execution.shell.mode, ShellAccessMode::Off);
         assert!(run.workspace_agents.iter().all(|agent| agent.id != MEMBER));
 
@@ -297,11 +297,11 @@ mod tests {
         let disabled = resolve_run_context(&fx.state, WS, Some(MEMBER)).expect("disabled runs");
         assert_eq!(disabled.automation_name.as_deref(), Some("Reviewer"));
         assert_eq!(
-            disabled.agent_memory_dir,
+            disabled.craft_dir,
             Some(
                 crate::paths::clai_agents_root()
                     .join(DEFINITION)
-                    .join("memory")
+                    .join("craft")
             )
         );
 

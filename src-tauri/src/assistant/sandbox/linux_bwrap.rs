@@ -1157,17 +1157,17 @@ mod tests {
     }
 
     #[test]
-    fn agents_are_masked_and_only_the_members_memory_bound_inside() {
+    fn agents_are_masked_and_only_the_members_craft_bound_inside() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
         let app = home.join(".clai");
         let workspace = app.join("workspaces").join("ws");
         let agents = app.join("agents");
-        let own = agents.join("me/memory");
+        let own = agents.join("me/craft");
         for dir in [
             workspace.join(".clai/memory"),
             own.clone(),
-            agents.join("other/memory"),
+            agents.join("other/craft"),
         ] {
             std::fs::create_dir_all(dir).unwrap();
         }
@@ -3668,17 +3668,17 @@ else:
         assert!(workspace.join(".clai").is_dir());
     }
 
-    /// A member writes its own professional memory and nothing else of the
-    /// agents', reads the workspace memory but cannot write it, and cannot
-    /// move its memory aside; under any grant.
+    /// A member writes its own craft and nothing else of the agents', reads
+    /// the workspace memory but cannot write it, and cannot move its craft
+    /// aside; under any grant.
     #[tokio::test]
-    async fn only_the_members_own_memory_is_reachable_inside_the_sandbox() {
+    async fn only_the_members_own_craft_is_reachable_inside_the_sandbox() {
         let temp = tempfile::tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
         let app = home.join(".clai");
         let workspace = app.join("workspaces").join("ws");
-        let own = app.join("agents/me/memory");
-        let other = app.join("agents/other/memory");
+        let own = app.join("agents/me/craft");
+        let other = app.join("agents/other/craft");
         for dir in [workspace.join(".clai/memory"), own.clone(), other.clone()] {
             std::fs::create_dir_all(dir).unwrap();
         }

@@ -226,7 +226,7 @@ fn seatbelt_profile(command: &SandboxCommand, private_tmp: &Path) -> Result<Stri
         metadata_filters.insert(PathFilter::Literal("/var".to_string()));
     }
 
-    // A member's professional memory lives outside the workspace.
+    // A member's craft lives outside the workspace.
     if let Some(memory) = command
         .profile
         .filesystem
@@ -332,8 +332,8 @@ fn append_workspace_mask(profile: &mut String, command: &SandboxCommand) -> Resu
     Ok(())
 }
 
-/// The agents' memories, denied like the workspace container, with a
-/// member's own memory allowed again after the deny.
+/// The agents' craft folders, denied like the workspace container, with a
+/// member's own craft allowed again after the deny.
 fn append_agents_mask(profile: &mut String, command: &SandboxCommand) -> Result<(), String> {
     let filesystem = &command.profile.filesystem;
     let Some(hidden) = filesystem.hidden.as_deref() else {
@@ -791,19 +791,19 @@ mod tests {
     }
 
     #[test]
-    fn profile_hides_agents_memories_but_reexposes_the_members_own() {
-        // A $HOME grant exposes every agent's memory under ~/.clai/agents. The
+    fn profile_hides_agents_crafts_but_reexposes_the_members_own() {
+        // A $HOME grant exposes every agent's craft under ~/.clai/agents. The
         // directory is denied after the grant's allows, then the member's own
-        // memory allowed again after the deny (seatbelt is last-match-wins).
+        // craft allowed again after the deny (seatbelt is last-match-wins).
         let temp = tempfile::tempdir().unwrap();
         let home = fs::canonicalize(temp.path()).unwrap();
         let app = home.join(".clai");
         let workspace = app.join("workspaces").join("ws");
         let agents = app.join("agents");
-        let own = agents.join("me").join("memory");
+        let own = agents.join("me").join("craft");
         fs::create_dir_all(workspace.join(".clai").join("tmp")).unwrap();
         fs::create_dir_all(&own).unwrap();
-        fs::create_dir_all(agents.join("other").join("memory")).unwrap();
+        fs::create_dir_all(agents.join("other").join("craft")).unwrap();
         let private_tmp = tempfile::tempdir_in(workspace.join(".clai").join("tmp")).unwrap();
 
         let mut command = sample_command(&workspace);
@@ -839,11 +839,11 @@ mod tests {
                     "(allow {operation}\n  (subpath \"{}\")\n)",
                     literal(&own)
                 ))
-                .unwrap_or_else(|| panic!("own memory should be {operation}; profile:\n{profile}"));
+                .unwrap_or_else(|| panic!("own craft should be {operation}; profile:\n{profile}"));
             assert!(reexposed > denied, "{operation}; profile:\n{profile}");
         }
-        // After the deny, nothing among the agents' memories but the member's
-        // own is allowed again.
+        // After the deny, nothing among the agents' craft folders but the
+        // member's own is allowed again.
         for (at, _) in profile[denied..].match_indices("(allow ") {
             let rule = &profile[denied + at..];
             let rule = &rule[..rule.find("\n)").unwrap()];

@@ -685,26 +685,18 @@ fn augment_timeout_error(error: String, timeout_ms: u64, explicit_timeout: bool)
 
 fn filesystem_policy(context: &ToolExecutionContext) -> Result<EffectiveFilesystemPolicy, String> {
     let workspace = ensure_workspace_root(context)?;
-    let agent_memory = context.run_context.agent_memory_dir.as_deref();
-    // The sandbox hides the agents' memories only once their directory
-    // exists: created first, so a member's memory never appears inside a
-    // grant compiled before it.
-    let agents_root = crate::paths::clai_agents_root();
-    if let Err(error) = fs::create_dir_all(&agents_root) {
-        tracing::warn!(%error, path = %agents_root.display(), "Agents directory unavailable");
-    }
-    if let Some(dir) = agent_memory {
-        // Without it the command runs with no professional memory, rather
-        // than not at all.
-        if let Err(error) = crate::agent_memory::ensure_memory_dir(dir) {
-            tracing::warn!(%error, "Agent memory unavailable");
+    let craft = context.run_context.craft_dir.as_deref();
+    if let Some(dir) = craft {
+        // Without it the command runs with no craft, rather than not at all.
+        if let Err(error) = crate::agent_craft::ensure_craft_dir(dir) {
+            tracing::warn!(%error, "Agent craft unavailable");
         }
     }
     EffectiveFilesystemPolicy::from_config(
         &workspace,
         &path_grants(context),
         crate::paths::real_home().as_deref(),
-        agent_memory,
+        craft,
     )
 }
 
@@ -1294,7 +1286,7 @@ async fn execute_fs_request_grant(
 }
 
 /// Why a grant on `path` could never take effect, so the user is not asked
-/// for it: the policy drops grants among the agents' memories and keeps
+/// for it: the policy drops grants among the agents' craft folders and keeps
 /// CLAI's own state read-only.
 fn grant_refusal(
     filesystem: &EffectiveFilesystemPolicy,
@@ -1302,27 +1294,29 @@ fn grant_refusal(
     access: FilesystemPathAccess,
 ) -> Option<String> {
     let path_str = agent_path_string(path);
-    let own_memory = filesystem
+    let writes_under = filesystem
         .memory
         .as_deref()
         .map(|memory| {
-            format!(
-                "; you write CLAI state only under `{}`",
-                agent_path_string(memory)
-            )
+            let place = if filesystem.is_agents_craft(memory) {
+                "only under your craft folder, "
+            } else {
+                "CLAI state only under "
+            };
+            format!("; you write {place}`{}`", agent_path_string(memory))
         })
         .unwrap_or_default();
-    if filesystem.is_agents_memory(path) && !filesystem.covers(path, access) {
+    if filesystem.is_agents_craft(path) && !filesystem.covers(path, access) {
         return Some(format!(
-            "{path_str} holds agents' professional memories, which no grant \
-             reaches{own_memory}"
+            "{path_str} holds the agents' craft folders, which no grant \
+             reaches{writes_under}"
         ));
     }
     (matches!(access, FilesystemPathAccess::ReadWrite) && filesystem.is_read_only_state(path)).then(
         || {
             format!(
                 "{path_str} is CLAI's own state or a provider CLI's project \
-                 configuration, which the shell may only read{own_memory}"
+                 configuration, which the shell may only read{writes_under}"
             )
         },
     )
@@ -4603,14 +4597,14 @@ mod tests {
         let home = temp.path().canonicalize().unwrap();
         let app = home.join(".clai");
         let agents = app.join("agents");
-        let own = agents.join("me/memory");
-        let other = agents.join("other/memory");
+        let own = agents.join("me/craft");
+        let other = agents.join("other/craft");
         let workspace = app.join("workspaces/ws");
         let workspace_memory = workspace.join(".clai/memory");
         for dir in [&own, &other, &workspace_memory] {
             fs::create_dir_all(dir).unwrap();
         }
-        let policy = |agent_memory: Option<&Path>| {
+        let policy = |craft: Option<&Path>| {
             EffectiveFilesystemPolicy::compile_with(
                 &workspace,
                 &[SandboxPathGrant {
@@ -4619,15 +4613,17 @@ mod tests {
                 }],
                 Some(&home),
                 Some(&app),
-                agent_memory,
+                craft,
             )
             .unwrap()
         };
-        let writes_under =
-            |dir: &Path| format!("you write CLAI state only under `{}`", dir.display());
         let (member, main) = (policy(Some(&own)), policy(None));
 
-        for (policy, writable) in [(&member, &own), (&main, &workspace_memory)] {
+        for (policy, writable, writes_under) in [
+            (&member, &own, "you write only under your craft folder, "),
+            (&main, &workspace_memory, "you write CLAI state only under "),
+        ] {
+            let writes_under = |dir: &Path| format!("{writes_under}`{}`", dir.display());
             for (path, access) in [(other.join("x.md"), ReadOnly), (agents.clone(), ReadOnly)] {
                 let refusal = grant_refusal(policy, &path, access).unwrap();
                 assert!(refusal.contains("no grant reaches"), "{refusal}");

@@ -327,7 +327,7 @@ pub(crate) fn build_system_prompt(
     if shell_enabled {
         prompt.push_str(&format!(
             "- Your workspace (id `{workspace_id}`) is your read_write home and your default shell working directory (run `pwd` for its path). Do your work here: write documents, scratch files, code, and durable outputs to the workspace unless the user points you elsewhere. Files in the workspace are shown to the user as **artifacts** in the CLAI app, so treat them as user-facing. The workspace is shared with other agents in the *same* workspace. Its `.clai/` directory is CLAI's own state (settings, conversation history): {state_rule}. The same holds for the provider CLI configuration at the workspace root (`.claude/`, `.codex/`, `.opencode/`, `.mcp.json`, `opencode.json`, `opencode.jsonc`).\n",
-            state_rule = if context.agent_memory_dir.is_some() {
+            state_rule = if context.craft_dir.is_some() {
                 "never write there, not even under `.clai/memory/`, which is the workspace Main's; on Linux and macOS the shell can only read it"
             } else {
                 "write there only under `.clai/memory/`; on Linux and macOS the shell can only read the rest"
@@ -374,8 +374,8 @@ pub(crate) fn build_system_prompt(
     }
     // Either memory protocol is all reads and writes of files.
     if shell_enabled {
-        match &context.agent_memory_dir {
-            Some(dir) => push_professional_memory(&mut prompt, dir),
+        match &context.craft_dir {
+            Some(dir) => push_craft(&mut prompt, dir),
             None => push_agent_memory(&mut prompt, trigger),
         }
     }
@@ -416,7 +416,7 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
         &context.workspace_root,
         &context.execution.filesystem.extra_paths,
         home.as_deref(),
-        context.agent_memory_dir.as_deref(),
+        context.craft_dir.as_deref(),
     );
     match policy {
         Ok(policy) => {
@@ -639,23 +639,23 @@ fn sandbox_prompt(
     }
 }
 
-/// A member's professional memory: what it is for, and a catalog of what it
-/// holds. The catalog names files without their contents, so the prompt stays
-/// small however much the agent has learnt.
-fn push_professional_memory(prompt: &mut String, dir: &std::path::Path) {
+/// A member's craft: what it is for, and a catalog of what it holds. The
+/// catalog names files without their contents, so the prompt stays small
+/// however much the agent has learnt.
+fn push_craft(prompt: &mut String, dir: &std::path::Path) {
     use crate::assistant::sandbox::filesystem::{agent_path_string, resolve};
     // The path the sandbox exposes, which differs from `dir` when `~` or the
     // app directory is a symlink, or under Flatpak.
     let dir_text = agent_path_string(&resolve(dir).unwrap_or_else(|_| dir.to_path_buf()));
     prompt.push_str(&format!(
-        "\n## Professional Memory\n\
-         `{dir_text}` is your professional memory: lessons about your craft that you carry into every run, in every workspace that assigns you. You reach it through the shell; on Linux and macOS no other agent's shell can, and the user can read and edit it in the CLAI app. The workspace's `.clai/memory/` belongs to its Main and is read-only to you.\n\n\
-         You are a craftsman striving for mastery, and a humble one. Record only what makes you better at your profession:\n\
+        "\n## Your Craft\n\
+         `{dir_text}` holds your craft: what you have learnt about how to do your work, carried into every run, in every workspace that assigns you. You reach it through the shell; on Linux and macOS no other agent's shell can, and the user can read and edit it in the CLAI app. The workspace's `.clai/memory/` belongs to its Main and is read-only to you.\n\n\
+         You are a craftsman striving for mastery, and a humble one. Record only what makes you better at your craft:\n\
          - root causes of your own mistakes;\n\
          - techniques that proved themselves;\n\
          - findings that reviewers keep raising about your work;\n\
          - calibration of your blind spots.\n\
-         Never record facts about a project or workspace, user data, paths, hosts, task status, secrets, or summaries of work: they belong to the workspace, not to you.\n\n\
+         Never record facts about a project or workspace, user data, paths, hosts, task status, secrets, or summaries of work: they belong to the workspace, not to your craft.\n\n\
          Your lessons are fallible. Revise or delete one when fresh evidence contradicts it. Prefer a few sharp lessons to many vague ones, and merge overlapping ones. At the end of a task, ask yourself what a master would have done differently, and write a lesson only if it changes what you will do next time.\n\n\
          Organise the directory as you like: `.md` files, in subfolders if useful. Each file starts with frontmatter whose `description` says when to read it:\n\
          ```\n\
@@ -664,16 +664,16 @@ fn push_professional_memory(prompt: &mut String, dir: &std::path::Path) {
          updated_at: YYYY-MM-DD\n\
          ---\n\
          ```\n\
-         Below is the catalog of your memory, newest first. Read a file when its description matches your situation.\n\n\
+         Below is the catalog of your craft, newest first. Read a file when its description matches your situation.\n\n\
          ### Catalog\n"
     ));
-    match crate::agent_memory::list(dir) {
+    match crate::agent_craft::list(dir) {
         Ok(files) if files.is_empty() => {
             prompt.push_str("Empty: you have not recorded any lessons yet.\n");
         }
-        Ok(files) => prompt.push_str(&crate::agent_memory::catalog(&files)),
+        Ok(files) => prompt.push_str(&crate::agent_craft::catalog(&files)),
         Err(error) => {
-            tracing::warn!(%error, "Could not list agent memory");
+            tracing::warn!(%error, "Could not list agent craft");
             prompt.push_str("Unavailable this run: list the directory yourself.\n");
         }
     }
@@ -817,9 +817,9 @@ mod tests {
     }
 
     #[test]
-    fn members_get_professional_memory_with_a_catalog_instead_of_workspace_memory() {
+    fn members_get_their_craft_with_a_catalog_instead_of_workspace_memory() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("memory");
+        let dir = temp.path().join("craft");
         std::fs::create_dir_all(dir.join("rust")).unwrap();
         std::fs::write(
             dir.join("rust/locks.md"),
@@ -834,14 +834,14 @@ mod tests {
         std::fs::write(dir.join("loose.md"), "no frontmatter").unwrap();
         let member = RunContext {
             execution: shell_execution(),
-            agent_memory_dir: Some(dir.clone()),
+            craft_dir: Some(dir.clone()),
             ..Default::default()
         };
 
         for trigger in [RunTrigger::Scheduled, RunTrigger::WorkspaceTask] {
             let text = prompt_text(&member, &trigger);
-            assert!(text.contains("## Professional Memory"));
-            assert!(text.contains(&format!("`{}` is your professional memory", dir.display())));
+            assert!(text.contains("## Your Craft"));
+            assert!(text.contains(&format!("`{}` holds your craft", dir.display())));
             assert!(text.contains("what a master would have done differently"));
             assert!(text.contains("Never record facts about a project or workspace"));
             assert!(!text.contains("## Agent Memory"));
@@ -866,27 +866,27 @@ mod tests {
         }
 
         let empty = RunContext {
-            agent_memory_dir: Some(temp.path().join("absent")),
+            craft_dir: Some(temp.path().join("absent")),
             ..member.clone()
         };
         assert!(prompt_text(&empty, &RunTrigger::UserMessage)
             .contains("### Catalog\nEmpty: you have not recorded any lessons yet."));
 
-        // Without a shell there is no memory to read or write.
+        // Without a shell there is no craft or memory to read or write.
         let no_shell = RunContext {
             execution: ExecutionCapabilityConfig::default(),
             ..member
         };
         let text = prompt_text(&no_shell, &RunTrigger::Scheduled);
-        assert!(!text.contains("Professional Memory"));
+        assert!(!text.contains("## Your Craft"));
         assert!(!text.contains("## Agent Memory"));
     }
 
-    /// The prompt names the memory where the sandbox exposes it, through
-    /// any symlink on the way, even before the directory exists.
+    /// The prompt names the craft folder where the sandbox exposes it,
+    /// through any symlink on the way, even before the directory exists.
     #[cfg(unix)]
     #[test]
-    fn professional_memory_is_named_by_its_resolved_path() {
+    fn craft_is_named_by_its_resolved_path() {
         let temp = tempfile::tempdir().unwrap();
         let real = temp.path().canonicalize().unwrap().join("real");
         std::fs::create_dir_all(&real).unwrap();
@@ -894,14 +894,14 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let member = RunContext {
             execution: shell_execution(),
-            agent_memory_dir: Some(link.join("agents/me/memory")),
+            craft_dir: Some(link.join("agents/me/craft")),
             ..Default::default()
         };
         let text = prompt_text(&member, &RunTrigger::Scheduled);
         assert!(
             text.contains(&format!(
-                "`{}` is your professional memory",
-                real.join("agents/me/memory").display()
+                "`{}` holds your craft",
+                real.join("agents/me/craft").display()
             )),
             "{text}"
         );
@@ -916,7 +916,7 @@ mod tests {
         let text = prompt_text(&main, &RunTrigger::Scheduled);
         assert!(text.contains("## Agent Memory"));
         assert!(text.contains("write there only under `.clai/memory/`"));
-        assert!(!text.contains("Professional Memory"));
+        assert!(!text.contains("## Your Craft"));
     }
 
     #[test]

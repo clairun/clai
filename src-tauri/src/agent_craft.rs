@@ -1,11 +1,11 @@
-//! The professional memory of a shared agent definition: lessons about its
-//! craft that every workspace assigning it shares, kept in
-//! `<app dir>/agents/<definition-id>/memory/`.
+//! The craft of a shared agent definition: what it has learnt about how to do
+//! its work, carried into every workspace that assigns it, kept in
+//! `<app dir>/agents/<definition-id>/craft/`.
 //!
 //! Agents read and write it through the shell; the sandbox exposes only the
 //! running member's own directory. This module lists it for the system
 //! prompt's catalog and the settings UI, and reads, writes and deletes single
-//! files for the UI. Paths given to it are relative to the memory directory
+//! files for the UI. Paths given to it are relative to the craft directory
 //! and never leave it.
 
 use std::fs;
@@ -28,12 +28,12 @@ const FRONTMATTER_BYTES: u64 = 4 * 1024;
 /// The largest file the settings UI reads or writes.
 const MAX_FILE_BYTES: usize = 256 * 1024;
 
-/// One memory file, as the catalog and the settings UI list it.
+/// One craft file, as the catalog and the settings UI list it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
-pub struct AgentMemoryFile {
-    /// Relative to the memory directory, `/`-separated.
+pub struct AgentCraftFile {
+    /// Relative to the craft directory, `/`-separated.
     pub path: String,
     pub description: Option<String>,
     pub updated_at: Option<String>,
@@ -47,10 +47,10 @@ pub struct AgentMemoryFile {
     sort_key: i64,
 }
 
-/// The memory directory of `definition_id` under `agents_root`.
-pub fn memory_dir(agents_root: &Path, definition_id: &str) -> Result<PathBuf, String> {
+/// The craft directory of `definition_id` under `agents_root`.
+pub fn craft_dir(agents_root: &Path, definition_id: &str) -> Result<PathBuf, String> {
     validate_definition_id(definition_id)?;
-    Ok(agents_root.join(definition_id).join("memory"))
+    Ok(agents_root.join(definition_id).join("craft"))
 }
 
 /// Definition ids are generated UUIDs; anything that could name another
@@ -69,28 +69,25 @@ pub fn validate_definition_id(id: &str) -> Result<(), String> {
     }
 }
 
-/// Creates the memory directory. A symlink in its place is refused: the
+/// Creates the craft directory. A symlink in its place is refused: the
 /// sandbox would expose wherever it leads.
-pub fn ensure_memory_dir(dir: &Path) -> Result<(), String> {
+pub fn ensure_craft_dir(dir: &Path) -> Result<(), String> {
     fs::create_dir_all(dir)
-        .map_err(|e| format!("Failed to create agent memory {}: {e}", dir.display()))?;
+        .map_err(|e| format!("Failed to create agent craft {}: {e}", dir.display()))?;
     real_dir(dir)
 }
 
 fn real_dir(dir: &Path) -> Result<(), String> {
     match fs::symlink_metadata(dir) {
         Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(format!("Agent memory {} is not a directory", dir.display())),
-        Err(e) => Err(format!(
-            "Agent memory {} is unavailable: {e}",
-            dir.display()
-        )),
+        Ok(_) => Err(format!("Agent craft {} is not a directory", dir.display())),
+        Err(e) => Err(format!("Agent craft {} is unavailable: {e}", dir.display())),
     }
 }
 
 /// Every visible `.md` file under `dir`, newest first. Hidden entries and
 /// symlinks are skipped; a missing directory lists nothing.
-pub fn list(dir: &Path) -> Result<Vec<AgentMemoryFile>, String> {
+pub fn list(dir: &Path) -> Result<Vec<AgentCraftFile>, String> {
     if fs::symlink_metadata(dir).is_err() {
         return Ok(Vec::new());
     }
@@ -105,7 +102,7 @@ pub fn list(dir: &Path) -> Result<Vec<AgentMemoryFile>, String> {
     Ok(files)
 }
 
-fn walk(dir: &Path, prefix: &str, depth: usize, files: &mut Vec<AgentMemoryFile>) {
+fn walk(dir: &Path, prefix: &str, depth: usize, files: &mut Vec<AgentCraftFile>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
     };
@@ -136,7 +133,7 @@ fn walk(dir: &Path, prefix: &str, depth: usize, files: &mut Vec<AgentMemoryFile>
     }
 }
 
-fn describe(path: &Path, relative: String) -> Option<AgentMemoryFile> {
+fn describe(path: &Path, relative: String) -> Option<AgentCraftFile> {
     let (file, meta) = open_file(path).ok()?;
     let mut head = Vec::new();
     let _ = file.take(FRONTMATTER_BYTES).read_to_end(&mut head);
@@ -155,7 +152,7 @@ fn describe(path: &Path, relative: String) -> Option<AgentMemoryFile> {
         .map_or(0, |since| {
             i64::try_from(since.as_secs()).unwrap_or(i64::MAX)
         });
-    Some(AgentMemoryFile {
+    Some(AgentCraftFile {
         path: relative,
         frontmatter_valid: frontmatter.closed
             && frontmatter.description.is_some()
@@ -221,7 +218,7 @@ fn parse_date(value: &str) -> Option<i64> {
 
 /// The catalog the system prompt shows: one line per file, newest first,
 /// bounded. Files whose frontmatter needs fixing say so.
-pub fn catalog(files: &[AgentMemoryFile]) -> String {
+pub fn catalog(files: &[AgentCraftFile]) -> String {
     let mut catalog = String::new();
     let mut shown = 0;
     for file in files {
@@ -248,7 +245,7 @@ pub fn catalog(files: &[AgentMemoryFile]) -> String {
     }
     if shown < files.len() {
         catalog.push_str(&format!(
-            "- … {} older files not listed. Your memory has outgrown its catalog: consolidate overlapping lessons and delete stale ones.\n",
+            "- … {} older files not listed. Your craft has outgrown its catalog: consolidate overlapping lessons and delete stale ones.\n",
             files.len() - shown
         ));
     }
@@ -263,7 +260,7 @@ fn valid_component(name: &str) -> bool {
 /// `relative` inside `dir`, refusing anything that could leave it: absolute
 /// paths, `..`, hidden components, non-`.md` files and symlinks on the way.
 fn resolve_file(dir: &Path, relative: &str) -> Result<PathBuf, String> {
-    let invalid = || format!("Invalid memory file path: {relative:?}");
+    let invalid = || format!("Invalid craft file path: {relative:?}");
     let path = Path::new(relative);
     if !relative.ends_with(".md") || path.is_absolute() {
         return Err(invalid());
@@ -329,14 +326,12 @@ pub fn read(dir: &Path, relative: &str) -> Result<String, String> {
 /// path is replaced rather than followed.
 pub fn write(dir: &Path, relative: &str, content: &str) -> Result<(), String> {
     if content.len() > MAX_FILE_BYTES {
-        return Err(format!(
-            "Memory files are limited to {MAX_FILE_BYTES} bytes"
-        ));
+        return Err(format!("Craft files are limited to {MAX_FILE_BYTES} bytes"));
     }
     let path = resolve_file(dir, relative)?;
     let parent = path
         .parent()
-        .ok_or_else(|| format!("Invalid memory file path: {relative:?}"))?;
+        .ok_or_else(|| format!("Invalid craft file path: {relative:?}"))?;
     fs::create_dir_all(parent).map_err(|e| format!("Failed to write {relative}: {e}"))?;
     if fs::symlink_metadata(&path).is_ok_and(|meta| meta.is_dir()) {
         return Err(format!("{relative} is a directory"));
@@ -363,8 +358,8 @@ pub fn delete(dir: &Path, relative: &str) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    fn file(path: &str, description: Option<&str>, valid: bool) -> AgentMemoryFile {
-        AgentMemoryFile {
+    fn file(path: &str, description: Option<&str>, valid: bool) -> AgentCraftFile {
+        AgentCraftFile {
             path: path.to_string(),
             description: description.map(str::to_string),
             updated_at: None,
@@ -408,7 +403,7 @@ mod tests {
     #[test]
     fn list_orders_newest_first_flags_broken_files_and_skips_the_rest() {
         let temp = tempfile::tempdir().unwrap();
-        let dir = &temp.path().join("memory");
+        let dir = &temp.path().join("craft");
         fs::create_dir_all(dir.join("rust/.hidden")).unwrap();
         fs::write(dir.join("old.md"), lesson("Use when old", "2025-01-01")).unwrap();
         fs::write(
@@ -480,7 +475,7 @@ mod tests {
             .collect();
         let text = catalog(&many);
         assert_eq!(text.lines().count(), MAX_CATALOG_ENTRIES + 1);
-        assert!(text.ends_with("- … 5 older files not listed. Your memory has outgrown its catalog: consolidate overlapping lessons and delete stale ones.\n"));
+        assert!(text.ends_with("- … 5 older files not listed. Your craft has outgrown its catalog: consolidate overlapping lessons and delete stale ones.\n"));
 
         let wide: Vec<_> = (0..60)
             .map(|i| file(&format!("{i}.md"), Some(&long), true))
@@ -493,18 +488,18 @@ mod tests {
     }
 
     #[test]
-    fn definition_ids_and_file_paths_cannot_leave_the_memory_dir() {
+    fn definition_ids_and_file_paths_cannot_leave_the_craft_dir() {
         for id in ["", ".", "..", "../x", "a/b", ".hidden", "a b"] {
-            assert!(memory_dir(Path::new("/agents"), id).is_err(), "{id:?}");
+            assert!(craft_dir(Path::new("/agents"), id).is_err(), "{id:?}");
         }
         assert_eq!(
-            memory_dir(Path::new("/agents"), "8d3bb9d1-a92a_x").unwrap(),
-            Path::new("/agents/8d3bb9d1-a92a_x/memory")
+            craft_dir(Path::new("/agents"), "8d3bb9d1-a92a_x").unwrap(),
+            Path::new("/agents/8d3bb9d1-a92a_x/craft")
         );
 
         let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("memory");
-        ensure_memory_dir(&dir).unwrap();
+        let dir = temp.path().join("craft");
+        ensure_craft_dir(&dir).unwrap();
         for path in [
             "",
             "/etc/x.md",
@@ -521,15 +516,15 @@ mod tests {
             assert!(write(&dir, path, "x").is_err(), "{path:?}");
             assert!(read(&dir, path).is_err(), "{path:?}");
         }
-        write(&dir, "craft/lesson.md", "hello").unwrap();
-        assert_eq!(read(&dir, "craft/lesson.md").unwrap(), "hello");
-        write(&dir, "craft/lesson.md", "again").unwrap();
-        assert_eq!(read(&dir, "craft/lesson.md").unwrap(), "again");
+        write(&dir, "rust/lesson.md", "hello").unwrap();
+        assert_eq!(read(&dir, "rust/lesson.md").unwrap(), "hello");
+        write(&dir, "rust/lesson.md", "again").unwrap();
+        assert_eq!(read(&dir, "rust/lesson.md").unwrap(), "again");
         assert!(write(&dir, "big.md", &"x".repeat(MAX_FILE_BYTES + 1)).is_err());
-        delete(&dir, "craft/lesson.md").unwrap();
-        assert!(read(&dir, "craft/lesson.md").is_err());
+        delete(&dir, "rust/lesson.md").unwrap();
+        assert!(read(&dir, "rust/lesson.md").is_err());
         // No temp file is left behind.
-        assert_eq!(fs::read_dir(dir.join("craft")).unwrap().count(), 0);
+        assert_eq!(fs::read_dir(dir.join("rust")).unwrap().count(), 0);
     }
 
     #[cfg(unix)]
@@ -537,7 +532,7 @@ mod tests {
     fn symlinks_are_never_followed() {
         use std::os::unix::fs::symlink;
         let temp = tempfile::tempdir().unwrap();
-        let dir = temp.path().join("memory");
+        let dir = temp.path().join("craft");
         let outside = temp.path().join("outside");
         fs::create_dir_all(&dir).unwrap();
         fs::create_dir_all(&outside).unwrap();
@@ -557,10 +552,41 @@ mod tests {
             secret
         );
 
-        let linked = temp.path().join("linked-memory");
+        let linked = temp.path().join("linked-craft");
         symlink(&outside, &linked).unwrap();
-        assert!(ensure_memory_dir(&linked).is_err());
+        assert!(ensure_craft_dir(&linked).is_err());
         assert!(list(&linked).is_err());
         assert!(read(&linked, "secret.md").is_err());
+    }
+
+    /// A FIFO swapped in for a file is refused at once: opening it does not
+    /// wait for a writer, and it is not read as a file.
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_refused_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("craft");
+        fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("pipe.md");
+        let c_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send((
+                open_file(&fifo).map(|_| ()).map_err(|e| e.kind()),
+                read(&dir, "pipe.md"),
+                describe(&fifo, "pipe.md".into()),
+            ));
+        });
+        let (opened, read, described) = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("opening a FIFO blocked");
+        assert_eq!(opened, Err(std::io::ErrorKind::InvalidInput));
+        assert!(read.unwrap_err().contains("not a regular file"));
+        assert_eq!(described, None);
     }
 }

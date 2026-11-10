@@ -14,9 +14,8 @@ const STATE_DIR: &str = ".clai";
 /// The part of [`STATE_DIR`] the Main writes: its memory, which the app
 /// creates before each command.
 const MEMORY_DIR: &str = "memory";
-/// The app directory's entry holding each shared agent definition's
-/// professional memory. Only a member's own memory is reachable, by that
-/// member alone.
+/// The app directory's entry holding each shared agent definition's craft.
+/// Only a member's own craft is reachable, by that member alone.
 const AGENTS_DIR: &str = "agents";
 /// Project configuration the provider CLIs (Claude Code, Codex, OpenCode)
 /// read from their working directory, the workspace root. They run outside
@@ -65,13 +64,14 @@ pub struct EffectiveFilesystemPolicy {
     )]
     pub pinned: Vec<PathBuf>,
     /// The memory the agent writes: the Main's inside its read-only `.clai`,
-    /// or a member's professional memory inside the read-only app directory.
+    /// or a member's craft inside the read-only app directory.
     pub memory: Option<PathBuf>,
-    /// The agents' memories, hidden when a root exposes them, as the
-    /// workspace directory is by [`Self::mask`]. A member's own memory is
+    /// The agents' craft folders, hidden when a root exposes them, as the
+    /// workspace directory is by [`Self::mask`]. A member's own craft is
     /// re-exposed inside.
     pub hidden: Option<PathBuf>,
-    /// The agents' memories, resolved, whether or not a root exposes them.
+    /// The agents' craft folders, resolved, whether or not a root exposes
+    /// them.
     agents: Option<PathBuf>,
 }
 
@@ -103,16 +103,15 @@ impl EffectiveFilesystemPolicy {
         Self::compile_with(workspace, grants, home, clai_home, None)
     }
 
-    /// [`Self::compile_in`] for a member whose professional memory is
-    /// `agent_memory`, or for the Main when `None`. A member's memory is
-    /// writable and the workspace's `.clai/memory` read-only; the Main's the
-    /// other way round.
+    /// [`Self::compile_in`] for a member whose craft is `craft`, or for the
+    /// Main when `None`. A member's craft is writable and the workspace's
+    /// `.clai/memory` read-only; the Main's memory the other way round.
     pub(crate) fn compile_with(
         workspace: &Path,
         grants: &[SandboxPathGrant],
         home: Option<&Path>,
         clai_home: Option<&Path>,
-        agent_memory: Option<&Path>,
+        craft: Option<&Path>,
     ) -> Result<Self, String> {
         // Derive isolation from the configured container BEFORE resolving the workspace.
         let mask = workspace_mask(workspace, home)
@@ -136,7 +135,7 @@ impl EffectiveFilesystemPolicy {
                     continue;
                 }
             };
-            // No grant reaches into the agents' memories, not even the
+            // No grant reaches into the agents' craft folders, not even the
             // member's own, which is exposed below.
             if host_path == workspace_root
                 || agents.as_ref().is_some_and(|a| host_path.starts_with(a))
@@ -163,8 +162,8 @@ impl EffectiveFilesystemPolicy {
             })
             .chain(state_entries(&workspace_root))
             .collect();
-        let profession = agent_memory.is_some();
-        let memory = match agent_memory {
+        let member = craft.is_some();
+        let memory = match craft {
             // Created by the app before each command; a symlink in its place
             // would expose wherever it leads.
             Some(dir) => fs::symlink_metadata(dir)
@@ -201,8 +200,8 @@ impl EffectiveFilesystemPolicy {
                     .any(|w| authorizes(w, &g.host_path, mask.as_deref()))
         });
         let (mut read_only_state, pinned) = protect(&state, &writes, &containers, mask.as_deref());
-        let memory = memory
-            .filter(|memory| profession || read_only_state.iter().any(|s| memory.starts_with(s)));
+        let memory =
+            memory.filter(|memory| member || read_only_state.iter().any(|s| memory.starts_with(s)));
         let hidden = agents.clone().filter(|agents| {
             std::iter::once(&workspace_root)
                 .chain(path_grants.iter().map(|g| &g.host_path))
@@ -227,13 +226,13 @@ impl EffectiveFilesystemPolicy {
         })
     }
 
-    /// The policy for the agent's saved grants: a member's when
-    /// `agent_memory` is its professional memory, the Main's when `None`.
+    /// The policy for the agent's saved grants: a member's when `craft` is
+    /// its craft, the Main's when `None`.
     pub fn from_config(
         workspace: &Path,
         grants: &[FilesystemPathGrant],
         home: Option<&Path>,
-        agent_memory: Option<&Path>,
+        craft: Option<&Path>,
     ) -> Result<Self, String> {
         let grants = grants
             .iter()
@@ -252,7 +251,7 @@ impl EffectiveFilesystemPolicy {
             &grants,
             home,
             Some(crate::paths::clai_home().as_path()),
-            agent_memory,
+            craft,
         )
     }
 
@@ -266,9 +265,9 @@ impl EffectiveFilesystemPolicy {
         is_state(path, &self.state, &containers, self.memory.as_deref())
     }
 
-    /// Whether `path` lies among the agents' memories, which no grant
+    /// Whether `path` lies among the agents' craft folders, which no grant
     /// reaches: a member reaches its own without one.
-    pub fn is_agents_memory(&self, path: &Path) -> bool {
+    pub fn is_agents_craft(&self, path: &Path) -> bool {
         self.agents.as_deref().is_some_and(|a| path.starts_with(a))
     }
 
@@ -313,8 +312,8 @@ impl EffectiveFilesystemPolicy {
     /// Mounts are explicit and deeper mounts win: masks come first at equal
     /// depth, then read-only and writable binds, and read-only state last. So
     /// the workspace stays writable inside a read-only `~/.clai`, the Main's
-    /// memory inside its read-only `.clai`, and a member's inside the hidden
-    /// agents directory.
+    /// memory inside its read-only `.clai`, and a member's craft inside the
+    /// hidden agents directory.
     #[cfg(any(target_os = "linux", test))]
     pub fn operations(&self) -> Vec<FilesystemOperation<'_>> {
         let mut ops = vec![FilesystemOperation::Expose {
@@ -1111,11 +1110,11 @@ mod tests {
         );
     }
 
-    /// A member writes only its own professional memory and reads the
-    /// workspace's; no run reaches another agent's memory, whatever the
-    /// grants, and the Main keeps the workspace memory writable.
+    /// A member writes only its own craft and reads the workspace memory; no
+    /// run reaches another agent's craft, whatever the grants, and the Main
+    /// keeps the workspace memory writable.
     #[test]
-    fn professional_memory_is_the_members_alone() {
+    fn craft_is_the_members_alone() {
         use FilesystemPathAccess::{ReadOnly, ReadWrite};
         use SandboxPathAccess as Access;
         let layout = ClaiLayout::new();
@@ -1127,8 +1126,8 @@ mod tests {
             ..
         } = &layout;
         let agents = app.join("agents");
-        let own = agents.join("me/memory");
-        let other = agents.join("other/memory");
+        let own = agents.join("me/craft");
+        let other = agents.join("other/craft");
         fs::create_dir_all(&own).unwrap();
         fs::create_dir_all(&other).unwrap();
         let workspace_memory = state.join("memory");
@@ -1209,13 +1208,13 @@ mod tests {
         }
 
         // A grant inside the workspace memory does not make it writable for a
-        // member, and a missing own memory is simply not exposed.
+        // member, and a missing own craft is simply not exposed.
         let member = EffectiveFilesystemPolicy::compile_with(
             workspace,
             &[grant(&workspace_memory, Access::ReadWrite)],
             Some(home),
             Some(app),
-            Some(&agents.join("absent/memory")),
+            Some(&agents.join("absent/craft")),
         )
         .unwrap();
         assert_eq!(member.memory, None);
@@ -1227,13 +1226,13 @@ mod tests {
     /// and no read-only bind of CLAI's state exposes it again.
     #[cfg(unix)]
     #[test]
-    fn professional_memory_stays_hidden_behind_a_symlinked_agents_directory() {
+    fn craft_stays_hidden_behind_a_symlinked_agents_directory() {
         use SandboxPathAccess as Access;
         let layout = ClaiLayout::new();
         let data = layout.base.join("data");
         let agents = data.join("agents");
-        let own = agents.join("me/memory");
-        let other = agents.join("other/memory");
+        let own = agents.join("me/craft");
+        let other = agents.join("other/craft");
         fs::create_dir_all(&own).unwrap();
         fs::create_dir_all(&other).unwrap();
         let link = layout.app.join("agents");
@@ -1247,17 +1246,17 @@ mod tests {
                 grant(&link.join("other"), Access::ReadWrite),
             ],
         ] {
-            for agent_memory in [None, Some(link.join("me/memory"))] {
+            for craft in [None, Some(link.join("me/craft"))] {
                 let policy = EffectiveFilesystemPolicy::compile_with(
                     &layout.workspace,
                     &grants,
                     Some(&layout.home),
                     Some(&layout.app),
-                    agent_memory.as_deref(),
+                    craft.as_deref(),
                 )
                 .unwrap();
                 assert_eq!(policy.hidden.as_ref(), Some(&agents));
-                assert!(policy.is_agents_memory(&other));
+                assert!(policy.is_agents_craft(&other));
                 assert!(!policy.covers(&other.join("x.md"), FilesystemPathAccess::ReadOnly));
                 let ops = policy.operations();
                 let mask = ops
@@ -1270,29 +1269,29 @@ mod tests {
                     {
                         if path.starts_with(&agents) {
                             assert!(
-                                agent_memory.is_some() && *path == own && Some(at) > mask,
+                                craft.is_some() && *path == own && Some(at) > mask,
                                 "{ops:?}"
                             );
                         }
                     }
                 }
-                assert_eq!(policy.memory.as_ref() == Some(&own), agent_memory.is_some());
+                assert_eq!(policy.memory.as_ref() == Some(&own), craft.is_some());
             }
         }
     }
 
-    /// A memory directory that is a symlink, or that lies outside the agents
+    /// A craft directory that is a symlink, or that lies outside the agents
     /// directory, is never exposed.
     #[cfg(unix)]
     #[test]
-    fn professional_memory_must_be_a_real_directory_under_agents() {
+    fn craft_must_be_a_real_directory_under_agents() {
         let layout = ClaiLayout::new();
         let agents = layout.app.join("agents");
         let outside = layout.base.join("outside");
         fs::create_dir_all(agents.join("me")).unwrap();
         fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, agents.join("me/memory")).unwrap();
-        for dir in [agents.join("me/memory"), outside.clone(), agents.clone()] {
+        std::os::unix::fs::symlink(&outside, agents.join("me/craft")).unwrap();
+        for dir in [agents.join("me/craft"), outside.clone(), agents.clone()] {
             let policy = EffectiveFilesystemPolicy::compile_with(
                 &layout.workspace,
                 &[],
