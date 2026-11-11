@@ -4,6 +4,7 @@ import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import WorkspaceRail from './WorkspaceRail';
+import { useFleetActivityStore } from '../../stores/fleetActivityStore';
 import type { WorkspaceListEntry } from '../../generated/bindings';
 
 // Typed against the generated bindings so a backend field rename fails this
@@ -44,6 +45,7 @@ const rail = (
     collapsed={false}
     onToggleCollapsed={noop}
     onOpenFleet={noop}
+    onOpenGlobalSettings={noop}
     onSelect={noop}
     onCreate={noop}
     onRunNow={noop}
@@ -463,27 +465,101 @@ describe('WorkspaceRail sections', () => {
   });
 });
 
-describe('WorkspaceRail Fleet button', () => {
+describe('WorkspaceRail navigation', () => {
   it.each([
-    { collapsed: false, label: 'Fleet' },
-    { collapsed: true, label: '' },
-  ])('opens the Fleet from the rail (collapsed: $collapsed)', async ({ collapsed, label }) => {
+    { collapsed: false, fleet: 'Fleet', settings: 'Settings' },
+    { collapsed: true, fleet: '', settings: '' },
+  ])('opens the Fleet and app settings (collapsed: $collapsed)', async ({ collapsed, fleet, settings }) => {
     const onOpenFleet = vi.fn();
-    renderRail([entry('a', 'Alpha')], { collapsed, onOpenFleet });
-    const button = screen.getByRole('button', { name: 'Open Fleet' });
-    expect(button).toHaveTextContent(label);
-    expect(button).toHaveAttribute('title', 'Open Fleet (Ctrl/Cmd+Shift+M)');
-    await userEvent.click(button);
+    const onOpenGlobalSettings = vi.fn();
+    renderRail([entry('a', 'Alpha')], { collapsed, onOpenFleet, onOpenGlobalSettings });
+
+    const fleetButton = screen.getByRole('button', { name: 'Open Fleet' });
+    expect(fleetButton).toHaveTextContent(fleet);
+    expect(fleetButton).toHaveAttribute('title', 'Open Fleet (Ctrl/Cmd+Shift+M)');
+    await userEvent.click(fleetButton);
+    expect(onOpenFleet).toHaveBeenCalledTimes(1);
+
+    const settingsButton = screen.getByRole('button', { name: 'Open settings' });
+    expect(settingsButton).toHaveTextContent(settings);
+    await userEvent.click(settingsButton);
+    // No arguments: the host's openGlobalSettings takes an options object,
+    // and the click event must not arrive in its place.
+    expect(onOpenGlobalSettings).toHaveBeenCalledWith();
     expect(onOpenFleet).toHaveBeenCalledTimes(1);
   });
 
-  it('keeps the Fleet button out of the footer row that holds the update badge and Settings', () => {
-    renderRail([entry('a', 'Alpha')], {
-      footer: <><button type="button">Restart to install</button><button type="button">Settings</button></>,
-    });
-    // That row grows with the update state; sharing it pushed Settings under the badge.
-    const settingsRow = screen.getByRole('button', { name: 'Settings' }).parentElement;
-    expect(settingsRow).toContainElement(screen.getByRole('button', { name: 'Restart to install' }));
-    expect(settingsRow).not.toContainElement(screen.getByRole('button', { name: 'Open Fleet' }));
+  it('puts Fleet, Settings and the update notice above the workspace list', () => {
+    const rows = Array.from({ length: 30 }, (_, i) => entry(`w${i}`, `Workspace ${i}`));
+    renderRail(rows, { updateNotice: <button type="button">Restart to install</button> });
+    // Below a long scrolling list they were out of sight.
+    const firstRow = screen.getByText('Workspace 0');
+    const order = [
+      screen.getByRole('button', { name: 'Open Fleet' }),
+      screen.getByRole('button', { name: 'Open settings' }),
+      screen.getByRole('button', { name: 'Restart to install' }),
+      firstRow,
+    ];
+    for (let i = 1; i < order.length; i++) {
+      expect(order[i - 1]!.compareDocumentPosition(order[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+  });
+
+  it('names every icon-only control when collapsed', () => {
+    renderRail([entry('a', 'Alpha')], { collapsed: true });
+    for (const name of ['Expand sidebar', 'New workspace', 'Open Fleet', 'Open settings', 'Pause all scheduled runs']) {
+      expect(screen.getByRole('button', { name })).toHaveTextContent('');
+    }
+  });
+});
+
+describe('WorkspaceRail rows', () => {
+  const row = (title: string) => screen.getByText(title).closest('[role="button"]') as HTMLElement;
+
+  it('shows the cadence at the end of the line and the full schedule to screen readers', () => {
+    renderRail([
+      entry('a', 'Alpha', { updatedAt: 2n, scheduleEnabled: true, scheduleKind: { type: 'interval', intervalMinutes: 120 } }),
+      entry('b', 'Beta', {
+        updatedAt: 1n,
+        scheduleEnabled: true,
+        schedulePaused: true,
+        scheduleKind: { type: 'cron', expression: '0 12 * * *', timezone: 'UTC' },
+      }),
+      entry('c', 'Gamma'),
+    ]);
+    const alpha = within(row('Alpha')).getByTitle('every 120m');
+    expect(within(alpha).getByText('120m')).toHaveAttribute('aria-hidden', 'true');
+    expect(within(alpha).getByText('every 120m')).toBeInTheDocument();
+    const beta = within(row('Beta')).getByTitle('Paused · cron: 0 12 * * *');
+    expect(within(beta).getByText('cron')).toHaveAttribute('aria-hidden', 'true');
+    expect(within(beta).getByText('Paused · cron: 0 12 * * *')).toBeInTheDocument();
+    expect(row('Gamma').querySelector('[class*="rowMeta"]')).toBeNull();
+  });
+
+  // jsdom applies no CSS (vitest `css: false`), so this cannot prove the
+  // notice is visible. It pins the structure the stylesheet relies on: the
+  // notice has its own class, outside every element hidden or masked while
+  // the row is hovered (`.rowMeta`, `.rowBody`, `.rowActions`, badge, dot).
+  it('keeps the Run now skipped notice out of the elements hidden on hover', () => {
+    renderRail([
+      entry('a', 'Alpha', { scheduleEnabled: true, scheduleKind: { type: 'interval', intervalMinutes: 120 } }),
+    ]);
+    try {
+      act(() => useFleetActivityStore.setState({ runNowSkipped: ['a'] }));
+      const notice = within(row('Alpha')).getByRole('status');
+      expect(notice).toHaveTextContent('Run now skipped: session busy');
+      expect(notice.className).toMatch(/rowSkipNotice/);
+      expect(notice.closest('[class*="rowMeta"], [class*="rowBody"], [class*="rowActions"]')).toBeNull();
+      expect(row('Alpha').className).toMatch(/rowSkipped/);
+      expect(row('Alpha').querySelector('[class*="rowMeta"]')).toBeNull();
+    } finally {
+      act(() => useFleetActivityStore.setState({ runNowSkipped: [] }));
+    }
+  });
+
+  it('marks the selected workspace as current', () => {
+    renderRail([entry('a', 'Alpha'), entry('b', 'Beta')], { selectedId: 'b' });
+    expect(row('Beta')).toHaveAttribute('aria-current', 'true');
+    expect(row('Alpha')).not.toHaveAttribute('aria-current');
   });
 });

@@ -1,7 +1,7 @@
 /**
  * AppUpdateBadge Component
  *
- * A persistent update pill in Fleet's top bar and the workspace rail footer. It stays
+ * A persistent update pill in Fleet's top bar and the workspace rail. It stays
  * up until the update is applied — deliberately not dismissible, and
  * deliberately not a toast: an update is worth knowing about, never worth
  * interrupting for.
