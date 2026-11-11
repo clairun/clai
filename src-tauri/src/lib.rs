@@ -26,6 +26,7 @@
 //! ```
 
 // Declare our modules
+mod agent_craft;
 mod agents;
 mod assistant;
 mod commands;
@@ -364,6 +365,14 @@ pub fn run() {
         .manage(state)
         // Setup hook - runs after app is built, gives us AppHandle
         .setup(move |app| {
+            // The sandbox hides the agents' craft folders only once their
+            // directory exists, so it must exist before any run compiles a
+            // grant over it.
+            let agents_root = paths::clai_agents_root();
+            if let Err(e) = std::fs::create_dir_all(&agents_root) {
+                tracing::warn!(path = %agents_root.display(), "Failed to create agents directory: {}", e);
+            }
+
             // Here rather than before the builder, so that a second launch,
             // which exits in `Builder::build`, never adds connections to
             // config.json. Runs before the default-workspace bootstrap below so
