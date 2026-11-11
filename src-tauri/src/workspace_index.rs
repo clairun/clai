@@ -42,9 +42,41 @@ pub struct WorkspaceLoadFailure {
 pub enum LoadFailureReason {
     IdMismatch { expected: String, actual: String },
     DuplicateId { id: String },
-    Unparseable(String),
+    Unreadable(std::io::ErrorKind),
+    InvalidConfig { line: usize, column: usize },
     DbCorrupt(String),
     MigrationFailed(String),
+}
+
+impl LoadFailureReason {
+    fn from_config_error(error: &workspace_config::WorkspaceConfigError) -> Self {
+        use workspace_config::WorkspaceConfigError;
+        match error {
+            WorkspaceConfigError::Io { source, .. } => Self::Unreadable(source.kind()),
+            WorkspaceConfigError::Parse { source, .. }
+            | WorkspaceConfigError::Serialize { source } => Self::InvalidConfig {
+                line: source.line(),
+                column: source.column(),
+            },
+        }
+    }
+}
+
+/// Category only: serde and I/O messages can quote config contents.
+impl std::fmt::Display for LoadFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IdMismatch { .. } => f.write_str("config id does not match directory name"),
+            Self::DuplicateId { .. } => f.write_str("duplicate workspace id"),
+            Self::Unreadable(std::io::ErrorKind::NotFound) => f.write_str("missing config.json"),
+            Self::Unreadable(kind) => write!(f, "unreadable config.json ({kind})"),
+            Self::InvalidConfig { line, column } => {
+                write!(f, "invalid config.json at line {line} column {column}")
+            }
+            Self::DbCorrupt(_) => f.write_str("workspace database could not be opened"),
+            Self::MigrationFailed(_) => f.write_str("workspace database migration failed"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -116,7 +148,7 @@ impl WorkspaceIndex {
                     Err(error) => {
                         index.load_failures.push(WorkspaceLoadFailure {
                             path,
-                            reason: LoadFailureReason::Unparseable(error.to_string()),
+                            reason: LoadFailureReason::from_config_error(&error),
                         });
                         continue;
                     }
@@ -326,6 +358,43 @@ mod cli_scan_tests {
             .code,
             1
         );
+    }
+
+    #[test]
+    fn load_failure_messages_never_quote_config_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = "aaaaaaaa-0000-0000-0000-000000000000";
+        let root = temp.path().join(id);
+        let json = "{\n  \"version\": \"SECRET_MARKER\"\n}";
+        fs::create_dir_all(workspace_config::config_path(&root).parent().unwrap()).unwrap();
+        fs::write(workspace_config::config_path(&root), json).unwrap();
+        // The raw serde message does quote the value.
+        assert!(workspace_config::load(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("SECRET_MARKER"));
+        fs::create_dir(temp.path().join("bbbbbbbb-0000-0000-0000-000000000000")).unwrap();
+        let config = AppConfig {
+            workspace_dirs: vec![temp.path().to_path_buf()],
+            ..Default::default()
+        };
+        let index = WorkspaceIndex::scan(&config);
+
+        let open = |name: &str| {
+            crate::cli::resolve(crate::cli::Command::Open(name.into()), &config, &index)
+                .unwrap_err()
+                .message
+        };
+        let exact = open(id);
+        assert!(exact.contains(&root.display().to_string()), "{exact}");
+        assert!(
+            exact.contains("invalid config.json at line 2 column"),
+            "{exact}"
+        );
+        assert!(!exact.contains("SECRET_MARKER"), "{exact}");
+        let title = open("Some title");
+        assert!(title.contains("missing config.json"), "{title}");
+        assert!(!title.contains("SECRET_MARKER"), "{title}");
     }
 
     #[test]
