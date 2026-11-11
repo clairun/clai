@@ -24,6 +24,8 @@ import { useFleetActivityStore } from '../../stores/fleetActivityStore';
 interface WorkspaceRailProps {
   id?: string;
   footer?: React.ReactNode;
+  /** Leave for the Fleet: the same action as Ctrl/Cmd+Shift+M. */
+  onOpenFleet: () => void;
   onOpenWindow?: (id: string) => void;
   workspaces: WorkspaceListEntry[];
   selectedId: string | null;
@@ -85,6 +87,15 @@ const PauseIcon = () => (
   <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
     <rect x="6" y="5" width="4" height="14" rx="1" />
     <rect x="14" y="5" width="4" height="14" rx="1" />
+  </svg>
+);
+
+const FleetIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="3" y="3" width="7" height="7" rx="1" />
+    <rect x="14" y="3" width="7" height="7" rx="1" />
+    <rect x="3" y="14" width="7" height="7" rx="1" />
+    <rect x="14" y="14" width="7" height="7" rx="1" />
   </svg>
 );
 
@@ -166,6 +177,7 @@ const WorkspaceRail = ({
   selectedId,
   id,
   footer,
+  onOpenFleet,
   onOpenWindow,
   attentionCounts,
   attentionRequest = 0,
@@ -747,7 +759,20 @@ const WorkspaceRail = ({
           <div className={styles.emptyRail}>No workspaces match “{query.trim()}”.</div>
         )}
       </div>
-      {footer && <div className={styles.railFooter}>{footer}</div>}
+      <div className={styles.railFooter}>
+        <button
+          type="button"
+          className={styles.fleetButton}
+          onClick={onOpenFleet}
+          aria-label="Open Fleet"
+          aria-keyshortcuts="Control+Shift+M Meta+Shift+M"
+          title="Open Fleet (Ctrl/Cmd+Shift+M)"
+        >
+          <FleetIcon />
+          {!collapsed && <span>Fleet</span>}
+        </button>
+        {footer && <div className={styles.railFooterRow}>{footer}</div>}
+      </div>
     </nav>
   );
 };

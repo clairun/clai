@@ -251,13 +251,13 @@ const FleetLayout = () => {
     [navigate],
   );
 
-  // Ctrl+Shift+F: to the Fleet, with this workspace selected there.
-  useFleetToggle(
-    useCallback(() => {
-      if (selectedId) useFleetStore.getState().select(selectedId);
-      navigate('/fleet');
-    }, [selectedId, navigate]),
-  );
+  // Ctrl/Cmd+Shift+M and the rail's Fleet button: to the Fleet, with this
+  // workspace selected there.
+  const openFleet = useCallback(() => {
+    if (selectedId) useFleetStore.getState().select(selectedId);
+    navigate('/fleet');
+  }, [selectedId, navigate]);
+  useFleetToggle(openFleet);
 
   const handleCreate = useCallback(async () => {
     try {
@@ -556,6 +556,7 @@ const FleetLayout = () => {
         )}
         {!railHidden && <WorkspaceRail
           id="workspace-rail"
+          onOpenFleet={openFleet}
           onOpenWindow={(id) => { void openWorkspaceWindow(id).catch((err) => setError(errText(err, 'Failed to open a new window.'))); }}
           footer={<>{railCollapsed ? <CompactUpdateAccess /> : <AppUpdateBadge />}<button type="button" onClick={() => openGlobalSettings()} aria-label="Open settings" title="Settings">{railCollapsed ? "⚙" : "Settings"}</button></>}
           workspaces={workspaces}

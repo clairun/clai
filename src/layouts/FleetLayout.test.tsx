@@ -511,6 +511,22 @@ describe('FleetLayout switch to the Fleet', () => {
     expect(await screen.findByTestId('fleet')).toBeInTheDocument();
     expect(useFleetStore.getState().selectedId).toBe('a');
   });
+
+  it.each([false, true])('goes to the Fleet from the rail button with this workspace selected there (collapsed: %s)', async (collapse) => {
+    useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null });
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    renderFleet('/workspace/b');
+    expect(await screen.findByTestId('workspace')).toBeInTheDocument();
+    if (collapse) await userEvent.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
+    expect(screen.queryByRole('button', { name: 'Expand sidebar' }) !== null).toBe(collapse);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open Fleet' }));
+    expect(await screen.findByTestId('fleet')).toBeInTheDocument();
+    expect(useFleetStore.getState().selectedId).toBe('b');
+    // Only this harness's routing: Routes.test covers the real /fleet route.
+    expect(screen.queryByRole('navigation', { name: 'Workspaces' })).toBeNull();
+  });
 });
 
 describe('FleetLayout rail in a narrow window', () => {
