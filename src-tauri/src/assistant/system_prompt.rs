@@ -838,10 +838,15 @@ mod tests {
             ..Default::default()
         };
 
+        // Resolved, as the sandbox exposes it: macOS's temp directory is
+        // behind a symlink, and Windows paths are shown with `/`.
+        let shown_dir =
+            crate::assistant::sandbox::filesystem::agent_path_string(&dir.canonicalize().unwrap());
+
         for trigger in [RunTrigger::Scheduled, RunTrigger::WorkspaceTask] {
             let text = prompt_text(&member, &trigger);
             assert!(text.contains("## Your Craft"));
-            assert!(text.contains(&format!("`{}` holds your craft", dir.display())));
+            assert!(text.contains(&format!("`{}` holds your craft", shown_dir)));
             assert!(text.contains("what a master would have done differently"));
             assert!(text.contains("Never record facts about a project or workspace"));
             assert!(!text.contains("## Agent Memory"));

@@ -4591,7 +4591,7 @@ mod tests {
     /// user is asked, and the refusal names where this agent writes.
     #[test]
     fn grants_that_could_never_apply_are_refused_up_front() {
-        use crate::assistant::sandbox::{SandboxPathAccess, SandboxPathGrant};
+        use crate::assistant::sandbox::{profile::SandboxPathGrant, SandboxPathAccess};
         use FilesystemPathAccess::{ReadOnly, ReadWrite};
         let temp = tempdir().unwrap();
         let home = temp.path().canonicalize().unwrap();
@@ -4623,7 +4623,7 @@ mod tests {
             (&member, &own, "you write only under your craft folder, "),
             (&main, &workspace_memory, "you write CLAI state only under "),
         ] {
-            let writes_under = |dir: &Path| format!("{writes_under}`{}`", dir.display());
+            let writes_under = |dir: &Path| format!("{writes_under}`{}`", agent_path_string(dir));
             for (path, access) in [(other.join("x.md"), ReadOnly), (agents.clone(), ReadOnly)] {
                 let refusal = grant_refusal(policy, &path, access).unwrap();
                 assert!(refusal.contains("no grant reaches"), "{refusal}");
