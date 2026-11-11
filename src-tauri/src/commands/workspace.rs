@@ -3459,14 +3459,8 @@ async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), 
         .remove_workspace(&workspace_id)
         .ok_or_else(|| format!("Workspace {} not found.", workspace_id))?;
     // Dropping the index's pool handle does not close its connections, and
-    // Windows refuses to delete an open `data.sqlite`. `close` waits until
-    // every connection's worker thread has released the file — except that
-    // sqlx 0.8 returns early when a connection is still checked out while
-    // idle ones are closed, so also wait for the pool to drain.
-    workspace_pool.close().await;
-    while workspace_pool.size() > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    // Windows refuses to delete an open `data.sqlite`.
+    crate::db::close_pool(&workspace_pool).await;
 
     // Wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
     // `memory/`, plus any artifact files written into the workspace
@@ -5370,6 +5364,17 @@ mod tests {
     }
 
     #[cfg(unix)]
+    struct WritableOnDrop<'path>(&'path Path);
+
+    #[cfg(unix)]
+    impl Drop for WritableOnDrop<'_> {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[cfg(unix)]
     #[tokio::test]
     async fn failed_wipe_that_removes_the_workspace_still_broadcasts() {
         use std::os::unix::fs::PermissionsExt;
@@ -5379,14 +5384,15 @@ mod tests {
         let root = state.workspace_root(DETAILS_WORKSPACE_ID).unwrap();
         let parent = root.parent().unwrap();
         fs::set_permissions(parent, fs::Permissions::from_mode(0o555)).unwrap();
+        // Restores the mode even when an assertion panics, so the temp dir
+        // can still be cleaned up.
+        let _writable_again = WritableOnDrop(parent);
         if fs::create_dir(parent.join("probe")).is_ok() {
-            fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
             return; // running as root: the mode bits are advisory
         }
 
         let (result, removed) =
             delete_workspace_and_check_removed(state, DETAILS_WORKSPACE_ID).await;
-        fs::set_permissions(parent, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert!(result.is_err(), "the root cannot be removed");
         assert!(root.exists(), "a partial wipe left its root behind");

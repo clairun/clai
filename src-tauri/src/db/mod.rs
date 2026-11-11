@@ -116,6 +116,21 @@ pub(crate) async fn init_workspace_db(
     Ok(pool)
 }
 
+/// Close `pool` and wait until it holds no connection, so nothing keeps its
+/// database file open — Windows refuses to delete an open `data.sqlite`.
+///
+/// One `Pool::close` is not enough in sqlx 0.8: a connection whose return to
+/// the pool passed the closed check before `close` still lands in the idle
+/// queue, after `close` last swept it, and nothing closes it afterwards.
+/// Each further `close` sweeps the queue again.
+pub(crate) async fn close_pool(pool: &DbPool) {
+    pool.close().await;
+    while pool.size() > 0 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        pool.close().await;
+    }
+}
+
 /// A unit enum stored in a TEXT column: the bare string serde gives it
 /// (`RunStatus::Running` → `running`). Pair with [`parse_enum_text`].
 pub(crate) fn enum_text<T: Serialize>(value: &T) -> Result<String, String> {
@@ -784,5 +799,30 @@ mod tests {
             .map(|(_, statuses)| statuses.trim())
             .expect("the index is partial on run status");
         assert_eq!(predicate, crate::assistant::repository::ACTIVE_RUN_STATUSES);
+    }
+
+    /// A connection dropped just before the pool closes is still on its way
+    /// back: the spawned return has passed sqlx's closed check and awaits its
+    /// liveness ping. It is the pool's only connection, so `Pool::close`
+    /// sweeps an empty idle queue and only waits for its permit — released
+    /// after the connection is parked in the queue.
+    #[tokio::test]
+    async fn close_pool_closes_a_connection_returned_while_closing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_lazy_with(
+                SqliteConnectOptions::new()
+                    .filename(tmp.path().join("data.sqlite"))
+                    .create_if_missing(true),
+            );
+        drop(pool.acquire().await.expect("acquire"));
+        // Run the spawned return up to its ping before the pool closes.
+        tokio::task::yield_now().await;
+
+        tokio::time::timeout(Duration::from_secs(10), close_pool(&pool))
+            .await
+            .expect("close_pool must not wait for a connection nothing will close");
+        assert_eq!(pool.size(), 0);
     }
 }
