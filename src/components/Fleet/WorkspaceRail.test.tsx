@@ -43,6 +43,7 @@ const rail = (
     activeRuns={{}}
     collapsed={false}
     onToggleCollapsed={noop}
+    onOpenFleet={noop}
     onSelect={noop}
     onCreate={noop}
     onRunNow={noop}
@@ -459,5 +460,30 @@ describe('WorkspaceRail sections', () => {
     );
     expect(screen.queryByText('Starred')).toBeNull();
     expect(screen.queryByText('Recent')).toBeNull();
+  });
+});
+
+describe('WorkspaceRail Fleet button', () => {
+  it.each([
+    { collapsed: false, label: 'Fleet' },
+    { collapsed: true, label: '' },
+  ])('opens the Fleet from the rail (collapsed: $collapsed)', async ({ collapsed, label }) => {
+    const onOpenFleet = vi.fn();
+    renderRail([entry('a', 'Alpha')], { collapsed, onOpenFleet });
+    const button = screen.getByRole('button', { name: 'Open Fleet' });
+    expect(button).toHaveTextContent(label);
+    expect(button).toHaveAttribute('title', 'Open Fleet (Ctrl/Cmd+Shift+M)');
+    await userEvent.click(button);
+    expect(onOpenFleet).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the Fleet button out of the footer row that holds the update badge and Settings', () => {
+    renderRail([entry('a', 'Alpha')], {
+      footer: <><button type="button">Restart to install</button><button type="button">Settings</button></>,
+    });
+    // That row grows with the update state; sharing it pushed Settings under the badge.
+    const settingsRow = screen.getByRole('button', { name: 'Settings' }).parentElement;
+    expect(settingsRow).toContainElement(screen.getByRole('button', { name: 'Restart to install' }));
+    expect(settingsRow).not.toContainElement(screen.getByRole('button', { name: 'Open Fleet' }));
   });
 });
