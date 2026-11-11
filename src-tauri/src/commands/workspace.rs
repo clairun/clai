@@ -17,6 +17,7 @@ use crate::config::{
     FilesystemPathGrant, GrantOrigin, WorkspaceAgent, WorkspaceConfig,
 };
 use crate::db::DbPool;
+use crate::fs_removal::remove_dir_all_forcing_permissions;
 use crate::workspace_index::{WorkspaceIndex, WorkspaceLocator};
 use crate::AppState;
 use serde::{Deserialize, Serialize};
@@ -3190,105 +3191,6 @@ pub fn get_scheduler_paused(state: State<'_, AppState>) -> Result<bool, String> 
     Ok(config_manager.get().scheduler_paused)
 }
 
-/// Give the owner write access to one entry, so the tree it belongs to can
-/// be deleted.
-///
-/// On Unix only directories are touched (`chmod u+rwx`): unlinking a file is
-/// governed by its *parent* directory's bits, never its own, so relaxing file
-/// modes would be collateral damage for nothing. On Windows the read-only
-/// attribute is cleared on both — std's `remove_dir_all` already deletes
-/// read-only entries on NTFS, but its FAT32 fallback does not. Neither
-/// platform's ACLs are touched; a `deny write` ACE still blocks deletion.
-///
-/// Never call this on a symlink: `fs::set_permissions` resolves it and would
-/// change the target's permissions, outside the tree being deleted.
-fn grant_owner_write(path: &Path, metadata: &fs::Metadata) -> std::io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        if !metadata.is_dir() {
-            return Ok(());
-        }
-        let mut permissions = metadata.permissions();
-        let mode = permissions.mode();
-        if mode & 0o700 == 0o700 {
-            return Ok(());
-        }
-        permissions.set_mode(mode | 0o700);
-        fs::set_permissions(path, permissions)
-    }
-    #[cfg(not(unix))]
-    {
-        let mut permissions = metadata.permissions();
-        if !permissions.readonly() {
-            return Ok(());
-        }
-        // The lint warns that this is world-writable on Unix; this block
-        // only compiles off Unix, where clearing the read-only attribute is
-        // exactly the operation wanted.
-        #[allow(clippy::permissions_set_readonly_false)]
-        permissions.set_readonly(false);
-        fs::set_permissions(path, permissions)
-    }
-}
-
-/// Walk `root` granting owner write on the way down, best effort. Each
-/// directory is chmod-ed *before* its entries are listed, which is what lets
-/// the walk descend into a directory whose read or execute bits were stripped
-/// too (`0000`, `0300`): after the chmod it can be listed, before it cannot.
-///
-/// Symlinks are skipped, not followed: `remove_dir_all` unlinks them without
-/// entering, and chmod-ing one would reach outside the tree. The walk is
-/// path-based where the removal it precedes is `openat`-hardened, so a
-/// concurrent symlink swap inside the tree could in principle redirect a
-/// chmod; the blast radius is owner bits on a path the user owns and is
-/// deleting.
-fn grant_owner_write_recursively(root: &Path) {
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(path) = stack.pop() {
-        let Ok(metadata) = fs::symlink_metadata(&path) else {
-            continue;
-        };
-        if metadata.is_symlink() {
-            continue;
-        }
-        if let Err(error) = grant_owner_write(&path, &metadata) {
-            tracing::debug!(path = %path.display(), "Could not grant write access: {}", error);
-        }
-        if !metadata.is_dir() {
-            continue;
-        }
-        let Ok(entries) = fs::read_dir(&path) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            stack.push(entry.path());
-        }
-    }
-}
-
-/// `fs::remove_dir_all` that also clears the one obstacle the user owns and
-/// would otherwise have to clear by hand: directories inside the tree with
-/// their write bit stripped. Go's module cache (`pkg/mod`) and Cargo's
-/// registry sources publish theirs as `0555`, so a workspace that ever ran
-/// `go build` cannot be deleted — plain `rm -rf` fails on it too, and
-/// ownership does not help, because on Unix it is the *directory's* write bit
-/// that permits unlinking its children.
-///
-/// The chmod pass only runs after a `PermissionDenied`, so the common case
-/// pays nothing, and it stays inside `root`. When the retry fails anyway, the
-/// directories it relaxed keep their new modes — acceptable for a tree the
-/// user asked to delete, and visible to them since the error is surfaced.
-fn remove_dir_all_forcing_permissions(root: &Path) -> std::io::Result<()> {
-    match fs::remove_dir_all(root) {
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-            grant_owner_write_recursively(root);
-            fs::remove_dir_all(root)
-        }
-        result => result,
-    }
-}
-
 /// Put a workspace back in the index after its deletion failed — unless the
 /// partial wipe already destroyed it.
 ///
@@ -3616,113 +3518,6 @@ mod tests {
         );
     }
 
-    // A workspace that ever ran `go build` carries a module cache whose
-    // directories are 0555 by design. Deleting it used to fail with EACCES —
-    // `rm -rf` fails on it too — even though the user owns every byte.
-    #[cfg(unix)]
-    #[test]
-    fn remove_dir_all_forcing_permissions_deletes_a_read_only_subtree() {
-        use std::os::unix::fs::PermissionsExt;
-
-        fn build_module_cache(parent: &Path) -> PathBuf {
-            let root = parent.join("ws");
-            let cache = root.join(".gopath/pkg/mod/gopkg.in/yaml.v3@v3.0.1");
-            fs::create_dir_all(cache.join("nested")).unwrap();
-            fs::write(cache.join("yaml.go"), "package yaml").unwrap();
-            fs::write(cache.join("nested/decode.go"), "package yaml").unwrap();
-            for dir in [cache.join("nested"), cache.clone()] {
-                fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
-            }
-            root
-        }
-
-        let parent = tempfile::tempdir().unwrap();
-        let root = build_module_cache(parent.path());
-
-        // Guard the fixture: as root the write bits are advisory, and every
-        // assertion below would pass without the code under test.
-        if fs::write(
-            root.join(".gopath/pkg/mod/gopkg.in/yaml.v3@v3.0.1/probe"),
-            "x",
-        )
-        .is_ok()
-        {
-            return;
-        }
-        assert!(
-            fs::remove_dir_all(&root).is_err(),
-            "fixture must be undeletable by a plain remove_dir_all"
-        );
-
-        // Same fixture again, deleted the way the app now does it. (The
-        // first one is left for `remove_dir_all_forcing_permissions` to
-        // clear as well, so the TempDir can clean itself up on drop.)
-        let second = build_module_cache(&parent.path().join("second"));
-        remove_dir_all_forcing_permissions(&second).unwrap();
-        assert!(!second.exists());
-        remove_dir_all_forcing_permissions(&root).unwrap();
-        assert!(!root.exists());
-    }
-
-    // A directory that lost read and execute along with write cannot even be
-    // listed until it is chmod-ed, which is why the walk relaxes each
-    // directory *before* reading its entries. Chmod-ing after the listing
-    // leaves the inner 0555 directory untouched and the retry still fails.
-    #[cfg(unix)]
-    #[test]
-    fn remove_dir_all_forcing_permissions_descends_into_an_unreadable_directory() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let parent = tempfile::tempdir().unwrap();
-        let root = parent.path().join("ws");
-        let outer = root.join("outer");
-        let inner = outer.join("inner");
-        fs::create_dir_all(&inner).unwrap();
-        fs::write(inner.join("file"), "x").unwrap();
-        fs::set_permissions(&inner, fs::Permissions::from_mode(0o555)).unwrap();
-        fs::set_permissions(&outer, fs::Permissions::from_mode(0o000)).unwrap();
-
-        if fs::read_dir(&outer).is_ok() {
-            return; // running as root: the mode bits are advisory
-        }
-
-        remove_dir_all_forcing_permissions(&root).unwrap();
-        assert!(!root.exists());
-    }
-
-    // The walk must not reach outside the tree: `fs::set_permissions` follows
-    // symlinks. On Linux a symlink's own mode is already 0777, so the
-    // `is_symlink` guard in the walk is belt-and-braces there and this test
-    // passes without it; the guard earns its keep on Windows, where clearing
-    // the read-only attribute would land on the target.
-    #[cfg(unix)]
-    #[test]
-    fn remove_dir_all_forcing_permissions_does_not_chmod_through_symlinks() {
-        use std::os::unix::fs::PermissionsExt;
-
-        let parent = tempfile::tempdir().unwrap();
-        let outsider = parent.path().join("outsider");
-        fs::create_dir_all(outsider.join("child")).unwrap();
-        fs::set_permissions(&outsider, fs::Permissions::from_mode(0o555)).unwrap();
-
-        let root = parent.path().join("ws");
-        let locked = root.join("locked");
-        fs::create_dir_all(&locked).unwrap();
-        std::os::unix::fs::symlink(&outsider, root.join("link")).unwrap();
-        fs::write(locked.join("file"), "x").unwrap();
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o555)).unwrap();
-
-        if fs::write(locked.join("probe"), "x").is_ok() {
-            return;
-        }
-
-        remove_dir_all_forcing_permissions(&root).unwrap();
-        assert!(!root.exists());
-        assert!(outsider.exists(), "the symlink target must survive");
-        let mode = fs::metadata(&outsider).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o555, "the symlink target must keep its permissions");
-    }
-
     fn locator(id: &str, root: &Path) -> WorkspaceLocator {
         WorkspaceLocator {
             id: id.to_string(),
@@ -3826,7 +3621,7 @@ mod tests {
     fn remove_workspace_root_does_not_restore_a_workspace_whose_config_is_gone() {
         use std::os::unix::fs::PermissionsExt;
 
-        let parent = tempfile::tempdir().unwrap();
+        let parent = crate::fs_removal::ForcedTempDir::new();
         let holder = parent.path().join("holder");
         let root = holder.join("ws");
         fs::create_dir_all(&root).unwrap();
@@ -3835,7 +3630,6 @@ mod tests {
 
         if fs::create_dir(holder.join("probe")).is_ok() {
             // Running as root: the mode bits are advisory and nothing fails.
-            fs::set_permissions(&holder, fs::Permissions::from_mode(0o755)).unwrap();
             return;
         }
 
@@ -3858,8 +3652,6 @@ mod tests {
         // instances on this: unreachable workspace, so its runtime state has
         // to go with it.
         assert!(!failure.restored);
-
-        fs::set_permissions(&holder, fs::Permissions::from_mode(0o755)).unwrap();
     }
 
     // A root that is already gone is a deletion that already happened, not

@@ -32,6 +32,7 @@ mod assistant;
 mod commands;
 mod config;
 mod db;
+mod fs_removal;
 mod main_window;
 mod mcp;
 mod paths;
