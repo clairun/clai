@@ -335,9 +335,13 @@ mod tests {
         );
     }
 
+    fn failed_path(dir: &str) -> PathBuf {
+        PathBuf::from("/tmp/workspaces").join(dir)
+    }
+
     fn fail(index: &mut WorkspaceIndex, dir: &str) {
         index.load_failures.push(WorkspaceLoadFailure {
-            path: PathBuf::from("/tmp/workspaces").join(dir),
+            path: failed_path(dir),
             reason: LoadFailureReason::InvalidConfig { line: 1, column: 1 },
         });
     }
@@ -357,13 +361,14 @@ mod tests {
     fn load_failure_under_prefix_blocks_prefix_but_not_exact_id() {
         let (config, mut index) = fixture();
         index.by_id.remove(B);
-        fail(&mut index, "12345678-ffff-0000-0000-000000000000");
+        let dir = "12345678-ffff-0000-0000-000000000000";
+        fail(&mut index, dir);
         let open = |name: &str| resolve(Command::Open(name.into()), &config, &index);
         let error = open("12345678").unwrap_err();
         assert_eq!(error.code, 1);
         assert!(error
             .message
-            .contains("/tmp/workspaces/12345678-ffff-0000-0000-000000000000"));
+            .contains(&failed_path(dir).display().to_string()));
         assert_eq!(open(A), Ok(LaunchRequest::Open(A.into())));
     }
 
