@@ -431,25 +431,34 @@ fn service_owner(connection: &Connection) -> zbus::Result<String> {
         .deserialize()
 }
 
+/// Body of `org.freedesktop.Notifications.Notify`, signature `(susssasa{sv}i)`.
+type NotifyArgs<'a> = (
+    &'a str,
+    u32,
+    &'a str,
+    &'a str,
+    &'a str,
+    &'a [&'a str],
+    HashMap<&'a str, zbus::zvariant::Value<'a>>,
+    i32,
+);
+
+fn notify_args(body: &str) -> NotifyArgs<'_> {
+    (
+        "CLAI",
+        0,
+        "",
+        "CLAI",
+        body,
+        &["default", ""],
+        HashMap::new(),
+        -1,
+    )
+}
+
 fn notify(connection: &Connection, owner: &str, body: &str) -> zbus::Result<u32> {
-    let hints = HashMap::<&str, zbus::zvariant::Value<'_>>::new();
     connection
-        .call_method(
-            Some(owner),
-            PATH,
-            Some(BUS),
-            "Notify",
-            &(
-                "CLAI",
-                0u32,
-                "",
-                "CLAI",
-                body,
-                ["default", ""],
-                hints,
-                -1i32,
-            ),
-        )?
+        .call_method(Some(owner), PATH, Some(BUS), "Notify", &notify_args(body))?
         .body()
         .deserialize()
 }
@@ -469,6 +478,15 @@ fn close_server(connection: &Connection, owner: &str, server_id: u32) -> zbus::R
 mod tests {
     use super::*;
     use std::sync::mpsc;
+
+    #[test]
+    fn notify_body_matches_freedesktop_signature() {
+        let message = zbus::Message::method_call(PATH, "Notify")
+            .unwrap()
+            .build(&notify_args("body"))
+            .unwrap();
+        assert_eq!(message.body().signature().to_string(), "(susssasa{sv}i)");
+    }
 
     #[test]
     fn cancellation_before_delivery_skips_notify() {
