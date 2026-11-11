@@ -14,6 +14,10 @@ use crate::AppState;
 const PREFIX: &str = "run.clai.CLAI-workspace-";
 const SUFFIX: &str = ".desktop";
 const OWNER_KEY: &str = "X-CLAI-Workspace-ID=";
+// The deb and rpm bundles (and the AUR package built from the deb) install the
+// app icon under the binary name. Flatpak names it after the app ID, but
+// launchers are not written there.
+const ICON: &str = "clai";
 static LAUNCHER_LOCK: Mutex<()> = Mutex::new(());
 
 fn applications_dir() -> Result<PathBuf, String> {
@@ -55,8 +59,8 @@ fn escaped_name(title: &str) -> String {
 
 fn entry(id: &str, title: &str) -> String {
     format!(
-        "[Desktop Entry]\nType=Application\nName={} — CLAI\nExec=clai open {}\nIcon=run.clai.CLAI\nTerminal=false\nCategories=Development;\n{}{}\n",
-        escaped_name(title), id, OWNER_KEY, id
+        "[Desktop Entry]\nType=Application\nName={} — CLAI\nExec=clai open {}\nIcon={}\nTerminal=false\nCategories=Development;\n{}{}\n",
+        escaped_name(title), id, ICON, OWNER_KEY, id
     )
 }
 
@@ -267,6 +271,7 @@ mod tests {
         let content = fs::read_to_string(&path).unwrap();
         assert!(content.contains("Name=a\\\\b\\nc\\td\\;\\r  — CLAI"));
         assert!(content.contains(&format!("Exec=clai open {A}\n")));
+        assert!(content.contains("\nIcon=clai\n"));
         fs::write(&path, "[Desktop Entry]\nName=Other\n").unwrap();
         assert!(upsert_in(dir, A, "Mine").is_err());
         remove_in(dir, A).unwrap();
@@ -311,6 +316,20 @@ mod tests {
             state.workspace_index.read().unwrap().by_id[A].starred_at,
             42
         );
+    }
+
+    #[test]
+    fn startup_reconciliation_refreshes_owned_launchers_with_stale_icon() {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = dir.path();
+        let path = launcher_path(dir, A).unwrap();
+        let stale = format!(
+            "[Desktop Entry]\nType=Application\nName=Current — CLAI\nExec=clai open {A}\nIcon=run.clai.CLAI\nTerminal=false\nCategories=Development;\n{OWNER_KEY}{A}\n"
+        );
+        fs::write(&path, stale).unwrap();
+        reconcile_in(dir, &[(A.into(), "Current".into())], true).unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), entry(A, "Current"));
+        assert!(entry(A, "Current").contains("\nIcon=clai\n"));
     }
 
     #[test]
