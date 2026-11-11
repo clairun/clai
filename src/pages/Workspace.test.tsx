@@ -238,6 +238,7 @@ const FleetOutlet = ({ attentionCounts = { b: 1 }, withRail = false }: { attenti
     {withRail && !railHidden && <WorkspaceRail
       id="workspace-rail"
       onOpenFleet={() => {}}
+      onOpenGlobalSettings={() => {}}
       workspaces={LISTED_WORKSPACES}
       selectedId="a"
       attentionCounts={attentionCounts}

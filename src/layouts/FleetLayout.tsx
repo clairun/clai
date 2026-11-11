@@ -558,7 +558,8 @@ const FleetLayout = () => {
           id="workspace-rail"
           onOpenFleet={openFleet}
           onOpenWindow={(id) => { void openWorkspaceWindow(id).catch((err) => setError(errText(err, 'Failed to open a new window.'))); }}
-          footer={<>{railCollapsed ? <CompactUpdateAccess /> : <AppUpdateBadge />}<button type="button" onClick={() => openGlobalSettings()} aria-label="Open settings" title="Settings">{railCollapsed ? "⚙" : "Settings"}</button></>}
+          onOpenGlobalSettings={openGlobalSettings}
+          updateNotice={railCollapsed ? <CompactUpdateAccess /> : <AppUpdateBadge />}
           workspaces={workspaces}
           selectedId={selectedId}
           attentionCounts={attentionCounts}
