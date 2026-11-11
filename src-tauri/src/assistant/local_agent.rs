@@ -1820,29 +1820,22 @@ async fn run_codex_turn_app_server(
 
     // Handshake: initialize -> thread/start|resume. Startup notifications are
     // ignored by the request/await helper.
-    aps_request_await(
+    let initialized = aps_request_await(
         &mut transport,
         cancel_token,
         aps::initialize_request(1, client_version),
     )
     .await?;
+    let thread_config = aps::thread_config(mcp_url, MCP_TOKEN_ENV, tool_timeout, &initialized);
     let thread_request = match existing_thread_id.as_deref() {
-        Some(thread_id) => aps::thread_resume_request(
-            2,
-            thread_id,
-            model,
-            mcp_url,
-            MCP_TOKEN_ENV,
-            tool_timeout,
-            &developer_instructions,
-        ),
+        Some(thread_id) => {
+            aps::thread_resume_request(2, thread_id, model, thread_config, &developer_instructions)
+        }
         None => aps::thread_start_request(
             2,
             cwd.as_deref(),
             model,
-            mcp_url,
-            MCP_TOKEN_ENV,
-            tool_timeout,
+            thread_config,
             &developer_instructions,
         ),
     };
@@ -2862,6 +2855,10 @@ fn add_codex_common_args(
             "mcp_servers.clai.tool_timeout_sec={}",
             crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT.as_secs()
         ))
+        // Unlike the app-server path, `exec` learns no Codex version, so it
+        // cannot safely send `features.code_mode.direct_only_tool_namespaces`
+        // (see `codex_app_server::thread_config`): with a code-mode model a
+        // CLAI call waiting on the user can still be terminated here.
         // Bypass Codex's own approval/sandbox layer entirely — this is the
         // direct parallel of `--permission-mode bypassPermissions` that we pass
         // to Claude Code. CLAI provides the external sandbox (our MCP
