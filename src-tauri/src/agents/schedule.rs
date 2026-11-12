@@ -71,6 +71,16 @@ pub fn upcoming_cron_runs(
         .collect())
 }
 
+/// Whether the cron schedule fires exactly at `unix_ms`.
+pub fn cron_fires_at(expression: &str, timezone: &str, unix_ms: i64) -> Result<bool, String> {
+    let schedule = parse_cron(expression)?;
+    let at = parse_timezone(timezone)?
+        .timestamp_millis_opt(unix_ms)
+        .single()
+        .ok_or_else(|| format!("Invalid timestamp: {}", unix_ms))?;
+    Ok(schedule.includes(at))
+}
+
 fn compute_next_cron_run_at(
     expression: &str,
     timezone: &str,
@@ -97,11 +107,110 @@ fn parse_cron(expression: &str) -> Result<Schedule, String> {
     if trimmed.is_empty() {
         return Err("Cron expression is empty.".to_string());
     }
-    // Users write 5-field Vixie cron (`min hour dom mon dow`). The
-    // `cron` crate requires a leading seconds field; pad with `"0 "` so
-    // schedules fire on the minute boundary.
-    let padded = format!("0 {}", trimmed);
+    // Users write 5-field Vixie cron (`min hour dom mon dow`), optionally
+    // followed by a year. The `cron` crate requires a leading seconds
+    // field; pad with `"0 "` so schedules fire on the minute boundary.
+    let mut fields = cron_fields(trimmed);
+    if !(5..=6).contains(&fields.len()) {
+        return Err("Invalid cron expression: it must have 5 fields \
+                    (minute hour day-of-month month day-of-week)."
+            .to_string());
+    }
+    fields[4] = day_of_week_names(&fields[4])?;
+    let padded = format!("0 {}", fields.join(" "));
     Schedule::from_str(&padded).map_err(|e| format!("Invalid cron expression: {}", e))
+}
+
+/// Splits on whitespace, rejoining tokens around `,`, `-` and `/`: the
+/// `cron` crate accepted spaces there (`1, 3`), so stored expressions may
+/// contain them.
+fn cron_fields(expression: &str) -> Vec<String> {
+    const JOINERS: [char; 3] = [',', '-', '/'];
+    let mut fields: Vec<String> = Vec::new();
+    for token in expression.split_whitespace() {
+        match fields.last_mut() {
+            Some(last) if last.ends_with(JOINERS) || token.starts_with(JOINERS) => {
+                last.push_str(token);
+            }
+            _ => fields.push(token.to_owned()),
+        }
+    }
+    fields
+}
+
+const DAY_NAMES: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+
+/// Rewrites a Vixie day-of-week field (0 or 7 = Sunday, 1 = Monday) as
+/// the list of day names it selects. The `cron` crate numbers days
+/// 1 = Sunday … 7 = Saturday, so numbers can't be passed through, and
+/// a range like `5-7` has no equivalent there; names mean the same day
+/// in both.
+fn day_of_week_names(field: &str) -> Result<String, String> {
+    let mut selected = [false; 7];
+    for item in field.split(',') {
+        let days = day_of_week_item(item).ok_or_else(|| {
+            let shown = if item.is_empty() { field } else { item };
+            format!(
+                "Invalid cron expression: `{}` is not a valid day of the week (0-7 or Sun-Sat).",
+                shown
+            )
+        })?;
+        for day in days {
+            selected[day % 7] = true;
+        }
+    }
+    let names: Vec<&str> = DAY_NAMES
+        .iter()
+        .zip(selected)
+        .filter_map(|(name, on)| on.then_some(*name))
+        .collect();
+    Ok(names.join(","))
+}
+
+/// Days (0..=7) selected by one list item: `*`, a day, or a range, with
+/// an optional `/step`. As in cronie, a range ending in Sunday (`Fri-Sun`,
+/// `5-0`) ends at 7. cronie rejects a single day with a step; the `cron`
+/// crate accepted it, so it stays valid and runs to 7 (`1/2` = Mon, Wed,
+/// Fri, Sun).
+fn day_of_week_item(item: &str) -> Option<impl Iterator<Item = usize>> {
+    let (base, step) = match item.split_once('/') {
+        Some((base, step)) => (base, Some(number(step).filter(|&step| step > 0)?)),
+        None => (item, None),
+    };
+    let (first, last) = if base == "*" || base == "?" {
+        (0, 7)
+    } else if let Some((first, last)) = base.split_once('-') {
+        let (first, last) = (day_of_week(first)?, day_of_week(last)?);
+        (first, if last == 0 && first > 0 { 7 } else { last })
+    } else {
+        let day = day_of_week(base)?;
+        (day, if step.is_some() { 7 } else { day })
+    };
+    (first <= last).then(|| (first..=last).step_by(step.unwrap_or(1)))
+}
+
+fn day_of_week(token: &str) -> Option<usize> {
+    if let Some(day) = number(token) {
+        return (day <= 7).then_some(day);
+    }
+    let day = match token.to_ascii_lowercase().as_str() {
+        "sun" | "sunday" => 0,
+        "mon" | "monday" => 1,
+        "tue" | "tues" | "tuesday" => 2,
+        "wed" | "wednesday" => 3,
+        "thu" | "thurs" | "thursday" => 4,
+        "fri" | "friday" => 5,
+        "sat" | "saturday" => 6,
+        _ => return None,
+    };
+    Some(day)
+}
+
+fn number(token: &str) -> Option<usize> {
+    if token.is_empty() || !token.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    token.parse().ok()
 }
 
 fn parse_timezone(name: &str) -> Result<chrono_tz::Tz, String> {
@@ -238,6 +347,181 @@ mod tests {
         .unwrap();
         assert!(reserialized.contains("intervalMinutes"));
         assert!(!reserialized.contains("interval_minutes"));
+    }
+
+    /// Sunday 2026-11-08 00:00 UTC.
+    fn week_start() -> i64 {
+        chrono::Utc
+            .with_ymd_and_hms(2026, 11, 8, 0, 0, 0)
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    /// The first `n` UTC fire times of `expression` after `week_start()`.
+    fn runs(expression: &str, n: usize) -> Result<Vec<chrono::DateTime<chrono::Utc>>, String> {
+        let kind = ScheduleKind::Cron {
+            expression: expression.to_string(),
+            timezone: "UTC".to_string(),
+        };
+        Ok(upcoming_cron_runs(&kind, week_start(), n)?
+            .into_iter()
+            .map(|ms| chrono::Utc.timestamp_millis_opt(ms).unwrap())
+            .collect())
+    }
+
+    /// Weekdays on which `0 9 * * <dow>` fires during the week starting
+    /// at `week_start()`, in firing order.
+    fn fire_days(dow: &str) -> Result<Vec<chrono::Weekday>, String> {
+        use chrono::Datelike;
+        let week_end = week_start() + 7 * 24 * 60 * 60 * 1000;
+        Ok(runs(&format!("0 9 * * {dow}"), 8)?
+            .into_iter()
+            .filter(|run| run.timestamp_millis() < week_end)
+            .map(|run| run.weekday())
+            .collect())
+    }
+
+    fn utc(
+        year: i32,
+        month: u32,
+        day: u32,
+        hour: u32,
+        minute: u32,
+    ) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc
+            .with_ymd_and_hms(year, month, day, hour, minute, 0)
+            .unwrap()
+    }
+
+    #[test]
+    fn cron_fires_at_matches_only_fire_times() {
+        let monday_9 = utc(2026, 11, 9, 9, 0).timestamp_millis();
+        assert_eq!(cron_fires_at("0 9 * * 1", "UTC", monday_9), Ok(true));
+        assert_eq!(
+            cron_fires_at("0 9 * * 1", "UTC", monday_9 - 24 * 60 * 60 * 1000),
+            Ok(false)
+        );
+        assert_eq!(
+            cron_fires_at("0 9 * * 1", "UTC", monday_9 + 60_000),
+            Ok(false)
+        );
+        assert!(cron_fires_at("0 9 * * 8", "UTC", monday_9).is_err());
+    }
+
+    #[test]
+    fn day_of_week_numbers_follow_standard_cron() {
+        use chrono::Weekday::*;
+        let cases: &[(&str, &[chrono::Weekday])] = &[
+            ("1", &[Mon]),
+            ("1-5", &[Mon, Tue, Wed, Thu, Fri]),
+            ("0", &[Sun]),
+            ("7", &[Sun]),
+            ("6", &[Sat]),
+            ("5-7", &[Sun, Fri, Sat]),
+            ("0-6", &[Sun, Mon, Tue, Wed, Thu, Fri, Sat]),
+            ("1,3,5", &[Mon, Wed, Fri]),
+            ("0,7", &[Sun]),
+            ("*/2", &[Sun, Tue, Thu, Sat]),
+            ("1-5/2", &[Mon, Wed, Fri]),
+            ("5-7/2", &[Sun, Fri]),
+            ("1/3", &[Sun, Mon, Thu]),
+            ("6-7", &[Sun, Sat]),
+            ("7-7", &[Sun]),
+            ("0-7", &[Sun, Mon, Tue, Wed, Thu, Fri, Sat]),
+            ("?/2", &[Sun, Tue, Thu, Sat]),
+            ("*", &[Sun, Mon, Tue, Wed, Thu, Fri, Sat]),
+            ("?", &[Sun, Mon, Tue, Wed, Thu, Fri, Sat]),
+        ];
+        for (dow, expected) in cases {
+            assert_eq!(&fire_days(dow).unwrap(), expected, "dow `{dow}`");
+        }
+    }
+
+    #[test]
+    fn day_of_week_names_are_unchanged_and_mix_with_numbers() {
+        use chrono::Weekday::*;
+        let cases: &[(&str, &[chrono::Weekday])] = &[
+            ("MON", &[Mon]),
+            ("SUN", &[Sun]),
+            ("sat", &[Sat]),
+            ("Thurs", &[Thu]),
+            ("MON-FRI", &[Mon, Tue, Wed, Thu, Fri]),
+            ("Mon-Fri/2", &[Mon, Wed, Fri]),
+            ("SUN,3,Fri", &[Sun, Wed, Fri]),
+            ("Mon-3", &[Mon, Tue, Wed]),
+            ("5-Sat", &[Fri, Sat]),
+            ("Fri-Sun", &[Sun, Fri, Sat]),
+            ("5-0", &[Sun, Fri, Sat]),
+            ("Sun-Sun", &[Sun]),
+            ("Sat-Sun", &[Sun, Sat]),
+            ("Mon/2", &[Sun, Mon, Wed, Fri]),
+        ];
+        for (dow, expected) in cases {
+            assert_eq!(&fire_days(dow).unwrap(), expected, "dow `{dow}`");
+        }
+    }
+
+    #[test]
+    fn invalid_day_of_week_is_rejected() {
+        for dow in ["8", "0-8", "5-2", "Fri-Mon", "*/0", "1,", "Funday", "1-5/x"] {
+            let err = fire_days(dow).unwrap_err();
+            assert!(
+                err.starts_with("Invalid cron expression:") && err.contains("day of the week"),
+                "dow `{dow}`: {err}"
+            );
+        }
+        // `-1` joins the month field (`*-1`), leaving four fields.
+        assert!(fire_days("-1").unwrap_err().contains("5 fields"));
+    }
+
+    #[test]
+    fn empty_day_of_week_item_quotes_the_whole_field() {
+        for dow in ["1,", "1,,2", "Mon,"] {
+            let err = fire_days(dow).unwrap_err();
+            assert!(err.contains(&format!("`{dow}` is not")), "{err}");
+        }
+        // A leading comma joins the month field (`*,1`), leaving four fields.
+        assert!(fire_days(",1").unwrap_err().contains("5 fields"));
+    }
+
+    #[test]
+    fn spaces_around_list_range_and_step_separators_are_joined() {
+        use chrono::Weekday::*;
+        assert_eq!(fire_days("1, 3").unwrap(), [Mon, Wed]);
+        assert_eq!(fire_days("1 ,3").unwrap(), [Mon, Wed]);
+        assert_eq!(fire_days("1 - 3").unwrap(), [Mon, Tue, Wed]);
+        assert_eq!(fire_days("*/ 3").unwrap(), [Sun, Wed, Sat]);
+        assert_eq!(
+            runs("0, 30 9 * * 1", 2).unwrap(),
+            [utc(2026, 11, 9, 9, 0), utc(2026, 11, 9, 9, 30)]
+        );
+    }
+
+    #[test]
+    fn field_count_must_be_five_or_six_with_a_year() {
+        for expression in ["0 9 * *", "0 9 * * 1 2027 3"] {
+            let err = runs(expression, 1).unwrap_err();
+            assert!(
+                err.starts_with("Invalid cron expression:") && err.contains("5 fields"),
+                "`{expression}`: {err}"
+            );
+        }
+        assert_eq!(runs("0 9 * * 1 2026", 1).unwrap(), [utc(2026, 11, 9, 9, 0)]);
+    }
+
+    #[test]
+    fn other_fields_pass_through_unchanged() {
+        assert_eq!(
+            runs("0 9 1-5 JAN *", 6).unwrap(),
+            [
+                utc(2027, 1, 1, 9, 0),
+                utc(2027, 1, 2, 9, 0),
+                utc(2027, 1, 3, 9, 0),
+                utc(2027, 1, 4, 9, 0),
+                utc(2027, 1, 5, 9, 0),
+                utc(2028, 1, 1, 9, 0),
+            ]
+        );
     }
 
     #[test]
