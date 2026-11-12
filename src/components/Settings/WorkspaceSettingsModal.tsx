@@ -21,6 +21,7 @@ import type { WorkspaceAgentResponse, WorkspaceDetails } from '../../generated/b
 import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { identityFor } from '../Agents/agentIdentity';
+import { formatScheduleCadence } from '../../utils/scheduleFormat';
 import form from './SettingsForm.module.css';
 import shell from './SettingsShell.module.css';
 import styles from './WorkspaceSettingsModal.module.css';
@@ -44,14 +45,8 @@ const agentLabel = (agent: WorkspaceAgentResponse): string => (
 
 const scheduleSummary = (details: WorkspaceDetails | null): string => {
   if (!details?.scheduleEnabled) return 'Off';
-  const kind = details.scheduleKind;
-  let when = 'On';
-  if (kind?.type === 'cron') {
-    when = kind.expression;
-  } else if (kind?.type === 'interval') {
-    const mins = kind.intervalMinutes;
-    when = mins % 60 === 0 ? `Every ${mins / 60} h` : `Every ${mins} min`;
-  }
+  const cadence = formatScheduleCadence(details.scheduleKind);
+  const when = cadence ? cadence.charAt(0).toUpperCase() + cadence.slice(1) : 'On';
   return details.schedulePaused ? `${when} · paused` : when;
 };
 

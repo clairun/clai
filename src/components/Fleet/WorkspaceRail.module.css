@@ -581,7 +581,8 @@
 }
 
 /* Width of the action overlay: 24px icon buttons with 2px gaps — two buttons
-   (star, menu) normally, four (star, run, pause, menu) on scheduled rows.
+   (star, menu) normally, four (star, run, pause, menu) on scheduled rows,
+   three (star, resume, menu) on paused ones.
    Keep in sync with `.iconButton` width and `.rowActions` gap. */
 .row {
   --row-actions-overlay: 50px;
@@ -589,6 +590,10 @@
 
 .rowScheduled {
   --row-actions-overlay: 102px;
+}
+
+.rowScheduledPaused {
+  --row-actions-overlay: 76px;
 }
 
 .row:hover .rowActions,

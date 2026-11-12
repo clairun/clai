@@ -11,9 +11,9 @@ import type { WorkspaceListEntry } from '../../generated/bindings';
 import {
   CARD_STATUS_LABEL,
   deriveCardStatus,
-  formatScheduleLabel,
   num,
 } from '../../fleet/workspaceStatus';
+import { formatIntervalShort, formatScheduleDetail } from '../../utils/scheduleFormat';
 import {
   fixedRightAlignedMenuStyle,
   sameFloatingMenuStyle,
@@ -131,13 +131,10 @@ const ClockIcon = () => (
 );
 
 /** The cadence in a few characters, for the row's trailing schedule cue:
- *  "120m" for an interval, "cron" for a cron expression. The full label
- *  (`formatScheduleLabel`) goes to the tooltip and to screen readers. */
+ *  "2 h" or "90 min" for an interval, "cron" for a cron expression. The full
+ *  label (`formatScheduleDetail`) goes to the tooltip and to screen readers. */
 const shortScheduleLabel = (kind: WorkspaceListEntry['scheduleKind']): string => {
-  if (kind?.type === 'interval') {
-    const minutes = Number(kind.intervalMinutes ?? 0);
-    return Number.isFinite(minutes) && minutes > 0 ? `${minutes}m` : '';
-  }
+  if (kind?.type === 'interval') return formatIntervalShort(Number(kind.intervalMinutes ?? 0)) ?? '';
   return kind?.type === 'cron' ? 'cron' : '';
 };
 
@@ -394,7 +391,7 @@ const WorkspaceRail = ({
     const pending = attentionCounts[ws.id] || 0;
     const status = deriveCardStatus(ws, processing, pending > 0);
     const isSelected = ws.id === selectedId;
-    const scheduleLabel = formatScheduleLabel(ws.scheduleKind);
+    const scheduleLabel = formatScheduleDetail(ws.scheduleKind);
     const isPaused = !!ws.schedulePaused;
     const scheduleText = isPaused
       ? `Paused${scheduleLabel ? ` · ${scheduleLabel}` : ''}`
@@ -410,8 +407,9 @@ const WorkspaceRail = ({
       styles.row,
       isSelected ? styles.rowSelected : '',
       isUnread ? styles.rowUnread : '',
-      // Sizes the hover-action overlay (scheduled rows show two extra buttons).
-      ws.scheduleEnabled ? styles.rowScheduled : '',
+      // Sizes the hover-action overlay: running schedules add Run now and
+      // Pause, paused ones add Resume.
+      ws.scheduleEnabled ? (isPaused ? styles.rowScheduledPaused : styles.rowScheduled) : '',
       isRunNowSkipped ? styles.rowSkipped : '',
       // An open menu keeps its row's actions visible. Opening the menu moves
       // focus into it, and it is portaled to <body>, so the row loses
@@ -542,7 +540,7 @@ const WorkspaceRail = ({
               >
                 <StarIcon filled={isStarred} />
               </button>
-              {ws.scheduleEnabled && (
+              {ws.scheduleEnabled && !isPaused && (
                 <>
                   <button
                     type="button"
@@ -562,15 +560,30 @@ const WorkspaceRail = ({
                     className={styles.iconButton}
                     onClick={(e) => {
                       e.stopPropagation();
-                      onTogglePause(ws.id, isPaused);
+                      onTogglePause(ws.id, false);
                     }}
                     disabled={pauseBusyId === ws.id}
-                    title={isPaused ? 'Resume schedule' : 'Pause schedule'}
-                    aria-label={isPaused ? 'Resume schedule' : 'Pause schedule'}
+                    title="Pause schedule"
+                    aria-label="Pause schedule"
                   >
                     <PauseIcon />
                   </button>
                 </>
+              )}
+              {ws.scheduleEnabled && isPaused && (
+                <button
+                  type="button"
+                  className={styles.iconButton}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onTogglePause(ws.id, true);
+                  }}
+                  disabled={pauseBusyId === ws.id}
+                  title="Resume schedule"
+                  aria-label="Resume schedule"
+                >
+                  <RunIcon />
+                </button>
               )}
               <button
                 type="button"

@@ -222,14 +222,17 @@ const CREW = {
   displayName: 'Reviewer',
 };
 
-const renderModal = (initialSelection?: { kind: 'general' | 'schedule' | 'team' | 'agent'; agentId?: string }) => {
+const renderModal = (
+  initialSelection?: { kind: 'general' | 'schedule' | 'team' | 'agent'; agentId?: string },
+  details: Partial<WorkspaceDetails> = {},
+) => {
   const onClose = vi.fn();
   render(
     <WorkspaceSettingsModal
       isOpen
       onClose={onClose}
       workspaceId="ws-1"
-      details={{ ...DETAILS, assignedAgents: [CREW, MAIN] } as unknown as WorkspaceDetails}
+      details={{ ...DETAILS, assignedAgents: [CREW, MAIN], ...details } as unknown as WorkspaceDetails}
       initialSelection={initialSelection}
     />,
   );
@@ -240,6 +243,19 @@ const pageHeading = (name: string) => screen.getByRole('heading', { level: 2, na
 const nav = () => screen.getByRole('navigation', { name: 'Settings pages' });
 const navItem = (name: RegExp) => within(nav()).getByRole('button', { name });
 const saveBar = () => screen.queryByRole('region', { name: 'Unsaved changes' });
+
+describe('WorkspaceSettingsModal schedule summary', () => {
+  const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  it.each([
+    [{ type: 'cron', expression: '0 18 * * *', timezone: localZone }, false, 'Daily 18:00'],
+    [{ type: 'cron', expression: '0 9 * * 1-5', timezone: localZone }, false, 'Cron: 0 9 * * 1-5'],
+    [{ type: 'interval', intervalMinutes: 90 }, true, 'Every 1 h 30 min · paused'],
+  ] as const)('summarises %j (paused: %s) as %j', (scheduleKind, schedulePaused, summary) => {
+    renderModal(undefined, { scheduleEnabled: true, schedulePaused, scheduleKind });
+    expect(navItem(/^Schedule/)).toHaveTextContent(`Schedule${summary}`);
+  });
+});
 
 describe('WorkspaceSettingsModal navigation and per-page save', () => {
   beforeEach(() => {

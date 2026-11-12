@@ -4,6 +4,7 @@ import { mainIdentity, type AgentIdentity } from '../Agents/agentIdentity';
 import { useFleetStore } from '../../fleet/fleetStore';
 import { listWorkspaces } from '../../workspace/client';
 import type { WorkspaceListEntry } from '../../generated/bindings';
+import { formatCount } from '../../utils/formatCount';
 import { formatRelativeTime } from '../../utils/taskDisplay';
 import styles from './TerminalEmulator.module.css';
 
@@ -60,7 +61,7 @@ const WorkspacePicker = ({ onClose }: { onClose: () => void }) => {
       .map((w) => ({
         id: w.id,
         title: w.title || 'Workspace',
-        detail: `${Number(w.messageCount)} messages · ${formatRelativeTime(w.updatedAt)}`,
+        detail: `${formatCount(Number(w.messageCount))} messages · ${formatRelativeTime(w.updatedAt)}`,
         main: mainIdentity(),
       }));
     return [...onFleet, ...rest];
