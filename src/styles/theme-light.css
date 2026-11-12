@@ -28,10 +28,11 @@
 
   /* Primary backgrounds - warm undertones with hint of indigo */
   --color-bg-primary: #FDFCFB;
-  --color-bg-secondary: #F8F7F6;
-  --color-bg-tertiary: #F0EFED;
-  --color-bg-hover: #E8E7E4;
-  --color-bg-active: #DEDDD9;
+  --color-bg-secondary: #F6F5F3;
+  --color-bg-tertiary: #ECEBE8;
+  /* A visible step on the sunken tertiary too. */
+  --color-bg-hover: #E4E3E0;
+  --color-bg-active: #DAD9D5;  /* keeps its step above hover */
 
   /* Elevated surfaces */
   --color-bg-elevated: #FFFFFF;
@@ -195,13 +196,16 @@
      ============================================ */
 
   /* Based on warm dark: rgb(45, 42, 38) */
-  --color-text-primary: rgba(45, 42, 38, 0.92);
-  --color-text-secondary: rgba(45, 42, 38, 0.68);
-  --color-text-tertiary: rgba(45, 42, 38, 0.50);
-  /* Small past-tense text read all day (Fleet history): 4.8:1 on a card, where tertiary is 3.0:1. */
-  --color-text-past: rgba(45, 42, 38, 0.66);
+  /* Tertiary is held at 4.5:1, so the steps above it open up from the top. */
+  --color-text-primary: rgba(45, 42, 38, 0.95);
+  --color-text-secondary: rgba(45, 42, 38, 0.82);
+  /* At least 4.5:1 on the page, card and hover steps. */
+  --color-text-tertiary: rgba(45, 42, 38, 0.68);
+  /* Small past-tense text read all day (Fleet history): a step above tertiary. */
+  --color-text-past: rgba(45, 42, 38, 0.74);
   --color-text-disabled: rgba(45, 42, 38, 0.32);
-  --color-text-placeholder: rgba(45, 42, 38, 0.40);
+  /* Placeholders often carry the only instruction: 4.5:1 on an elevated surface. */
+  --color-text-placeholder: rgba(45, 42, 38, 0.66);
 
   /* Text on colored backgrounds */
   --color-text-on-primary: #FFFFFF;
@@ -219,7 +223,8 @@
   --color-border-medium: rgba(45, 42, 38, 0.14);
   --color-border-strong: rgba(45, 42, 38, 0.22);
   --color-border-hover: rgba(99, 102, 241, 0.35);
-  --color-border-focus: rgba(99, 102, 241, 0.50);
+  /* Focus rings: 3:1 against every surface step (WCAG 1.4.11). */
+  --color-border-focus: rgb(99, 102, 241);
   --color-border-active: rgba(99, 102, 241, 0.60);
 
   /* ============================================
@@ -404,6 +409,10 @@
      translucent tints can be built with rgba(var(--color-cyan-rgb), a). */
   --color-cyan-rgb: 6, 182, 212;
 
+  /* The integrated terminal stays dark in both themes (ANSI colours assume it).
+     WorkspaceTerminal.tsx reads it for xterm's own background at mount. */
+  --color-terminal-bg: #15181E;
+
   /* Code Blocks */
   --color-code-bg: rgba(99, 102, 241, 0.04);
   --color-code-border: rgba(99, 102, 241, 0.08);
@@ -416,6 +425,14 @@
   /* Dividers */
   --color-divider: rgba(45, 42, 38, 0.08);
   --color-divider-strong: rgba(45, 42, 38, 0.15);
+
+  /* ============================================
+     TYPOGRAPHY (shared by both themes)
+     ============================================ */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen', 'Ubuntu',
+    'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  /* No Linux family named: `monospace` is the user's fontconfig choice. */
+  --font-mono: ui-monospace, 'SF Mono', SFMono-Regular, Menlo, 'Cascadia Mono', Consolas, monospace;
 
   /* ============================================
      SPACING & LAYOUT

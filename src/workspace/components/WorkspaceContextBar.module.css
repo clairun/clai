@@ -61,10 +61,10 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 4px 10px;
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-full);
-  background: var(--color-overlay-02);
+  padding: 3px 8px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: var(--color-overlay-04);
   cursor: pointer;
   transition: border-color var(--transition-fast), background var(--transition-fast);
   /* Shrinkable (overrides the children's flex-shrink: 0): give ground to
@@ -75,8 +75,14 @@
 }
 
 .providerPicker:hover {
-  border-color: var(--color-border-medium);
-  background: var(--color-overlay-04);
+  background: var(--color-overlay-08);
+}
+
+/* The select draws no outline of its own; ring the whole pill instead,
+   inset so the scrolling bar cannot clip it. */
+.providerPicker:has(.providerSelect:focus-visible) {
+  outline: 2px solid var(--color-border-focus);
+  outline-offset: -2px;
 }
 
 .providerIcon {
@@ -88,7 +94,7 @@
   appearance: none;
   border: none;
   background: transparent;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
   color: var(--color-text-secondary);
   cursor: pointer;

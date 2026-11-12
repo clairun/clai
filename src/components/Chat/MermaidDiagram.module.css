@@ -17,17 +17,17 @@
   height: auto;
 }
 
-/* Raw-source fallback (streaming / not yet rendered) — mirrors .codeBlock
-   in MarkdownMessage.module.css. */
+/* Raw-source fallback (streaming / not yet rendered) — mirrors the
+   container in CodeBlock.module.css. */
 .codeFallback {
   margin: 12px 0;
   padding: 12px 16px;
-  background: var(--color-code-bg);
-  border: 1px solid var(--color-code-border);
-  border-radius: 6px;
+  background: var(--code-block-bg, var(--color-bg-tertiary));
+  border: none;
+  border-radius: var(--radius-md);
   overflow-x: auto;
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
-  font-size: 14px;
+  font-family: var(--font-mono);
+  font-size: 13px;
   line-height: 1.5;
 }
 

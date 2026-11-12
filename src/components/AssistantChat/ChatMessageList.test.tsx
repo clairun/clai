@@ -163,6 +163,22 @@ describe('ChatMessageList', () => {
     expect(screen.getByText('Clai')).toBeInTheDocument();
   });
 
+  it('names the user turn for screen readers only, and widens it while a queued message is edited', () => {
+    render(
+      <ChatMessageList
+        workspaceId="ws-1"
+        messages={[msg({ id: 'u1', role: 'user', content: [{ type: 'text', text: 'ship it' }] })]}
+        queuedMessageIds={['u1']}
+        onEditQueuedMessage={vi.fn()}
+      />
+    );
+    expect(screen.getByText('You')).toHaveClass('sr-only');
+    const bubble = screen.getByText('ship it').closest('[class*="userMessage_"]') as HTMLElement;
+    expect(bubble.className).not.toMatch(/userMessageEditing_/);
+    fireEvent.click(screen.getByRole('button', { name: 'Edit queued message' }));
+    expect(screen.getByRole('textbox').closest('[class*="userMessage_"]')?.className).toMatch(/userMessageEditing_/);
+  });
+
   it('renders a single tool call with its (cleaned) name and result', () => {
     const messages: AssistantMessage[] = [
       msg({

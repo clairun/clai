@@ -4,6 +4,7 @@ import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import { shouldUseWebglRenderer } from './webglSupport';
+import { useAppTheme } from '../../hooks/useAppTheme';
 import '@xterm/xterm/css/xterm.css';
 import styles from './WorkspaceTerminal.module.css';
 
@@ -33,6 +34,14 @@ function base64ToBytes(b64: string): Uint8Array {
     bytes[i] = binary.charCodeAt(i);
   }
   return bytes;
+}
+
+// Fallback for a stylesheet that has not loaded: the dark theme's value.
+const TERMINAL_BG_FALLBACK = '#0A0E14';
+
+/** The panel's --color-terminal-bg, so xterm's canvas matches the CSS around it. */
+function readTerminalBackground(el: Element): string {
+  return getComputedStyle(el).getPropertyValue('--color-terminal-bg').trim() || TERMINAL_BG_FALLBACK;
 }
 
 interface WorkspaceTerminalProps {
@@ -71,6 +80,7 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
   fullscreen,
   onToggleFullscreen,
 }) => {
+  const appTheme = useAppTheme();
   const containerRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<string | null>(null);
   const termRef = useRef<Terminal | null>(null);
@@ -124,8 +134,9 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
       scrollback: 8000,
       cursorBlink: true,
       // Dark terminal pane regardless of app theme — the conventional look,
-      // and avoids unreadable ANSI colours on a light background.
-      theme: { background: '#0b0e14', foreground: '#cbd5e1', cursor: '#7ee787' },
+      // and avoids unreadable ANSI colours on a light background. xterm paints
+      // its own canvas, so it takes the panel's colour from the token.
+      theme: { background: readTerminalBackground(container), foreground: '#cbd5e1', cursor: '#7ee787' },
     });
     const fit = new FitAddon();
     term.loadAddon(fit);
@@ -276,6 +287,17 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
     };
   }, [workspaceId, syncSizeToPty]);
 
+  // The token differs per theme; follow a theme switch without a remount.
+  useEffect(() => {
+    const term = termRef.current;
+    const container = containerRef.current;
+    if (!term || !container) return;
+    const background = readTerminalBackground(container);
+    if (term.options.theme?.background !== background) {
+      term.options.theme = { ...term.options.theme, background };
+    }
+  }, [appTheme]);
+
   // When this terminal becomes visible again, its xterm may have been laid out
   // at zero size while hidden — refit and refocus once layout settles. Also
   // deliver any queued `!cmd` to an ALREADY-RUNNING shell here (a fresh mount
@@ -314,24 +336,26 @@ const WorkspaceTerminal: React.FC<WorkspaceTerminalProps> = ({
       className={`${styles.panel} ${fullscreen ? styles.panelFullscreen : ''}`}
       style={visible ? undefined : { display: 'none' }}
     >
-      <button
-        type="button"
-        className={styles.iconFloat}
-        onClick={onToggleFullscreen}
-        title={fullscreen ? 'Exit fullscreen (Ctrl+Shift+Enter)' : 'Fullscreen (Ctrl+Shift+Enter)'}
-        aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-      >
-        {fullscreen ? '⤡' : '⤢'}
-      </button>
-      <button
-        type="button"
-        className={styles.exitFloat}
-        onClick={() => onBackToChatRef.current()}
-        title="Back to chat (Ctrl+\)"
-        aria-label="Back to chat"
-      >
-        Chat ⌄
-      </button>
+      <div className={styles.floatActions}>
+        <button
+          type="button"
+          className={styles.iconFloat}
+          onClick={onToggleFullscreen}
+          title={fullscreen ? 'Exit fullscreen (Ctrl+Shift+Enter)' : 'Fullscreen (Ctrl+Shift+Enter)'}
+          aria-label={fullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+        >
+          {fullscreen ? '⤡' : '⤢'}
+        </button>
+        <button
+          type="button"
+          className={styles.exitFloat}
+          onClick={() => onBackToChatRef.current()}
+          title="Back to chat (Ctrl+\)"
+          aria-label="Back to chat"
+        >
+          Chat ⌄
+        </button>
+      </div>
       <div ref={containerRef} className={styles.term} />
     </div>
   );

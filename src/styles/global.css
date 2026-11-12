@@ -37,9 +37,7 @@ html {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: var(--font-sans);
   color: var(--color-text-primary);
   background: var(--color-bg-primary);
   line-height: 1.5;
@@ -169,7 +167,7 @@ em, i {
 }
 
 code {
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  font-family: var(--font-mono);
   font-size: 0.875em;
   padding: 0.125em 0.25em;
   background: var(--color-code-bg);
@@ -179,7 +177,7 @@ code {
 }
 
 pre {
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  font-family: var(--font-mono);
   font-size: 0.875rem;
   padding: 1rem;
   background: var(--color-code-bg);

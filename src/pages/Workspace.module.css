@@ -797,14 +797,8 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-lg);
-  /* Neutral elevated surface — calmer and more legible than the old
-     indigo-tinted glass (the `saturate(180%)` backdrop boosted that tint
-     toward purple, which read poorly in dark mode). The thin indigo top
-     line below keeps a subtle brand accent against this neutral panel. */
-  background: var(--color-bg-elevated);
-  box-shadow: var(--shadow-md);
+  /* No card: the conversation sits on the page, and the composer is the
+     only raised surface. */
   overflow: auto;
   /* Width: fill the available column, between the readable floor and the
      --chat-max-width cap. Margin-left replaces `margin: 0 auto` with an explicit
@@ -836,17 +830,19 @@
   transition: margin-left 220ms ease-out;
 }
 
-/* Soft gradient accent line along the top — mirrors the Fleet detail pane
-   so chat surfaces look consistent across the app. */
+/* Without a card edge, scrolled text would run hard into the header: fade
+   it out over the top 12px. The list scrolls inside this box (VirtualizedList),
+   so the overlay stays put; its own 16px top padding keeps the first message
+   clear of the fade at rest. */
 .chatFirstContent::before {
   content: '';
   position: absolute;
   top: 0;
   left: 0;
   right: 0;
-  height: 2px;
-  background: var(--gradient-primary);
-  border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+  height: 12px;
+  background: linear-gradient(var(--color-bg-secondary), transparent);
+  pointer-events: none;
   z-index: 1;
 }
 

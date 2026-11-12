@@ -1,6 +1,19 @@
 .codeBlock {
   position: relative;
   margin: 12px 0;
+  /* A sunken tone, no outline. --code-block-bg lets a parent that is
+     already sunken (the user's turn) pick another step. */
+  background: var(--code-block-bg, var(--color-bg-tertiary));
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+/* The highlighter renders PreTag="div", so the global `code` box (border,
+   fill, padding) would otherwise draw a second box inside the block. */
+.codeBlock code {
+  padding: 0;
+  background: none;
+  border: none;
 }
 
 /* Absolutely positioned so showing/hiding it never shifts the code. */
@@ -15,8 +28,11 @@
   width: 26px;
   height: 26px;
   padding: 0;
-  background: var(--color-bg-elevated);
-  border: 1px solid var(--color-code-border);
+  /* Opaque, so code under it never shows through. */
+  background:
+    linear-gradient(var(--color-overlay-06), var(--color-overlay-06)),
+    var(--code-block-bg, var(--color-bg-tertiary));
+  border: none;
   border-radius: var(--radius-sm);
   color: var(--color-text-secondary);
   cursor: pointer;
@@ -32,7 +48,9 @@
 }
 
 .copyButton:hover {
-  background: var(--color-bg-elevated-hover);
+  background:
+    linear-gradient(var(--color-overlay-10), var(--color-overlay-10)),
+    var(--code-block-bg, var(--color-bg-tertiary));
   color: var(--color-text-primary);
 }
 
