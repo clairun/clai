@@ -265,13 +265,15 @@ describe('WorkspaceRail sections', () => {
       renderRail([
         entry('a', 'Alpha'),
         entry('b', 'Beta', { scheduleEnabled: true }),
+        entry('c', 'Gamma', { scheduleEnabled: true, schedulePaused: true }),
       ]);
       // The overlay width lives in CSS keyed off this class; jsdom cannot
       // measure it, so assert the class routing instead.
-      const alphaRow = screen.getByText('Alpha').closest('[role="button"]');
-      const betaRow = screen.getByText('Beta').closest('[role="button"]');
-      expect(alphaRow?.className).not.toMatch(/rowScheduled/);
-      expect(betaRow?.className).toMatch(/rowScheduled/);
+      const rowClass = (title: string) => screen.getByText(title).closest('[role="button"]')?.className ?? '';
+      expect(rowClass('Alpha')).not.toMatch(/rowScheduled/);
+      expect(rowClass('Beta')).toMatch(/rowScheduled_/);
+      expect(rowClass('Beta')).not.toMatch(/rowScheduledPaused/);
+      expect(rowClass('Gamma')).toMatch(/rowScheduledPaused/);
     });
 
     it('holds its position when the trigger cannot be measured', async () => {
@@ -527,13 +529,48 @@ describe('WorkspaceRail rows', () => {
       }),
       entry('c', 'Gamma'),
     ]);
-    const alpha = within(row('Alpha')).getByTitle('every 120m');
-    expect(within(alpha).getByText('120m')).toHaveAttribute('aria-hidden', 'true');
-    expect(within(alpha).getByText('every 120m')).toBeInTheDocument();
-    const beta = within(row('Beta')).getByTitle('Paused · cron: 0 12 * * *');
+    const alpha = within(row('Alpha')).getByTitle('every 2 h');
+    expect(within(alpha).getByText('2 h')).toHaveAttribute('aria-hidden', 'true');
+    expect(within(alpha).getByText('every 2 h')).toBeInTheDocument();
+    const betaLabel = 'Paused · daily 12:00 (cron: 0 12 * * *, UTC)';
+    const beta = within(row('Beta')).getByTitle(betaLabel);
     expect(within(beta).getByText('cron')).toHaveAttribute('aria-hidden', 'true');
-    expect(within(beta).getByText('Paused · cron: 0 12 * * *')).toBeInTheDocument();
+    expect(within(beta).getByText(betaLabel)).toBeInTheDocument();
     expect(row('Gamma').querySelector('[class*="rowMeta"]')).toBeNull();
+  });
+
+  it('uses ▶ for Run now while scheduled and for Resume while paused, as the header does', async () => {
+    const onRunNow = vi.fn();
+    const onTogglePause = vi.fn();
+    renderRail(
+      [
+        entry('a', 'Alpha', { updatedAt: 2n, scheduleEnabled: true }),
+        entry('b', 'Beta', { updatedAt: 1n, scheduleEnabled: true, schedulePaused: true }),
+      ],
+      { onRunNow, onTogglePause },
+    );
+    const isPlay = (button: HTMLElement) => button.querySelector('path[d="M8 5v14l11-7z"]') !== null;
+    const isPauseBars = (button: HTMLElement) => button.querySelectorAll('rect').length === 2;
+
+    const alpha = within(row('Alpha'));
+    const run = alpha.getByRole('button', { name: 'Run now' });
+    const pause = alpha.getByRole('button', { name: 'Pause schedule' });
+    expect(isPlay(run)).toBe(true);
+    expect(isPauseBars(pause)).toBe(true);
+    expect(alpha.queryByRole('button', { name: 'Resume schedule' })).toBeNull();
+
+    const beta = within(row('Beta'));
+    const resume = beta.getByRole('button', { name: 'Resume schedule' });
+    expect(isPlay(resume)).toBe(true);
+    expect(beta.queryByRole('button', { name: 'Run now' })).toBeNull();
+    expect(beta.queryByRole('button', { name: 'Pause schedule' })).toBeNull();
+
+    await userEvent.click(pause);
+    expect(onTogglePause).toHaveBeenLastCalledWith('a', false);
+    await userEvent.click(resume);
+    expect(onTogglePause).toHaveBeenLastCalledWith('b', true);
+    await userEvent.click(run);
+    expect(onRunNow).toHaveBeenCalledWith('a');
   });
 
   // jsdom applies no CSS (vitest `css: false`), so this cannot prove the

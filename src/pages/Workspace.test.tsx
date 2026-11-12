@@ -948,6 +948,76 @@ const ACTIVE_RUN = {
   error: null,
 } as WorkspaceDetails['runs'][number];
 
+describe('Workspace header', () => {
+  it('keeps every panel counter a named toggle whose label the compact layout can hide', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { artifactCount: 21725n, artifactCountCapped: true, tasks: [FAILED_TASK] })
+    );
+    renderWorkspace();
+    const artifacts = await screen.findByRole('button', { name: /artifacts/ });
+    // jsdom cannot evaluate the container query that swaps labels for icons
+    // (Chromium screenshots cover that); this pins the structure it relies on.
+    for (const [name, count] of [
+      ['agents', '0'],
+      ['tasks', '1'],
+      ['memories', '1'],
+      ['artifacts', `${(21725).toLocaleString()}+`],
+    ] as const) {
+      const button = screen.getByRole('button', { name: new RegExp(`^${count.replace('+', '\\+')} ${name}$`) });
+      expect(button).toHaveAttribute('aria-pressed', 'false');
+      expect(within(button).getByText(name)).toHaveClass(styles.metricLabel!);
+      expect(button.querySelector(`.${styles.metricIcon} svg`)).toHaveAttribute('aria-hidden', 'true');
+    }
+    await userEvent.click(artifacts);
+    expect(artifacts).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('button', { name: 'Open in new window' }).closest(`.${styles.windowActions}`)).not.toBeNull();
+  });
+
+  it('spells out the cadence and resumes from an icon button like Run now and Pause', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, {
+        scheduleEnabled: true,
+        schedulePaused: true,
+        scheduleKind: { type: 'interval', intervalMinutes: 120 },
+      })
+    );
+    const { unmount } = renderWorkspace();
+    const resume = await screen.findByRole('button', { name: 'Resume schedule' });
+    expect(resume).toHaveTextContent('');
+    expect(resume.querySelector('svg')).not.toBeNull();
+    expect(screen.getByTitle('Paused · every 2 h')).toHaveTextContent('Paused · every 2 h');
+    expect(screen.getByText('Paused')).toHaveClass(styles.scheduleState!);
+    unmount();
+
+    // The runtime's own zone, so the pill omits it wherever the suite runs.
+    const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, {
+        scheduleEnabled: true,
+        scheduleKind: { type: 'cron', expression: '0 18 * * *', timezone: localZone },
+      })
+    );
+    renderWorkspace();
+    const pill = await screen.findByTitle(`Periodic · daily 18:00 (cron: 0 18 * * *, ${localZone})`);
+    expect(pill.textContent).toBe('Periodic · daily 18:00');
+    expect(screen.getByRole('button', { name: 'Run now' })).toHaveTextContent('');
+    expect(screen.getByRole('button', { name: 'Pause schedule' })).toHaveTextContent('');
+  });
+
+  it('names a foreign cron zone in the schedule pill', async () => {
+    const foreignZone = Intl.DateTimeFormat().resolvedOptions().timeZone === 'Asia/Tokyo' ? 'UTC' : 'Asia/Tokyo';
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, {
+        scheduleEnabled: true,
+        scheduleKind: { type: 'cron', expression: '0 18 * * *', timezone: foreignZone },
+      })
+    );
+    renderWorkspace();
+    const pill = await screen.findByTitle(`Periodic · daily 18:00 (cron: 0 18 * * *, ${foreignZone})`);
+    expect(pill.textContent).toBe(`Periodic · daily 18:00 · ${foreignZone}`);
+  });
+});
+
 describe('Workspace switch with a call in flight', () => {
   const scheduledDetails = (workspaceId: string, options: WorkspaceDetailsOptions) =>
     detailsFor(
