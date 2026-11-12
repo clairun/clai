@@ -34,6 +34,7 @@ mod cli;
 mod commands;
 mod config;
 mod db;
+mod fs_removal;
 #[cfg(target_os = "linux")]
 mod linux_launchers;
 #[cfg(target_os = "linux")]

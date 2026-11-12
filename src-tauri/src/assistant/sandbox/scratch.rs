@@ -93,6 +93,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 
+use crate::fs_removal::remove_dir_all_forcing_permissions;
+
 /// Scratch container, as a child of the workspace container. Dot-prefixed so it
 /// is visually distinct from the workspace-id directories beside it, and so the
 /// workspace index skips it along with every other dot-prefixed sibling.
@@ -346,12 +348,32 @@ fn reclaim(root: &Path, in_use: &HashSet<String>, current: &str) {
     }
 }
 
-/// Unlink a tree off the caller's critical path when a runtime is available.
+/// Scratch entries already handed to a delete during this app session.
+///
+/// Every workspace's first command drains the shared `.trash/`, so without
+/// this a tree that cannot be deleted is retried, and warned about, once per
+/// workspace per session, and workspaces starting together unlink the same
+/// tree concurrently. One attempt per entry per session is enough: the next
+/// session retries whatever survived.
+fn claimed_for_delete() -> &'static Mutex<HashSet<PathBuf>> {
+    static SET: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    SET.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Unlink a tree off the caller's critical path when a runtime is available,
+/// unless it was already handed to a delete this session.
 ///
 /// Falls back to a synchronous delete outside a runtime (unit tests) so the
 /// tree is never simply leaked. Callers are always inside an async tool task in
 /// production, so the background branch is the live one.
 fn spawn_delete(root: PathBuf, path: PathBuf) {
+    let first_claim = claimed_for_delete()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path.clone());
+    if !first_claim {
+        return;
+    }
     match tokio::runtime::Handle::try_current() {
         Ok(handle) => {
             handle.spawn_blocking(move || remove_entry(&root, &path));
@@ -410,7 +432,13 @@ fn remove_entry(root: &Path, path: &Path) {
         Err(_) => return,
     }
 
-    if let Err(error) = fs::remove_dir_all(path) {
+    // `path` is now known to be a real directory directly under the root or
+    // `.trash/`. The forcing pass walks down from it without following
+    // symlinks, which is what clears a read-only Go module cache an agent
+    // left in its scratch. A symlink swapped in mid-walk can redirect one of
+    // its chmods outside the entry, but only ever to `0700`; the deletion
+    // itself is never redirected. See `fs_removal`.
+    if let Err(error) = remove_dir_all_forcing_permissions(path) {
         if error.kind() != std::io::ErrorKind::NotFound {
             tracing::warn!(
                 "Failed to remove sandbox scratch directory {}: {error}",
@@ -825,6 +853,56 @@ mod tests {
         reclaim(&root, &HashSet::new(), "ws-current");
 
         assert!(!doomed.exists(), "reclaim left trash behind");
+    }
+
+    /// Go makes its module cache read-only, so a scratch dir that held one
+    /// used to sit in `.trash/` forever: plain `remove_dir_all` cannot unlink
+    /// entries out of a 0555 directory, even for the owner.
+    #[cfg(unix)]
+    #[test]
+    fn reclaim_drains_a_trash_entry_with_read_only_directories() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = crate::fs_removal::ForcedTempDir::new();
+        let root = dir.path().join(SCRATCH_DIR);
+        let doomed = root.join(TRASH_DIR).join("nonce-ro");
+        let module = doomed
+            .join("gopath")
+            .join("pkg")
+            .join("mod")
+            .join("example.com")
+            .join("m@v1.0.0");
+        fs::create_dir_all(module.join("nested")).unwrap();
+        fs::write(module.join("m.go"), "package m").unwrap();
+        fs::write(module.join("nested").join("n.go"), "package m").unwrap();
+        for read_only in [module.join("nested"), module.clone()] {
+            fs::set_permissions(&read_only, fs::Permissions::from_mode(0o555)).unwrap();
+        }
+        if fs::write(module.join("probe"), "x").is_ok() {
+            return; // running as root: the mode bits are advisory
+        }
+
+        reclaim(&root, &HashSet::new(), "ws-current");
+
+        assert!(!doomed.exists(), "reclaim left a read-only tree behind");
+        assert!(root.join(TRASH_DIR).exists());
+    }
+
+    /// Each entry is handed to a delete at most once per session, so a tree
+    /// that cannot be deleted produces one warning, not one per workspace.
+    #[test]
+    fn spawn_delete_attempts_each_entry_once_per_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join(SCRATCH_DIR);
+        let entry = root.join(TRASH_DIR).join("nonce-once");
+        fs::create_dir_all(&entry).unwrap();
+
+        spawn_delete(root.clone(), entry.clone());
+        assert!(!entry.exists());
+
+        fs::create_dir_all(&entry).unwrap();
+        spawn_delete(root.clone(), entry.clone());
+        assert!(entry.exists(), "the same entry was deleted twice");
     }
 
     /// Reclaim must not touch a workspace in use this session, nor the one
