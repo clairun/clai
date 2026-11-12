@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import MarkdownMessage from './MarkdownMessage';
 
 const fence = (lang: string, body: string) => `\`\`\`${lang}\n${body}\n\`\`\`\n`;
@@ -74,5 +74,30 @@ describe('MarkdownMessage — code block copy button', () => {
     await clickCopy();
     expect(screen.getByRole('button', { name: 'Copy code' })).toHaveAttribute('data-state', 'failed');
     expect(screen.getByRole('status')).toHaveTextContent('Copy failed');
+  });
+});
+
+describe('MarkdownMessage — code block palette', () => {
+  afterEach(() => {
+    document.documentElement.removeAttribute('data-theme');
+  });
+
+  const commentColor = () => (screen.getByText('// note').closest('span') as HTMLElement).style.color;
+
+  it('draws dark-theme code with the dark palette and follows a theme switch', async () => {
+    document.documentElement.setAttribute('data-theme', 'dark');
+    render(<MarkdownMessage content={fence('js', 'run(); // note')} />);
+    expect(commentColor()).toBe('rgb(139, 145, 156)');
+    act(() => document.documentElement.setAttribute('data-theme', 'light'));
+    await waitFor(() => expect(commentColor()).toBe('rgb(100, 103, 112)'));
+  });
+
+  it('leaves the block surface to the stylesheet', () => {
+    document.documentElement.setAttribute('data-theme', 'dark');
+    render(<MarkdownMessage content={fence('js', 'run(); // note')} />);
+    const surface = screen.getByRole('button', { name: 'Copy code' }).previousElementSibling as HTMLElement;
+    expect(surface.style.background).toBe('');
+    expect(surface.style.backgroundColor).toBe('');
+    expect(surface.style.border).toBe('');
   });
 });

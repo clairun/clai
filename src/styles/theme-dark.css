@@ -26,17 +26,19 @@
   /* ============================================
      BACKGROUNDS - Deep space, layered (cards lift)
      ============================================ */
-  --color-bg-primary: #0A0E14;       /* page — deepest */
-  --color-bg-secondary: #0E141C;     /* rails / secondary surfaces */
-  --color-bg-tertiary: #141B24;
-  --color-bg-hover: #1B2330;         /* hover LIGHTENS on dark */
-  --color-bg-active: #232C3A;
+  /* The steps below move together: each keeps its old contrast against its
+     neighbour (secondary on primary, hover on elevated). */
+  --color-bg-primary: #070A0E;       /* page — deepest */
+  --color-bg-secondary: #0C1117;     /* rails / secondary surfaces */
+  --color-bg-tertiary: #151C25;      /* sunken: user turn, code, table head */
+  --color-bg-hover: #1E2734;         /* hover LIGHTENS on dark */
+  --color-bg-active: #26303F;        /* keeps its step above hover */
 
-  --color-bg-elevated: #161D28;      /* cards / panels — lifted above page */
-  --color-bg-elevated-hover: #1C2533;
+  --color-bg-elevated: #19212C;      /* cards / panels — lifted above page */
+  --color-bg-elevated-hover: #1F2836;
 
-  --color-bg-glass: rgba(14, 20, 28, 0.85);
-  --color-bg-glass-strong: rgba(22, 29, 40, 0.95);
+  --color-bg-glass: rgba(12, 17, 23, 0.85);          /* bg-secondary */
+  --color-bg-glass-strong: rgba(25, 33, 44, 0.95);   /* bg-elevated */
 
   --color-bg-gradient: linear-gradient(180deg, #0A0E14 0%, #0B1018 50%, #0A1014 100%);
 
@@ -163,11 +165,12 @@
      ============================================ */
   --color-text-primary: rgba(230, 237, 243, 0.92);
   --color-text-secondary: rgba(230, 237, 243, 0.66);
-  --color-text-tertiary: rgba(230, 237, 243, 0.46);
-  /* Small past-tense text read all day (Fleet history): 5.2:1 on a card, where tertiary is 4.05:1. */
-  --color-text-past: rgba(230, 237, 243, 0.55);
+  /* At least 4.5:1 on the page, card and hover steps. */
+  --color-text-tertiary: rgba(230, 237, 243, 0.53);
+  /* Small past-tense text read all day (Fleet history): a step above tertiary. */
+  --color-text-past: rgba(230, 237, 243, 0.60);
   --color-text-disabled: rgba(230, 237, 243, 0.30);
-  --color-text-placeholder: rgba(230, 237, 243, 0.38);
+  --color-text-placeholder: rgba(230, 237, 243, 0.52);
 
   /* On colored backgrounds: the accents are light/saturated, so near-black
      text reads best (and looks intentional/modern). */
@@ -185,7 +188,8 @@
   --color-border-medium: rgba(230, 237, 243, 0.14);
   --color-border-strong: rgba(230, 237, 243, 0.22);
   --color-border-hover: rgba(129, 140, 248, 0.45);
-  --color-border-focus: rgba(129, 140, 248, 0.60);
+  /* Focus rings: 3:1 against every surface step (WCAG 1.4.11). */
+  --color-border-focus: rgba(129, 140, 248, 0.80);
   --color-border-active: rgba(129, 140, 248, 0.70);
 
   /* ============================================
@@ -346,6 +350,8 @@
      SPECIAL COLORS
      ============================================ */
   --color-cyan-rgb: 34, 211, 238;
+
+  --color-terminal-bg: #0A0E14;
 
   --color-code-bg: rgba(129, 140, 248, 0.08);
   --color-code-border: rgba(129, 140, 248, 0.14);
