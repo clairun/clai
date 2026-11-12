@@ -106,12 +106,35 @@ pub fn apply_workspace_schedule(
             // would fire immediately on app start regardless of when it
             // was actually due — the `Instant` `next_run_at` doesn't
             // survive process restart.
-            sched.set_instance_next_run_at(&instance_id, config.schedule.next_run_at_unix_ms);
+            let now = chrono::Utc::now().timestamp_millis();
+            sched.set_instance_next_run_at(&instance_id, seeded_next_run_at(&config.schedule, now));
             if config.schedule.paused {
                 sched.set_instance_enabled(&instance_id, false);
             }
         }
     }
+}
+
+/// The persisted next-run target, except that a future cron target the
+/// schedule doesn't fire at is recomputed from `now`: one stored before a
+/// fix to cron parsing (such as the day-of-week numbering) may land on
+/// the wrong day. Valid targets are kept even when `now` is behind them,
+/// so a slow clock can't add a run. Past-due targets are kept so the
+/// missed run still fires, and any error keeps the stored value.
+fn seeded_next_run_at(schedule: &workspace_config::WorkspaceSchedule, now: i64) -> Option<i64> {
+    let stored = schedule.next_run_at_unix_ms?;
+    let workspace_config::ScheduleKind::Cron {
+        expression,
+        timezone,
+    } = &schedule.kind
+    else {
+        return Some(stored);
+    };
+    let valid = crate::agents::schedule::cron_fires_at(expression, timezone, stored);
+    if stored <= now || valid.unwrap_or(true) {
+        return Some(stored);
+    }
+    Some(crate::agents::schedule::compute_next_run_at(&schedule.kind, now).unwrap_or(stored))
 }
 
 /// Clears all agent instances.
@@ -141,6 +164,7 @@ mod tests {
     use super::*;
     use crate::agents::create_shared_scheduler;
     use crate::agents::types::AgentInstance;
+    use crate::config::workspace_config::{ScheduleKind, WorkspaceSchedule};
 
     fn create_test_agent_config() -> crate::config::AgentConfig {
         crate::config::AgentConfig::new(
@@ -150,6 +174,82 @@ mod tests {
                 interval_minutes: 5,
             },
         )
+    }
+
+    fn schedule(kind: ScheduleKind, next_run_at_unix_ms: Option<i64>) -> WorkspaceSchedule {
+        WorkspaceSchedule {
+            enabled: true,
+            paused: false,
+            kind,
+            next_run_at_unix_ms,
+        }
+    }
+
+    fn cron(expression: &str) -> ScheduleKind {
+        ScheduleKind::Cron {
+            expression: expression.to_string(),
+            timezone: "UTC".to_string(),
+        }
+    }
+
+    /// Unix ms of November `day`, 2026, `hour:minute` UTC.
+    fn utc_ms(day: u32, hour: u32, minute: u32) -> i64 {
+        chrono::TimeZone::with_ymd_and_hms(&chrono::Utc, 2026, 11, day, hour, minute, 0)
+            .unwrap()
+            .timestamp_millis()
+    }
+
+    #[test]
+    fn seeded_next_run_at_recomputes_future_cron_targets() {
+        // Sunday 2026-11-08: "Mondays 9am" stored as Sunday 9am by the
+        // old day-of-week numbering is moved to Monday 9am.
+        let now = utc_ms(8, 0, 0);
+        let mondays = schedule(cron("0 9 * * 1"), Some(utc_ms(8, 9, 0)));
+        assert_eq!(seeded_next_run_at(&mondays, now), Some(utc_ms(9, 9, 0)));
+
+        let correct = schedule(cron("0 9 * * 1"), Some(utc_ms(9, 9, 0)));
+        assert_eq!(seeded_next_run_at(&correct, now), Some(utc_ms(9, 9, 0)));
+    }
+
+    #[test]
+    fn seeded_next_run_at_with_a_slow_clock() {
+        // Daily 9am ran Monday 9:00 and stored Tuesday 9:00; the clock
+        // reads Monday 8:30. The valid target must not move back to
+        // Monday 9:00, which would run the agent twice.
+        let daily = schedule(cron("0 9 * * *"), Some(utc_ms(10, 9, 0)));
+        assert_eq!(
+            seeded_next_run_at(&daily, utc_ms(9, 8, 30)),
+            Some(utc_ms(10, 9, 0))
+        );
+
+        // "Weekdays" stored on Sunday by the old numbering is recomputed
+        // from the clock even when it reads earlier than the last run.
+        let weekdays = schedule(cron("0 9 * * 1-5"), Some(utc_ms(8, 9, 0)));
+        assert_eq!(
+            seeded_next_run_at(&weekdays, utc_ms(5, 8, 30)),
+            Some(utc_ms(5, 9, 0))
+        );
+    }
+
+    #[test]
+    fn seeded_next_run_at_keeps_other_targets() {
+        let now = utc_ms(8, 0, 0);
+        let past_due = schedule(cron("0 9 * * 1"), Some(utc_ms(7, 9, 0)));
+        assert_eq!(seeded_next_run_at(&past_due, now), Some(utc_ms(7, 9, 0)));
+
+        let invalid = schedule(cron("0 9 * * 8"), Some(utc_ms(8, 9, 0)));
+        assert_eq!(seeded_next_run_at(&invalid, now), Some(utc_ms(8, 9, 0)));
+
+        let interval = ScheduleKind::Interval {
+            interval_minutes: 5,
+        };
+        let interval = schedule(interval, Some(utc_ms(8, 9, 0)));
+        assert_eq!(seeded_next_run_at(&interval, now), Some(utc_ms(8, 9, 0)));
+
+        assert_eq!(
+            seeded_next_run_at(&schedule(cron("0 9 * * 1"), None), now),
+            None
+        );
     }
 
     #[tokio::test]
