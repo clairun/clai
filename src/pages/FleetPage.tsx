@@ -130,8 +130,9 @@ const FleetPage = () => {
     return { working, waiting };
   }, [cards, live]);
 
-  // Opening a workspace: the card's icon, Enter, or Ctrl/Cmd+Shift+M, which
-  // opens the selected card's workspace, or the workspaces page without one.
+  // Opening a workspace here: Enter, or Ctrl/Cmd+Shift+M, which opens the
+  // selected card's workspace, or the workspaces page without one. The card's
+  // icon and Shift+Enter open it in a new window instead.
   const navigate = useNavigate();
   const openWorkspace = useCallback((id: string) => navigate(`/workspace/${id}`), [navigate]);
   useFleetToggle(useCallback(() => {

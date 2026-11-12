@@ -373,11 +373,6 @@
   background: var(--color-border-light);
 }
 
-/* Filled/star state of the per-row star toggle. */
-.starButtonActive {
-  color: var(--color-warning-dark);
-}
-
 /* One line, one height (32px) for every row: scheduled or not, in any
    section, expanded or collapsed. Schedule, attention and unread cues sit
    at the end of the line instead of on a second one, and the 30px content
@@ -581,8 +576,8 @@
 }
 
 /* Width of the action overlay: 24px icon buttons with 2px gaps — two buttons
-   (star, menu) normally, four (star, run, pause, menu) on scheduled rows,
-   three (star, resume, menu) on paused ones.
+   (new window, menu) normally, four (run, pause, new window, menu) on
+   scheduled rows, three (resume, new window, menu) on paused ones.
    Keep in sync with `.iconButton` width and `.rowActions` gap. */
 .row {
   --row-actions-overlay: 50px;

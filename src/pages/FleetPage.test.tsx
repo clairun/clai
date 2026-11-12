@@ -637,24 +637,16 @@ describe('FleetPage', () => {
         </MemoryRouter>
       );
 
-    it("opens from the card's icon, without selecting or zooming", async () => {
+    it("opens another window from the card's icon, without navigating, selecting or zooming", async () => {
       fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000)]);
       renderRoutes();
-      const icon = await screen.findByRole('button', { name: 'Open Alpha' });
-      expect(icon).toHaveAttribute('title', 'Open workspace (Shift+click opens in new window)');
+      const icon = await screen.findByRole('button', { name: 'Open Alpha in new window' });
+      expect(icon).toHaveAttribute('title', 'Open in new window');
       fireEvent.click(icon);
-      expect(screen.getByTestId('opened').textContent).toBe('a');
-      expect(useFleetStore.getState().selectedId).toBeNull();
-      expect(screen.queryByRole('dialog')).toBeNull();
-    });
-
-    it('opens another window on Shift+click without navigating this one', async () => {
-      fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
-      renderRoutes();
-      const icon = await screen.findByRole('button', { name: 'Open Alpha' });
-      fireEvent.click(icon, { shiftKey: true });
       expect(mockInvoke).toHaveBeenCalledWith('window_open', { workspaceId: 'a' });
       expect(screen.queryByTestId('opened')).toBeNull();
+      expect(useFleetStore.getState().selectedId).toBeNull();
+      expect(screen.queryByRole('dialog')).toBeNull();
     });
 
     it('opens another window on Shift+Enter with a selected card', async () => {

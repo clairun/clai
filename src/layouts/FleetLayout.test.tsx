@@ -116,7 +116,7 @@ const renderFleet = (initialPath = '/workspace/a') =>
 // The rail row is a role="button" whose accessible name contains the
 // workspace title, so it is a stable scope for that row's ⋯ menu.
 const openDeleteDialog = async (title = 'Alpha') => {
-  const row = await screen.findByRole('button', { name: new RegExp(title) });
+  const row = await screen.findByRole('button', { name: new RegExp(`^${title}`) });
   await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
   const menu = screen.getByRole('menu');
   await userEvent.click(within(menu).getByRole('menuitem', { name: 'Delete' }));
@@ -142,11 +142,15 @@ describe('FleetLayout starred launcher warnings', () => {
     getSchedulerPaused.mockResolvedValue(false);
 
     renderFleet();
-    const row = await screen.findByRole('button', { name: /Alpha/ });
-    await userEvent.click(within(row).getByRole('button', { name: 'Star workspace' }));
+    const row = await screen.findByRole('button', { name: /^Alpha/ });
+    await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
+    await userEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Star workspace' }));
 
     expect(await screen.findByText(warning)).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Unstar workspace' })).toBeInTheDocument();
+    // The star moved the row into the Starred section, so look it up again.
+    const starredRow = screen.getByRole('button', { name: /^Alpha/ });
+    await userEvent.click(within(starredRow).getByRole('button', { name: 'More actions' }));
+    expect(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Unstar workspace' })).toBeInTheDocument();
     expect(workspaceClient.setWorkspaceStarred).toHaveBeenCalledWith('a', true);
   });
 });
@@ -156,9 +160,8 @@ describe('FleetLayout new window action', () => {
     listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
     getSchedulerPaused.mockResolvedValue(false);
     renderFleet();
-    const row = await screen.findByRole('button', { name: /Alpha/ });
-    await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
-    await userEvent.click(screen.getByRole('menuitem', { name: 'Open in new window' }));
+    const row = await screen.findByRole('button', { name: /^Alpha/ });
+    await userEvent.click(within(row).getByRole('button', { name: 'Open Alpha in new window' }));
     expect(mockInvoke).toHaveBeenCalledWith('window_open', { workspaceId: 'a' });
     expect(screen.getByTestId('workspace')).toBeInTheDocument();
   });
@@ -243,7 +246,7 @@ describe('FleetLayout attention', () => {
     try {
       renderFleet();
       await screen.findByText('Alpha');
-      expect(within(screen.getByRole('button', { name: /Alpha/ })).getAllByTitle('Needs attention').length).toBeGreaterThan(0);
+      expect(within(screen.getByRole('button', { name: /^Alpha/ })).getAllByTitle('Needs attention').length).toBeGreaterThan(0);
     } finally {
       permissionAttention.counts = {};
     }
@@ -260,7 +263,7 @@ describe('FleetLayout attention', () => {
       renderFleet();
       await screen.findByText('Alpha');
       const badges = (title: string) =>
-        within(screen.getByRole('button', { name: new RegExp(title) })).getAllByTitle('Needs attention').map((el) => el.textContent);
+        within(screen.getByRole('button', { name: new RegExp(`^${title}`) })).getAllByTitle('Needs attention').map((el) => el.textContent);
       expect(badges('Alpha')).toContain('2');
       expect(badges('Beta')).toContain('1');
     } finally {
@@ -423,7 +426,7 @@ describe('FleetLayout workspace settings', () => {
   const METADATA_ONLY = { includeFiles: false };
 
   const openSettings = async (title = 'Alpha') => {
-    const row = await screen.findByRole('button', { name: new RegExp(title) });
+    const row = await screen.findByRole('button', { name: new RegExp(`^${title}`) });
     await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
     const menu = screen.getByRole('menu');
     await userEvent.click(within(menu).getByRole('menuitem', { name: 'Settings' }));
@@ -465,7 +468,7 @@ describe('FleetLayout run now', () => {
     useFleetActivityStore.setState({ runNowSkipped: ['a'] });
 
     renderFleet();
-    const row = await screen.findByRole('button', { name: /Alpha/ });
+    const row = await screen.findByRole('button', { name: /^Alpha/ });
     expect(within(row).getByRole('status')).toHaveTextContent('Run now skipped: session busy');
     await userEvent.click(within(row).getByRole('button', { name: 'Run now' }));
     await waitFor(() => expect(within(row).queryByRole('status')).not.toBeInTheDocument());
@@ -476,7 +479,7 @@ describe('FleetLayout run now', () => {
     vi.mocked(workspaceClient.runWorkspaceNow).mockRejectedValue({ code: 'unknown' });
 
     renderFleet();
-    const row = await screen.findByRole('button', { name: /Alpha/ });
+    const row = await screen.findByRole('button', { name: /^Alpha/ });
     await userEvent.click(within(row).getByRole('button', { name: 'Run now' }));
 
     expect(await screen.findByText('Failed to start run.')).toBeInTheDocument();

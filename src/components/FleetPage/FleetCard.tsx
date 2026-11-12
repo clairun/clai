@@ -82,7 +82,7 @@ interface FleetCardProps {
   loud: FleetLoudness;
   onSelect: (workspaceId: string) => void;
   onOpen: (workspaceId: string) => void;
-  onOpenWindow?: (workspaceId: string) => void;
+  onOpenWindow: (workspaceId: string) => void;
   onDismiss: (workspaceId: string) => void;
 }
 
@@ -124,12 +124,11 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpe
         <button
           type="button"
           className={styles.cardIcon}
-          title="Open workspace (Shift+click opens in new window)"
-          aria-label={`Open ${title}`}
+          title="Open in new window"
+          aria-label={`Open ${title} in new window`}
           onClick={(e) => {
             e.stopPropagation();
-            if (e.shiftKey && onOpenWindow) onOpenWindow(card.workspaceId);
-            else onOpen(card.workspaceId);
+            onOpenWindow(card.workspaceId);
           }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

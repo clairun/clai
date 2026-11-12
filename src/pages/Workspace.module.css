@@ -188,15 +188,6 @@
   display: contents;
 }
 
-/* The pop-out acts on the window, not the workspace's stats: a rule sets it
-   apart from them. */
-.windowActions {
-  display: flex;
-  align-items: center;
-  padding-left: 6px;
-  border-left: 1px solid var(--color-border-light);
-}
-
 /* ── Error Banner ────────────────────────────────────── */
 
 .errorBanner {

@@ -46,6 +46,7 @@ const rail = (
     onToggleCollapsed={noop}
     onOpenFleet={noop}
     onOpenGlobalSettings={noop}
+    onOpenWindow={noop}
     onSelect={noop}
     onCreate={noop}
     onRunNow={noop}
@@ -117,20 +118,62 @@ describe('WorkspaceRail sections', () => {
       .map((el) => el.textContent);
     // Beta has pending approvals, so it outranks the starred Alpha and Gamma.
     expect(titles).toEqual(['Beta', 'Alpha', 'Gamma']);
-    expect(within(screen.getByRole('button', { name: /Gamma/ })).queryByTitle('Needs attention')).toBeNull();
+    expect(within(screen.getByRole('button', { name: /^Gamma/ })).queryByTitle('Needs attention')).toBeNull();
     expect(screen.queryByText('Recent')).toBeNull();
   });
 
-  it('fires onToggleStar from the hover star button with the current state', async () => {
+  it('fires onToggleStar from the overflow menu with the current state', async () => {
     const onToggleStar = vi.fn();
     renderRail(
       [entry('a', 'Alpha'), entry('b', 'Beta', { starred: true })],
       { onToggleStar },
     );
-    await userEvent.click(screen.getByRole('button', { name: 'Star workspace' }));
+    const toggleFromMenu = async (title: string, item: string) => {
+      const row = screen.getByRole('button', { name: new RegExp(`^${title}`) });
+      await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
+      await userEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: item }));
+    };
+    await toggleFromMenu('Alpha', 'Star workspace');
     expect(onToggleStar).toHaveBeenCalledWith('a', false);
-    await userEvent.click(screen.getByRole('button', { name: 'Unstar workspace' }));
+    await toggleFromMenu('Beta', 'Unstar workspace');
     expect(onToggleStar).toHaveBeenCalledWith('b', true);
+  });
+
+  it('keeps star out of the hover actions', () => {
+    renderRail([entry('a', 'Alpha'), entry('b', 'Beta', { starred: true })]);
+    for (const title of ['Alpha', 'Beta']) {
+      const row = screen.getByRole('button', { name: new RegExp(`^${title}`) });
+      const actions = within(row).getAllByRole('button').map((b) => b.getAttribute('aria-label'));
+      expect(actions).toEqual([`Open ${title} in new window`, 'More actions']);
+    }
+  });
+
+  it('opens a row in a new window from its hover icon, without selecting it', async () => {
+    const onOpenWindow = vi.fn();
+    const onSelect = vi.fn();
+    renderRail([entry('a', 'Alpha'), entry('b', 'Beta', { updatedAt: 0n })], { onOpenWindow, onSelect });
+    const icon = screen.getByRole('button', { name: 'Open Alpha in new window' });
+    expect(icon).toHaveAttribute('title', 'Open in new window');
+    // Revealed with the row actions: on hover and on focus-within, never collapsed.
+    expect(icon.parentElement?.className).toMatch(/rowActions_/);
+    await userEvent.click(icon);
+    expect(onOpenWindow).toHaveBeenCalledExactlyOnceWith('a');
+    expect(onSelect).not.toHaveBeenCalled();
+    screen.getByRole('button', { name: 'Open Beta in new window' }).focus();
+    await userEvent.keyboard('{Enter}');
+    expect(onOpenWindow).toHaveBeenLastCalledWith('b');
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('keeps the new-window action out of the overflow menu', async () => {
+    renderRail([entry('a', 'Alpha')]);
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'Star workspace',
+      'Settings',
+      'Fork workspace',
+      'Delete',
+    ]);
   });
 
   it('offers star/unstar in the per-row overflow menu', async () => {
@@ -512,6 +555,8 @@ describe('WorkspaceRail navigation', () => {
     for (const name of ['Expand sidebar', 'New workspace', 'Open Fleet', 'Open settings', 'Pause all scheduled runs']) {
       expect(screen.getByRole('button', { name })).toHaveTextContent('');
     }
+    // A collapsed row is only its initial: no new window, no menu.
+    expect(screen.queryByRole('button', { name: /new window|More actions/ })).toBeNull();
   });
 });
 

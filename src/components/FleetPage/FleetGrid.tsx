@@ -35,7 +35,7 @@ interface FleetGridProps {
   onSelect: (workspaceId: string | null) => void;
   /** Leave for the workspace's own page. */
   onOpen: (workspaceId: string) => void;
-  onOpenWindow?: (workspaceId: string) => void;
+  onOpenWindow: (workspaceId: string) => void;
   /** Take a card off the board until something happens in it. */
   onDismiss: (workspaceId: string) => void;
 }
