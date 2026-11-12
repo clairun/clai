@@ -10,17 +10,53 @@ use sqlx::{Row, SqliteConnection};
 use std::collections::HashMap;
 use ts_rs::TS;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(export, export_to = "bindings.ts")]
 pub enum TaskStatus {
     Queued,
     Running,
     Stopping,
-    #[serde(alias = "input_required")]
     Stopped,
     Completed,
     Failed,
+}
+
+/// Also reads the retired `input_required` as `stopped`: persisted message
+/// origins still hold it. Hand-written because ts-rs warns on `serde(alias)`.
+impl<'de> Deserialize<'de> for TaskStatus {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case")]
+        enum Wire {
+            Queued,
+            Running,
+            Stopping,
+            #[serde(alias = "input_required")]
+            Stopped,
+            Completed,
+            Failed,
+        }
+        // A new `TaskStatus` variant fails to compile here: add it to `Wire` too.
+        fn _every_status_is_readable(status: TaskStatus) -> Wire {
+            match status {
+                TaskStatus::Queued => Wire::Queued,
+                TaskStatus::Running => Wire::Running,
+                TaskStatus::Stopping => Wire::Stopping,
+                TaskStatus::Stopped => Wire::Stopped,
+                TaskStatus::Completed => Wire::Completed,
+                TaskStatus::Failed => Wire::Failed,
+            }
+        }
+        Ok(match Wire::deserialize(deserializer)? {
+            Wire::Queued => Self::Queued,
+            Wire::Running => Self::Running,
+            Wire::Stopping => Self::Stopping,
+            Wire::Stopped => Self::Stopped,
+            Wire::Completed => Self::Completed,
+            Wire::Failed => Self::Failed,
+        })
+    }
 }
 
 impl TaskStatus {
@@ -625,6 +661,22 @@ mod tests {
         let status: TaskStatus = serde_json::from_str("\"input_required\"").unwrap();
         assert_eq!(status, TaskStatus::Stopped);
         assert_eq!(serde_json::to_string(&status).unwrap(), "\"stopped\"");
+    }
+
+    #[test]
+    fn every_status_round_trips() {
+        for status in [
+            TaskStatus::Queued,
+            TaskStatus::Running,
+            TaskStatus::Stopping,
+            TaskStatus::Stopped,
+            TaskStatus::Completed,
+            TaskStatus::Failed,
+        ] {
+            let text = enum_text(&status).unwrap();
+            assert_eq!(parse_enum_text::<TaskStatus>(text, "status"), Ok(status));
+        }
+        assert!(serde_json::from_str::<TaskStatus>("\"paused\"").is_err());
     }
 
     fn names(entries: &[(&str, &str)]) -> HashMap<String, String> {
