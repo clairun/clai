@@ -62,14 +62,17 @@ const FULL_DAY_NAMES: Record<string, string> = {
   SATURDAY: 'SAT',
 };
 
-// Only named days are described. The scheduler's cron parser numbers days
-// 1 = Sunday … 7 = Saturday, not Vixie's 0 = Sunday … 6 = Saturday, so a
-// numeric field would be described as days it does not fire on; those fall
-// back to the raw expression.
+// Day numbers follow standard cron, as the scheduler reads them: 0 and 7 are
+// Sunday, 1-6 Monday-Saturday. They become names, so `1-5` reads as `MON-FRI`.
+// Only one day, `MON-FRI`, or the list `SAT,SUN` (in either order) is
+// described; anything else (a step, a range other than `MON-FRI`, 8) stays raw.
+const DAY_NUMBERS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'];
+
 const describeDays = (field: string): string | null => {
   const upper = field
     .toUpperCase()
-    .replace(/[A-Z]+/g, (name) => FULL_DAY_NAMES[name] ?? name);
+    .replace(/[A-Z]+/g, (name) => FULL_DAY_NAMES[name] ?? name)
+    .replace(/\d+/g, (day) => DAY_NUMBERS[Number(day)] ?? day);
   if (upper === 'MON-FRI') return 'weekdays';
   if (upper === 'SAT,SUN' || upper === 'SUN,SAT') return 'weekends';
   return DAY_NAMES[upper] ?? null;
