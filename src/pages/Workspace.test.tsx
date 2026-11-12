@@ -239,6 +239,7 @@ const FleetOutlet = ({ attentionCounts = { b: 1 }, withRail = false }: { attenti
       id="workspace-rail"
       onOpenFleet={() => {}}
       onOpenGlobalSettings={() => {}}
+      onOpenWindow={() => {}}
       workspaces={LISTED_WORKSPACES}
       selectedId="a"
       attentionCounts={attentionCounts}
@@ -393,7 +394,6 @@ describe('Workspace window header', () => {
     await userEvent.click(screen.getByRole('button', { name: '1 other workspace needs you' }));
     expect(screen.getByRole('button', { name: 'Hide workspaces' })).toHaveAttribute('aria-expanded', 'true');
     await waitFor(() => expect(screen.getByText('Beta').closest('[data-workspace-id]')).toHaveFocus());
-    expect(screen.getByRole('button', { name: 'Open in new window' })).toBeInTheDocument();
   });
 });
 
@@ -970,7 +970,8 @@ describe('Workspace header', () => {
     }
     await userEvent.click(artifacts);
     expect(artifacts).toHaveAttribute('aria-pressed', 'true');
-    expect(screen.getByRole('button', { name: 'Open in new window' }).closest(`.${styles.windowActions}`)).not.toBeNull();
+    // Opening another window moved to the rail's rows.
+    expect(within(artifacts.closest<HTMLElement>(`.${styles.header}`)!).queryByRole('button', { name: /new window/i })).toBeNull();
   });
 
   it('spells out the cadence and resumes from an icon button like Run now and Pause', async () => {

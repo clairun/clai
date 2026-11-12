@@ -29,7 +29,7 @@ interface WorkspaceRailProps {
   onOpenFleet: () => void;
   /** App-wide settings, as opposed to `onSettings` for one workspace. */
   onOpenGlobalSettings: () => void;
-  onOpenWindow?: (id: string) => void;
+  onOpenWindow: (id: string) => void;
   workspaces: WorkspaceListEntry[];
   selectedId: string | null;
   /** Per-workspace pending approval/path-grant count (merged). */
@@ -138,12 +138,20 @@ const shortScheduleLabel = (kind: WorkspaceListEntry['scheduleKind']): string =>
   return kind?.type === 'cron' ? 'cron' : '';
 };
 
-const StarIcon = ({ filled }: { filled: boolean }) => (
+const NewWindowIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+    <polyline points="15 3 21 3 21 9" />
+    <line x1="10" y1="14" x2="21" y2="3" />
+  </svg>
+);
+
+const StarIcon = () => (
   <svg
     width="12"
     height="12"
     viewBox="0 0 24 24"
-    fill={filled ? 'currentColor' : 'none'}
+    fill="currentColor"
     stroke="currentColor"
     strokeWidth="2"
     strokeLinecap="round"
@@ -197,7 +205,7 @@ const rowMenuStyle = (trigger: HTMLElement): React.CSSProperties => {
  * so ordering is never a mystery:
  *
  *   1. "Needs attention" — open questions, pending approvals and path grants.
- *   2. "Starred" — user-pinned workspaces (star via hover icon or ⋯ menu).
+ *   2. "Starred" — user-pinned workspaces (star via the ⋯ menu).
  *   3. "Recent" — everything else, most-recently-updated first.
  *
  * Within each section rows keep the recency order. Scheduled workspaces
@@ -527,19 +535,6 @@ const WorkspaceRail = ({
             )}
 
             <span className={styles.rowActions}>
-              <button
-                type="button"
-                className={`${styles.iconButton} ${isStarred ? styles.starButtonActive : ''}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onToggleStar(ws.id, isStarred);
-                }}
-                title={isStarred ? 'Unstar workspace' : 'Star workspace'}
-                aria-label={isStarred ? 'Unstar workspace' : 'Star workspace'}
-                aria-pressed={isStarred}
-              >
-                <StarIcon filled={isStarred} />
-              </button>
               {ws.scheduleEnabled && !isPaused && (
                 <>
                   <button
@@ -585,6 +580,18 @@ const WorkspaceRail = ({
                   <RunIcon />
                 </button>
               )}
+              <button
+                type="button"
+                className={styles.iconButton}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenWindow(ws.id);
+                }}
+                title="Open in new window"
+                aria-label={`Open ${ws.title} in new window`}
+              >
+                <NewWindowIcon />
+              </button>
               <button
                 type="button"
                 className={styles.iconButton}
@@ -675,11 +682,6 @@ const WorkspaceRail = ({
                     >
                       Settings
                     </button>
-                    {onOpenWindow && <button type="button" className={styles.menuItem} role="menuitem" onClick={(e) => {
-                      e.stopPropagation();
-                      closeMenu();
-                      onOpenWindow(ws.id);
-                    }}>Open in new window</button>}
                     <button
                       type="button"
                       className={styles.menuItem}
@@ -827,7 +829,7 @@ const WorkspaceRail = ({
               <div className={styles.sectionHeader} role="presentation">
                 {section.key === 'starred' && (
                   <span className={styles.sectionHeaderIcon} aria-hidden="true">
-                    <StarIcon filled />
+                    <StarIcon />
                   </span>
                 )}
                 {section.label}

@@ -65,8 +65,8 @@ import { fixedRightAlignedMenuStyle, sameFloatingMenuStyle } from '../utils/floa
 import { formatCount } from '../utils/formatCount';
 import { formatScheduleCadence, formatScheduleDetail, formatTimeUntil } from '../utils/scheduleFormat';
 import styles from './Workspace.module.css';
-import { AgentsIcon, ArtifactsIcon, MemoriesIcon, NewWindowIcon, TasksIcon } from './workspaceHeaderIcons';
-import { useWindowUi, openWorkspaceWindow } from '../windowUi';
+import { AgentsIcon, ArtifactsIcon, MemoriesIcon, TasksIcon } from './workspaceHeaderIcons';
+import { useWindowUi } from '../windowUi';
 
 const DEFAULT_WORKSPACE_ID = 'default';
 const REFRESH_INTERVAL_MS = 5000;
@@ -1040,7 +1040,6 @@ const WorkspaceHeader = ({
   stopBusy,
   otherAttention,
   onShowAttention,
-  onOpenWindow,
 }: {
   details: WorkspaceDetails | null;
   workspaceId: string;
@@ -1068,7 +1067,6 @@ const WorkspaceHeader = ({
   stopBusy: boolean;
   otherAttention: number;
   onShowAttention: () => void;
-  onOpenWindow: () => void;
 }) => {
   const { railHidden, toggleRail } = useWindowUi();
   const runNowSkipped = useFleetActivityStore((state) => state.runNowSkipped.includes(workspaceId));
@@ -1371,9 +1369,6 @@ const WorkspaceHeader = ({
               <ArtifactsIcon />
             )
           )}
-          <span className={styles.windowActions}>
-            <button type="button" className={styles.headerAction} onClick={onOpenWindow} title="Open in new window" aria-label="Open in new window"><NewWindowIcon /></button>
-          </span>
         </div>
       </div>
     </div>
@@ -2409,7 +2404,6 @@ const Workspace = () => {
         stopBusy={stopBusy}
         otherAttention={Object.entries(attentionCounts ?? {}).filter(([id, count]) => id !== workspaceId && id !== '__null' && count > 0).length}
         onShowAttention={showAttention ?? (() => {})}
-        onOpenWindow={() => { void openWorkspaceWindow(workspaceId).catch((err) => setError(errorMessage(err, 'Failed to open a new window.'))); }}
       />
 
       {error && <div className={styles.errorBanner}>{error}</div>}

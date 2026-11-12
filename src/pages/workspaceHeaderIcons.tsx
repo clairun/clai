@@ -1,11 +1,11 @@
 import type { ReactNode } from 'react';
 
-// 12px stroke icons for the workspace header's compact counters and window
-// action, drawn in the same style as the rail's icons.
-const Icon = ({ children, size = 12 }: { children: ReactNode; size?: number }) => (
+// 12px stroke icons for the workspace header's compact counters, drawn in the
+// same style as the rail's icons.
+const Icon = ({ children }: { children: ReactNode }) => (
   <svg
-    width={size}
-    height={size}
+    width="12"
+    height="12"
     viewBox="0 0 24 24"
     fill="none"
     stroke="currentColor"
@@ -46,13 +46,5 @@ export const ArtifactsIcon = () => (
   <Icon>
     <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
     <polyline points="14 2 14 8 20 8" />
-  </Icon>
-);
-
-export const NewWindowIcon = () => (
-  <Icon size={14}>
-    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
-    <polyline points="15 3 21 3 21 9" />
-    <line x1="10" y1="14" x2="21" y2="3" />
   </Icon>
 );
