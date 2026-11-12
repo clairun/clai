@@ -249,7 +249,8 @@ describe('WorkspaceSettingsModal schedule summary', () => {
 
   it.each([
     [{ type: 'cron', expression: '0 18 * * *', timezone: localZone }, false, 'Daily 18:00'],
-    [{ type: 'cron', expression: '0 9 * * 1-5', timezone: localZone }, false, 'Cron: 0 9 * * 1-5'],
+    [{ type: 'cron', expression: '0 9 * * 1-5', timezone: localZone }, false, 'Weekdays 09:00'],
+    [{ type: 'cron', expression: '0 9 * * 1-5/2', timezone: localZone }, false, 'Cron: 0 9 * * 1-5/2'],
     [{ type: 'interval', intervalMinutes: 90 }, true, 'Every 1 h 30 min · paused'],
   ] as const)('summarises %j (paused: %s) as %j', (scheduleKind, schedulePaused, summary) => {
     renderModal(undefined, { scheduleEnabled: true, schedulePaused, scheduleKind });

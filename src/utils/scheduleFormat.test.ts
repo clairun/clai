@@ -58,6 +58,19 @@ describe('describeCron', () => {
     ['0 9 * * MON', 'Mondays 09:00'],
     ['0 9 * * MONDAY', 'Mondays 09:00'],
     ['0 9 * * monday-friday', 'weekdays 09:00'],
+    // Day numbers follow standard cron: 0 and 7 are Sunday.
+    ['0 9 * * 1-5', 'weekdays 09:00'],
+    ['0 10 * * 0,6', 'weekends 10:00'],
+    ['0 10 * * 6,0', 'weekends 10:00'],
+    ['0 10 * * 6,7', 'weekends 10:00'],
+    ['0 10 * * 7,6', 'weekends 10:00'],
+    ['0 9 * * 0', 'Sundays 09:00'],
+    ['0 9 * * 1', 'Mondays 09:00'],
+    ['0 9 * * 6', 'Saturdays 09:00'],
+    ['0 9 * * 7', 'Sundays 09:00'],
+    ['0 9 * * 01', 'Mondays 09:00'],
+    ['0 9 * * MON-5', 'weekdays 09:00'],
+    ['0 10 * * SAT,0', 'weekends 10:00'],
     ['00 18 * * *', 'daily 18:00'],
     ['*/30 * * * *', 'every 30 min'],
     ['0 */12 * * *', 'every 12 h'],
@@ -69,10 +82,18 @@ describe('describeCron', () => {
   });
 
   it.each([
-    // Numeric days: the scheduler numbers them from Sunday = 1, so naming
-    // them by Vixie's convention would be wrong; left raw.
-    '0 9 * * 1-5',
-    '0 9 * * 1',
+    // Shapes described only in their canonical spelling, and everything else.
+    '0 9 * * 8',
+    '0 9 * * 1-5/2',
+    '0 9 * * */2',
+    '0 9 * * 5-7',
+    '0 9 * * 1,3,5',
+    '0 9 * * 0,7',
+    '0 9 * * 0-6',
+    // The scheduler fires only when day-of-month and day-of-week both match,
+    // where standard cron fires when either does; such schedules stay raw.
+    '0 9 1 * 1-5',
+    '0 9 15 * MON',
     '0 0 1 * *',
     '0 0 * 1 *',
     '0,30 9 * * *',
@@ -134,10 +155,10 @@ describe('formatScheduleCadence / formatScheduleDetail', () => {
   });
 
   it('falls back to the raw cron for an unknown shape', () => {
-    const kind = { type: 'cron', expression: '0 9 * * 1-5', timezone: 'UTC' } as const;
-    expect(formatScheduleCadence(kind, 'UTC')).toBe('cron: 0 9 * * 1-5');
-    expect(formatScheduleCadence(kind, 'Europe/Madrid')).toBe('cron: 0 9 * * 1-5 · UTC');
-    expect(formatScheduleDetail(kind)).toBe('cron: 0 9 * * 1-5, UTC');
+    const kind = { type: 'cron', expression: '0 9 * * 1-5/2', timezone: 'UTC' } as const;
+    expect(formatScheduleCadence(kind, 'UTC')).toBe('cron: 0 9 * * 1-5/2');
+    expect(formatScheduleCadence(kind, 'Europe/Madrid')).toBe('cron: 0 9 * * 1-5/2 · UTC');
+    expect(formatScheduleDetail(kind)).toBe('cron: 0 9 * * 1-5/2, UTC');
   });
 
   it('has no cadence without a usable schedule', () => {
