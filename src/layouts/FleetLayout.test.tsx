@@ -79,6 +79,19 @@ const getSchedulerPaused = vi.mocked(workspaceClient.getSchedulerPaused);
 const setSchedulerPaused = vi.mocked(workspaceClient.setSchedulerPaused);
 const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
 
+// Every test gets an empty `localStorage` of its own, so a saved rail
+// preference cannot carry into the next test. Node 22 exposes jsdom's
+// storage, which persists for the whole file; Node 25+ shadows it with a
+// global that, without --localstorage-file, has none.
+beforeEach(() => {
+  const items = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => void items.set(key, value),
+  });
+});
+afterEach(() => vi.unstubAllGlobals());
+
 const entry = (
   id: string,
   title: string,
@@ -606,14 +619,8 @@ describe('FleetLayout rail in a narrow window', () => {
       media.listeners.forEach((listener) => listener());
     });
   const railWidth = () => document.documentElement.style.getPropertyValue('--fleet-rail-width');
-  // A `localStorage` of its own: Node's global one, without a file, has none.
-  const memoryStorage = () => {
-    const items = new Map<string, string>();
-    return { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) };
-  };
 
   beforeEach(() => {
-    vi.stubGlobal('localStorage', memoryStorage());
     media.width = WIDE;
     media.listeners.clear();
     window.matchMedia = vi.fn((query: string) => ({
@@ -630,7 +637,6 @@ describe('FleetLayout rail in a narrow window', () => {
 
   afterEach(() => {
     window.matchMedia = originalMatchMedia;
-    vi.unstubAllGlobals();
   });
 
   it('collapses an expanded rail while narrow and restores it on widening, leaving the saved preference alone', async () => {
