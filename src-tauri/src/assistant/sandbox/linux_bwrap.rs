@@ -991,7 +991,7 @@ fn os(value: impl AsRef<OsStr>) -> OsString {
 mod tests {
     use super::*;
     use crate::assistant::sandbox::{
-        AllowedSocket, SandboxEnv, SandboxPathGrant, SandboxProfile, SocketPolicy,
+        built_helper, AllowedSocket, SandboxEnv, SandboxPathGrant, SandboxProfile, SocketPolicy,
     };
 
     fn sample_command() -> SandboxCommand {
@@ -2521,22 +2521,6 @@ print(os.readlink("/var/run"), *sorted(os.listdir("/var/run")))
                 .is_some_and(|line| line.contains("ServiceUnknown")),
             "{output:?}"
         );
-    }
-
-    /// The helper `cargo test` builds next to the test binary; `cargo test
-    /// --lib` alone does not build it.
-    fn built_helper() -> Option<PathBuf> {
-        let exe = std::env::current_exe().ok()?;
-        let helper = exe.parent()?.parent()?.join("clai-sandbox-helper");
-        if helper.is_file() {
-            Some(helper)
-        } else {
-            crate::assistant::sandbox::skip_without_bwrap(&format!(
-                "{} is not built",
-                helper.display()
-            ));
-            None
-        }
     }
 
     fn network_command(

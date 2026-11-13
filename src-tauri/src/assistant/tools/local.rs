@@ -3773,26 +3773,6 @@ mod tests {
         assert!(spawn_roots::started_by(&by).is_empty(), "gone once reaped");
     }
 
-    /// The helper `cargo test` builds next to the test binary.
-    #[cfg(target_os = "linux")]
-    fn built_helper() -> Option<PathBuf> {
-        let exe = std::env::current_exe().unwrap();
-        let helper = exe
-            .parent()
-            .unwrap()
-            .parent()
-            .unwrap()
-            .join("clai-sandbox-helper");
-        if helper.is_file() {
-            return Some(helper);
-        }
-        crate::assistant::sandbox::skip_without_bwrap(&format!(
-            "{} is not built",
-            helper.display()
-        ));
-        None
-    }
-
     /// An Allowlist command running `script` in `workspace`, with its proxy
     /// files in `files`.
     #[cfg(target_os = "linux")]
@@ -3835,7 +3815,7 @@ mod tests {
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn an_allowlist_command_runs_behind_its_own_proxy_session() {
-        let Some(helper) = built_helper() else {
+        let Some(helper) = crate::assistant::sandbox::built_helper() else {
             return;
         };
         let files = tempdir().unwrap();
@@ -3896,7 +3876,7 @@ mod tests {
     async fn a_port_allowed_during_a_command_is_forwarded_from_the_next() {
         use crate::assistant::network::run_state::{LocalBinding, LocalRule};
         use std::sync::atomic::{AtomicBool, Ordering};
-        let Some(helper) = built_helper() else {
+        let Some(helper) = crate::assistant::sandbox::built_helper() else {
             return;
         };
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
