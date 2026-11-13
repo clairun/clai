@@ -17,15 +17,32 @@ pub async fn reset_cli_session_for_rotation(
     Ok(())
 }
 
-/// The Codex thread to resume, or `None` to start a new one. A thread opened
-/// with another tool exposure than `tool_exposure` (see
-/// `codex_app_server::CODEX_TOOL_EXPOSURE`) is dropped like a rotated one, so
-/// the new thread is seeded from CLAI's conversation.
-pub async fn codex_thread_to_resume(
+/// The thread a Codex turn runs in: the one to resume, if any, and the tool
+/// exposure (see `codex_app_server::CODEX_TOOL_EXPOSURE`) recorded with
+/// whichever thread the turn ends up in.
+pub struct CodexThread {
+    resume: Option<String>,
+    tool_exposure: Option<&'static str>,
+}
+
+impl CodexThread {
+    pub fn to_resume(&self) -> Option<&str> {
+        self.resume.as_deref()
+    }
+
+    pub fn tool_exposure(&self) -> Option<&'static str> {
+        self.tool_exposure
+    }
+}
+
+/// The thread for a Codex turn whose CLAI tools are exposed as
+/// `tool_exposure`. A thread opened with another exposure is dropped like a
+/// rotated one, so the new thread is seeded from CLAI's conversation.
+pub async fn codex_thread(
     pool: &DbPool,
     session: &mut AssistantSession,
-    tool_exposure: Option<&str>,
-) -> Result<Option<String>, String> {
+    tool_exposure: Option<&'static str>,
+) -> Result<CodexThread, String> {
     if session.context.cli_session_id.is_some()
         && session.context.cli_tool_exposure.as_deref() != tool_exposure
     {
@@ -38,5 +55,8 @@ pub async fn codex_thread_to_resume(
         );
         reset_cli_session_for_rotation(pool, session).await?;
     }
-    Ok(session.context.cli_session_id.clone())
+    Ok(CodexThread {
+        resume: session.context.cli_session_id.clone(),
+        tool_exposure,
+    })
 }

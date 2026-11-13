@@ -1,6 +1,6 @@
 use crate::assistant::network::run_state::RunNetwork;
 use crate::assistant::{
-    cli_session::{codex_thread_to_resume, reset_cli_session_for_rotation},
+    cli_session::{codex_thread, reset_cli_session_for_rotation, CodexThread},
     conversation::content_text,
     conversation::tool_groups,
     conversation::RunConversation,
@@ -715,7 +715,7 @@ async fn clear_cli_session_id(
 }
 
 /// Record the provider session (thread) the turn runs in, with the tool
-/// exposure it was opened with (see `codex_thread_to_resume`).
+/// exposure it was opened with (see `codex_thread`).
 async fn set_cli_session_id(
     pool: &crate::db::DbPool,
     session: &mut AssistantSession,
@@ -737,6 +737,23 @@ async fn set_cli_session_id(
         .await
         .map_err(LocalAgentRunError::failed)?;
     Ok(())
+}
+
+/// Record the Codex thread a turn runs in, with `thread`'s tool exposure.
+async fn set_codex_thread_id(
+    pool: &crate::db::DbPool,
+    session: &mut AssistantSession,
+    thread_id: &str,
+    thread: &CodexThread,
+) -> Result<(), LocalAgentRunError> {
+    set_cli_session_id(
+        pool,
+        session,
+        thread_id.to_string(),
+        CODEX_PROVIDER_ID,
+        thread.tool_exposure(),
+    )
+    .await
 }
 
 async fn ensure_cli_session_id(
@@ -1520,7 +1537,8 @@ async fn run_codex_turn(
     run_input: &[AssistantMessage],
 ) -> Result<(), LocalAgentRunError> {
     // `exec` keeps CLAI's tools deferred (see `add_codex_common_args`).
-    let existing_thread_id = codex_thread_to_resume(&deps.pool, session, None).await?;
+    let codex_thread = codex_thread(&deps.pool, session, None).await?;
+    let existing_thread_id = codex_thread.to_resume().map(str::to_string);
     let prompt = prepare_prompt(
         deps,
         session,
@@ -1688,6 +1706,7 @@ async fn run_codex_turn(
             &mut state,
             &mut result_error,
             conversation,
+            &codex_thread,
         )
         .await;
         emit_pending_on_err(handled, deps, session, run_id, &mut state.update_throttle)?;
@@ -1807,8 +1826,8 @@ async fn run_codex_turn_app_server(
     )
     .await?;
     let thread_config = aps::thread_config(mcp_url, MCP_TOKEN_ENV, tool_timeout, &initialized);
-    let tool_exposure = aps::clai_tool_exposure(&thread_config);
-    let existing_thread_id = codex_thread_to_resume(&deps.pool, session, tool_exposure).await?;
+    let codex_thread =
+        codex_thread(&deps.pool, session, aps::clai_tool_exposure(&thread_config)).await?;
 
     let prompt = prepare_prompt(
         deps,
@@ -1817,7 +1836,7 @@ async fn run_codex_turn_app_server(
         trigger_message,
         CliProviderRuntime::Codex.metadata_source(),
         CliProviderRuntime::Codex.display_name(),
-        existing_thread_id.is_none(),
+        codex_thread.to_resume().is_none(),
         conversation,
         run_input,
     )
@@ -1843,7 +1862,7 @@ async fn run_codex_turn_app_server(
 
     let thread_request = aps::thread_request(
         2,
-        existing_thread_id.as_deref(),
+        codex_thread.to_resume(),
         cwd.as_deref(),
         model,
         thread_config,
@@ -1855,14 +1874,7 @@ async fn run_codex_turn_app_server(
         .and_then(|t| t.get("id"))
         .and_then(Value::as_str)
     {
-        set_cli_session_id(
-            &deps.pool,
-            session,
-            thread_id.to_string(),
-            CODEX_PROVIDER_ID,
-            tool_exposure,
-        )
-        .await?;
+        set_codex_thread_id(&deps.pool, session, thread_id, &codex_thread).await?;
     }
     let thread_id =
         session.context.cli_session_id.clone().ok_or_else(|| {
@@ -2034,7 +2046,7 @@ async fn run_codex_turn_app_server(
             &mut result_error,
             &mut active_turn_id,
             conversation,
-            tool_exposure,
+            &codex_thread,
         )
         .await;
         let turn_done =
@@ -2149,7 +2161,7 @@ async fn handle_app_server_notification(
     result_error: &mut Option<String>,
     active_turn_id: &mut Option<String>,
     conversation: &mut RunConversation,
-    tool_exposure: Option<&str>,
+    codex_thread: &CodexThread,
 ) -> Result<bool, LocalAgentRunError> {
     let null = Value::Null;
     let params = message.get("params").unwrap_or(&null);
@@ -2160,14 +2172,7 @@ async fn handle_app_server_notification(
                 .and_then(|t| t.get("id"))
                 .and_then(Value::as_str)
             {
-                set_cli_session_id(
-                    &deps.pool,
-                    session,
-                    thread_id.to_string(),
-                    CODEX_PROVIDER_ID,
-                    tool_exposure,
-                )
-                .await?;
+                set_codex_thread_id(&deps.pool, session, thread_id, codex_thread).await?;
             }
         }
         "turn/started" => {
@@ -3884,18 +3889,12 @@ async fn handle_codex_event(
     state: &mut CodexStreamState,
     result_error: &mut Option<String>,
     conversation: &mut RunConversation,
+    codex_thread: &CodexThread,
 ) -> Result<(), LocalAgentRunError> {
     match value.get("type").and_then(Value::as_str) {
         Some("thread.started") => {
             if let Some(thread_id) = value.get("thread_id").and_then(Value::as_str) {
-                set_cli_session_id(
-                    &deps.pool,
-                    session,
-                    thread_id.to_string(),
-                    CODEX_PROVIDER_ID,
-                    None,
-                )
-                .await?;
+                set_codex_thread_id(&deps.pool, session, thread_id, codex_thread).await?;
             }
         }
         Some("turn.failed") => {
@@ -6442,7 +6441,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_thread_without_tool_exposure_is_replaced_and_the_new_one_marked() {
+    async fn codex_thread_without_tool_exposure_is_replaced_once_then_resumed() {
         use crate::assistant::codex_app_server::{self as aps, CODEX_TOOL_EXPOSURE};
         use crate::db::test_support::workspace_pool;
 
@@ -6451,30 +6450,45 @@ mod tests {
         // CLAI's tools inside code mode.
         let mut session = session_with_cli_thread(&pool, CODEX_PROVIDER_ID, None).await;
 
-        let resume = codex_thread_to_resume(&pool, &mut session, Some(CODEX_TOOL_EXPOSURE))
-            .await
-            .unwrap();
-        assert_eq!(resume, None);
-        assert_eq!(stored_context(&pool, &session).await.cli_session_id, None);
-        let request =
-            aps::thread_request(2, resume.as_deref(), None, None, serde_json::json!({}), "i");
-        assert_eq!(request["method"], "thread/start");
-
-        set_cli_session_id(
-            &pool,
-            &mut session,
-            "new-thread".to_string(),
-            CODEX_PROVIDER_ID,
-            Some(CODEX_TOOL_EXPOSURE),
-        )
-        .await
-        .map_err(|_| "set_cli_session_id failed")
-        .unwrap();
-        let stored = stored_context(&pool, &session).await;
-        assert_eq!(stored.cli_session_id.as_deref(), Some("new-thread"));
+        // Each run: pick the thread, then record the one Codex reports, as
+        // `run_codex_turn_app_server` does.
+        let mut methods = Vec::new();
+        for reported_thread in ["new-thread", "new-thread"] {
+            let thread = codex_thread(&pool, &mut session, Some(CODEX_TOOL_EXPOSURE))
+                .await
+                .unwrap();
+            let request = aps::thread_request(
+                2,
+                thread.to_resume(),
+                None,
+                None,
+                serde_json::json!({}),
+                "i",
+            );
+            methods.push((
+                request["method"].clone(),
+                request["params"]["threadId"].clone(),
+            ));
+            set_codex_thread_id(&pool, &mut session, reported_thread, &thread)
+                .await
+                .map_err(|_| "set_codex_thread_id failed")
+                .unwrap();
+            let stored = stored_context(&pool, &session).await;
+            assert_eq!(stored.cli_session_id.as_deref(), Some("new-thread"));
+            assert_eq!(
+                stored.cli_tool_exposure.as_deref(),
+                Some(CODEX_TOOL_EXPOSURE)
+            );
+        }
         assert_eq!(
-            stored.cli_tool_exposure.as_deref(),
-            Some(CODEX_TOOL_EXPOSURE)
+            methods,
+            [
+                (serde_json::json!("thread/start"), serde_json::Value::Null),
+                (
+                    serde_json::json!("thread/resume"),
+                    serde_json::json!("new-thread")
+                ),
+            ]
         );
     }
 
@@ -6495,12 +6509,16 @@ mod tests {
             let case = format!("{opened_with:?} -> {current:?}");
             let mut session = session_with_cli_thread(&pool, CODEX_PROVIDER_ID, opened_with).await;
 
-            let resume = codex_thread_to_resume(&pool, &mut session, current)
-                .await
-                .unwrap();
+            let thread = codex_thread(&pool, &mut session, current).await.unwrap();
 
-            let request =
-                aps::thread_request(2, resume.as_deref(), None, None, serde_json::json!({}), "i");
+            let request = aps::thread_request(
+                2,
+                thread.to_resume(),
+                None,
+                None,
+                serde_json::json!({}),
+                "i",
+            );
             let stored = stored_context(&pool, &session).await;
             if resumed {
                 assert_eq!(request["method"], "thread/resume", "{case}");
