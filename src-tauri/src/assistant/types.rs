@@ -114,6 +114,11 @@ pub struct SessionContext {
     /// `None` for sessions created before this was tracked.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_provider: Option<String>,
+    /// How CLAI's tools were exposed to the Codex thread in `cli_session_id`
+    /// (see `codex_app_server::CODEX_TOOL_EXPOSURE`); `None` when deferred or
+    /// unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cli_tool_exposure: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]

@@ -646,7 +646,13 @@ automationId?: string | null, cliSessionId?: string | null,
  * server-side thread id), so switching providers must NOT reuse it.
  * `None` for sessions created before this was tracked.
  */
-cliSessionProvider?: string | null, };
+cliSessionProvider?: string | null, 
+/**
+ * How CLAI's tools were exposed to the Codex thread in `cli_session_id`
+ * (see `codex_app_server::CODEX_TOOL_EXPOSURE`); `None` when deferred or
+ * unknown.
+ */
+cliToolExposure?: string | null, };
 
 export type SetSkillSourceEnabledRequest = { id: string, enabled: boolean, };
 

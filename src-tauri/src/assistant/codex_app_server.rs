@@ -242,6 +242,40 @@ fn supports_direct_mcp_tools(initialize_result: &Value) -> bool {
     }
 }
 
+/// Marks a Codex thread opened with CLAI's tools as direct tools (see
+/// [`thread_config`]). Bump it whenever the way CLAI's tools are exposed to
+/// Codex changes: a thread whose history found the tools elsewhere keeps
+/// looking there and reports them missing, so a thread with another marker
+/// is replaced by a new one instead of resumed.
+pub(crate) const CODEX_TOOL_EXPOSURE: &str = "direct-v1";
+
+/// The tool-exposure marker for a thread opened with `config`, built by
+/// [`thread_config`]; `None` when CLAI's tools stay deferred.
+pub(crate) fn clai_tool_exposure(config: &Value) -> Option<&'static str> {
+    config["features"]
+        .get("code_mode")
+        .is_some()
+        .then_some(CODEX_TOOL_EXPOSURE)
+}
+
+/// The `thread/resume` request for `thread_to_resume`, or `thread/start` when
+/// there is none.
+pub(crate) fn thread_request(
+    id: i64,
+    thread_to_resume: Option<&str>,
+    cwd: Option<&str>,
+    model: Option<&str>,
+    config: Value,
+    developer_instructions: &str,
+) -> Value {
+    match thread_to_resume {
+        Some(thread_id) => {
+            thread_resume_request(id, thread_id, model, config, developer_instructions)
+        }
+        None => thread_start_request(id, cwd, model, config, developer_instructions),
+    }
+}
+
 /// The `config` object mirroring the `-c mcp_servers.clai.*` flags the `exec`
 /// path passes, so the app-server turn can reach the same local MCP server.
 /// `initialize_result` is the server's answer to [`initialize_request`].
@@ -622,6 +656,14 @@ mod tests {
         // An older server rejects any `code_mode` table, so none is sent.
         let config = thread_config("u", "T", 60, &initialized("0.141.9"));
         assert!(config["features"].get("code_mode").is_none());
+    }
+
+    #[test]
+    fn tool_exposure_marks_only_threads_with_direct_clai_tools() {
+        let direct = thread_config("u", "T", 60, &initialized("0.167.0"));
+        assert_eq!(clai_tool_exposure(&direct), Some(CODEX_TOOL_EXPOSURE));
+        let deferred = thread_config("u", "T", 60, &initialized("0.141.9"));
+        assert_eq!(clai_tool_exposure(&deferred), None);
     }
 
     #[test]
