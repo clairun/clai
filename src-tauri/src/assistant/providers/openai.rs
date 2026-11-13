@@ -58,6 +58,7 @@ impl ProviderAdapter for OpenAiAdapter {
                 ModelsEndpointStyle::OpenAiCompatible { url } => {
                     return super::fetch_models_openai_compatible(
                         url,
+                        &connection.provider_id,
                         api_key.as_deref(),
                         entry.capabilities.as_ref(),
                     )
@@ -85,38 +86,28 @@ impl ProviderAdapter for OpenAiAdapter {
             "Fetching models from provider"
         );
 
-        let client = Client::new();
-        let mut builder = client.get(&models_url);
+        let mut headers: Vec<(String, String)> = Vec::new();
         if let Some(key) = &api_key {
-            builder = builder.header("Authorization", format!("Bearer {}", key));
+            headers.push(("Authorization".to_string(), format!("Bearer {}", key)));
         }
-        for (name, value) in catalog_extra_headers(connection) {
-            builder = builder.header(name, value);
-        }
-        let resp = builder.send().await.map_err(|e| {
-            tracing::error!(url = %models_url, error = %e, "HTTP request failed");
-            ProviderError::RequestFailed(e.to_string())
-        })?;
+        headers.extend(catalog_extra_headers(connection));
 
-        if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            tracing::error!(
-                url = %models_url,
-                status = %status,
-                body = %body,
-                "Provider returned error"
-            );
-            return Err(ProviderError::RequestFailed(format!(
-                "HTTP {}: {}",
-                status, body
-            )));
-        }
+        let wire = super::wire_log::Scope::begin(&super::wire_log::Request {
+            kind: "models",
+            provider_id: &connection.provider_id,
+            protocol_id: &connection.protocol_id,
+            model_id: None,
+            run_id: None,
+            session_id: None,
+            method: "GET",
+            url: &models_url,
+            headers: &headers,
+            body: &serde_json::Value::Null,
+        });
 
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let text = super::get_logged(&wire, &models_url, &headers).await?;
+        let body: serde_json::Value =
+            serde_json::from_str(&text).map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
         let models = body["data"]
             .as_array()
@@ -152,32 +143,56 @@ impl ProviderAdapter for OpenAiAdapter {
         let url = completions_url(connection);
         let body = build_request_body(&request);
 
-        let client = Client::new();
-        let mut builder = client
-            .post(url)
-            .header("Content-Type", "application/json")
-            .json(&body);
+        // One header list drives both the request and the wire log, so the
+        // log cannot drift from what goes on the wire.
+        let mut headers: Vec<(String, String)> =
+            vec![("Content-Type".to_string(), "application/json".to_string())];
         if let Some(key) = &api_key {
-            builder = builder.header("Authorization", format!("Bearer {}", key));
+            headers.push(("Authorization".to_string(), format!("Bearer {}", key)));
         }
-        for (name, value) in catalog_extra_headers(connection) {
+        headers.extend(catalog_extra_headers(connection));
+
+        let wire = super::wire_log::Scope::begin(&super::wire_log::Request {
+            kind: "completion",
+            provider_id: &connection.provider_id,
+            protocol_id: &connection.protocol_id,
+            model_id: Some(&request.model_id),
+            // `stream_sessionless_completion` (compaction summaries) falls
+            // through to this send, so the wire log covers both purposes.
+            run_id: Some(&request.run_id),
+            session_id: Some(&request.session_id),
+            method: "POST",
+            url: &url,
+            headers: &headers,
+            body: &body,
+        });
+
+        let client = Client::new();
+        let mut builder = client.post(&url).json(&body);
+        for (name, value) in &headers {
             builder = builder.header(name, value);
         }
-        let resp = builder
-            .send()
-            .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let resp = match builder.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                wire.transport_error(&e.to_string());
+                return Err(ProviderError::RequestFailed(e.to_string()));
+            }
+        };
+
+        wire.response(resp.status().as_u16(), resp.headers());
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            wire.body(&body);
             return Err(ProviderError::RequestFailed(format!(
                 "HTTP {}: {}",
                 status, body
             )));
         }
 
-        let byte_stream = resp.bytes_stream();
+        let byte_stream = wire.wrap_stream(resp.bytes_stream());
         let event_stream = sse_to_provider_events(byte_stream);
 
         Ok(Box::pin(event_stream))
@@ -867,6 +882,221 @@ mod tests {
             Ok(ProviderEvent::TextDelta { text }) if text == "€"
         )));
     }
+    fn wire_test_completion_request(
+        run_id: &str,
+        session_id: &str,
+        model: &str,
+    ) -> CompletionRequest {
+        use crate::assistant::types::ToolDefinition;
+        CompletionRequest {
+            run_id: run_id.into(),
+            session_id: session_id.into(),
+            model_id: model.into(),
+            messages: vec![ProviderInputMessage {
+                role: MessageRole::User,
+                content: vec![ContentPart::Text {
+                    text: "pr\u{fae}ba full prompt".into(),
+                }],
+            }],
+            tools: vec![ToolDefinition {
+                name: "get_weather".into(),
+                description: "Get weather".into(),
+                input_schema: json!({"type": "object"}),
+            }],
+            temperature: None,
+            max_output_tokens: None,
+            images: Default::default(),
+        }
+    }
+
+    /// Adapter-level proof of the opt-in wire log: a full streamed completion
+    /// exchange (request body verbatim, redacted Authorization, response
+    /// status, raw SSE chunks, end) plus the non-2xx error-body path.
+    /// The std Mutex guard is held across awaits on purpose: these tests swap
+    /// a process-global logger and must not interleave.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn wire_log_captures_full_completion_exchange() {
+        use crate::assistant::providers::wire_log;
+        use axum::{http::HeaderMap, routing::post, Router};
+
+        let _guard = wire_log::TEST_LOCK.lock().expect("test lock poisoned");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("wire.log");
+        wire_log::testing::install(&log_path);
+
+        let seen_auth = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let captured_auth = seen_auth.clone();
+        let sse_body =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"h\u{e9}llo\"}}]}\n\ndata: [DONE]\n\n";
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(move |headers: HeaderMap| {
+                let captured_auth = captured_auth.clone();
+                async move {
+                    *captured_auth.lock().unwrap() = headers
+                        .get("authorization")
+                        .map(|value| value.to_str().unwrap().to_string());
+                    axum::http::Response::builder()
+                        .status(200)
+                        .header("content-type", "text/event-stream")
+                        .body(axum::body::Body::from(sse_body.to_string()))
+                        .unwrap()
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let mut connection = conn_with_brand("z-ai-glm");
+        connection.base_url = Some(base_url.clone());
+        connection.secret_ref = "provider-connection::wire-log-test".into();
+        ProviderSecretStorage::set_secret(&connection.secret_ref, "sk-wire-secret").unwrap();
+
+        let request = wire_test_completion_request("run-wire", "sess-wire", "glm-4.7");
+
+        let events = futures::StreamExt::collect::<Vec<_>>(
+            OpenAiAdapter
+                .stream_completion(&connection, request)
+                .await
+                .expect("stream starts"),
+        )
+        .await;
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Ok(ProviderEvent::TextDelta { text }) if text == "h\u{e9}llo"
+        )));
+
+        // The Authorization header reached the server unredacted...
+        assert_eq!(
+            seen_auth.lock().unwrap().as_deref(),
+            Some("Bearer sk-wire-secret")
+        );
+
+        wire_log::testing::disable();
+        drop(_guard);
+
+        // ...while the wire log holds everything else, credentials redacted.
+        let file = std::fs::read_to_string(&log_path).expect("wire log written");
+        let events: Vec<serde_json::Value> = file
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid JSONL"))
+            .collect();
+        let request_event = events
+            .iter()
+            .find(|e| {
+                e["event"] == "request" && e["url"] == format!("{base_url}/v1/chat/completions")
+            })
+            .expect("request event");
+        assert_eq!(request_event["kind"], "completion");
+        assert_eq!(request_event["model_id"], "glm-4.7");
+        assert_eq!(request_event["run_id"], "run-wire");
+        assert_eq!(request_event["session_id"], "sess-wire");
+        assert_eq!(request_event["headers"]["Authorization"], "[REDACTED]");
+        assert_eq!(request_event["headers"]["Content-Type"], "application/json");
+        assert_eq!(request_event["body"]["model"], "glm-4.7");
+        assert_eq!(request_event["body"]["stream"], true);
+        assert_eq!(
+            request_event["body"]["messages"][0]["content"],
+            "pr\u{fae}ba full prompt"
+        );
+        assert_eq!(
+            request_event["body"]["tools"][0]["function"]["name"],
+            "get_weather"
+        );
+
+        let id = request_event["id"].as_str().expect("request id");
+        let response = events
+            .iter()
+            .find(|e| e["event"] == "response" && e["id"] == id)
+            .expect("response event");
+        assert_eq!(response["status"], 200);
+
+        let chunk_texts: String = events
+            .iter()
+            .filter(|e| e["event"] == "chunk" && e["id"] == id)
+            .map(|e| e["payload"]["text"].as_str().unwrap_or(""))
+            .collect();
+        assert!(chunk_texts.contains("h\u{e9}llo"));
+        assert!(chunk_texts.contains("[DONE]"));
+
+        let end = events
+            .iter()
+            .find(|e| e["event"] == "end" && e["id"] == id)
+            .expect("end event");
+        assert!(end["chunks"].as_u64().expect("chunk count") >= 1);
+        assert!(!events
+            .iter()
+            .any(|e| e["event"] == "cancelled" && e["id"] == id));
+    }
+
+    /// The non-2xx path: status plus the provider's error body, verbatim.
+    /// Guard held across awaits on purpose (process-global logger).
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn wire_log_captures_http_error_body() {
+        use crate::assistant::providers::wire_log;
+        use axum::{http::StatusCode, routing::post, Router};
+
+        let _guard = wire_log::TEST_LOCK.lock().expect("test lock poisoned");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let log_path = dir.path().join("wire.log");
+        wire_log::testing::install(&log_path);
+
+        let router = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "{\"error\":{\"message\":\"minimax exploded\"}}",
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        let mut connection = conn_with_brand("minimax");
+        connection.base_url = Some(base_url.clone());
+        connection.secret_ref = "provider-connection::wire-log-err-test".into();
+        ProviderSecretStorage::set_secret(&connection.secret_ref, "sk-wire-secret").unwrap();
+
+        let request = wire_test_completion_request("run-err", "sess-err", "abab6.5s-chat");
+
+        let Err(error) = OpenAiAdapter.stream_completion(&connection, request).await else {
+            panic!("non-2xx status must fail")
+        };
+        assert!(error.to_string().contains("HTTP 500"));
+
+        wire_log::testing::disable();
+        drop(_guard);
+
+        let file = std::fs::read_to_string(&log_path).expect("wire log written");
+        let events: Vec<serde_json::Value> = file
+            .lines()
+            .map(|line| serde_json::from_str(line).expect("valid JSONL"))
+            .collect();
+        let request_event = events
+            .iter()
+            .find(|e| e["event"] == "request" && e["kind"] == "completion")
+            .expect("request event");
+        let id = request_event["id"].as_str().expect("request id");
+        let response = events
+            .iter()
+            .find(|e| e["event"] == "response" && e["id"] == id)
+            .expect("response event");
+        assert_eq!(response["status"], 500);
+        let body = events
+            .iter()
+            .find(|e| e["event"] == "body" && e["id"] == id)
+            .expect("error body logged");
+        assert_eq!(
+            body["text"],
+            "{\"error\":{\"message\":\"minimax exploded\"}}"
+        );
+    }
+
     fn conn_with_brand(brand: &str) -> ProviderConnection {
         ProviderConnection {
             id: "t".into(),

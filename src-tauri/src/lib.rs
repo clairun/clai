@@ -293,6 +293,10 @@ pub fn run() {
 
     tracing::info!("CLAI starting up...");
 
+    // Opt-in provider wire log (see assistant::providers::wire_log). Resolve
+    // it before any provider traffic can start.
+    assistant::providers::wire_log::init();
+
     // Install the process-wide rustls CryptoProvider before any TLS handshake.
     // rmcp's HTTP MCP transport builds a reqwest 0.13 (rustls 0.23) client, and
     // rustls 0.23 panics with "No provider set" if no default provider is

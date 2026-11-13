@@ -75,18 +75,46 @@ fn key_validation_url(connection: &ProviderConnection) -> String {
 }
 
 async fn validate_openrouter_key_at(url: &str, key: &str) -> Result<(), ProviderError> {
-    let response = Client::new()
-        .get(url)
-        .bearer_auth(key)
-        .send()
-        .await
-        .map_err(|error| ProviderError::RequestFailed(error.to_string()))?;
-    if !response.status().is_success() {
+    let headers: Vec<(String, String)> =
+        vec![("Authorization".to_string(), format!("Bearer {}", key))];
+
+    let wire = super::wire_log::Scope::begin(&super::wire_log::Request {
+        kind: "key_validation",
+        provider_id: OPENROUTER_PROVIDER_ID,
+        protocol_id: "openai",
+        model_id: None,
+        run_id: None,
+        session_id: None,
+        method: "GET",
+        url,
+        headers: &headers,
+        body: &serde_json::Value::Null,
+    });
+
+    let response = match Client::new().get(url).bearer_auth(key).send().await {
+        Ok(response) => response,
+        Err(error) => {
+            wire.transport_error(&error.to_string());
+            return Err(ProviderError::RequestFailed(error.to_string()));
+        }
+    };
+    let status = response.status();
+    wire.response(status.as_u16(), response.headers());
+    if !status.is_success() {
+        let error_body = response.text().await.unwrap_or_default();
+        wire.body(&error_body);
         return Err(ProviderError::RequestFailed(format!(
             "OpenRouter API key validation failed: HTTP {}",
-            response.status()
+            status
         )));
     }
+    // The validation endpoint answers with the key's usage data; status alone
+    // decides success, the body is read only for the wire log.
+    let usage = response
+        .text()
+        .await
+        .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+    wire.body(&usage);
     Ok(())
 }
 
