@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest';
-import { act, fireEvent, render } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import userEvent, { type UserEvent } from '@testing-library/user-event';
 import { useEffect, useRef, useState } from 'react';
 import { FOCUS_TERMINAL_EVENT } from '../utils/workspaceUiEvents';
@@ -26,7 +26,11 @@ const Host = ({ workspaceId }: { workspaceId: string | null }) => {
       <p onClick={() => setQuestionOpen(true)}>Show the question</p>
       {questionOpen && <div role="dialog" aria-label="Question" />}
       <p onClick={() => document.getElementById('search')?.focus()}>Search for this</p>
-      <p onPointerDown={(e) => e.stopPropagation()} onPointerUp={(e) => e.stopPropagation()}>
+      <p
+        onPointerDown={(e) => e.stopPropagation()}
+        onPointerUp={(e) => e.stopPropagation()}
+        onDragStart={(e) => e.stopPropagation()}
+      >
         A message that keeps its pointer events
       </p>
       <input id="search" aria-label="Search" />
@@ -322,9 +326,10 @@ describe('useComposerFocus on window activation during a press', () => {
     expect(composer).toHaveFocus();
   });
 
-  // These pass with a microtask in place of the next-task deferral too: user-event
-  // waits a task after each action. They show the release rechecks after the
-  // click, not that the recheck waits for the click.
+  // These pass with a microtask in place of the next-task deferral too:
+  // user-event dispatches pointerup, mouseup and click in one JS call, with no
+  // microtask checkpoint between them. They show the release rechecks after
+  // the click, not that the recheck waits for the click.
   it("leaves the keyboard to a dialog the click's own handler opens", async () => {
     const { composer, getByText, getByRole } = setup();
     const user = userEvent.setup();
@@ -363,11 +368,27 @@ describe('useComposerFocus on window activation during a press', () => {
     expect(composer).not.toHaveFocus();
   });
 
-  it('focuses the composer at once when the press is not the primary button', () => {
+  it('leaves the composer alone after a right-click that activates the window', async () => {
     const { composer, getByText } = setup();
-    fireEvent.pointerDown(getByText(CHAT), { button: 2 });
+    const chat = getByText(CHAT);
+    fireEvent.pointerDown(chat, { button: 2 });
     activate();
-    expect(composer).toHaveFocus();
+    fireEvent.pointerUp(chat, { button: 2 });
+    await nextTask();
+    expect(composer).not.toHaveFocus();
+  });
+
+  it('leaves the chat selection to a right-click that activates the window', async () => {
+    const { composer, getByText } = setup();
+    const chat = getByText(CHAT);
+    selectText(chat);
+    fireEvent.pointerDown(chat, { button: 2 });
+    activate();
+    expect(composer).not.toHaveFocus();
+    fireEvent.pointerUp(chat, { button: 2 });
+    await nextTask();
+    expect(composer).not.toHaveFocus();
+    expect(document.getSelection()?.toString()).toBe(CHAT);
   });
 });
 
@@ -391,38 +412,30 @@ describe('useComposerFocus after an activation with no press', () => {
 describe('useComposerFocus press state', () => {
   afterEach(() => fireEvent.blur(window));
 
-  it('forgets a press once released', async () => {
-    const { composer, getByText } = setup();
-    await userEvent.click(getByText('The agent replied with a long answer.'));
-    activate();
-    expect(composer).toHaveFocus();
-  });
-
-  it('forgets a press when the window is left', () => {
-    const { composer, getByText } = setup();
-    fireEvent.pointerDown(getByText('The agent replied with a long answer.'), { button: 0 });
-    fireEvent.blur(window);
-    activate();
-    expect(composer).toHaveFocus();
-  });
-
-  it('forgets a press the pointer cancels', () => {
-    const { composer, getByText } = setup();
-    fireEvent.pointerDown(getByText('The agent replied with a long answer.'), { button: 0 });
-    fireEvent.pointerCancel(window);
-    activate();
-    expect(composer).toHaveFocus();
-  });
-
-  it.each([
+  const RESETS: [string, (button: number) => void][] = [
+    ['released', (button) => fireEvent.pointerUp(window, { button })],
     ['the window is left', () => fireEvent.blur(window)],
     ['the pointer cancels', () => fireEvent.pointerCancel(window)],
-  ])('disarms when %s mid-press', async (_, end) => {
+    ['a drag starts', () => fireEvent.dragStart(screen.getByText('A message that keeps its pointer events'))],
+  ];
+
+  it.each(RESETS.flatMap(([when, end]) => [0, 2].map((button) => [when, button, end] as const)))(
+    'forgets a press once %s (button %i)',
+    (_, button, end) => {
+      const { composer, getByText } = setup();
+      fireEvent.pointerDown(getByText('The agent replied with a long answer.'), { button });
+      end(button);
+      activate();
+      expect(composer).toHaveFocus();
+    },
+  );
+
+  it.each(RESETS.slice(1))('disarms when %s mid-press', async (_, end) => {
     const { composer, getByText } = setup();
     const chat = getByText('The agent replied with a long answer.');
     fireEvent.pointerDown(chat, { button: 0 });
     activate();
-    end();
+    end(0);
     fireEvent.pointerDown(chat, { button: 0 });
     fireEvent.pointerUp(chat, { button: 0 });
     await nextTask();

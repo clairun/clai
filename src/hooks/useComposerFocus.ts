@@ -54,29 +54,30 @@ export function useComposerFocus(workspaceId: string | null): void {
   }, [workspaceId]);
 
   useEffect(() => {
-    // A primary press is in progress, and whether the window was activated during it.
-    let pressed = false;
+    // The press in progress, and whether the window was activated during a primary one.
+    let press: 'none' | 'primary' | 'other' = 'none';
     let armed = false;
     let pending: ReturnType<typeof setTimeout> | undefined;
 
     const reset = () => {
-      pressed = false;
+      press = 'none';
       armed = false;
     };
     const onPointerDown = (e: PointerEvent) => {
-      pressed = e.button === 0;
+      press = e.button === 0 ? 'primary' : 'other';
     };
     // WebKitGTK delivers the activation during the press that causes it, so
     // that press's release decides; focusing the composer mid-press would take
     // the press's own focus and clamp a drag-select to the composer. Were the
     // activation to come before the press, a press on plain content would end
-    // on <body>, and only typing would bring the composer back.
+    // on <body>, and only typing would bring the composer back. Any other
+    // press is left alone: a right-click keeps the selection for its menu.
     const onFocus = () => {
-      if (pressed) armed = true;
-      else if (composerMayReclaim()) dispatchFocusTerminal();
+      if (press === 'primary') armed = true;
+      else if (press === 'none' && composerMayReclaim()) dispatchFocusTerminal();
     };
     const onPointerUp = () => {
-      pressed = false;
+      press = 'none';
       if (!armed) return;
       armed = false;
       // WebKit dispatches click in the same task as pointerup and mouseup, so
@@ -91,8 +92,10 @@ export function useComposerFocus(workspaceId: string | null): void {
     };
 
     window.addEventListener('focus', onFocus);
-    // A press released outside the window sends no pointerup; blur ends it.
+    // A press released outside the window, or one that starts a drag, sends
+    // no pointerup; blur and dragstart end it.
     window.addEventListener('blur', reset);
+    window.addEventListener('dragstart', reset, true);
     // Capture, so a handler that stops propagation cannot hide the press.
     window.addEventListener('pointerdown', onPointerDown, true);
     window.addEventListener('pointerup', onPointerUp, true);
@@ -102,6 +105,7 @@ export function useComposerFocus(workspaceId: string | null): void {
       clearTimeout(pending);
       window.removeEventListener('focus', onFocus);
       window.removeEventListener('blur', reset);
+      window.removeEventListener('dragstart', reset, true);
       window.removeEventListener('pointerdown', onPointerDown, true);
       window.removeEventListener('pointerup', onPointerUp, true);
       window.removeEventListener('pointercancel', reset, true);
