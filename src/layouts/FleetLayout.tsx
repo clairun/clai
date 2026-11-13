@@ -31,7 +31,7 @@ import { cardAttention } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetToggle } from '../fleet/useFleetToggle';
 import { dispatchFocusTerminal, onWorkspaceUiCommand, setPendingForkPrompt } from '../utils/workspaceUiEvents';
-import { useComposerTypeToFocus } from '../hooks/useComposerTypeToFocus';
+import { useComposerFocus } from '../hooks/useComposerFocus';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 import styles from './FleetLayout.module.css';
 
@@ -102,7 +102,7 @@ const FleetLayout = () => {
   const match = useMatch('/workspace/:workspaceId');
   const selectedId = match?.params.workspaceId ?? null;
   const { railHidden, setRailHidden, toggleRail } = useWindowUi();
-  useComposerTypeToFocus(selectedId);
+  useComposerFocus(selectedId);
   const [attentionRequest, setAttentionRequest] = useState(0);
   const showAttention = useCallback(() => {
     setRailHidden(false);
