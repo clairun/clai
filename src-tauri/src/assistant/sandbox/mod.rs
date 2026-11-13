@@ -335,6 +335,29 @@ pub(crate) fn skip_without_bwrap(reason: &str) {
     eprintln!("skipped: {reason}");
 }
 
+/// The helper `cargo test` builds into the target directory's profile
+/// directory (`target/debug/`); `cargo test --lib` alone does not build it.
+/// Test binaries run from inside Cargo's build directory, whose layout is not
+/// stable (Rust 1.100 moved them from `target/debug/deps/` to
+/// `target/debug/build/<pkg>/<hash>/out/`), so search every ancestor rather
+/// than a fixed depth.
+#[cfg(all(test, target_os = "linux"))]
+pub(crate) fn built_helper() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let helper = exe
+        .ancestors()
+        .skip(1)
+        .map(|dir| dir.join("clai-sandbox-helper"))
+        .find(|path| path.is_file());
+    if helper.is_none() {
+        skip_without_bwrap(&format!(
+            "clai-sandbox-helper is not built in any ancestor of {}",
+            exe.display()
+        ));
+    }
+    helper
+}
+
 /// A test that needs Landlock ABI `needed` calls this, and returns when it
 /// says to skip on an older kernel. It never skips when
 /// `CLAI_REQUIRE_LANDLOCK_ABI` is `needed` or more: the test fails instead.
