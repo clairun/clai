@@ -6,6 +6,14 @@ import { OTHER_INDEX, useAskAnswer } from './useAskAnswer';
 import styles from './AskUserPanel.module.css';
 
 /**
+ * The question's root. It is a dialog but sits inline in the page, so a
+ * check for open dialogs decides whether it counts.
+ */
+export const AGENT_QUESTION = '[data-agent-question]';
+/** A question collapsed to its one-line summary; typed characters go to the composer, even from its buttons. */
+export const COLLAPSED_AGENT_QUESTION = '[data-agent-question="collapsed"]';
+
+/**
  * Inline answer block for the `ask_user` tool.
  *
  * Renders when the active workspace session has a pending ask_user
@@ -143,6 +151,7 @@ const AskQuestion = ({
       className={speaker ? `${styles.panel} ${styles.spoken}` : styles.panel}
       role="dialog"
       aria-label={asker ? `Question from ${asker.name}` : 'Agent question'}
+      data-agent-question={collapsed ? 'collapsed' : 'expanded'}
       tabIndex={-1}
       onKeyDown={handlePanelKeyDown}
     >

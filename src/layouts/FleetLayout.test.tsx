@@ -10,6 +10,7 @@ import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useFleetStore } from '../fleet/fleetStore';
 import { EMPTY_FLEET, emptyCard, type FleetAsk } from '../fleet/fleetModel';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
+import { FOCUS_TERMINAL_EVENT } from '../utils/workspaceUiEvents';
 
 const schedulerHandlers = vi.hoisted(() => new Map<string, (event: { payload: boolean }) => void>());
 vi.mock('@tauri-apps/api/event', () => ({
@@ -77,6 +78,19 @@ const deleteWorkspace = vi.mocked(workspaceClient.deleteWorkspace);
 const getSchedulerPaused = vi.mocked(workspaceClient.getSchedulerPaused);
 const setSchedulerPaused = vi.mocked(workspaceClient.setSchedulerPaused);
 const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
+
+// Every test gets an empty `localStorage` of its own, so a saved rail
+// preference cannot carry into the next test. Node 22 exposes jsdom's
+// storage, which persists for the whole file; Node 25+ shadows it with a
+// global that, without --localstorage-file, has none.
+beforeEach(() => {
+  const items = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => void items.set(key, value),
+  });
+});
+afterEach(() => vi.unstubAllGlobals());
 
 const entry = (
   id: string,
@@ -532,6 +546,58 @@ describe('FleetLayout switch to the Fleet', () => {
   });
 });
 
+describe('FleetLayout composer focus', () => {
+  // The shared terminal lives beside FleetLayout (in MainLayout); a stand-in
+  // takes the keyboard on the same event.
+  let composer: HTMLTextAreaElement;
+  const focusComposer = () => composer.focus();
+  beforeEach(() => {
+    composer = document.createElement('textarea');
+    composer.setAttribute('aria-label', 'Composer');
+    document.body.append(composer);
+    window.addEventListener(FOCUS_TERMINAL_EVENT, focusComposer);
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);
+    getSchedulerPaused.mockResolvedValue(false);
+  });
+  afterEach(() => {
+    window.removeEventListener(FOCUS_TERMINAL_EVENT, focusComposer);
+    composer.remove();
+  });
+
+  it('readies the composer for a workspace chosen in the rail', async () => {
+    renderFleet('/workspace/a');
+    const row = await screen.findByRole('button', { name: /^Beta/ });
+    await userEvent.click(row);
+    expect(await screen.findByTestId('workspace')).toBeInTheDocument();
+    expect(composer).toHaveFocus();
+  });
+
+  it('opens a workspace with the keyboard in the composer', async () => {
+    renderFleet('/workspace/a');
+    await screen.findByRole('button', { name: /^Alpha/ });
+    expect(composer).toHaveFocus();
+  });
+
+  it('types into the composer when nothing has the keyboard', async () => {
+    renderFleet('/workspace/a');
+    await screen.findByRole('button', { name: /^Alpha/ });
+    composer.blur();
+    await userEvent.keyboard('h');
+    expect(composer).toHaveValue('h');
+  });
+
+  it('leaves the Fleet to its own focus rules', async () => {
+    useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null });
+    renderFleet('/workspace/a');
+    await screen.findByRole('button', { name: /^Alpha/ });
+    await userEvent.keyboard('{Control>}{Shift>}M{/Shift}{/Control}');
+    expect(await screen.findByTestId('fleet')).toBeInTheDocument();
+    composer.blur();
+    await userEvent.keyboard('h');
+    expect(composer).not.toHaveFocus();
+  });
+});
+
 describe('FleetLayout rail in a narrow window', () => {
   const PREFERENCE_KEY = 'fleet.rail.collapsed';
   // A window whose width the test sets; matchMedia evaluates its width
@@ -553,14 +619,8 @@ describe('FleetLayout rail in a narrow window', () => {
       media.listeners.forEach((listener) => listener());
     });
   const railWidth = () => document.documentElement.style.getPropertyValue('--fleet-rail-width');
-  // A `localStorage` of its own: Node's global one, without a file, has none.
-  const memoryStorage = () => {
-    const items = new Map<string, string>();
-    return { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) };
-  };
 
   beforeEach(() => {
-    vi.stubGlobal('localStorage', memoryStorage());
     media.width = WIDE;
     media.listeners.clear();
     window.matchMedia = vi.fn((query: string) => ({
@@ -577,7 +637,6 @@ describe('FleetLayout rail in a narrow window', () => {
 
   afterEach(() => {
     window.matchMedia = originalMatchMedia;
-    vi.unstubAllGlobals();
   });
 
   it('collapses an expanded rail while narrow and restores it on widening, leaving the saved preference alone', async () => {

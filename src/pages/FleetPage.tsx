@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import AppTopBar from '../components/AppTopBar';
+import { AGENT_QUESTION } from '../components/AskUserPanel/AskUserPanel';
 import FleetGrid from '../components/FleetPage/FleetGrid';
 import FleetSwitcher from '../components/FleetPage/FleetSwitcher';
 import styles from '../components/FleetPage/FleetPage.module.css';
@@ -27,7 +28,7 @@ const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
 const OWNS_ENTER =
   'input, textarea:not([data-leaves-enter]), select, a, button:not([data-card-title]), [contenteditable="true"], [role="dialog"]';
 /** A zoom or a modal; an agent question sits inline in its card. */
-const OPEN_DIALOG = '[role="dialog"]:not([aria-label="Agent question"])';
+const OPEN_DIALOG = `[role="dialog"]:not(${AGENT_QUESTION})`;
 
 /**
  * The Fleet: one card per recently active workspace, with the shared

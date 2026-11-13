@@ -30,7 +30,8 @@ import { errText } from '../fleet/workspaceStatus';
 import { cardAttention } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetToggle } from '../fleet/useFleetToggle';
-import { onWorkspaceUiCommand, setPendingForkPrompt } from '../utils/workspaceUiEvents';
+import { dispatchFocusTerminal, onWorkspaceUiCommand, setPendingForkPrompt } from '../utils/workspaceUiEvents';
+import { useComposerTypeToFocus } from '../hooks/useComposerTypeToFocus';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 import styles from './FleetLayout.module.css';
 
@@ -101,6 +102,7 @@ const FleetLayout = () => {
   const match = useMatch('/workspace/:workspaceId');
   const selectedId = match?.params.workspaceId ?? null;
   const { railHidden, setRailHidden, toggleRail } = useWindowUi();
+  useComposerTypeToFocus(selectedId);
   const [attentionRequest, setAttentionRequest] = useState(0);
   const showAttention = useCallback(() => {
     setRailHidden(false);
@@ -244,9 +246,11 @@ const FleetLayout = () => {
   }, [narrow]);
 
 
+  // Choosing a workspace readies the terminal for it, as a Fleet card does.
   const handleSelect = useCallback(
     (id: string) => {
       navigate(`/workspace/${id}`);
+      dispatchFocusTerminal();
     },
     [navigate],
   );
