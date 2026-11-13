@@ -10,6 +10,7 @@ import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useFleetStore } from '../fleet/fleetStore';
 import { EMPTY_FLEET, emptyCard, type FleetAsk } from '../fleet/fleetModel';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
+import { FOCUS_TERMINAL_EVENT } from '../utils/workspaceUiEvents';
 
 const schedulerHandlers = vi.hoisted(() => new Map<string, (event: { payload: boolean }) => void>());
 vi.mock('@tauri-apps/api/event', () => ({
@@ -529,6 +530,58 @@ describe('FleetLayout switch to the Fleet', () => {
     expect(useFleetStore.getState().selectedId).toBe('b');
     // Only this harness's routing: Routes.test covers the real /fleet route.
     expect(screen.queryByRole('navigation', { name: 'Workspaces' })).toBeNull();
+  });
+});
+
+describe('FleetLayout composer focus', () => {
+  // The shared terminal lives beside FleetLayout (in MainLayout); a stand-in
+  // takes the keyboard on the same event.
+  let composer: HTMLTextAreaElement;
+  const focusComposer = () => composer.focus();
+  beforeEach(() => {
+    composer = document.createElement('textarea');
+    composer.setAttribute('aria-label', 'Composer');
+    document.body.append(composer);
+    window.addEventListener(FOCUS_TERMINAL_EVENT, focusComposer);
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);
+    getSchedulerPaused.mockResolvedValue(false);
+  });
+  afterEach(() => {
+    window.removeEventListener(FOCUS_TERMINAL_EVENT, focusComposer);
+    composer.remove();
+  });
+
+  it('readies the composer for a workspace chosen in the rail', async () => {
+    renderFleet('/workspace/a');
+    const row = await screen.findByRole('button', { name: /^Beta/ });
+    await userEvent.click(row);
+    expect(await screen.findByTestId('workspace')).toBeInTheDocument();
+    expect(composer).toHaveFocus();
+  });
+
+  it('opens a workspace with the keyboard in the composer', async () => {
+    renderFleet('/workspace/a');
+    await screen.findByRole('button', { name: /^Alpha/ });
+    expect(composer).toHaveFocus();
+  });
+
+  it('types into the composer when nothing has the keyboard', async () => {
+    renderFleet('/workspace/a');
+    await screen.findByRole('button', { name: /^Alpha/ });
+    composer.blur();
+    await userEvent.keyboard('h');
+    expect(composer).toHaveValue('h');
+  });
+
+  it('leaves the Fleet to its own focus rules', async () => {
+    useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null });
+    renderFleet('/workspace/a');
+    await screen.findByRole('button', { name: /^Alpha/ });
+    await userEvent.keyboard('{Control>}{Shift>}M{/Shift}{/Control}');
+    expect(await screen.findByTestId('fleet')).toBeInTheDocument();
+    composer.blur();
+    await userEvent.keyboard('h');
+    expect(composer).not.toHaveFocus();
   });
 });
 

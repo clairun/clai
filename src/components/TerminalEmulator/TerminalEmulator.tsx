@@ -627,7 +627,7 @@ const TerminalEmulator = ({
 
     // Add global event listener
     document.addEventListener('keydown', handleGlobalKeyDown);
-    const focusInput = () => inputRef.current?.focus();
+    const focusInput = () => inputRef.current?.focus({ preventScroll: true });
     window.addEventListener(FOCUS_TERMINAL_EVENT, focusInput);
 
     // Cleanup on unmount
