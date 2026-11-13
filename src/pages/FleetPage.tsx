@@ -21,9 +21,11 @@ const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
 
 /**
  * Where Enter does its own thing, so it doesn't open the selected workspace.
- * A card's title is a button only to select the card, so Enter there opens.
+ * A card's title is a button only to select the card, so Enter there opens;
+ * so it does in the terminal's composer while it leaves Enter to the page.
  */
-const OWNS_ENTER = 'input, textarea, select, a, button:not([data-card-title]), [contenteditable="true"], [role="dialog"]';
+const OWNS_ENTER =
+  'input, textarea:not([data-leaves-enter]), select, a, button:not([data-card-title]), [contenteditable="true"], [role="dialog"]';
 /** A zoom or a modal; an agent question sits inline in its card. */
 const OPEN_DIALOG = '[role="dialog"]:not([aria-label="Agent question"])';
 
@@ -130,9 +132,10 @@ const FleetPage = () => {
     return { working, waiting };
   }, [cards, live]);
 
-  // Opening a workspace here: Enter, or Ctrl/Cmd+Shift+M, which opens the
-  // selected card's workspace, or the workspaces page without one. The card's
-  // icon and Shift+Enter open it in a new window instead.
+  // Opening a workspace here: Enter, a double-click on a card's title, or
+  // Ctrl/Cmd+Shift+M, which opens the selected card's workspace, or the
+  // workspaces page without one. The card's icon and Shift+Enter open it in a
+  // new window instead.
   const navigate = useNavigate();
   const openWorkspace = useCallback((id: string) => navigate(`/workspace/${id}`), [navigate]);
   useFleetToggle(useCallback(() => {
@@ -143,7 +146,10 @@ const FleetPage = () => {
     if (!selectedId) return undefined;
     const onEnter = (e: KeyboardEvent) => {
       if (e.key !== 'Enter' || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
-      if ((e.target instanceof Element && e.target.closest(OWNS_ENTER)) || document.querySelector(OPEN_DIALOG)) return;
+      const target = e.target instanceof Element ? e.target : null;
+      // The composer left this Enter to the page: it is taken even when it opens nothing, so no newline lands there.
+      if (target?.matches('[data-leaves-enter]')) e.preventDefault();
+      if (e.repeat || target?.closest(OWNS_ENTER) || document.querySelector(OPEN_DIALOG)) return;
       e.preventDefault();
       if (e.shiftKey) openNewWindow(selectedId);
       else openWorkspace(selectedId);

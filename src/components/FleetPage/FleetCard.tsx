@@ -116,6 +116,8 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpe
             e.stopPropagation();
             onSelect(card.workspaceId);
           }}
+          onDoubleClick={() => onOpen(card.workspaceId)}
+          title="Double-click to open"
           aria-label={`Select ${title}`}
         >
           {title}

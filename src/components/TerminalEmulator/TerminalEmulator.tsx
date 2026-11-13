@@ -553,8 +553,12 @@ const TerminalEmulator = ({
     );
   };
 
+  // On the Fleet, Enter in an empty composer is the page's: it opens the selected card.
+  const leavesEnter = isFleetRoute && target.workspaceId !== null && inputValue === '' && attachments.length === 0;
+
   // Handle keyboard events
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key === 'Enter' && leavesEnter && !e.ctrlKey && !e.metaKey && !e.altKey) return;
     // Enter sends message (Shift+Enter for newline)
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -779,6 +783,7 @@ const TerminalEmulator = ({
                   setConfirmingCreate(false);
                 }}
                 onKeyDown={handleKeyDown}
+                data-leaves-enter={leavesEnter || undefined}
                 onPaste={handlePaste}
                 onClick={(e) => e.stopPropagation()}
                 aria-busy={agentWorking || undefined}
