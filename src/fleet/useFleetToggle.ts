@@ -1,20 +1,7 @@
-import { useEffect } from 'react';
+import { useCtrlShiftShortcut } from '../hooks/useCtrlShiftShortcut';
 
 /**
  * Ctrl+Shift+M (Cmd on macOS) switches between the Fleet and Workspace mode;
- * `onToggle` says where to. Capture phase, so a focused terminal doesn't eat
- * it as a control character.
+ * `onToggle` says where to.
  */
-export const useFleetToggle = (onToggle: (() => void) | null) => {
-  useEffect(() => {
-    if (!onToggle) return undefined;
-    const onKeyDown = (e: KeyboardEvent) => {
-      if (!(e.ctrlKey || e.metaKey) || !e.shiftKey || e.altKey || e.code !== 'KeyM') return;
-      e.preventDefault();
-      e.stopPropagation();
-      onToggle();
-    };
-    window.addEventListener('keydown', onKeyDown, true);
-    return () => window.removeEventListener('keydown', onKeyDown, true);
-  }, [onToggle]);
-};
+export const useFleetToggle = (onToggle: (() => void) | null) => useCtrlShiftShortcut('KeyM', onToggle);
