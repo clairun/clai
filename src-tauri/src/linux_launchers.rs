@@ -225,9 +225,15 @@ pub(crate) fn reconcile(state: &AppState) -> Result<(), String> {
         .filter(|locator| locator.starred_at > 0)
         .map(|locator| (locator.id.clone(), locator.title.clone()))
         .collect::<Vec<_>>();
-    let remove_orphans = index.load_failures.is_empty() && index.scan_errors.is_empty();
+    let remove_orphans = launcher_cleanup_allowed(&index);
     drop(index);
     reconcile_in(&applications_dir()?, &starred, remove_orphans)
+}
+
+/// Whether reconciliation may delete launchers of workspaces missing from the
+/// index: only when no failed scan or config can be hiding a starred one.
+fn launcher_cleanup_allowed(index: &crate::workspace_index::WorkspaceIndex) -> bool {
+    index.failures_hiding_configs().next().is_none() && index.scan_errors.is_empty()
 }
 
 #[cfg(test)]
@@ -236,6 +242,24 @@ mod tests {
 
     const A: &str = "11111111-1111-4111-8111-111111111111";
     const B: &str = "22222222-2222-4222-8222-222222222222";
+
+    #[test]
+    fn cleanup_is_blocked_only_by_failures_that_can_hide_a_star() {
+        use crate::workspace_index::{LoadFailureReason, WorkspaceIndex};
+        let allowed = |reason: LoadFailureReason| {
+            let mut index = WorkspaceIndex::default();
+            index.record_failure(PathBuf::from(A), reason);
+            launcher_cleanup_allowed(&index)
+        };
+        assert!(allowed(LoadFailureReason::Unreadable(
+            std::io::ErrorKind::NotFound
+        )));
+        assert!(!allowed(LoadFailureReason::InvalidConfig {
+            line: 1,
+            column: 1
+        }));
+        assert!(allowed(LoadFailureReason::DbCorrupt("locked".into())));
+    }
 
     #[test]
     fn lifecycle_and_startup_reconciliation() {

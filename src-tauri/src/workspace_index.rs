@@ -62,6 +62,19 @@ impl LoadFailureReason {
     }
 }
 
+impl LoadFailureReason {
+    /// Whether the directory may hold a config the index could not use. A
+    /// directory without `config.json` holds no title or star, and a database
+    /// failure is recorded for a workspace whose config is already indexed.
+    fn may_hide_config(&self) -> bool {
+        match self {
+            Self::Unreadable(kind) => *kind != std::io::ErrorKind::NotFound,
+            Self::IdMismatch { .. } | Self::DuplicateId { .. } | Self::InvalidConfig { .. } => true,
+            Self::DbCorrupt(_) | Self::MigrationFailed(_) => false,
+        }
+    }
+}
+
 /// Category only: serde and I/O messages can quote config contents.
 impl std::fmt::Display for LoadFailureReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -241,6 +254,13 @@ impl WorkspaceIndex {
         self.pools.get(id).cloned()
     }
 
+    /// Load failures that may hide a workspace's title or star.
+    pub fn failures_hiding_configs(&self) -> impl Iterator<Item = &WorkspaceLoadFailure> {
+        self.load_failures
+            .iter()
+            .filter(|failure| failure.reason.may_hide_config())
+    }
+
     pub fn record_failure(&mut self, path: PathBuf, reason: LoadFailureReason) {
         self.load_failures
             .push(WorkspaceLoadFailure { path, reason });
@@ -393,8 +413,80 @@ mod cli_scan_tests {
         );
         assert!(!exact.contains("SECRET_MARKER"), "{exact}");
         let title = open("Some title");
-        assert!(title.contains("missing config.json"), "{title}");
+        assert!(title.contains("invalid config.json"), "{title}");
         assert!(!title.contains("SECRET_MARKER"), "{title}");
+        let orphan = open("bbbbbbbb-0000-0000-0000-000000000000");
+        assert!(orphan.contains("missing config.json"), "{orphan}");
+    }
+
+    const READY: &str = "aaaaaaaa-0000-0000-0000-000000000000";
+    const ORPHAN: &str = "bbbbbbbb-0000-0000-0000-000000000000";
+    const CORRUPT: &str = "cccccccc-0000-0000-0000-000000000000";
+
+    /// A starred workspace titled "Pisos" next to what a failed deletion
+    /// leaves behind: a directory with files but no `config.json`.
+    fn root_with_orphan() -> (tempfile::TempDir, AppConfig) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut workspace = WorkspaceConfig::new(READY.into(), "Pisos".into(), 1, "manager".into());
+        workspace.starred_at = 1;
+        workspace_config::save(&temp.path().join(READY), &workspace).unwrap();
+        let leftover = temp.path().join(ORPHAN).join(".gocache");
+        fs::create_dir_all(&leftover).unwrap();
+        fs::write(leftover.join("README"), "cache").unwrap();
+        let config = AppConfig {
+            workspace_dirs: vec![temp.path().to_path_buf()],
+            ..Default::default()
+        };
+        (temp, config)
+    }
+
+    fn open(
+        config: &AppConfig,
+        name: &str,
+    ) -> Result<crate::cli::LaunchRequest, crate::cli::CliError> {
+        let index = WorkspaceIndex::scan(config);
+        crate::cli::resolve(crate::cli::Command::Open(name.into()), config, &index)
+    }
+
+    #[test]
+    fn directory_without_config_does_not_block_title_or_prefix_lookup() {
+        let (_temp, config) = root_with_orphan();
+        assert_eq!(WorkspaceIndex::scan(&config).load_failures.len(), 1);
+        assert_eq!(
+            open(&config, "pisos"),
+            Ok(crate::cli::LaunchRequest::Open(READY.into()))
+        );
+        assert_eq!(open(&config, &ORPHAN[..8]).unwrap_err().code, 2);
+    }
+
+    #[test]
+    fn corrupt_config_still_blocks_title_lookup() {
+        let (temp, config) = root_with_orphan();
+        let corrupt = temp.path().join(CORRUPT);
+        fs::create_dir_all(workspace_config::config_path(&corrupt).parent().unwrap()).unwrap();
+        fs::write(workspace_config::config_path(&corrupt), "{").unwrap();
+
+        let error = open(&config, "Pisos").unwrap_err();
+        assert_eq!(error.code, 1);
+        assert!(error.message.contains(CORRUPT), "{}", error.message);
+        assert!(!error.message.contains(ORPHAN), "{}", error.message);
+        assert_eq!(open(&config, &CORRUPT[..8]).unwrap_err().code, 1);
+    }
+
+    #[test]
+    fn id_lookup_is_unchanged_by_directories_without_config() {
+        let (_temp, config) = root_with_orphan();
+        assert_eq!(
+            open(&config, READY),
+            Ok(crate::cli::LaunchRequest::Open(READY.into()))
+        );
+        let error = open(&config, ORPHAN).unwrap_err();
+        assert_eq!(error.code, 1);
+        assert!(
+            error.message.contains("missing config.json"),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
