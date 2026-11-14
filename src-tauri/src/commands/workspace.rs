@@ -3220,9 +3220,9 @@ pub fn get_scheduler_paused(state: State<'_, AppState>) -> Result<bool, String> 
 /// config cannot be read poisons every walk of the index that rewrites each
 /// config — the MCP server and skill-source sweeps fail on the first one they
 /// cannot read. Such a leftover is left out, and stays out: the next startup
-/// scan cannot load it either, so it records a `load_failure` — a sink
-/// nothing reads today — and the directory sits on disk with no workspace in
-/// the rail. The `warn!` below is the only signal there is.
+/// scan cannot load it either, so it records a `load_failure` that only
+/// `clai open` reports, and the directory sits on disk with no workspace
+/// in the rail. The `warn!` below is the only other signal there is.
 fn restore_after_failed_delete(
     workspace_index: &RwLock<WorkspaceIndex>,
     locator: &WorkspaceLocator,

@@ -96,8 +96,7 @@ fn resolve_open(name: &str, index: &WorkspaceIndex) -> Result<String, CliError> 
         // Workspace directories are named by id, so only a failure whose
         // directory starts with the prefix can hide a match.
         let hidden: Vec<_> = index
-            .load_failures
-            .iter()
+            .failures_hiding_configs()
             .filter(|failure| failure_dir(failure).is_some_and(|dir| dir.starts_with(name)))
             .collect();
         if !hidden.is_empty() {
@@ -112,10 +111,11 @@ fn resolve_open(name: &str, index: &WorkspaceIndex) -> Result<String, CliError> 
             return Ok(id);
         }
     }
-    // Any failed config could carry this title, so even a unique match among
-    // the loaded ones may be ambiguous.
-    if !index.load_failures.is_empty() {
-        let failures: Vec<_> = index.load_failures.iter().collect();
+    // A config that exists but failed to load could carry this title, so
+    // even a unique match among the loaded ones may be ambiguous. A directory
+    // without config.json has no title and does not block.
+    let failures: Vec<_> = index.failures_hiding_configs().collect();
+    if !failures.is_empty() {
         return Err(incomplete_lookup(name, &failures));
     }
     let matches: Vec<_> = starred
@@ -381,6 +381,60 @@ mod tests {
             let error = resolve(Command::Open(name.into()), &config, &index).unwrap_err();
             assert_eq!(error.code, 1, "{name}");
             assert!(error.message.contains("aaaaaaaa-0000"), "{name}");
+        }
+    }
+
+    #[test]
+    fn only_failures_that_can_hide_a_config_block_title_lookup() {
+        use std::io::ErrorKind;
+        let cases = [
+            (LoadFailureReason::Unreadable(ErrorKind::NotFound), false),
+            (LoadFailureReason::DbCorrupt("locked".into()), false),
+            (LoadFailureReason::MigrationFailed("v9".into()), false),
+            (
+                LoadFailureReason::Unreadable(ErrorKind::PermissionDenied),
+                true,
+            ),
+            (
+                LoadFailureReason::InvalidConfig { line: 1, column: 1 },
+                true,
+            ),
+            (
+                LoadFailureReason::IdMismatch {
+                    expected: "x".into(),
+                    actual: "y".into(),
+                },
+                true,
+            ),
+            (LoadFailureReason::DuplicateId { id: "x".into() }, true),
+        ];
+        for (reason, blocks) in cases {
+            let (config, mut index) = fixture();
+            index.by_id.remove(B);
+            let label = reason.to_string();
+            index.load_failures.push(WorkspaceLoadFailure {
+                path: failed_path("aaaaaaaa-0000-0000-0000-000000000000"),
+                reason,
+            });
+            let open = |name: &str| resolve(Command::Open(name.into()), &config, &index);
+            if blocks {
+                assert_eq!(open("research").unwrap_err().code, 1, "{label}");
+                assert_eq!(open("aaaaaaaa").unwrap_err().code, 1, "{label}");
+            } else {
+                assert_eq!(
+                    open("research"),
+                    Ok(LaunchRequest::Open(A.into())),
+                    "{label}"
+                );
+                assert_eq!(open("aaaaaaaa").unwrap_err().code, 2, "{label}");
+            }
+            assert_eq!(
+                open("aaaaaaaa-0000-0000-0000-000000000000")
+                    .unwrap_err()
+                    .code,
+                1,
+                "{label}"
+            );
         }
     }
 
