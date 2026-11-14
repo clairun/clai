@@ -228,10 +228,10 @@ const LISTED_WORKSPACES = [
 ] as WorkspaceListEntry[];
 
 const FleetOutlet = ({ attentionCounts = { b: 1 }, withRail = false }: { attentionCounts?: Record<string, number>; withRail?: boolean }) => {
-  const { railHidden, setRailHidden } = useWindowUi();
+  const { railHidden, showRail } = useWindowUi();
   const [attentionRequest, setAttentionRequest] = React.useState(0);
   const showAttention = () => {
-    setRailHidden(false);
+    showRail();
     setAttentionRequest((request) => request + 1);
   };
   return <>

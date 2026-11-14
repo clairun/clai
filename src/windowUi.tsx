@@ -1,18 +1,19 @@
-import { createContext, useContext, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useState, type ReactNode } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 
 interface WindowUi {
   railHidden: boolean;
-  setRailHidden: (hidden: boolean) => void;
+  showRail: () => void;
   toggleRail: () => void;
 }
 
-const Context = createContext<WindowUi>({ railHidden: false, setRailHidden: () => {}, toggleRail: () => {} });
+const Context = createContext<WindowUi>({ railHidden: false, showRail: () => {}, toggleRail: () => {} });
 
 export const WindowUiProvider = ({ children }: { children: ReactNode }) => {
   const [railHidden, setRailHidden] = useState(() => new URLSearchParams(window.location.search).has('workspace'));
+  const showRail = useCallback(() => setRailHidden(false), []);
   return (
-    <Context.Provider value={{ railHidden, setRailHidden, toggleRail: () => setRailHidden((value) => !value) }}>
+    <Context.Provider value={{ railHidden, showRail, toggleRail: () => setRailHidden((value) => !value) }}>
       {children}
     </Context.Provider>
   );

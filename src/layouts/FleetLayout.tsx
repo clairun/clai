@@ -101,13 +101,13 @@ const FleetLayout = () => {
   const navigate = useNavigate();
   const match = useMatch('/workspace/:workspaceId');
   const selectedId = match?.params.workspaceId ?? null;
-  const { railHidden, setRailHidden, toggleRail } = useWindowUi();
+  const { railHidden, showRail, toggleRail } = useWindowUi();
   useComposerFocus(selectedId);
   const [attentionRequest, setAttentionRequest] = useState(0);
   const showAttention = useCallback(() => {
-    setRailHidden(false);
+    showRail();
     setAttentionRequest((request) => request + 1);
-  }, [setRailHidden]);
+  }, [showRail]);
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey || event.code !== 'KeyF') return;

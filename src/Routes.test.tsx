@@ -8,6 +8,7 @@ import {
   useParams,
 } from 'react-router';
 import AppRoutes from './Routes';
+import { WindowUiProvider, useWindowUi } from './windowUi';
 import { listen as globalListen } from '@tauri-apps/api/event';
 import { listWorkspaces } from './workspace/client';
 import type { WorkspaceListEntry } from './generated/bindings';
@@ -85,9 +86,11 @@ const existingWorkspaces = (...ids: string[]) =>
 const HistoryProbe = () => {
   const { pathname } = useLocation();
   const navigate = useNavigate();
+  const { railHidden } = useWindowUi();
   return (
     <>
       <span data-testid="pathname">{pathname}</span>
+      <span data-testid="rail">{railHidden ? 'hidden' : 'shown'}</span>
       <button type="button" onClick={() => navigate(-1)}>
         back
       </button>
@@ -100,10 +103,12 @@ const HistoryProbe = () => {
 
 const renderEntries = (entries: string[]) =>
   render(
-    <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
-      <HistoryProbe />
-      <AppRoutes />
-    </MemoryRouter>
+    <WindowUiProvider>
+      <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
+        <HistoryProbe />
+        <AppRoutes />
+      </MemoryRouter>
+    </WindowUiProvider>
   );
 
 const renderAt = (path: string) => renderEntries([path]);
@@ -155,7 +160,23 @@ describe('AppRoutes', () => {
     await vi.waitFor(() => expect(windowEvents.listeners.has('workspace://deleted')).toBe(true));
     act(() => windowEvents.listeners.get('workspace://deleted')!({ payload: { workspaceId: 'gone' } }));
     expect(await screen.findByRole('heading', { name: 'Workspace deleted' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Open workspaces' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: 'Open workspaces' }));
+    expect(screen.getByTestId('fleet-layout')).toContainElement(screen.getByTestId('fleet-index'));
+  });
+
+  // A pop-out window starts with its rail hidden; any other window starts with it shown.
+  it.each([
+    ['a pop-out', '/?workspace=gone', 'hidden'],
+    ['any other window', '/', 'shown'],
+  ])('shows the rail in %s when the user opens the workspaces from the deleted state', async (_window, launchUrl, initialRail) => {
+    window.history.replaceState({}, '', launchUrl);
+    renderAt('/workspace/gone');
+    window.history.replaceState({}, '', '/');
+    expect(screen.getByTestId('rail')).toHaveTextContent(initialRail);
+    await vi.waitFor(() => expect(windowEvents.listeners.has('workspace://deleted')).toBe(true));
+    act(() => windowEvents.listeners.get('workspace://deleted')!({ payload: { workspaceId: 'gone' } }));
+    fireEvent.click(await screen.findByRole('link', { name: 'Open workspaces' }));
+    expect(screen.getByTestId('rail')).toHaveTextContent('shown');
   });
 
   it('handles targeted navigation only in the receiving webview', async () => {
