@@ -21,6 +21,7 @@ import type { WorkspaceAgentResponse, WorkspaceDetails } from '../../generated/b
 import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 import AgentAvatar from '../Agents/AgentAvatar';
 import { identityFor } from '../Agents/agentIdentity';
+import { formatScheduleCadence } from '../../utils/scheduleFormat';
 import form from './SettingsForm.module.css';
 import shell from './SettingsShell.module.css';
 import styles from './WorkspaceSettingsModal.module.css';
@@ -44,19 +45,15 @@ const agentLabel = (agent: WorkspaceAgentResponse): string => (
 
 const scheduleSummary = (details: WorkspaceDetails | null): string => {
   if (!details?.scheduleEnabled) return 'Off';
-  const kind = details.scheduleKind;
-  let when = 'On';
-  if (kind?.type === 'cron') {
-    when = kind.expression;
-  } else if (kind?.type === 'interval') {
-    const mins = kind.intervalMinutes;
-    when = mins % 60 === 0 ? `Every ${mins / 60} h` : `Every ${mins} min`;
-  }
+  const cadence = formatScheduleCadence(details.scheduleKind);
+  const when = cadence ? cadence.charAt(0).toUpperCase() + cadence.slice(1) : 'On';
   return details.schedulePaused ? `${when} · paused` : when;
 };
 
 // Keep in sync with WorkspaceContextBar: the self-loading context bar
 // listens for this to refetch its workspace details after a settings save.
+import { notifySettingsChanged } from '../../utils/settingsEvents';
+
 const WORKSPACE_SETTINGS_CHANGED_EVENT = 'workspace-settings-changed';
 
 interface WorkspaceSettingsModalProps {
@@ -67,6 +64,7 @@ interface WorkspaceSettingsModalProps {
   /** Page to open on; General when omitted. */
   initialSelection?: Selection | null;
   onChanged?: () => void;
+  onLauncherWarning?: (warning: string | null) => void;
 }
 
 type FocusTarget = 'heading' | 'nav';
@@ -85,6 +83,7 @@ const SettingsWindow = ({
   details,
   initialSelection,
   onChanged,
+  onLauncherWarning,
 }: Omit<WorkspaceSettingsModalProps, 'isOpen'>) => {
   const [page, setPage] = useState<Selection>(initialSelection ?? GENERAL);
   // Bumped to remount the page: that is how Discard drops its draft.
@@ -133,23 +132,33 @@ const SettingsWindow = ({
   }, [page, pageVersion, focusNav]);
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
+    let active = true;
+    let revision = 0;
+    const refreshDeps = async () => {
+      const requestedAt = ++revision;
       const [servers, skills, connections, defaults] = await Promise.allSettled([
         getMcpServers(),
         getSkills(),
         assistantClient.listProviderConnections(),
         workspaceAgentDefaultExecution(),
       ]);
-      if (cancelled) return;
+      if (!active || requestedAt !== revision) return;
       setDeps({
         mcpServers: servers.status === 'fulfilled' ? (servers.value || []) : [],
         skills: skills.status === 'fulfilled' ? (skills.value || []) : [],
         providerConnections: connections.status === 'fulfilled' ? (connections.value || []) : [],
         defaultExecution: defaults.status === 'fulfilled' ? (defaults.value || null) : null,
       });
-    })();
-    return () => { cancelled = true; };
+    };
+    const onChanged = () => { void refreshDeps(); };
+    window.addEventListener('mcp-servers-changed', onChanged);
+    window.addEventListener('assistant-provider-connections-changed', onChanged);
+    void refreshDeps();
+    return () => {
+      active = false;
+      window.removeEventListener('mcp-servers-changed', onChanged);
+      window.removeEventListener('assistant-provider-connections-changed', onChanged);
+    };
   }, []);
 
   // Saves the visible page and stays on it. Resolves true on success.
@@ -171,6 +180,7 @@ const SettingsWindow = ({
         return false;
       }
       createdId = result.createdId;
+      if (page.kind === 'general') onLauncherWarning?.(result.warning ?? null);
     } catch (err) {
       setSaveError(err instanceof Error ? err.message : String(err));
       return false;
@@ -185,10 +195,10 @@ const SettingsWindow = ({
     } else {
       headingRef.current?.focus();
     }
-    window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
+    notifySettingsChanged(WORKSPACE_SETTINGS_CHANGED_EVENT);
     await Promise.resolve(onChanged?.());
     return true;
-  }, [saving, onChanged, showPage]);
+  }, [saving, onChanged, onLauncherWarning, page.kind, showPage]);
 
   const discardPage = useCallback(() => {
     focusNext.current = 'heading';
@@ -263,7 +273,7 @@ const SettingsWindow = ({
   // The page's record is gone, so there is nothing to keep or ask about.
   const handleAgentRemoved = useCallback(() => {
     showPage(GENERAL, 'nav');
-    window.dispatchEvent(new CustomEvent(WORKSPACE_SETTINGS_CHANGED_EVENT));
+    notifySettingsChanged(WORKSPACE_SETTINGS_CHANGED_EVENT);
     onChanged?.();
   }, [showPage, onChanged]);
 

@@ -1,16 +1,21 @@
 import React, { useEffect } from 'react';
 import { Outlet } from 'react-router';
 import TerminalEmulatorWrapper from '../components/TerminalEmulator/TerminalEmulatorWrapper';
-import PermissionAttentionNotifications from '../components/PermissionAttentionNotifications';
-import WorkspaceTaskNotifications from '../components/WorkspaceTaskNotifications';
 import GlobalSettingsHost from '../components/Settings/GlobalSettingsHost';
 import { useAssistantEvents } from '../assistant';
 import { useFleetAttentionFeed } from '../fleet/useFleetAttentionFeed';
 import styles from './MainLayout.module.css';
+import { useFleetStore } from '../fleet/fleetStore';
 
 const AssistantEventListener = ({ children }: { children: React.ReactNode }) => {
   useAssistantEvents();
   useFleetAttentionFeed();
+  useEffect(() => {
+    const refresh = () => { void useFleetStore.getState().loadSnapshot(); };
+    refresh();
+    window.addEventListener('focus', refresh);
+    return () => window.removeEventListener('focus', refresh);
+  }, []);
   return <>{children}</>;
 };
 
@@ -25,8 +30,6 @@ const MainLayout = () => {
   return (
     <AssistantEventListener>
       <div className={styles.mainLayout}>
-        <WorkspaceTaskNotifications />
-        <PermissionAttentionNotifications />
         <TerminalEmulatorWrapper />
         <GlobalSettingsHost />
         <div className={styles.contentArea}>

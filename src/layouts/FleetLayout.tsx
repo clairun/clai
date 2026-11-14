@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { Outlet, useMatch, useNavigate } from 'react-router';
 import {
   listWorkspaces,
@@ -15,18 +16,22 @@ import {
 } from '../workspace/client';
 import WorkspaceRail from '../components/Fleet/WorkspaceRail';
 import WorkspaceSettingsModal from '../components/Settings/WorkspaceSettingsModal';
-import AppTopBar from '../components/AppTopBar';
+import AppUpdateBadge from '../components/AppUpdateBadge';
+import { useAvailableAppUpdate } from '../hooks/useAvailableAppUpdate';
+import { openGlobalSettings } from '../utils/globalSettings';
+import { useWindowUi, openWorkspaceWindow } from '../windowUi';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ProgressDialog from '../components/ProgressDialog';
 import { useFleetActivity } from '../hooks/useFleetActivity';
 import { optimisticRunNowId, useFleetActivityStore } from '../stores/fleetActivityStore';
 import { usePermissionAttention } from '../hooks/usePermissionAttention';
 import { useMediaQuery } from '../hooks/useMediaQuery';
-import { errText, num } from '../fleet/workspaceStatus';
+import { errText } from '../fleet/workspaceStatus';
 import { cardAttention } from '../fleet/fleetModel';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetToggle } from '../fleet/useFleetToggle';
-import { onWorkspaceUiCommand, setPendingForkPrompt } from '../utils/workspaceUiEvents';
+import { dispatchFocusTerminal, onWorkspaceUiCommand, setPendingForkPrompt } from '../utils/workspaceUiEvents';
+import { useComposerFocus } from '../hooks/useComposerFocus';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
 import styles from './FleetLayout.module.css';
 
@@ -51,6 +56,8 @@ const NARROW_WINDOW_QUERY = '(max-width: 1106px)';
 export interface FleetOutletContext {
   workspaces: WorkspaceListEntry[];
   loadWorkspaces: () => Promise<void>;
+  attentionCounts: Record<string, number>;
+  showAttention: () => void;
 }
 
 interface SettingsState {
@@ -72,6 +79,12 @@ const SETTINGS_DETAILS_OPTIONS = {
   includeFiles: false,
 };
 
+const CompactUpdateAccess = () => {
+  const { update } = useAvailableAppUpdate();
+  if (!update) return null;
+  return <button type="button" onClick={() => openGlobalSettings({ tab: 'about' })} aria-label={`Update available: CLAI v${update.version}`} title={`Update available: CLAI v${update.version}`}>●</button>;
+};
+
 /**
  * Unified Fleet/Workspace shell: a persistent (collapsible) workspace
  * rail on the left and the selected workspace's full view in the
@@ -81,16 +94,34 @@ const SETTINGS_DETAILS_OPTIONS = {
  * layout).
  *
  * This layout owns the cross-workspace concerns the grid used to: the
- * workspace list + polling, the summary counters, and the create / clone /
+ * workspace list + polling, and the create / clone /
  * delete / settings / run / pause actions plus their modals.
  */
 const FleetLayout = () => {
   const navigate = useNavigate();
   const match = useMatch('/workspace/:workspaceId');
   const selectedId = match?.params.workspaceId ?? null;
+  const { railHidden, showRail, toggleRail } = useWindowUi();
+  useComposerFocus(selectedId);
+  const [attentionRequest, setAttentionRequest] = useState(0);
+  const showAttention = useCallback(() => {
+    showRail();
+    setAttentionRequest((request) => request + 1);
+  }, [showRail]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey) || !event.shiftKey || event.altKey || event.code !== 'KeyF') return;
+      event.preventDefault();
+      event.stopPropagation();
+      toggleRail();
+    };
+    window.addEventListener('keydown', onKeyDown, true);
+    return () => window.removeEventListener('keydown', onKeyDown, true);
+  }, [toggleRail]);
 
   const [workspaces, setWorkspaces] = useState<WorkspaceListEntry[]>([]);
   const [error, setError] = useState('');
+  const [launcherWarning, setLauncherWarning] = useState('');
   const [flash, setFlash] = useState('');
   const flashTimerRef = useRef<number | null>(null);
   const [collapsed, setCollapsed] = useState<boolean>(() => {
@@ -118,10 +149,12 @@ const FleetLayout = () => {
   const [forkBusyId, setForkBusyId] = useState<string | null>(null);
   const [runNowBusyId, setRunNowBusyId] = useState<string | null>(null);
   const [pauseBusyId, setPauseBusyId] = useState<string | null>(null);
-  // Global "pause all" overlay (scheduler-wide). Loaded once on mount; the
-  // toggle persists server-side and survives restarts.
+  // Global pause state is persisted by the backend and broadcast to every window.
   const [schedulerPaused, setSchedulerPausedState] = useState(false);
   const [schedulerPauseBusy, setSchedulerPauseBusy] = useState(false);
+  const [schedulerPauseRefreshing, setSchedulerPauseRefreshing] = useState(true);
+  const [schedulerPauseReadFailed, setSchedulerPauseReadFailed] = useState(false);
+  const schedulerPauseRefreshRef = useRef<(() => void) | null>(null);
   // Delete failures live next to the dialog, not in the page banner -- see
   // handleConfirmDelete for why the banner cannot hold them.
   const [deleteError, setDeleteError] = useState('');
@@ -171,14 +204,14 @@ const FleetLayout = () => {
   // WorkspaceRail.module.css. Cleared on unmount so non-Fleet routes fall back
   // to viewport-centered.
   useEffect(() => {
-    const railWidth = railCollapsed ? '52px' : '248px';
+    const railWidth = railHidden ? '0px' : railCollapsed ? '52px' : '248px';
     document.documentElement.style.setProperty('--fleet-rail-width', railWidth);
     return () => {
       document.documentElement.style.removeProperty('--fleet-rail-width');
     };
-  }, [railCollapsed]);
+  }, [railCollapsed, railHidden]);
 
-  // Publish the content area's top offset (below the top bar + any error
+  // Publish the content area's top offset (including any error
   // banner) so the globally-fixed terminal card can fill the detail pane in
   // fullscreen mode without covering the app chrome. Same publish-as-CSS-var
   // idiom as --fleet-rail-width above; re-measured when the banner toggles.
@@ -212,32 +245,23 @@ const FleetLayout = () => {
     });
   }, [narrow]);
 
-  const counters = useMemo(
-    () => ({
-      total: workspaces.length,
-      periodic: workspaces.filter((w) => w.scheduleEnabled).length,
-      running: workspaces.filter(
-        (w) => num(w.runningTaskCount) > 0 || (activeRunsByWorkspace[w.id] || 0) > 0,
-      ).length,
-      attention: workspaces.filter((w) => (attentionCounts[w.id] || 0) > 0).length,
-    }),
-    [workspaces, activeRunsByWorkspace, attentionCounts],
-  );
 
+  // Choosing a workspace readies the terminal for it, as a Fleet card does.
   const handleSelect = useCallback(
     (id: string) => {
       navigate(`/workspace/${id}`);
+      dispatchFocusTerminal();
     },
     [navigate],
   );
 
-  // Ctrl+Shift+F: to the Fleet, with this workspace selected there.
-  useFleetToggle(
-    useCallback(() => {
-      if (selectedId) useFleetStore.getState().select(selectedId);
-      navigate('/fleet');
-    }, [selectedId, navigate]),
-  );
+  // Ctrl/Cmd+Shift+M and the rail's Fleet button: to the Fleet, with this
+  // workspace selected there.
+  const openFleet = useCallback(() => {
+    if (selectedId) useFleetStore.getState().select(selectedId);
+    navigate('/fleet');
+  }, [selectedId, navigate]);
+  useFleetToggle(openFleet);
 
   const handleCreate = useCallback(async () => {
     try {
@@ -358,6 +382,7 @@ const FleetLayout = () => {
   const handleRunNow = useCallback(
     async (id: string) => {
       if (!id || runNowBusyId) return;
+      useFleetActivityStore.getState().dismissRunNowSkipped(id);
       setRunNowBusyId(id);
       try {
         await runWorkspaceNow(id);
@@ -409,10 +434,11 @@ const FleetLayout = () => {
         prev.map((w) => (w.id === id ? { ...w, starred: nextStarred } : w)),
       );
       try {
-        await setWorkspaceStarred(id, nextStarred);
-        setError('');
+        const launcherWarning = await setWorkspaceStarred(id, nextStarred);
         await loadWorkspaces();
+        setLauncherWarning(launcherWarning || '');
       } catch (err) {
+        setLauncherWarning('');
         setError(errText(err, 'Failed to update star.'));
         setWorkspaces((prev) =>
           prev.map((w) => (w.id === id ? { ...w, starred: currentlyStarred } : w)),
@@ -422,16 +448,54 @@ const FleetLayout = () => {
     [loadWorkspaces],
   );
 
-  // Load the persisted global-pause state once so the rail toggle reflects
-  // it on first paint (a 5s poll is unnecessary — only this UI flips it).
   useEffect(() => {
-    getSchedulerPaused()
-      .then(setSchedulerPausedState)
-      .catch(() => {});
+    let active = true;
+    let revision = 0;
+    const refresh = () => {
+      const requestedAt = ++revision;
+      setSchedulerPauseRefreshing(true);
+      getSchedulerPaused().then((paused) => {
+        if (active && requestedAt === revision) {
+          setSchedulerPausedState(paused);
+          setSchedulerPauseReadFailed(false);
+          setSchedulerPauseRefreshing(false);
+        }
+      }).catch(() => {
+        if (active && requestedAt === revision) {
+          setSchedulerPauseReadFailed(true);
+          setSchedulerPauseRefreshing(false);
+        }
+      });
+    };
+    schedulerPauseRefreshRef.current = refresh;
+    refresh();
+    window.addEventListener('focus', refresh);
+    let unlisten: (() => void) | undefined;
+    void listen<boolean>('scheduler://paused', (event) => {
+      ++revision;
+      if (active) {
+        setSchedulerPausedState(event.payload);
+        setSchedulerPauseReadFailed(false);
+        setSchedulerPauseRefreshing(false);
+      }
+    }).then((stop) => {
+      if (active) unlisten = stop;
+      else stop();
+    }).catch(() => {});
+    return () => {
+      active = false;
+      schedulerPauseRefreshRef.current = null;
+      window.removeEventListener('focus', refresh);
+      unlisten?.();
+    };
   }, []);
 
   const handleToggleSchedulerPaused = useCallback(async () => {
-    if (schedulerPauseBusy) return;
+    if (schedulerPauseBusy || schedulerPauseRefreshing) return;
+    if (schedulerPauseReadFailed) {
+      schedulerPauseRefreshRef.current?.();
+      return;
+    }
     const next = !schedulerPaused;
     setSchedulerPauseBusy(true);
     setSchedulerPausedState(next); // optimistic
@@ -443,7 +507,7 @@ const FleetLayout = () => {
     } finally {
       setSchedulerPauseBusy(false);
     }
-  }, [schedulerPaused, schedulerPauseBusy]);
+  }, [schedulerPaused, schedulerPauseBusy, schedulerPauseRefreshing, schedulerPauseReadFailed]);
 
   // Transient flash toast with a single, cleared timer (no stacked timers).
   const showFlash = useCallback((message: string) => {
@@ -485,32 +549,25 @@ const FleetLayout = () => {
 
   return (
     <div className={styles.layout}>
-      <AppTopBar nav={{ label: 'Fleet', to: '/fleet' }}>
-        <span>
-          <strong>{counters.total}</strong> workspace{counters.total === 1 ? '' : 's'}
-        </span>
-        <span>
-          <strong>{counters.periodic}</strong> periodic
-        </span>
-        <span>
-          <strong>{counters.running}</strong> running
-        </span>
-        <span data-attention={counters.attention > 0 || undefined}>
-          <strong>{counters.attention}</strong> need attention
-        </span>
-      </AppTopBar>
 
       <div className={styles.body} ref={bodyRef}>
-        {(error || flash) && (
+        {(error || launcherWarning || flash) && (
           <div className={styles.bannerStack}>
             {error && <div className={styles.errorBanner}>{error}</div>}
+            {launcherWarning && <div className={styles.errorBanner}>{launcherWarning}</div>}
             {flash && <div className={styles.flashBanner}>{flash}</div>}
           </div>
         )}
-        <WorkspaceRail
+        {!railHidden && <WorkspaceRail
+          id="workspace-rail"
+          onOpenFleet={openFleet}
+          onOpenWindow={(id) => { void openWorkspaceWindow(id).catch((err) => setError(errText(err, 'Failed to open a new window.'))); }}
+          onOpenGlobalSettings={openGlobalSettings}
+          updateNotice={railCollapsed ? <CompactUpdateAccess /> : <AppUpdateBadge />}
           workspaces={workspaces}
           selectedId={selectedId}
           attentionCounts={attentionCounts}
+          attentionRequest={attentionRequest}
           activeRuns={activeRunsByWorkspace}
           collapsed={railCollapsed}
           onToggleCollapsed={toggleCollapsed}
@@ -526,12 +583,13 @@ const FleetLayout = () => {
           forkBusyId={forkBusyId}
           pauseBusyId={pauseBusyId}
           schedulerPaused={schedulerPaused}
-          schedulerPauseBusy={schedulerPauseBusy}
+          schedulerPauseReadFailed={schedulerPauseReadFailed}
+          schedulerPauseBusy={schedulerPauseBusy || schedulerPauseRefreshing}
           onToggleSchedulerPaused={handleToggleSchedulerPaused}
           onArtifactDrop={handleArtifactDrop}
-        />
+        />}
         <div className={styles.detail}>
-          <Outlet context={{ workspaces, loadWorkspaces }} />
+          <Outlet context={{ workspaces, loadWorkspaces, attentionCounts, showAttention }} />
         </div>
       </div>
 
@@ -541,6 +599,7 @@ const FleetLayout = () => {
         workspaceId={settingsState.workspaceId || ''}
         details={settingsState.details}
         onChanged={handleSettingsChanged}
+        onLauncherWarning={(warning) => setLauncherWarning(warning || '')}
       />
 
       <ProgressDialog

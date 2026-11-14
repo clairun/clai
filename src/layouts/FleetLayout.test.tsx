@@ -5,10 +5,22 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
 
 import FleetLayout from './FleetLayout';
+import { WindowUiProvider } from '../windowUi';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useFleetStore } from '../fleet/fleetStore';
 import { EMPTY_FLEET, emptyCard, type FleetAsk } from '../fleet/fleetModel';
 import type { WorkspaceDetails, WorkspaceListEntry } from '../generated/bindings';
+import { FOCUS_TERMINAL_EVENT } from '../utils/workspaceUiEvents';
+
+const schedulerHandlers = vi.hoisted(() => new Map<string, (event: { payload: boolean }) => void>());
+vi.mock('@tauri-apps/api/event', () => ({
+  listen: vi.fn(async (event: string, handler: (event: { payload: boolean }) => void) => {
+    schedulerHandlers.set(event, handler);
+    return () => { schedulerHandlers.delete(event); };
+  }),
+}));
+const mockInvoke = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 
 vi.mock('../workspace/client', () => ({
   listWorkspaces: vi.fn(),
@@ -37,6 +49,7 @@ vi.mock('../hooks/usePermissionAttention', () => ({
 vi.mock('../components/AppUpdateBadge', () => ({
   default: () => null,
 }));
+vi.mock('../hooks/useAvailableAppUpdate', () => ({ useAvailableAppUpdate: () => ({ update: null, support: null }) }));
 
 // Stands in for the real modal so the settings tests can drive the post-save
 // `onChanged` path. Renders nothing while closed, and no `role="dialog"`, so
@@ -63,7 +76,21 @@ const workspaceClient = await import('../workspace/client');
 const listWorkspaces = vi.mocked(workspaceClient.listWorkspaces);
 const deleteWorkspace = vi.mocked(workspaceClient.deleteWorkspace);
 const getSchedulerPaused = vi.mocked(workspaceClient.getSchedulerPaused);
+const setSchedulerPaused = vi.mocked(workspaceClient.setSchedulerPaused);
 const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
+
+// Every test gets an empty `localStorage` of its own, so a saved rail
+// preference cannot carry into the next test. Node 22 exposes jsdom's
+// storage, which persists for the whole file; Node 25+ shadows it with a
+// global that, without --localstorage-file, has none.
+beforeEach(() => {
+  const items = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => void items.set(key, value),
+  });
+});
+afterEach(() => vi.unstubAllGlobals());
 
 const entry = (
   id: string,
@@ -89,7 +116,7 @@ const entry = (
 
 const renderFleet = (initialPath = '/workspace/a') =>
   render(
-    <MemoryRouter initialEntries={[initialPath]}>
+    <WindowUiProvider><MemoryRouter initialEntries={[initialPath]}>
       <Routes>
         <Route element={<FleetLayout />}>
           <Route path="/workspace" element={<div data-testid="fleet-index" />} />
@@ -97,13 +124,13 @@ const renderFleet = (initialPath = '/workspace/a') =>
         </Route>
         <Route path="/fleet" element={<div data-testid="fleet" />} />
       </Routes>
-    </MemoryRouter>
+    </MemoryRouter></WindowUiProvider>
   );
 
 // The rail row is a role="button" whose accessible name contains the
 // workspace title, so it is a stable scope for that row's ⋯ menu.
 const openDeleteDialog = async (title = 'Alpha') => {
-  const row = await screen.findByRole('button', { name: new RegExp(title) });
+  const row = await screen.findByRole('button', { name: new RegExp(`^${title}`) });
   await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
   const menu = screen.getByRole('menu');
   await userEvent.click(within(menu).getByRole('menuitem', { name: 'Delete' }));
@@ -117,6 +144,114 @@ const confirmDelete = async (dialog: HTMLElement) => {
   await userEvent.click(within(dialog).getByRole('button', { name: 'Delete workspace' }));
 };
 
+describe('FleetLayout starred launcher warnings', () => {
+  it('keeps a saved star and shows the launcher warning', async () => {
+    let persisted = false;
+    const warning = 'Workspace star was saved, but its app launcher could not be updated: permission denied';
+    listWorkspaces.mockImplementation(async () => [entry('a', 'Alpha', { starred: persisted })]);
+    vi.mocked(workspaceClient.setWorkspaceStarred).mockImplementation(async () => {
+      persisted = true;
+      return warning;
+    });
+    getSchedulerPaused.mockResolvedValue(false);
+
+    renderFleet();
+    const row = await screen.findByRole('button', { name: /^Alpha/ });
+    await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
+    await userEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Star workspace' }));
+
+    expect(await screen.findByText(warning)).toBeInTheDocument();
+    // The star moved the row into the Starred section, so look it up again.
+    const starredRow = screen.getByRole('button', { name: /^Alpha/ });
+    await userEvent.click(within(starredRow).getByRole('button', { name: 'More actions' }));
+    expect(within(screen.getByRole('menu')).getByRole('menuitem', { name: 'Unstar workspace' })).toBeInTheDocument();
+    expect(workspaceClient.setWorkspaceStarred).toHaveBeenCalledWith('a', true);
+  });
+});
+
+describe('FleetLayout new window action', () => {
+  it('opens a second window for the chosen rail workspace', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    renderFleet();
+    const row = await screen.findByRole('button', { name: /^Alpha/ });
+    await userEvent.click(within(row).getByRole('button', { name: 'Open Alpha in new window' }));
+    expect(mockInvoke).toHaveBeenCalledWith('window_open', { workspaceId: 'a' });
+    expect(screen.getByTestId('workspace')).toBeInTheDocument();
+  });
+});
+
+describe('FleetLayout global scheduler pause', () => {
+  it('offers safe retries after failed reads and toggles only after a current read succeeds', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockRejectedValueOnce(new Error('offline'))
+      .mockRejectedValueOnce(new Error('still offline'))
+      .mockResolvedValueOnce(true);
+    renderFleet();
+
+    const retry = await screen.findByRole('button', { name: 'Retry reading global pause state' });
+    expect(retry).toBeEnabled();
+    await userEvent.click(retry);
+    await waitFor(() => expect(getSchedulerPaused).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Retry reading global pause state' })).toBeEnabled());
+    expect(setSchedulerPaused).not.toHaveBeenCalled();
+
+    await userEvent.click(retry);
+    const resume = await screen.findByRole('button', { name: 'Resume all scheduled runs' });
+    expect(resume).toBeEnabled();
+    expect(setSchedulerPaused).not.toHaveBeenCalled();
+    await userEvent.click(resume);
+    expect(setSchedulerPaused).toHaveBeenCalledWith(false);
+  });
+  it('replaces a stale pause action with retry after a focus read fails', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('offline'))
+      .mockResolvedValueOnce(true);
+    renderFleet();
+    const pause = await screen.findByRole('button', { name: 'Pause all scheduled runs' });
+    await waitFor(() => expect(pause).toBeEnabled());
+
+    act(() => window.dispatchEvent(new Event('focus')));
+    const retry = await screen.findByRole('button', { name: 'Retry reading global pause state' });
+    expect(screen.queryByRole('button', { name: 'Pause all scheduled runs' })).toBeNull();
+    await userEvent.click(retry);
+    expect(await screen.findByRole('button', { name: 'Resume all scheduled runs' })).toBeEnabled();
+    expect(setSchedulerPaused).not.toHaveBeenCalled();
+  });
+  it('holds the pause control until a focus refresh resolves', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValueOnce(false);
+    renderFleet();
+    const pause = await screen.findByRole('button', { name: 'Pause all scheduled runs' });
+    await waitFor(() => expect(pause).toBeEnabled());
+
+    let resolveRefresh!: (value: boolean) => void;
+    getSchedulerPaused.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolveRefresh = resolve; }));
+    act(() => window.dispatchEvent(new Event('focus')));
+    expect(pause).toBeDisabled();
+    await userEvent.click(pause);
+    expect(setSchedulerPaused).not.toHaveBeenCalled();
+
+    await act(async () => resolveRefresh(true));
+    const resume = screen.getByRole('button', { name: 'Resume all scheduled runs' });
+    expect(resume).toBeEnabled();
+    await userEvent.click(resume);
+    expect(setSchedulerPaused).toHaveBeenCalledWith(false);
+  });
+  it('refreshes from the backend event and on focus before the next click', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    renderFleet();
+    await screen.findByRole('button', { name: 'Pause all scheduled runs' });
+    await waitFor(() => expect(schedulerHandlers.has('scheduler://paused')).toBe(true));
+    act(() => schedulerHandlers.get('scheduler://paused')!({ payload: true }));
+    expect(screen.getByRole('button', { name: 'Resume all scheduled runs' })).toBeInTheDocument();
+    getSchedulerPaused.mockResolvedValue(false);
+    await act(async () => window.dispatchEvent(new Event('focus')));
+    expect(screen.getByRole('button', { name: 'Pause all scheduled runs' })).toBeInTheDocument();
+  });
+});
+
 describe('FleetLayout attention', () => {
   it('counts a workspace with a pending approval as needing attention', async () => {
     permissionAttention.counts = { a: 1 };
@@ -125,7 +260,7 @@ describe('FleetLayout attention', () => {
     try {
       renderFleet();
       await screen.findByText('Alpha');
-      expect(screen.getByRole('status', { name: 'Summary' })).toHaveTextContent('1 need attention');
+      expect(within(screen.getByRole('button', { name: /^Alpha/ })).getAllByTitle('Needs attention').length).toBeGreaterThan(0);
     } finally {
       permissionAttention.counts = {};
     }
@@ -141,9 +276,8 @@ describe('FleetLayout attention', () => {
     try {
       renderFleet();
       await screen.findByText('Alpha');
-      expect(screen.getByRole('status', { name: 'Summary' })).toHaveTextContent('2 need attention');
       const badges = (title: string) =>
-        within(screen.getByRole('button', { name: new RegExp(title) })).getAllByTitle('Needs attention').map((el) => el.textContent);
+        within(screen.getByRole('button', { name: new RegExp(`^${title}`) })).getAllByTitle('Needs attention').map((el) => el.textContent);
       expect(badges('Alpha')).toContain('2');
       expect(badges('Beta')).toContain('1');
     } finally {
@@ -306,7 +440,7 @@ describe('FleetLayout workspace settings', () => {
   const METADATA_ONLY = { includeFiles: false };
 
   const openSettings = async (title = 'Alpha') => {
-    const row = await screen.findByRole('button', { name: new RegExp(title) });
+    const row = await screen.findByRole('button', { name: new RegExp(`^${title}`) });
     await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
     const menu = screen.getByRole('menu');
     await userEvent.click(within(menu).getByRole('menuitem', { name: 'Settings' }));
@@ -340,13 +474,26 @@ describe('FleetLayout workspace settings', () => {
 });
 
 describe('FleetLayout run now', () => {
+  beforeEach(() => useFleetActivityStore.setState({ activeRunsByWorkspace: {}, runNowSkipped: [] }));
+  it('shows skipped feedback in the rail and clears it on retry', async () => {
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha', { scheduleEnabled: true })]);
+    getSchedulerPaused.mockResolvedValue(false);
+    vi.mocked(workspaceClient.runWorkspaceNow).mockResolvedValue(undefined);
+    useFleetActivityStore.setState({ runNowSkipped: ['a'] });
+
+    renderFleet();
+    const row = await screen.findByRole('button', { name: /^Alpha/ });
+    expect(within(row).getByRole('status')).toHaveTextContent('Run now skipped: session busy');
+    await userEvent.click(within(row).getByRole('button', { name: 'Run now' }));
+    await waitFor(() => expect(within(row).queryByRole('status')).not.toBeInTheDocument());
+  });
   it('run now other error keeps failure message', async () => {
     listWorkspaces.mockResolvedValue([entry('a', 'Alpha', { scheduleEnabled: true })]);
     getSchedulerPaused.mockResolvedValue(false);
     vi.mocked(workspaceClient.runWorkspaceNow).mockRejectedValue({ code: 'unknown' });
 
     renderFleet();
-    const row = await screen.findByRole('button', { name: /Alpha/ });
+    const row = await screen.findByRole('button', { name: /^Alpha/ });
     await userEvent.click(within(row).getByRole('button', { name: 'Run now' }));
 
     expect(await screen.findByText('Failed to start run.')).toBeInTheDocument();
@@ -356,16 +503,98 @@ describe('FleetLayout run now', () => {
 });
 
 describe('FleetLayout switch to the Fleet', () => {
-  it('goes to the Fleet on Ctrl+Shift+F with this workspace selected there', async () => {
+  it('starts a workspace launch with no rail width and toggles it in this window', async () => {
+    window.history.replaceState({}, '', '/?workspace=a');
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    renderFleet('/workspace/a');
+    expect(document.documentElement.style.getPropertyValue('--fleet-rail-width')).toBe('0px');
+    expect(screen.queryByRole('navigation', { name: 'Workspaces' })).toBeNull();
+    await userEvent.keyboard('{Control>}{Shift>}F{/Shift}{/Control}');
+    expect(await screen.findByRole('navigation', { name: 'Workspaces' })).toBeInTheDocument();
+    expect(document.documentElement.style.getPropertyValue('--fleet-rail-width')).toBe('248px');
+    expect(screen.getByRole('button', { name: 'Open settings' })).toBeInTheDocument();
+    window.history.replaceState({}, '', '/');
+  });
+
+  it('goes to the Fleet on Ctrl+Shift+M with this workspace selected there', async () => {
     useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null });
     listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);
     getSchedulerPaused.mockResolvedValue(false);
     renderFleet('/workspace/a');
     expect(await screen.findByTestId('workspace')).toBeInTheDocument();
 
-    await userEvent.keyboard('{Control>}{Shift>}F{/Shift}{/Control}');
+    await userEvent.keyboard('{Control>}{Shift>}M{/Shift}{/Control}');
     expect(await screen.findByTestId('fleet')).toBeInTheDocument();
     expect(useFleetStore.getState().selectedId).toBe('a');
+  });
+
+  it.each([false, true])('goes to the Fleet from the rail button with this workspace selected there (collapsed: %s)', async (collapse) => {
+    useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null });
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);
+    getSchedulerPaused.mockResolvedValue(false);
+    renderFleet('/workspace/b');
+    expect(await screen.findByTestId('workspace')).toBeInTheDocument();
+    if (collapse) await userEvent.click(screen.getByRole('button', { name: 'Collapse sidebar' }));
+    expect(screen.queryByRole('button', { name: 'Expand sidebar' }) !== null).toBe(collapse);
+
+    await userEvent.click(screen.getByRole('button', { name: 'Open Fleet' }));
+    expect(await screen.findByTestId('fleet')).toBeInTheDocument();
+    expect(useFleetStore.getState().selectedId).toBe('b');
+    // Only this harness's routing: Routes.test covers the real /fleet route.
+    expect(screen.queryByRole('navigation', { name: 'Workspaces' })).toBeNull();
+  });
+});
+
+describe('FleetLayout composer focus', () => {
+  // The shared terminal lives beside FleetLayout (in MainLayout); a stand-in
+  // takes the keyboard on the same event.
+  let composer: HTMLTextAreaElement;
+  const focusComposer = () => composer.focus();
+  beforeEach(() => {
+    composer = document.createElement('textarea');
+    composer.setAttribute('aria-label', 'Composer');
+    document.body.append(composer);
+    window.addEventListener(FOCUS_TERMINAL_EVENT, focusComposer);
+    listWorkspaces.mockResolvedValue([entry('a', 'Alpha'), entry('b', 'Beta')]);
+    getSchedulerPaused.mockResolvedValue(false);
+  });
+  afterEach(() => {
+    window.removeEventListener(FOCUS_TERMINAL_EVENT, focusComposer);
+    composer.remove();
+  });
+
+  it('readies the composer for a workspace chosen in the rail', async () => {
+    renderFleet('/workspace/a');
+    const row = await screen.findByRole('button', { name: /^Beta/ });
+    await userEvent.click(row);
+    expect(await screen.findByTestId('workspace')).toBeInTheDocument();
+    expect(composer).toHaveFocus();
+  });
+
+  it('opens a workspace with the keyboard in the composer', async () => {
+    renderFleet('/workspace/a');
+    await screen.findByRole('button', { name: /^Alpha/ });
+    expect(composer).toHaveFocus();
+  });
+
+  it('types into the composer when nothing has the keyboard', async () => {
+    renderFleet('/workspace/a');
+    await screen.findByRole('button', { name: /^Alpha/ });
+    composer.blur();
+    await userEvent.keyboard('h');
+    expect(composer).toHaveValue('h');
+  });
+
+  it('leaves the Fleet to its own focus rules', async () => {
+    useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null });
+    renderFleet('/workspace/a');
+    await screen.findByRole('button', { name: /^Alpha/ });
+    await userEvent.keyboard('{Control>}{Shift>}M{/Shift}{/Control}');
+    expect(await screen.findByTestId('fleet')).toBeInTheDocument();
+    composer.blur();
+    await userEvent.keyboard('h');
+    expect(composer).not.toHaveFocus();
   });
 });
 
@@ -390,14 +619,8 @@ describe('FleetLayout rail in a narrow window', () => {
       media.listeners.forEach((listener) => listener());
     });
   const railWidth = () => document.documentElement.style.getPropertyValue('--fleet-rail-width');
-  // A `localStorage` of its own: Node's global one, without a file, has none.
-  const memoryStorage = () => {
-    const items = new Map<string, string>();
-    return { getItem: (key: string) => items.get(key) ?? null, setItem: (key: string, value: string) => void items.set(key, value) };
-  };
 
   beforeEach(() => {
-    vi.stubGlobal('localStorage', memoryStorage());
     media.width = WIDE;
     media.listeners.clear();
     window.matchMedia = vi.fn((query: string) => ({
@@ -414,7 +637,6 @@ describe('FleetLayout rail in a narrow window', () => {
 
   afterEach(() => {
     window.matchMedia = originalMatchMedia;
-    vi.unstubAllGlobals();
   });
 
   it('collapses an expanded rail while narrow and restores it on widening, leaving the saved preference alone', async () => {

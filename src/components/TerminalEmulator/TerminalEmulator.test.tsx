@@ -545,6 +545,16 @@ describe('TerminalEmulator help button', () => {
     expect(screen.getByRole('dialog', { name: 'Available commands' }).innerHTML).toBe(fromButton);
   });
 
+  it('takes the keyboard without scrolling the page', () => {
+    renderAt('/workspace/a');
+    const input = screen.getByRole('textbox');
+    input.blur();
+    const focus = vi.spyOn(input, 'focus');
+    act(() => dispatchFocusTerminal());
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+    expect(input).toHaveFocus();
+  });
+
   it('takes the keyboard when the Fleet switcher picks a workspace', () => {
     renderAt('/fleet');
     const input = screen.getByRole('textbox');

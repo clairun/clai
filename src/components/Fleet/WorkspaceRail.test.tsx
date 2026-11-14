@@ -4,6 +4,7 @@ import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import WorkspaceRail from './WorkspaceRail';
+import { useFleetActivityStore } from '../../stores/fleetActivityStore';
 import type { WorkspaceListEntry } from '../../generated/bindings';
 
 // Typed against the generated bindings so a backend field rename fails this
@@ -43,6 +44,9 @@ const rail = (
     activeRuns={{}}
     collapsed={false}
     onToggleCollapsed={noop}
+    onOpenFleet={noop}
+    onOpenGlobalSettings={noop}
+    onOpenWindow={noop}
     onSelect={noop}
     onCreate={noop}
     onRunNow={noop}
@@ -55,6 +59,7 @@ const rail = (
     forkBusyId={null}
     pauseBusyId={null}
     schedulerPaused={false}
+    schedulerPauseReadFailed={false}
     schedulerPauseBusy={false}
     onToggleSchedulerPaused={noop}
     {...overrides}
@@ -113,20 +118,62 @@ describe('WorkspaceRail sections', () => {
       .map((el) => el.textContent);
     // Beta has pending approvals, so it outranks the starred Alpha and Gamma.
     expect(titles).toEqual(['Beta', 'Alpha', 'Gamma']);
-    expect(within(screen.getByRole('button', { name: /Gamma/ })).queryByTitle('Needs attention')).toBeNull();
+    expect(within(screen.getByRole('button', { name: /^Gamma/ })).queryByTitle('Needs attention')).toBeNull();
     expect(screen.queryByText('Recent')).toBeNull();
   });
 
-  it('fires onToggleStar from the hover star button with the current state', async () => {
+  it('fires onToggleStar from the overflow menu with the current state', async () => {
     const onToggleStar = vi.fn();
     renderRail(
       [entry('a', 'Alpha'), entry('b', 'Beta', { starred: true })],
       { onToggleStar },
     );
-    await userEvent.click(screen.getByRole('button', { name: 'Star workspace' }));
+    const toggleFromMenu = async (title: string, item: string) => {
+      const row = screen.getByRole('button', { name: new RegExp(`^${title}`) });
+      await userEvent.click(within(row).getByRole('button', { name: 'More actions' }));
+      await userEvent.click(within(screen.getByRole('menu')).getByRole('menuitem', { name: item }));
+    };
+    await toggleFromMenu('Alpha', 'Star workspace');
     expect(onToggleStar).toHaveBeenCalledWith('a', false);
-    await userEvent.click(screen.getByRole('button', { name: 'Unstar workspace' }));
+    await toggleFromMenu('Beta', 'Unstar workspace');
     expect(onToggleStar).toHaveBeenCalledWith('b', true);
+  });
+
+  it('keeps star out of the hover actions', () => {
+    renderRail([entry('a', 'Alpha'), entry('b', 'Beta', { starred: true })]);
+    for (const title of ['Alpha', 'Beta']) {
+      const row = screen.getByRole('button', { name: new RegExp(`^${title}`) });
+      const actions = within(row).getAllByRole('button').map((b) => b.getAttribute('aria-label'));
+      expect(actions).toEqual([`Open ${title} in new window`, 'More actions']);
+    }
+  });
+
+  it('opens a row in a new window from its hover icon, without selecting it', async () => {
+    const onOpenWindow = vi.fn();
+    const onSelect = vi.fn();
+    renderRail([entry('a', 'Alpha'), entry('b', 'Beta', { updatedAt: 0n })], { onOpenWindow, onSelect });
+    const icon = screen.getByRole('button', { name: 'Open Alpha in new window' });
+    expect(icon).toHaveAttribute('title', 'Open in new window');
+    // Revealed with the row actions: on hover and on focus-within, never collapsed.
+    expect(icon.parentElement?.className).toMatch(/rowActions_/);
+    await userEvent.click(icon);
+    expect(onOpenWindow).toHaveBeenCalledExactlyOnceWith('a');
+    expect(onSelect).not.toHaveBeenCalled();
+    screen.getByRole('button', { name: 'Open Beta in new window' }).focus();
+    await userEvent.keyboard('{Enter}');
+    expect(onOpenWindow).toHaveBeenLastCalledWith('b');
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
+  it('keeps the new-window action out of the overflow menu', async () => {
+    renderRail([entry('a', 'Alpha')]);
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(within(screen.getByRole('menu')).getAllByRole('menuitem').map((item) => item.textContent)).toEqual([
+      'Star workspace',
+      'Settings',
+      'Fork workspace',
+      'Delete',
+    ]);
   });
 
   it('offers star/unstar in the per-row overflow menu', async () => {
@@ -261,13 +308,15 @@ describe('WorkspaceRail sections', () => {
       renderRail([
         entry('a', 'Alpha'),
         entry('b', 'Beta', { scheduleEnabled: true }),
+        entry('c', 'Gamma', { scheduleEnabled: true, schedulePaused: true }),
       ]);
       // The overlay width lives in CSS keyed off this class; jsdom cannot
       // measure it, so assert the class routing instead.
-      const alphaRow = screen.getByText('Alpha').closest('[role="button"]');
-      const betaRow = screen.getByText('Beta').closest('[role="button"]');
-      expect(alphaRow?.className).not.toMatch(/rowScheduled/);
-      expect(betaRow?.className).toMatch(/rowScheduled/);
+      const rowClass = (title: string) => screen.getByText(title).closest('[role="button"]')?.className ?? '';
+      expect(rowClass('Alpha')).not.toMatch(/rowScheduled/);
+      expect(rowClass('Beta')).toMatch(/rowScheduled_/);
+      expect(rowClass('Beta')).not.toMatch(/rowScheduledPaused/);
+      expect(rowClass('Gamma')).toMatch(/rowScheduledPaused/);
     });
 
     it('holds its position when the trigger cannot be measured', async () => {
@@ -458,5 +507,141 @@ describe('WorkspaceRail sections', () => {
     );
     expect(screen.queryByText('Starred')).toBeNull();
     expect(screen.queryByText('Recent')).toBeNull();
+  });
+});
+
+describe('WorkspaceRail navigation', () => {
+  it.each([
+    { collapsed: false, fleet: 'Fleet', settings: 'Settings' },
+    { collapsed: true, fleet: '', settings: '' },
+  ])('opens the Fleet and app settings (collapsed: $collapsed)', async ({ collapsed, fleet, settings }) => {
+    const onOpenFleet = vi.fn();
+    const onOpenGlobalSettings = vi.fn();
+    renderRail([entry('a', 'Alpha')], { collapsed, onOpenFleet, onOpenGlobalSettings });
+
+    const fleetButton = screen.getByRole('button', { name: 'Open Fleet' });
+    expect(fleetButton).toHaveTextContent(fleet);
+    expect(fleetButton).toHaveAttribute('title', 'Open Fleet (Ctrl/Cmd+Shift+M)');
+    await userEvent.click(fleetButton);
+    expect(onOpenFleet).toHaveBeenCalledTimes(1);
+
+    const settingsButton = screen.getByRole('button', { name: 'Open settings' });
+    expect(settingsButton).toHaveTextContent(settings);
+    await userEvent.click(settingsButton);
+    // No arguments: the host's openGlobalSettings takes an options object,
+    // and the click event must not arrive in its place.
+    expect(onOpenGlobalSettings).toHaveBeenCalledWith();
+    expect(onOpenFleet).toHaveBeenCalledTimes(1);
+  });
+
+  it('puts Fleet, Settings and the update notice above the workspace list', () => {
+    const rows = Array.from({ length: 30 }, (_, i) => entry(`w${i}`, `Workspace ${i}`));
+    renderRail(rows, { updateNotice: <button type="button">Restart to install</button> });
+    // Below a long scrolling list they were out of sight.
+    const firstRow = screen.getByText('Workspace 0');
+    const order = [
+      screen.getByRole('button', { name: 'Open Fleet' }),
+      screen.getByRole('button', { name: 'Open settings' }),
+      screen.getByRole('button', { name: 'Restart to install' }),
+      firstRow,
+    ];
+    for (let i = 1; i < order.length; i++) {
+      expect(order[i - 1]!.compareDocumentPosition(order[i]!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+  });
+
+  it('names every icon-only control when collapsed', () => {
+    renderRail([entry('a', 'Alpha')], { collapsed: true });
+    for (const name of ['Expand sidebar', 'New workspace', 'Open Fleet', 'Open settings', 'Pause all scheduled runs']) {
+      expect(screen.getByRole('button', { name })).toHaveTextContent('');
+    }
+    // A collapsed row is only its initial: no new window, no menu.
+    expect(screen.queryByRole('button', { name: /new window|More actions/ })).toBeNull();
+  });
+});
+
+describe('WorkspaceRail rows', () => {
+  const row = (title: string) => screen.getByText(title).closest('[role="button"]') as HTMLElement;
+
+  it('shows the cadence at the end of the line and the full schedule to screen readers', () => {
+    renderRail([
+      entry('a', 'Alpha', { updatedAt: 2n, scheduleEnabled: true, scheduleKind: { type: 'interval', intervalMinutes: 120 } }),
+      entry('b', 'Beta', {
+        updatedAt: 1n,
+        scheduleEnabled: true,
+        schedulePaused: true,
+        scheduleKind: { type: 'cron', expression: '0 12 * * *', timezone: 'UTC' },
+      }),
+      entry('c', 'Gamma'),
+    ]);
+    const alpha = within(row('Alpha')).getByTitle('every 2 h');
+    expect(within(alpha).getByText('2 h')).toHaveAttribute('aria-hidden', 'true');
+    expect(within(alpha).getByText('every 2 h')).toBeInTheDocument();
+    const betaLabel = 'Paused · daily 12:00 (cron: 0 12 * * *, UTC)';
+    const beta = within(row('Beta')).getByTitle(betaLabel);
+    expect(within(beta).getByText('cron')).toHaveAttribute('aria-hidden', 'true');
+    expect(within(beta).getByText(betaLabel)).toBeInTheDocument();
+    expect(row('Gamma').querySelector('[class*="rowMeta"]')).toBeNull();
+  });
+
+  it('uses ▶ for Run now while scheduled and for Resume while paused, as the header does', async () => {
+    const onRunNow = vi.fn();
+    const onTogglePause = vi.fn();
+    renderRail(
+      [
+        entry('a', 'Alpha', { updatedAt: 2n, scheduleEnabled: true }),
+        entry('b', 'Beta', { updatedAt: 1n, scheduleEnabled: true, schedulePaused: true }),
+      ],
+      { onRunNow, onTogglePause },
+    );
+    const isPlay = (button: HTMLElement) => button.querySelector('path[d="M8 5v14l11-7z"]') !== null;
+    const isPauseBars = (button: HTMLElement) => button.querySelectorAll('rect').length === 2;
+
+    const alpha = within(row('Alpha'));
+    const run = alpha.getByRole('button', { name: 'Run now' });
+    const pause = alpha.getByRole('button', { name: 'Pause schedule' });
+    expect(isPlay(run)).toBe(true);
+    expect(isPauseBars(pause)).toBe(true);
+    expect(alpha.queryByRole('button', { name: 'Resume schedule' })).toBeNull();
+
+    const beta = within(row('Beta'));
+    const resume = beta.getByRole('button', { name: 'Resume schedule' });
+    expect(isPlay(resume)).toBe(true);
+    expect(beta.queryByRole('button', { name: 'Run now' })).toBeNull();
+    expect(beta.queryByRole('button', { name: 'Pause schedule' })).toBeNull();
+
+    await userEvent.click(pause);
+    expect(onTogglePause).toHaveBeenLastCalledWith('a', false);
+    await userEvent.click(resume);
+    expect(onTogglePause).toHaveBeenLastCalledWith('b', true);
+    await userEvent.click(run);
+    expect(onRunNow).toHaveBeenCalledWith('a');
+  });
+
+  // jsdom applies no CSS (vitest `css: false`), so this cannot prove the
+  // notice is visible. It pins the structure the stylesheet relies on: the
+  // notice has its own class, outside every element hidden or masked while
+  // the row is hovered (`.rowMeta`, `.rowBody`, `.rowActions`, badge, dot).
+  it('keeps the Run now skipped notice out of the elements hidden on hover', () => {
+    renderRail([
+      entry('a', 'Alpha', { scheduleEnabled: true, scheduleKind: { type: 'interval', intervalMinutes: 120 } }),
+    ]);
+    try {
+      act(() => useFleetActivityStore.setState({ runNowSkipped: ['a'] }));
+      const notice = within(row('Alpha')).getByRole('status');
+      expect(notice).toHaveTextContent('Run now skipped: session busy');
+      expect(notice.className).toMatch(/rowSkipNotice/);
+      expect(notice.closest('[class*="rowMeta"], [class*="rowBody"], [class*="rowActions"]')).toBeNull();
+      expect(row('Alpha').className).toMatch(/rowSkipped/);
+      expect(row('Alpha').querySelector('[class*="rowMeta"]')).toBeNull();
+    } finally {
+      act(() => useFleetActivityStore.setState({ runNowSkipped: [] }));
+    }
+  });
+
+  it('marks the selected workspace as current', () => {
+    renderRail([entry('a', 'Alpha'), entry('b', 'Beta')], { selectedId: 'b' });
+    expect(row('Beta')).toHaveAttribute('aria-current', 'true');
+    expect(row('Alpha')).not.toHaveAttribute('aria-current');
   });
 });

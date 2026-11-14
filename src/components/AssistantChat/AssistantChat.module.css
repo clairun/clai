@@ -94,7 +94,9 @@
 .activityList {
   flex: 1;
   overflow-y: auto;
-  padding: 12px;
+  /* 16px sides: reply text lines up with the composer's input text. The
+     top clears the conversation's 12px fade (Workspace .chatFirstContent). */
+  padding: 16px 16px 20px;
   min-height: 0;
   contain: layout paint style;
   overflow-anchor: none;
@@ -174,12 +176,17 @@
 }
 
 /* User Message */
+/* The user's turn: a sunken bubble on the right. Its "You" label is for
+   screen readers only; the side says who wrote it. */
 .userMessage {
-  padding: 14px 16px;
-  background: var(--color-accent-alpha-08);
-  border: 1px solid var(--color-accent-alpha-15);
-  border-left: 3px solid var(--color-accent);
-  border-radius: var(--radius-md);
+  width: fit-content;
+  max-width: min(82%, 680px);
+  margin-left: auto;
+  padding: 10px 14px;
+  background: var(--color-bg-tertiary);
+  border-radius: var(--radius-lg);
+  /* Code inside the bubble steps back to the page tone. */
+  --code-block-bg: var(--color-bg-secondary);
   animation: slideIn var(--transition-base) ease-out;
   contain: layout paint style;
 }
@@ -187,9 +194,17 @@
 /* Queued: written while a run was active, not yet picked up. Dashed edge +
    slight fade so it reads as "not part of the conversation yet". */
 .userMessageQueued {
-  border-style: dashed;
-  border-left-style: solid;
   opacity: 0.75;
+}
+
+/* A fit-content bubble would shrink to the textarea's default width. */
+.userMessageEditing {
+  width: min(82%, 680px);
+}
+
+.userMessage .messageHeader {
+  justify-content: flex-end;
+  margin-bottom: 2px;
 }
 
 .queuedChip {
@@ -201,9 +216,8 @@
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--color-accent);
-  border: 1px dashed var(--color-accent-alpha-15);
-  background: var(--color-accent-alpha-08);
+  color: var(--color-text-secondary);
+  background: var(--color-overlay-06);
 }
 
 .queuedRemove {
@@ -247,7 +261,7 @@
 
 .queuedEdit:hover {
   background: var(--color-overlay-08, rgba(0, 0, 0, 0.06));
-  color: var(--color-accent);
+  color: var(--color-primary);
 }
 
 .queuedEditor {
@@ -273,7 +287,7 @@
 
 .queuedEditorInput:focus {
   outline: none;
-  border-color: var(--color-accent);
+  border-color: var(--color-border-focus);
 }
 
 .queuedEditorActions {
@@ -297,8 +311,8 @@
 
 .queuedEditorSave {
   border-color: transparent;
-  background: var(--color-accent);
-  color: #fff;
+  background: var(--color-primary);
+  color: var(--color-text-on-primary);
 }
 
 .queuedEditorSave:disabled {
@@ -328,11 +342,9 @@
 }
 
 .messageRoleText {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
-  color: var(--color-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
+  color: var(--color-text-primary);
 }
 
 .messageTimestamp {
@@ -340,10 +352,6 @@
   color: var(--color-text-tertiary);
   margin-left: auto;
   font-weight: 400;
-}
-
-.userMessage .messageRoleText {
-  color: var(--color-accent);
 }
 
 .agentQueryMessage .messageRoleText {
@@ -422,11 +430,9 @@
 }
 
 /* Assistant Message */
+/* Plain text on the page: no panel of its own. */
 .assistantMessage {
-  padding: 14px 16px;
-  background: var(--glass-bg);
-  border: 1px solid var(--glass-border);
-  border-radius: var(--radius-md);
+  padding: 0;
   animation: slideIn var(--transition-base) ease-out;
   contain: layout paint style;
 }
@@ -437,7 +443,7 @@
  * iteration agent run reads as one continuous response instead of N
  * separate "CLAI" cards. */
 .assistantContinuation {
-  padding: 0 16px;
+  padding: 0;
   background: transparent;
   border: none;
   border-radius: 0;
@@ -456,10 +462,14 @@
 
 /* A turn's tool calls, stacked as slim rows. */
 .toolList {
-  margin-top: 10px;
+  margin: 0 0 10px;
   display: flex;
   flex-direction: column;
   gap: 1px;
+}
+
+.toolList:last-child {
+  margin-bottom: 0;
 }
 
 .toolRowBlock {
@@ -969,7 +979,8 @@
 .thinkingBlock {
   margin: 4px 0 8px 0;
   border-left: 3px solid var(--color-border-medium);
-  background: var(--color-bg-secondary);
+  /* Sunken below the conversation, which sits on the page tone. */
+  background: var(--color-bg-tertiary);
   border-radius: var(--radius-xs, 4px);
   overflow: hidden;
 }
@@ -1021,7 +1032,7 @@
 .thinkingBody {
   margin: 0;
   padding: 10px 14px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.5;
   font-style: italic;
@@ -1107,9 +1118,8 @@
 /* A message from another agent (or an unknown origin): neutral surface, the
    sender's identity hue on the left edge. Never the user's accent. */
 .inboxMessage {
-  padding: 14px 16px;
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--glass-border);
+  padding: 12px 16px;
+  background: var(--color-bg-tertiary);
   border-left: 3px solid var(--sender-hue, var(--color-border-light));
   border-radius: var(--radius-md);
   contain: layout paint style;

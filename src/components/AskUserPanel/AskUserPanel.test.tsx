@@ -8,7 +8,7 @@ import userEvent from '@testing-library/user-event';
 const mockInvoke = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 
-import AskUserPanel from './AskUserPanel';
+import AskUserPanel, { AGENT_QUESTION, COLLAPSED_AGENT_QUESTION } from './AskUserPanel';
 import useAssistantStore from '../../assistant/sessionStore';
 import type { PendingAskUser } from '../../assistant/sessionStore';
 import type { AssistantSession } from '../../generated/bindings';
@@ -326,6 +326,20 @@ describe('AskUserPanel — collapse', () => {
     // Expand restores the full body.
     await user.click(screen.getByRole('button', { name: /expand question/i }));
     expect(screen.getByText('Option A')).toBeInTheDocument();
+  });
+
+  it('marks itself collapsed for checks that look for open dialogs', async () => {
+    const user = userEvent.setup();
+    mountWithPending(askUserRequest());
+    const panel = screen.getByRole('dialog');
+    expect(panel.matches(AGENT_QUESTION)).toBe(true);
+    expect(panel.matches(COLLAPSED_AGENT_QUESTION)).toBe(false);
+
+    await user.click(screen.getByRole('button', { name: /collapse question/i }));
+    expect(panel.matches(COLLAPSED_AGENT_QUESTION)).toBe(true);
+
+    await user.click(screen.getByRole('button', { name: /expand question/i }));
+    expect(panel.matches(COLLAPSED_AGENT_QUESTION)).toBe(false);
   });
 });
 

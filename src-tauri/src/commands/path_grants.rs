@@ -517,6 +517,9 @@ fn upsert_grant(
 }
 
 pub fn emit_attention(app: &tauri::AppHandle, workspace_id: Option<String>, pending_count: u32) {
+    if let Some(id) = workspace_id.as_deref() {
+        crate::attention_notifications::AttentionNotifications::schedule_refresh(app, id);
+    }
     let payload = PathGrantAttentionUpdate {
         workspace_id,
         pending_count,

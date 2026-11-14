@@ -10,8 +10,7 @@
 //! `invoke('name')` literal but has no importers. That is unused-export
 //! analysis, it lives on the TypeScript side, and it is why
 //! `workspace_write_file` stayed alive long after its last caller. Read the
-//! guarantee here as "the two name lists agree", not "every command is
-//! reachable".
+//! guarantee here as "the two name lists agree", not "every command is reachable".
 //!
 //! The check is textual by necessity: it greps the registration macro and
 //! every `invoke('name')` literal under `../src`. That is exact as long as
@@ -172,15 +171,14 @@ fn invoke_call_arguments(text: &str) -> Vec<&str> {
 }
 
 #[test]
-fn every_registered_command_is_invoked_by_the_frontend() {
-    let unused: Vec<String> = registered_commands()
+fn every_registered_command_has_a_frontend_caller() {
+    let unused: BTreeSet<String> = registered_commands()
         .difference(&invoked_commands())
         .cloned()
         .collect();
     assert!(
         unused.is_empty(),
-        "commands registered in generate_handler! but named by no invoke() in ../src — \
-         delete the command (and its request type and resolver) or wire it up: {unused:?}"
+        "registered commands without frontend callers: {unused:?}"
     );
 }
 

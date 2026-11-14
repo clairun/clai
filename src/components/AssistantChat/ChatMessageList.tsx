@@ -741,7 +741,7 @@ const ChatMessageList = ({
           // them rendered/measured).
           estimateSize={48}
           overscan={1400}
-          gap={12}
+          gap={22}
           footer={footer}
           footerEstimateSize={56}
           initialScrollToBottom
@@ -817,9 +817,13 @@ const UserMessageBlock = ({
   };
 
   return (
-    <div className={`${styles.userMessage} ${isQueued ? styles.userMessageQueued : ''}`}>
+    <div
+      className={`${styles.userMessage} ${isQueued ? styles.userMessageQueued : ''} ${
+        isEditing ? styles.userMessageEditing : ''
+      }`}
+    >
       <div className={styles.messageHeader}>
-        <span className={styles.messageRoleText}>You</span>
+        <span className="sr-only">You</span>
         {createdAt && (
           <span className={styles.messageTimestamp}>{formatTimestamp(createdAt)}</span>
         )}

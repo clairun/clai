@@ -1,0 +1,13 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 16px;
+  height: 100%;
+  padding: 24px;
+  text-align: center;
+}
+.page h1, .page p { margin: 0; }
+.page p { color: var(--color-text-secondary); }
+.page a { color: var(--color-primary); }

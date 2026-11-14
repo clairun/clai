@@ -41,6 +41,8 @@
   background: currentColor;
 }
 
+/* No `flex-wrap` on purpose: the host decides. The top bar keeps one line;
+   the workspace rail wraps (WorkspaceRail.module.css `.updateNotice > *`). */
 .group {
   display: inline-flex;
   align-items: center;

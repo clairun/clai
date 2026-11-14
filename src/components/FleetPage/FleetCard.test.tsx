@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
 import type { AssistantRun } from '../../generated/bindings';
 import { emptyCard, type FleetLive } from '../../fleet/fleetModel';
 import FleetCard from './FleetCard';
@@ -12,7 +12,7 @@ const run = (status: AssistantRun['status'], error: string | null = null): Assis
 });
 const renderCard = (lastMainRun: AssistantRun | null) => render(
   <FleetCard card={{ ...base, lastMainRun }} feed={null} shouts={new Set()} live={live}
-    faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onDismiss={() => {}} />
+    faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onOpenWindow={() => {}} onDismiss={() => {}} />
 );
 
 describe('Fleet card run failure', () => {
@@ -27,22 +27,38 @@ describe('Fleet card run failure', () => {
     expect(screen.getByRole('alert')).toHaveTextContent('Provider unavailable');
     expect(screen.getByRole('alert')).not.toHaveAttribute('data-limit');
     view.rerender(<FleetCard card={{ ...base, lastMainRun: run('completed') }} feed={null} shouts={new Set()} live={live}
-      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onDismiss={() => {}} />);
+      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onOpenWindow={() => {}} onDismiss={() => {}} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     view.rerender(<FleetCard card={{ ...base, lastMainRun: run('completed_with_warnings', 'One tool failed') }} feed={null} shouts={new Set()} live={live}
-      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onDismiss={() => {}} />);
+      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onOpenWindow={() => {}} onDismiss={() => {}} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('moves its words one line a wheel notch, once it shows', () => {
     const view = renderCard(run('completed'));
     view.rerender(<FleetCard card={{ ...base, lastMainRun: run('failed', 'Provider unavailable') }} feed={null} shouts={new Set()} live={live}
-      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onDismiss={() => {}} />);
+      faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onOpenWindow={() => {}} onDismiss={() => {}} />);
     const banner = screen.getByRole('alert');
     banner.style.lineHeight = '17px';
     const notch = new WheelEvent('wheel', { bubbles: true, cancelable: true, deltaY: 93 });
     Object.defineProperty(notch, 'wheelDeltaY', { value: -120 });
     expect(banner.dispatchEvent(notch)).toBe(false);
     expect(banner.scrollTop).toBe(17);
+  });
+});
+
+describe('Fleet card icon', () => {
+  it('opens the workspace in a new window, not this one, and leaves the card unselected', () => {
+    const onOpen = vi.fn();
+    const onOpenWindow = vi.fn();
+    const onSelect = vi.fn();
+    render(<FleetCard card={base} feed={null} shouts={new Set()} live={live} faces={{}} now={3} loud={null}
+      onSelect={onSelect} onOpen={onOpen} onOpenWindow={onOpenWindow} onDismiss={() => {}} />);
+    const icon = screen.getByRole('button', { name: 'Open Project in new window' });
+    expect(icon).toHaveAttribute('title', 'Open in new window');
+    fireEvent.click(icon);
+    expect(onOpenWindow).toHaveBeenCalledExactlyOnceWith('ws-1');
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
   });
 });

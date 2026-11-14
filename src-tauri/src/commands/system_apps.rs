@@ -6,7 +6,7 @@ use std::io::{self, Seek};
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, State, Window};
 
 use crate::commands::workspace::resolve_workspace_descriptor;
 use crate::system_apps::{self, resolve_contained_path, SystemAppsConfig, SystemAppsStatus};
@@ -97,6 +97,7 @@ pub enum WorkspaceImportKind {
 /// an empty list when the user cancels the native picker.
 #[tauri::command]
 pub async fn workspace_import_files(
+    window: Window,
     workspace_id: Option<String>,
     import_kind: WorkspaceImportKind,
     dest_rel_path: Option<String>,
@@ -118,11 +119,13 @@ pub async fn workspace_import_files(
             .dialog()
             .file()
             .set_title("Add files to workspace")
+            .set_parent(&window)
             .blocking_pick_files(),
         WorkspaceImportKind::Folders => app
             .dialog()
             .file()
             .set_title("Add folders to workspace")
+            .set_parent(&window)
             .blocking_pick_folders(),
     };
 

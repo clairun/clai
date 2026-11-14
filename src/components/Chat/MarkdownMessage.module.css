@@ -3,10 +3,18 @@
 .markdownContainer {
   width: 100%;
   color: var(--color-text-primary);
-  font-size: 16px;
+  font-size: 15px;
   line-height: 1.6;
   word-wrap: break-word;
   overflow-wrap: break-word;
+}
+
+/* global.css colours bare p/ul/ol secondary; a reply reads in the colour
+   its container asks for. */
+.markdownContainer p,
+.markdownContainer ul,
+.markdownContainer ol {
+  color: inherit;
 }
 
 /* Make single paragraphs without siblings display inline */
@@ -109,13 +117,27 @@
 /* Inline code */
 .inlineCode {
   padding: 2px 6px;
-  background: var(--color-code-bg);
-  border: 1px solid var(--color-code-border);
-  border-radius: 4px;
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  background: var(--color-overlay-06);
+  border: none;
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
   font-size: 0.9em;
   color: var(--color-code-text);
   white-space: pre-wrap;
+}
+
+/* react-markdown wraps every fenced block in a bare <pre>. CodeBlock,
+   MermaidDiagram and VegaChart draw their own surface, so the global `pre`
+   box (fill, border, padding) must not draw a second one around it. A
+   component's own <pre> (the diagram/chart source fallback) has a class and
+   keeps its box. */
+.markdownContainer pre:not([class]) {
+  margin: 0;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  overflow: visible;
 }
 
 /* Code blocks */
@@ -126,7 +148,7 @@
   border: 1px solid var(--color-code-border);
   border-radius: 6px;
   overflow-x: auto;
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace;
+  font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.5;
 }
@@ -194,39 +216,39 @@
 
 .table {
   width: 100%;
-  border-collapse: collapse;
+  /* Separate, so the head cells can round their ends. */
+  border-collapse: separate;
   border-spacing: 0;
   font-size: 14px;
 }
 
-.tableHead {
-  background: var(--color-code-bg);
-}
-
+/* Rows separated by one rule each; the head is a sunken band, no grid. */
 .tableHeader {
-  padding: 10px 12px;
+  padding: 8px 12px;
+  /* Inside the user bubble (itself tertiary) the bubble swaps the tone. */
+  background: var(--code-block-bg, var(--color-bg-tertiary));
   text-align: left;
+  font-size: 13px;
   font-weight: 600;
-  color: var(--color-text-primary);
-  border: 1px solid var(--color-border-medium);
+  color: var(--color-text-secondary);
 }
 
-.tableBody {
-  background: var(--color-bg-primary);
+.tableHeader:first-child {
+  border-radius: var(--radius-sm) 0 0 var(--radius-sm);
 }
 
-.tableRow {
-  border-bottom: 1px solid var(--color-border-light);
-}
-
-.tableRow:last-child {
-  border-bottom: none;
+.tableHeader:last-child {
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
 }
 
 .tableCell {
-  padding: 10px 12px;
-  border: 1px solid var(--color-border-medium);
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--color-divider);
   color: var(--color-text-secondary);
+}
+
+.tableBody .tableRow:last-child .tableCell {
+  border-bottom: none;
 }
 
 /* Text formatting */

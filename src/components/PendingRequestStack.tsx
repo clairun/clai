@@ -66,14 +66,8 @@ export const usePendingRequests = <T extends PendingRequest>(
     if (!workspaceId) return undefined;
 
     let cancelled = false;
-    source
-      .list(workspaceId)
-      .then((pending) => {
-        if (!cancelled && Array.isArray(pending)) dispatch({ type: 'add', incoming: pending });
-      })
-      .catch(() => {
-        // Non-fatal: the events still bring new requests.
-      });
+    const resolvedDuringSeed = new Set<string>();
+    let seeded = false;
 
     // Tauri's unlisten is async, so after a switch the previous workspace's
     // listener can still fire, and its own workspaceId passes the filter;
@@ -82,14 +76,28 @@ export const usePendingRequests = <T extends PendingRequest>(
       if (cancelled) return;
       const req = event.payload;
       if (!req?.requestId || req.workspaceId !== workspaceId || !source.isRequest(req)) return;
+      resolvedDuringSeed.delete(req.requestId);
       dispatch({ type: 'add', incoming: [req] });
     });
     // requestId is unique across workspaces, so this needs no filter.
     const unlistenResolved = listen<{ requestId?: string }>(source.resolvedEvent, (event) => {
       if (cancelled) return;
       const requestId = event.payload?.requestId;
-      if (requestId) dispatch({ type: 'remove', requestId });
+      if (requestId) {
+        if (!seeded) resolvedDuringSeed.add(requestId);
+        dispatch({ type: 'remove', requestId });
+      }
     });
+
+    void Promise.allSettled([unlistenRequest, unlistenResolved])
+      .then(() => source.list(workspaceId))
+      .then((pending) => {
+        if (!cancelled && Array.isArray(pending)) {
+          dispatch({ type: 'add', incoming: pending.filter((req) => !resolvedDuringSeed.has(req.requestId)) });
+        }
+        seeded = true;
+      })
+      .catch(() => { seeded = true; });
 
     return () => {
       cancelled = true;

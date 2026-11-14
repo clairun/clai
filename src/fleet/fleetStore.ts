@@ -36,13 +36,13 @@ const SNAPSHOT_LIMIT = 16;
 /** Where `dismissed` survives a reload, as the workspace rail's collapsed flag does. */
 const DISMISSED_KEY = 'fleet.dismissed';
 
-const readDismissed = (): Record<string, number> => {
+const readDismissed = (fallback: Record<string, number> = {}): Record<string, number> => {
   try {
     const stored: unknown = JSON.parse(localStorage.getItem(DISMISSED_KEY) ?? '{}');
     if (!stored || typeof stored !== 'object') return {};
     return Object.fromEntries(Object.entries(stored).filter(([, at]) => typeof at === 'number'));
   } catch {
-    return {};
+    return fallback;
   }
 };
 
@@ -76,6 +76,7 @@ interface FleetStoreState {
   /** Fetches a message the snapshot cut, whole, into its card; a failed fetch leaves the preview. */
   loadWhole: (workspaceId: string, sessionId: string, messageId: string) => void;
   loadSnapshot: () => Promise<void>;
+  refreshDismissed: () => void;
   /** Selecting a card undoes its dismissal. */
   select: (workspaceId: string | null) => void;
   /** Takes the card off the board until something happens in it; a selected one is deselected. */
@@ -168,9 +169,12 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
     if (missing && selectedId !== keep) void get().loadSnapshot();
   },
 
+  refreshDismissed: () => set({ dismissed: readDismissed(get().dismissed) }),
+
   select: (workspaceId) => {
     const now = Date.now();
-    const { fleet, dismissed } = get();
+    const { fleet } = get();
+    const dismissed = readDismissed(get().dismissed);
     const undone = workspaceId !== null && Object.hasOwn(dismissed, workspaceId);
     set({
       selectedId: workspaceId,
@@ -181,7 +185,8 @@ export const useFleetStore = create<FleetStoreState>()((set, get) => ({
   },
 
   dismiss: (workspaceId) => {
-    const { dismissed, selectedId } = get();
+    const { selectedId } = get();
+    const dismissed = readDismissed(get().dismissed);
     const now = Date.now();
     // An older dismissal hides nothing that is idle (`eligibleCards`), so it goes, a deleted workspace's too.
     const recent = Object.entries(dismissed).filter(([, at]) => at >= now - RECENT_WINDOW_MS);

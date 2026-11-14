@@ -1,8 +1,9 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import { save } from '@tauri-apps/plugin-dialog';
 import MarkdownMessage from './Chat/MarkdownMessage';
+import { codePalette } from './Chat/codePalette';
+import { useAppTheme } from '../hooks/useAppTheme';
 import VegaChart, { isVegaLiteSpecPath } from './Chat/VegaChart';
 import { WorkspaceFileContext, useDocumentLocation, type WorkspaceFileLocation } from './Chat/WorkspaceFileContext';
 import { downloadWorkspaceFile, openWorkspacePath, readWorkspaceFile } from '../workspace/client';
@@ -43,23 +44,22 @@ interface WorkspaceFilePreviewPanelProps {
 }
 
 // ── Syntax-highlighting setup ──────────────────────────────────────────────
-// Reuses the same Prism instance + oneLight theme that MarkdownMessage uses
-// for fenced code blocks, so standalone file previews and inline markdown
-// snippets render with a consistent look.
+// Reuses the same Prism instance and theme-aware palette that MarkdownMessage
+// uses for fenced code blocks, so standalone file previews and inline
+// markdown snippets render with a consistent look.
 
 const PREVIEW_CODE_STYLE: React.CSSProperties = {
   margin: 0,
   padding: '12px 14px',
   fontSize: '12px',
   lineHeight: '1.5',
-  borderRadius: '6px',
-  background: 'rgba(0, 0, 0, 0.04)',
-  border: '1px solid rgba(0, 0, 0, 0.1)',
+  borderRadius: 'var(--radius-md)',
+  background: 'var(--color-bg-tertiary)',
   overflow: 'auto',
 };
 
 const PREVIEW_CODE_TAG_STYLE: React.CSSProperties = {
-  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace',
+  fontFamily: 'var(--font-mono)',
   fontSize: '12px',
 };
 
@@ -67,10 +67,10 @@ const PREVIEW_LINE_NUMBER_STYLE: React.CSSProperties = {
   minWidth: '2.5em',
   paddingRight: '12px',
   marginRight: '4px',
-  color: 'rgba(0, 0, 0, 0.32)',
+  color: 'var(--color-text-tertiary)',
   textAlign: 'right',
   userSelect: 'none',
-  borderRight: '1px solid rgba(0, 0, 0, 0.06)',
+  borderRight: '1px solid var(--color-divider)',
 };
 
 // Maps file extensions to Prism language identifiers. Keep this list curated
@@ -154,6 +154,7 @@ const detectLanguage = (path: string | null | undefined): string | null => {
 };
 
 export const CodeView = ({ content, language, line, navigationId }: { content: string; language: string | null; line?: number; navigationId?: number }) => {
+  const theme = useAppTheme();
   const containerRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     if (line) containerRef.current?.querySelector(`[data-preview-line="${line}"]`)?.scrollIntoView({ block: 'center' });
@@ -162,7 +163,7 @@ export const CodeView = ({ content, language, line, navigationId }: { content: s
     <div ref={containerRef}>
       <SyntaxHighlighter
         language={language || 'text'}
-        style={oneLight}
+        style={codePalette(theme)}
         showLineNumbers
         wrapLines={Boolean(line)}
         wrapLongLines={false}
