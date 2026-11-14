@@ -82,11 +82,12 @@ interface FleetCardProps {
   loud: FleetLoudness;
   onSelect: (workspaceId: string) => void;
   onOpen: (workspaceId: string) => void;
+  onOpenWindow: (workspaceId: string) => void;
   onDismiss: (workspaceId: string) => void;
 }
 
 /** A miniature: the workspace's conversation as highlights, or its open request, answerable in place. */
-const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpen, onDismiss }: FleetCardProps) => {
+const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpen, onOpenWindow, onDismiss }: FleetCardProps) => {
   const cast = useMemo(() => castFor(faces, card.main), [faces, card.main]);
   const crew = useMemo(() => cardCrew(card, live, now), [card, live, now]);
   const phase = cardPhase(card, live);
@@ -115,6 +116,8 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpe
             e.stopPropagation();
             onSelect(card.workspaceId);
           }}
+          onDoubleClick={() => onOpen(card.workspaceId)}
+          title="Double-click to open"
           aria-label={`Select ${title}`}
         >
           {title}
@@ -123,11 +126,11 @@ const FleetCard = ({ card, feed, shouts, live, faces, now, loud, onSelect, onOpe
         <button
           type="button"
           className={styles.cardIcon}
-          title="Open workspace"
-          aria-label={`Open ${title}`}
+          title="Open in new window"
+          aria-label={`Open ${title} in new window`}
           onClick={(e) => {
             e.stopPropagation();
-            onOpen(card.workspaceId);
+            onOpenWindow(card.workspaceId);
           }}
         >
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">

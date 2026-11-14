@@ -29,7 +29,7 @@
 //! - **Lifecycle.** The child is reaped by the reader thread on EOF; an
 //!   explicit `terminal_close` kills the child (which unblocks the reader).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -42,7 +42,7 @@ use base64::Engine as _;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 use serde::Serialize;
 use tauri::ipc::Channel;
-use tauri::State;
+use tauri::{State, Window};
 
 use crate::assistant::network::spawn_roots::{self, StartedBy};
 use crate::AppState;
@@ -70,6 +70,7 @@ pub enum TerminalEvent {
 /// behind a `Mutex` so the registry can hand out shared references that the
 /// write/resize/close commands serialize against.
 struct TerminalHandle {
+    window_label: String,
     /// Master PTY — kept for `resize`.
     master: Mutex<Box<dyn MasterPty + Send>>,
     /// Write half — keystrokes/commands from the frontend.
@@ -87,7 +88,14 @@ struct TerminalHandle {
 /// `AppState`; cheap to clone (just bumps the `Arc`).
 #[derive(Clone, Default)]
 pub struct TerminalRegistry {
-    inner: Arc<Mutex<HashMap<String, Arc<TerminalHandle>>>>,
+    inner: Arc<Mutex<TerminalRegistryInner>>,
+}
+
+#[derive(Default)]
+struct TerminalRegistryInner {
+    handles: HashMap<String, Arc<TerminalHandle>>,
+    closed_windows: HashSet<String>,
+    closed: bool,
 }
 
 impl TerminalRegistry {
@@ -95,17 +103,28 @@ impl TerminalRegistry {
         Self::default()
     }
 
-    fn insert(&self, id: String, handle: Arc<TerminalHandle>) {
-        self.inner
-            .lock()
-            .expect("terminal registry poisoned")
-            .insert(id, handle);
+    fn insert(&self, id: String, handle: Arc<TerminalHandle>) -> Result<(), String> {
+        let rejected = {
+            let mut inner = self.inner.lock().expect("terminal registry poisoned");
+            if inner.closed || inner.closed_windows.contains(&handle.window_label) {
+                true
+            } else {
+                inner.handles.insert(id, Arc::clone(&handle));
+                false
+            }
+        };
+        if rejected {
+            stop_terminal(&handle);
+            return Err("Terminal window has closed".to_string());
+        }
+        Ok(())
     }
 
     fn get(&self, id: &str) -> Option<Arc<TerminalHandle>> {
         self.inner
             .lock()
             .expect("terminal registry poisoned")
+            .handles
             .get(id)
             .cloned()
     }
@@ -114,7 +133,28 @@ impl TerminalRegistry {
         self.inner
             .lock()
             .expect("terminal registry poisoned")
+            .handles
             .remove(id)
+    }
+
+    /// Stop sessions owned by a destroyed window, leaving other windows alive.
+    pub fn close_window(&self, label: &str) {
+        let handles: Vec<_> = {
+            let mut inner = self.inner.lock().expect("terminal registry poisoned");
+            inner.closed_windows.insert(label.to_owned());
+            let ids: Vec<_> = inner
+                .handles
+                .iter()
+                .filter(|(_, handle)| handle.window_label == label)
+                .map(|(id, _)| id.clone())
+                .collect();
+            ids.into_iter()
+                .filter_map(|id| inner.handles.remove(&id))
+                .collect()
+        };
+        for handle in handles {
+            stop_terminal(&handle);
+        }
     }
 
     /// Kill every live session. Called on app teardown (see `lib.rs`'s
@@ -124,15 +164,20 @@ impl TerminalRegistry {
     pub fn close_all(&self) {
         // Drain under the lock, then kill without holding it (kill can block).
         let handles: Vec<Arc<TerminalHandle>> = {
-            let mut map = self.inner.lock().expect("terminal registry poisoned");
-            map.drain().map(|(_, handle)| handle).collect()
+            let mut inner = self.inner.lock().expect("terminal registry poisoned");
+            inner.closed = true;
+            inner.handles.drain().map(|(_, handle)| handle).collect()
         };
         for handle in handles {
-            handle.closed.store(true, Ordering::SeqCst);
-            if let Ok(mut killer) = handle.killer.lock() {
-                let _ = killer.kill();
-            }
+            stop_terminal(&handle);
         }
+    }
+}
+
+fn stop_terminal(handle: &TerminalHandle) {
+    handle.closed.store(true, Ordering::SeqCst);
+    if let Ok(mut killer) = handle.killer.lock() {
+        let _ = killer.kill();
     }
 }
 
@@ -376,6 +421,7 @@ fn spawn_io_threads(
 /// Returns the session id used by the write/resize/close commands.
 #[tauri::command]
 pub async fn terminal_open(
+    window: Window,
     state: State<'_, AppState>,
     workspace_id: Option<String>,
     cwd: Option<String>,
@@ -425,6 +471,7 @@ pub async fn terminal_open(
 
     let closed = Arc::new(AtomicBool::new(false));
     let handle = Arc::new(TerminalHandle {
+        window_label: window.label().to_owned(),
         master: Mutex::new(pair.master),
         writer: Mutex::new(writer),
         killer: Mutex::new(killer),
@@ -435,7 +482,7 @@ pub async fn terminal_open(
     spawn_io_threads(reader, child, on_event, closed);
 
     let session_id = uuid::Uuid::new_v4().to_string();
-    state.terminals.insert(session_id.clone(), handle);
+    state.terminals.insert(session_id.clone(), handle)?;
     Ok(session_id)
 }
 
@@ -510,10 +557,7 @@ fn send_host_winch(marker: &str) {
 #[tauri::command]
 pub async fn terminal_close(state: State<'_, AppState>, session_id: String) -> Result<(), String> {
     if let Some(handle) = state.terminals.remove(&session_id) {
-        handle.closed.store(true, Ordering::SeqCst);
-        if let Ok(mut killer) = handle.killer.lock() {
-            let _ = killer.kill();
-        }
+        stop_terminal(&handle);
     }
     Ok(())
 }
@@ -618,6 +662,93 @@ mod tests {
             spawn_roots::eventually(|| spawn_roots::recorded(pid).is_none()).await,
             "gone once reaped"
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn closing_one_window_kills_only_its_terminal() {
+        fn open_test_terminal(
+            registry: &TerminalRegistry,
+            id: &str,
+            label: &str,
+        ) -> Arc<AtomicBool> {
+            let pair = native_pty_system()
+                .openpty(PtySize {
+                    rows: 24,
+                    cols: 80,
+                    pixel_width: 0,
+                    pixel_height: 0,
+                })
+                .unwrap();
+            let mut command = CommandBuilder::new("sleep");
+            command.arg("30");
+            let child = pair.slave.spawn_command(command).unwrap();
+            drop(pair.slave);
+            let reader = pair.master.try_clone_reader().unwrap();
+            let writer = pair.master.take_writer().unwrap();
+            let killer = child.clone_killer();
+            let closed = Arc::new(AtomicBool::new(false));
+            let handle = Arc::new(TerminalHandle {
+                window_label: label.to_owned(),
+                master: Mutex::new(pair.master),
+                writer: Mutex::new(writer),
+                killer: Mutex::new(killer),
+                closed: Arc::clone(&closed),
+                winch_marker: None,
+            });
+            registry.insert(id.to_owned(), handle).unwrap();
+            spawn_io_threads(reader, child, Channel::new(|_| Ok(())), Arc::clone(&closed));
+            closed
+        }
+
+        let registry = TerminalRegistry::new();
+        let first = open_test_terminal(&registry, "first", "main");
+        let second = open_test_terminal(&registry, "second", "w-1");
+        registry.close_window("main");
+        assert!(first.load(Ordering::SeqCst));
+        assert!(registry.get("first").is_none());
+        assert!(!second.load(Ordering::SeqCst));
+        assert!(registry.get("second").is_some());
+        registry.close_all();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn inserting_after_window_close_kills_the_child() {
+        let registry = TerminalRegistry::new();
+        registry.close_window("main");
+
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let mut command = CommandBuilder::new("sleep");
+        command.arg("30");
+        let mut child = pair.slave.spawn_command(command).unwrap();
+        drop(pair.slave);
+        let writer = pair.master.take_writer().unwrap();
+        let closed = Arc::new(AtomicBool::new(false));
+        let handle = Arc::new(TerminalHandle {
+            window_label: "main".to_owned(),
+            master: Mutex::new(pair.master),
+            writer: Mutex::new(writer),
+            killer: Mutex::new(child.clone_killer()),
+            closed: Arc::clone(&closed),
+            winch_marker: None,
+        });
+
+        assert!(registry.insert("late".to_owned(), handle).is_err());
+        assert!(registry.get("late").is_none());
+        assert!(closed.load(Ordering::SeqCst));
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while child.try_wait().unwrap().is_none() {
+            assert!(std::time::Instant::now() < deadline, "child was not killed");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 
     #[test]

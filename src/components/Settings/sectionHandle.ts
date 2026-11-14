@@ -8,6 +8,7 @@ import { useEffect, useRef } from 'react';
 export interface SectionResult {
   ok: boolean;
   error?: string;
+  warning?: string;
   /** Set when the submit created a record; the window moves to it. */
   createdId?: string;
 }

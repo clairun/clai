@@ -73,6 +73,7 @@ tauri-build = { version = "2.7.0", features = [] }
 tauri = { version = "2.12.0", features = [] }
 tauri-plugin-clipboard-manager = "2.3.3"
 tauri-plugin-dialog = "2.7.3"
+tauri-plugin-notification = "2.8.0"
 tauri-plugin-opener = "2.5.5"
 tauri-plugin-os = "2.3.2"
 tauri-plugin-single-instance = "2.5.5"
@@ -191,6 +192,8 @@ ts-rs = { version = "12.0.1", features = ["serde-compat", "serde-json-impl"] }
 # path for the special `default` target only re-reads the alias.
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus-secret-service = "4.1"
+zbus = { version = "5.14", features = ["blocking"] }
+tempfile = "3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = [

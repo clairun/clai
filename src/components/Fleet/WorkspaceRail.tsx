@@ -11,20 +11,30 @@ import type { WorkspaceListEntry } from '../../generated/bindings';
 import {
   CARD_STATUS_LABEL,
   deriveCardStatus,
-  formatScheduleLabel,
   num,
 } from '../../fleet/workspaceStatus';
+import { formatIntervalShort, formatScheduleDetail } from '../../utils/scheduleFormat';
 import {
   fixedRightAlignedMenuStyle,
   sameFloatingMenuStyle,
 } from '../../utils/floatingMenu';
 import styles from './WorkspaceRail.module.css';
+import { useFleetActivityStore } from '../../stores/fleetActivityStore';
 
 interface WorkspaceRailProps {
+  id?: string;
+  /** App-update notice shown under Settings; it renders nothing when there is no update. */
+  updateNotice?: React.ReactNode;
+  /** Leave for the Fleet: the same action as Ctrl/Cmd+Shift+M. */
+  onOpenFleet: () => void;
+  /** App-wide settings, as opposed to `onSettings` for one workspace. */
+  onOpenGlobalSettings: () => void;
+  onOpenWindow: (id: string) => void;
   workspaces: WorkspaceListEntry[];
   selectedId: string | null;
   /** Per-workspace pending approval/path-grant count (merged). */
   attentionCounts: Record<string, number>;
+  attentionRequest?: number;
   /** Per-workspace in-flight interactive run count. */
   activeRuns: Record<string, number>;
   collapsed: boolean;
@@ -42,6 +52,7 @@ interface WorkspaceRailProps {
   pauseBusyId: string | null;
   /** Global scheduler pause (overlay across every workspace). */
   schedulerPaused: boolean;
+  schedulerPauseReadFailed: boolean;
   schedulerPauseBusy: boolean;
   onToggleSchedulerPaused: () => void;
   /** Drop handler for an artifact dragged from the artifacts drawer onto a
@@ -82,12 +93,65 @@ const PauseIcon = () => (
   </svg>
 );
 
-const StarIcon = ({ filled }: { filled: boolean }) => (
+const FleetIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <rect x="3" y="3" width="7" height="7" rx="1" />
+    <rect x="14" y="3" width="7" height="7" rx="1" />
+    <rect x="3" y="14" width="7" height="7" rx="1" />
+    <rect x="14" y="14" width="7" height="7" rx="1" />
+  </svg>
+);
+
+const SettingsIcon = () => (
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="3" />
+    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+  </svg>
+);
+
+const PlusIcon = () => (
+  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true">
+    <line x1="12" y1="5" x2="12" y2="19" />
+    <line x1="5" y1="12" x2="19" y2="12" />
+  </svg>
+);
+
+const RetryIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <polyline points="23 4 23 10 17 10" />
+    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+  </svg>
+);
+
+const ClockIcon = () => (
+  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <circle cx="12" cy="12" r="9" />
+    <polyline points="12 7 12 12 15 14" />
+  </svg>
+);
+
+/** The cadence in a few characters, for the row's trailing schedule cue:
+ *  "2 h" or "90 min" for an interval, "cron" for a cron expression. The full
+ *  label (`formatScheduleDetail`) goes to the tooltip and to screen readers. */
+const shortScheduleLabel = (kind: WorkspaceListEntry['scheduleKind']): string => {
+  if (kind?.type === 'interval') return formatIntervalShort(Number(kind.intervalMinutes ?? 0)) ?? '';
+  return kind?.type === 'cron' ? 'cron' : '';
+};
+
+const NewWindowIcon = () => (
+  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.25" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+    <path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" />
+    <polyline points="15 3 21 3 21 9" />
+    <line x1="10" y1="14" x2="21" y2="3" />
+  </svg>
+);
+
+const StarIcon = () => (
   <svg
     width="12"
     height="12"
     viewBox="0 0 24 24"
-    fill={filled ? 'currentColor' : 'none'}
+    fill="currentColor"
     stroke="currentColor"
     strokeWidth="2"
     strokeLinecap="round"
@@ -141,7 +205,7 @@ const rowMenuStyle = (trigger: HTMLElement): React.CSSProperties => {
  * so ordering is never a mystery:
  *
  *   1. "Needs attention" — open questions, pending approvals and path grants.
- *   2. "Starred" — user-pinned workspaces (star via hover icon or ⋯ menu).
+ *   2. "Starred" — user-pinned workspaces (star via the ⋯ menu).
  *   3. "Recent" — everything else, most-recently-updated first.
  *
  * Within each section rows keep the recency order. Scheduled workspaces
@@ -158,13 +222,20 @@ const rowMenuStyle = (trigger: HTMLElement): React.CSSProperties => {
 const WorkspaceRail = ({
   workspaces,
   selectedId,
+  id,
+  updateNotice,
+  onOpenFleet,
+  onOpenGlobalSettings,
+  onOpenWindow,
   attentionCounts,
+  attentionRequest = 0,
   activeRuns,
   collapsed,
   onToggleCollapsed,
   onSelect,
   onCreate,
   schedulerPaused,
+  schedulerPauseReadFailed,
   schedulerPauseBusy,
   onToggleSchedulerPaused,
   onRunNow,
@@ -188,6 +259,7 @@ const WorkspaceRail = ({
   const menuTriggerRef = useRef<HTMLElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
   const openMenuId = openMenu?.id ?? null;
+  const runNowSkipped = useFleetActivityStore((state) => state.runNowSkipped);
 
   // Opening the menu takes focus into it, so closing it hands focus back to
   // the ⋯ trigger — otherwise the focused element just disappears, focus
@@ -202,7 +274,21 @@ const WorkspaceRail = ({
     }
     setOpenMenu(null);
   }, []);
-  const [query, setQuery] = useState('');
+  const [filter, setFilter] = useState({ query: '', request: attentionRequest });
+  const query = filter.request === attentionRequest ? filter.query : '';
+  const selectedIdRef = useRef(selectedId);
+  useLayoutEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+  useLayoutEffect(() => {
+    if (attentionRequest === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      const rail = document.getElementById(id ?? '');
+      const rows = rail?.querySelectorAll<HTMLElement>('[data-attention]') ?? [];
+      Array.from(rows).find((row) => row.dataset.workspaceId !== selectedIdRef.current)?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [attentionRequest, id]);
   const [dropTargetId, setDropTargetId] = useState<string | null>(null);
 
   // The menu lives at the end of <body>, so Tab from the ⋯ trigger no
@@ -313,19 +399,26 @@ const WorkspaceRail = ({
     const pending = attentionCounts[ws.id] || 0;
     const status = deriveCardStatus(ws, processing, pending > 0);
     const isSelected = ws.id === selectedId;
-    const scheduleLabel = formatScheduleLabel(ws.scheduleKind);
+    const scheduleLabel = formatScheduleDetail(ws.scheduleKind);
     const isPaused = !!ws.schedulePaused;
+    const scheduleText = isPaused
+      ? `Paused${scheduleLabel ? ` · ${scheduleLabel}` : ''}`
+      : scheduleLabel || 'Scheduled';
     const isStarred = !!ws.starred;
     const attentionCount = pending;
     // A run completed since the user last opened this workspace.
     // Suppressed while selected — the open page is marking it seen.
     const isUnread = !!ws.unread && !isSelected;
     const initial = (ws.title || '?').trim().charAt(0).toUpperCase() || '?';
+    const isRunNowSkipped = runNowSkipped.includes(ws.id);
     const rowClasses = [
       styles.row,
       isSelected ? styles.rowSelected : '',
-      // Sizes the hover-action overlay (scheduled rows show two extra buttons).
-      ws.scheduleEnabled ? styles.rowScheduled : '',
+      isUnread ? styles.rowUnread : '',
+      // Sizes the hover-action overlay: running schedules add Run now and
+      // Pause, paused ones add Resume.
+      ws.scheduleEnabled ? (isPaused ? styles.rowScheduledPaused : styles.rowScheduled) : '',
+      isRunNowSkipped ? styles.rowSkipped : '',
       // An open menu keeps its row's actions visible. Opening the menu moves
       // focus into it, and it is portaled to <body>, so the row loses
       // `:focus-within` (and `:hover` as soon as the pointer moves onto the
@@ -338,12 +431,15 @@ const WorkspaceRail = ({
     return (
       <div
         key={ws.id}
+        data-workspace-id={ws.id}
+        data-attention={attentionCount > 0 || undefined}
         className={`${rowClasses}${
           dropTargetId === ws.id ? ` ${styles.rowDropTarget}` : ''
         }`}
         onClick={() => onSelect(ws.id)}
         role="button"
         tabIndex={0}
+        aria-current={isSelected || undefined}
         onKeyDown={(e) => {
           // The ⋯ menu is portaled, but portals still bubble through the
           // React tree — so Enter on a menu item (or on any row button)
@@ -402,16 +498,27 @@ const WorkspaceRail = ({
           <>
             <span className={styles.rowBody}>
               <span className={styles.rowTitle}>{ws.title}</span>
-              {ws.scheduleEnabled && (
-                <span
-                  className={`${styles.rowMeta} ${isPaused ? styles.rowMetaPaused : ''}`}
-                >
-                  {isPaused
-                    ? `Paused${scheduleLabel ? ` · ${scheduleLabel}` : ''}`
-                    : scheduleLabel || 'Scheduled'}
-                </span>
-              )}
             </span>
+
+            {isRunNowSkipped ? (
+              <span
+                className={styles.rowSkipNotice}
+                role="status"
+                title="Run now skipped: session busy"
+              >
+                <span aria-hidden="true">Busy</span>
+                <span className="sr-only">Run now skipped: session busy</span>
+              </span>
+            ) : ws.scheduleEnabled ? (
+              <span
+                className={`${styles.rowMeta} ${isPaused ? styles.rowMetaPaused : ''}`}
+                title={scheduleText}
+              >
+                {isPaused ? <PauseIcon /> : <ClockIcon />}
+                <span aria-hidden="true">{shortScheduleLabel(ws.scheduleKind)}</span>
+                <span className="sr-only">{scheduleText}</span>
+              </span>
+            ) : null}
 
             {attentionCount > 0 && (
               <span className={styles.attentionBadge} title="Needs attention">
@@ -428,20 +535,7 @@ const WorkspaceRail = ({
             )}
 
             <span className={styles.rowActions}>
-              <button
-                type="button"
-                className={`${styles.iconButton} ${isStarred ? styles.starButtonActive : ''}`}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  onToggleStar(ws.id, isStarred);
-                }}
-                title={isStarred ? 'Unstar workspace' : 'Star workspace'}
-                aria-label={isStarred ? 'Unstar workspace' : 'Star workspace'}
-                aria-pressed={isStarred}
-              >
-                <StarIcon filled={isStarred} />
-              </button>
-              {ws.scheduleEnabled && (
+              {ws.scheduleEnabled && !isPaused && (
                 <>
                   <button
                     type="button"
@@ -461,16 +555,43 @@ const WorkspaceRail = ({
                     className={styles.iconButton}
                     onClick={(e) => {
                       e.stopPropagation();
-                      onTogglePause(ws.id, isPaused);
+                      onTogglePause(ws.id, false);
                     }}
                     disabled={pauseBusyId === ws.id}
-                    title={isPaused ? 'Resume schedule' : 'Pause schedule'}
-                    aria-label={isPaused ? 'Resume schedule' : 'Pause schedule'}
+                    title="Pause schedule"
+                    aria-label="Pause schedule"
                   >
                     <PauseIcon />
                   </button>
                 </>
               )}
+              {ws.scheduleEnabled && isPaused && (
+                <button
+                  type="button"
+                  className={styles.iconButton}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    onTogglePause(ws.id, true);
+                  }}
+                  disabled={pauseBusyId === ws.id}
+                  title="Resume schedule"
+                  aria-label="Resume schedule"
+                >
+                  <RunIcon />
+                </button>
+              )}
+              <button
+                type="button"
+                className={styles.iconButton}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onOpenWindow(ws.id);
+                }}
+                title="Open in new window"
+                aria-label={`Open ${ws.title} in new window`}
+              >
+                <NewWindowIcon />
+              </button>
               <button
                 type="button"
                 className={styles.iconButton}
@@ -598,6 +719,7 @@ const WorkspaceRail = ({
 
   return (
     <nav
+      id={id}
       className={`${styles.rail} ${collapsed ? styles.railCollapsed : ''}`}
       aria-label="Workspaces"
     >
@@ -615,19 +737,6 @@ const WorkspaceRail = ({
             <line x1="3" y1="18" x2="21" y2="18" />
           </svg>
         </button>
-        {!collapsed && <span className={styles.railTitle}>Workspaces</span>}
-        {!collapsed && <span className={styles.railCount}>{workspaces.length}</span>}
-        {!collapsed && schedulerPaused && (
-          <span
-            className={styles.pausedPill}
-            title="Scheduled runs are paused for every workspace"
-          >
-            Paused
-          </span>
-        )}
-      </div>
-
-      <div className={styles.railActions}>
         <button
           type="button"
           className={styles.newButton}
@@ -635,22 +744,55 @@ const WorkspaceRail = ({
           title="New workspace"
           aria-label="New workspace"
         >
-          {collapsed ? '+' : '＋ New'}
+          <PlusIcon />
+          {!collapsed && <span>New workspace</span>}
+        </button>
+      </div>
+
+      {/* Destinations outside this list. Above it, not below: under a long
+          scrolling list they were out of sight. */}
+      <div className={styles.railNav}>
+        <button
+          type="button"
+          className={styles.navItem}
+          onClick={() => onOpenFleet()}
+          aria-label="Open Fleet"
+          aria-keyshortcuts="Control+Shift+M Meta+Shift+M"
+          title="Open Fleet (Ctrl/Cmd+Shift+M)"
+        >
+          <FleetIcon />
+          {!collapsed && <span>Fleet</span>}
         </button>
         <button
           type="button"
-          className={`${styles.pauseAllButton} ${schedulerPaused ? styles.pauseAllButtonActive : ''}`}
+          className={styles.navItem}
+          onClick={() => onOpenGlobalSettings()}
+          aria-label="Open settings"
+          title="Settings"
+        >
+          <SettingsIcon />
+          {!collapsed && <span>Settings</span>}
+        </button>
+        {updateNotice && <div className={styles.updateNotice}>{updateNotice}</div>}
+      </div>
+
+      <div className={styles.listHeader}>
+        {!collapsed && <span className={styles.listTitle}>Workspaces</span>}
+        {!collapsed && <span className={styles.listCount}>{workspaces.length}</span>}
+        <button
+          type="button"
+          className={`${styles.pauseAllButton} ${schedulerPaused && !schedulerPauseReadFailed ? styles.pauseAllButtonActive : ''}`}
           onClick={onToggleSchedulerPaused}
           disabled={schedulerPauseBusy}
           title={
-            schedulerPaused
-              ? 'Resume all scheduled runs'
+            schedulerPauseReadFailed ? 'Could not read global pause state. Retry' : schedulerPaused
+              ? 'Scheduled runs are paused for every workspace. Resume all'
               : 'Pause all scheduled runs across every workspace'
           }
-          aria-label={schedulerPaused ? 'Resume all scheduled runs' : 'Pause all scheduled runs'}
+          aria-label={schedulerPauseReadFailed ? 'Retry reading global pause state' : schedulerPaused ? 'Resume all scheduled runs' : 'Pause all scheduled runs'}
         >
-          {schedulerPaused ? <RunIcon /> : <PauseIcon />}
-          {!collapsed && <span>{schedulerPaused ? 'Resume all' : 'Pause all'}</span>}
+          {schedulerPauseReadFailed ? <RetryIcon /> : schedulerPaused ? <RunIcon /> : <PauseIcon />}
+          {!collapsed && <span>{schedulerPauseReadFailed ? 'Retry' : schedulerPaused ? 'Resume all' : 'Pause all'}</span>}
         </button>
       </div>
 
@@ -660,7 +802,7 @@ const WorkspaceRail = ({
             type="text"
             className={styles.filterInput}
             value={query}
-            onChange={(e) => setQuery(e.target.value)}
+            onChange={(e) => setFilter({ query: e.target.value, request: attentionRequest })}
             placeholder="Filter workspaces…"
             aria-label="Filter workspaces by name"
             spellCheck={false}
@@ -670,7 +812,7 @@ const WorkspaceRail = ({
             <button
               type="button"
               className={styles.filterClear}
-              onClick={() => setQuery('')}
+              onClick={() => setFilter({ query: '', request: attentionRequest })}
               title="Clear filter"
               aria-label="Clear filter"
             >
@@ -687,7 +829,7 @@ const WorkspaceRail = ({
               <div className={styles.sectionHeader} role="presentation">
                 {section.key === 'starred' && (
                   <span className={styles.sectionHeaderIcon} aria-hidden="true">
-                    <StarIcon filled />
+                    <StarIcon />
                   </span>
                 )}
                 {section.label}
@@ -702,7 +844,7 @@ const WorkspaceRail = ({
 
         {workspaces.length === 0 && !collapsed && (
           <div className={styles.emptyRail}>
-            No workspaces yet. Click ＋ New to start.
+            No workspaces yet. Click New workspace to start.
           </div>
         )}
 

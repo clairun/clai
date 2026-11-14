@@ -1,3 +1,4 @@
+import { useVisibleWorkspaceRead } from '../hooks/useVisibleWorkspaceRead';
 import React, { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import ReactDOM from 'react-dom';
 import { useLocation, useNavigate, useOutletContext, useParams } from 'react-router';
@@ -27,12 +28,12 @@ import InlineApprovalCard from '../components/InlineApprovalCard';
 import InlinePathGrantCard from '../components/InlinePathGrantCard';
 import InlineNetworkAccessCard from '../components/InlineNetworkAccessCard';
 import VirtualizedList from '../components/common/VirtualizedList';
+import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import {
   getOrCreateWorkspaceSession,
   getWorkspaceDetails,
   importWorkspaceFiles,
   listWorkspaceDir,
-  markWorkspaceOpened,
   openWorkspacePath,
   deleteWorkspacePath,
   moveWorkspacePath,
@@ -61,7 +62,12 @@ import {
 } from '../utils/taskDisplay';
 import { shouldCancelRunOnKey } from '../utils/cancelRunHotkey';
 import { fixedRightAlignedMenuStyle, sameFloatingMenuStyle } from '../utils/floatingMenu';
+import { formatCount } from '../utils/formatCount';
+import { formatScheduleCadence, formatScheduleDetail, formatTimeUntil } from '../utils/scheduleFormat';
 import styles from './Workspace.module.css';
+import { AgentsIcon, ArtifactsIcon, MemoriesIcon, TasksIcon } from './workspaceHeaderIcons';
+import { useWindowUi } from '../windowUi';
+import { useCtrlShiftShortcut } from '../hooks/useCtrlShiftShortcut';
 
 const DEFAULT_WORKSPACE_ID = 'default';
 const REFRESH_INTERVAL_MS = 5000;
@@ -83,6 +89,9 @@ const ARTIFACT_ADD_MENU_MARGIN = 8;
 const ARTIFACT_ADD_MENU_MIN_WIDTH = 116;
 
 type ActivePanel = 'agents' | 'tasks' | 'memories' | 'artifacts' | null;
+// A header counter (or its shortcut) opens its panel, switching from any other;
+// on the panel already showing it closes the drawer.
+const togglePanel = (panel: ActivePanel) => (current: ActivePanel) => (current === panel ? null : panel);
 type PreviewEntry = { kind: 'memory' | 'artifact'; entry: WorkspaceFileEntry; line?: number; navigationId?: number };
 type ArtifactImportKind = 'files' | 'folders';
 
@@ -165,35 +174,6 @@ const formatTimestamp = (timestamp: NumericTimestamp): string => {
     hour: '2-digit',
     minute: '2-digit',
   });
-};
-
-const formatNextRun = (seconds: number | bigint | null | undefined): string | null => {
-  const value = toNumber(seconds);
-  if (value === null) return null;
-  if (value <= 0) return 'Due now';
-  if (value < 60) return `In ${value}s`;
-  if (value < 3600) return `In ${Math.floor(value / 60)}m`;
-  if (value < 86400) return `In ${Math.floor(value / 3600)}h`;
-  return `In ${Math.floor(value / 86400)}d`;
-};
-
-const formatSchedulePill = (details: WorkspaceDetails | null): string | null => {
-  if (!details?.scheduleEnabled) return null;
-  const kind = details.scheduleKind;
-  let cadence: string | null = null;
-  if (kind?.type === 'interval' && Number(kind.intervalMinutes) > 0) {
-    cadence = `every ${Number(kind.intervalMinutes)}m`;
-  } else if (
-    kind?.type === 'cron' &&
-    typeof kind.expression === 'string' &&
-    kind.expression.trim()
-  ) {
-    cadence = `cron: ${kind.expression.trim()}`;
-  }
-  if (details.schedulePaused) {
-    return cadence ? `Paused · ${cadence}` : 'Paused';
-  }
-  return cadence ? `Periodic · ${cadence}` : 'Periodic';
 };
 
 const getLastRunInfo = (runs: AssistantRun[] | null | undefined): AssistantRun | null => {
@@ -628,15 +608,13 @@ const ARTIFACT_REFRESH_MS = REFRESH_INTERVAL_MS;
 const MAX_CHILD_COUNT = 1_000;
 
 // A saturated count is a lower bound, not a measurement. Every place that
-// shows one of these numbers goes through one of these, so no display can
-// silently present a capped value as exact. `capped` is a caller's decision
-// because the two counts learn it differently: a folder's `childCount` stops
-// exactly at its cap, while the recursive walk reports its own truncation.
-const formatCappedCount = (value: number, capped: boolean): string =>
-  capped ? `${value.toLocaleString()}+` : String(value);
-
+// shows one of these numbers passes `formatCount` its `capped` flag, so no
+// display can silently present a capped value as exact. `capped` is a
+// caller's decision because the two counts learn it differently: a folder's
+// `childCount` stops exactly at its cap, while the recursive walk reports its
+// own truncation.
 const formatChildCount = (childCount: number): string =>
-  formatCappedCount(childCount, childCount >= MAX_CHILD_COUNT);
+  formatCount(childCount, childCount >= MAX_CHILD_COUNT);
 
 // Lazy directory-tree browser. Loads the root level on open and each folder's
 // children on first expand, caching them by path. The 5s details poll surfaces
@@ -1003,7 +981,7 @@ const ArtifactsList = ({
           className={styles.searchInput}
           value={query}
           onChange={(event: React.ChangeEvent<HTMLInputElement>) => setQuery(event.target.value)}
-          placeholder={`Search artifacts (${formatCappedCount(totalCount, totalCountCapped)})`}
+          placeholder={`Search artifacts (${formatCount(totalCount, totalCountCapped)})`}
           aria-label="Search artifacts"
         />
       )}
@@ -1058,11 +1036,14 @@ const WorkspaceHeader = ({
   onTogglePause,
   onStop,
   onTitleSaved,
+  onLauncherWarning,
   activeRunId,
   hasActiveRun,
   runNowBusy,
   pauseBusy,
   stopBusy,
+  otherAttention,
+  onShowAttention,
 }: {
   details: WorkspaceDetails | null;
   workspaceId: string;
@@ -1079,6 +1060,7 @@ const WorkspaceHeader = ({
   activePanel: ActivePanel;
   setActivePanel: React.Dispatch<React.SetStateAction<ActivePanel>>;
   onTitleSaved: (title: string) => void;
+  onLauncherWarning: (warning: string | null) => void;
   onRunNow: () => void | Promise<void>;
   onTogglePause: (paused: boolean) => void | Promise<void>;
   onStop: (runId: string | null) => void | Promise<void>;
@@ -1087,11 +1069,16 @@ const WorkspaceHeader = ({
   runNowBusy: boolean;
   pauseBusy: boolean;
   stopBusy: boolean;
+  otherAttention: number;
+  onShowAttention: () => void;
 }) => {
+  const { railHidden, toggleRail } = useWindowUi();
+  const runNowSkipped = useFleetActivityStore((state) => state.runNowSkipped.includes(workspaceId));
   const isAgent = details?.kind === 'agent';
   const lastRun = getLastRunInfo(details?.runs);
-  const nextRunText = formatNextRun(details?.nextRunInSeconds);
-  const schedulePillText = formatSchedulePill(details);
+  const nextRunText = formatTimeUntil(details?.nextRunInSeconds);
+  const scheduleCadence = formatScheduleCadence(details?.scheduleKind);
+  const scheduleDetail = formatScheduleDetail(details?.scheduleKind);
   const scheduleEnabled = !!details?.scheduleEnabled;
   const schedulePaused = !!details?.schedulePaused;
   // Running or queued tasks disable Run-now; tasks waiting for subtasks do not.
@@ -1101,12 +1088,6 @@ const WorkspaceHeader = ({
   const assignedAgentCount = (details?.assignedAgents || []).length;
   const taskCount = details?.tasks?.length || 0;
   const activeTaskCount = (details?.tasks || []).filter(isTaskActive).length;
-
-  // Click a counter to open its panel; click again (or click another) to switch.
-  // null = no panel open, chat takes the full content area.
-  const togglePanel = (panel: ActivePanel) => {
-    setActivePanel((current) => (current === panel ? null : panel));
-  };
 
   // ── Inline title rename ────────────────────────────────────────────
   // Click the title to edit it in place; Enter/blur commits, Escape
@@ -1156,8 +1137,9 @@ const WorkspaceHeader = ({
     }
     setSavingTitle(true);
     try {
-      await setWorkspaceTitle(workspaceId, trimmed);
+      const launcherWarning = await setWorkspaceTitle(workspaceId, trimmed);
       onTitleSaved(trimmed);
+      onLauncherWarning(launcherWarning);
       setIsEditingTitle(false);
       setDraftTitle('');
     } catch {
@@ -1168,40 +1150,33 @@ const WorkspaceHeader = ({
   };
 
   const renderCounter = (
-    panel: ActivePanel,
-    // A string when the figure is a bound rather than an exact count (see the
-    // artifacts chip, which saturates once its walk spends its entry budget).
-    count: number | string,
+    panel: Exclude<ActivePanel, null>,
+    count: string,
     label: string,
-    clickable = true,
+    icon: React.ReactNode,
     activeCount = 0,
-    // Drawn before the count; the agents chip puts its faces here.
+    // Drawn before the count in the full layout; the agents chip puts its
+    // faces here. The compact layout shows `icon` instead.
     leading: React.ReactNode = null
   ) => {
     const isActive = activePanel === panel;
-    const displayedCount = details ? count : '…';
-    if (!clickable) {
-      return (
-        <span className={styles.metric}>
-          {displayedCount} {label}
-        </span>
-      );
-    }
     return (
       <button
         type="button"
         className={`${styles.metricButton} ${isActive ? styles.metricButtonActive : ''}`}
-        onClick={() => togglePanel(panel)}
-        title={activeCount > 0 ? `${activeCount} ${label} in flight` : `Toggle ${label} panel`}
+        onClick={() => setActivePanel(togglePanel(panel))}
+        aria-pressed={isActive}
+        title={activeCount > 0 ? `${activeCount} ${label} in flight` : `Toggle ${label} panel${panel === 'artifacts' ? ' (Ctrl/Cmd+Shift+A)' : ''}`}
       >
-        {leading}
+        <span className={styles.metricIcon}>{icon}</span>
+        {leading && <span className={styles.metricLeading}>{leading}</span>}
         {activeCount > 0 && (
           <span
             className={`${styles.statusDot} ${styles.status_running} ${styles.metricLeadingDot}`}
             aria-hidden="true"
           />
         )}
-        {displayedCount} {label}
+        {details ? count : '…'} <span className={styles.metricLabel}>{label}</span>
         {activeCount > 0 && (
           <span className={styles.metricActiveSuffix}> · {activeCount} active</span>
         )}
@@ -1209,172 +1184,190 @@ const WorkspaceHeader = ({
     );
   };
 
-  const messagesStat = renderCounter(null, messageCount, 'msgs', false);
+  const messagesStat = (
+    <span className={`${styles.metric} ${styles.headerInfo}`}>
+      {details ? formatCount(messageCount) : '…'} msgs
+    </span>
+  );
   // A stat and the separator before it wrap as one unit.
-  const withSeparator = (stat: React.ReactNode) => (
-    <span className={styles.metricGroup}>
+  const withSeparator = (stat: React.ReactNode, className = '') => (
+    <span className={`${styles.metricGroup} ${className}`}>
       <span className={styles.metricSeparator}>{'\u00B7'}</span>
       {stat}
     </span>
   );
 
   return (
-    <div className={styles.header}>
-      <div className={styles.headerLeft}>
-        {isEditingTitle ? (
-          <input
-            ref={titleInputRef}
-            type="text"
-            className={styles.titleInput}
-            value={draftTitle}
-            maxLength={100}
-            disabled={savingTitle}
-            onChange={(e) => setDraftTitle(e.target.value)}
-            onBlur={() => void commitTitle()}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                void commitTitle();
-              } else if (e.key === 'Escape') {
-                e.preventDefault();
-                cancelEditTitle();
-              }
-            }}
-            aria-label="Workspace title"
-          />
-        ) : (
-          <h1
-            className={`${styles.title} ${canEditTitle ? styles.titleEditable : ''}`}
-            onClick={beginEditTitle}
-            title={canEditTitle ? 'Click to rename' : undefined}
-            role={canEditTitle ? 'button' : undefined}
-            tabIndex={canEditTitle ? 0 : undefined}
-            onKeyDown={
-              canEditTitle
-                ? (e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      beginEditTitle();
+    <div className={styles.headerContainer}>
+      <div className={styles.header}>
+        <div className={styles.headerLeft}>
+          <button type="button" className={styles.headerAction} onClick={toggleRail} aria-label={railHidden ? 'Show workspaces' : 'Hide workspaces'} aria-controls={railHidden ? undefined : 'workspace-rail'} aria-expanded={!railHidden} title="Toggle workspaces (Ctrl+Shift+F)">
+            <img src="/icon.svg" alt="" width="20" height="20" />
+          </button>
+          {isEditingTitle ? (
+            <input
+              ref={titleInputRef}
+              type="text"
+              className={styles.titleInput}
+              value={draftTitle}
+              maxLength={100}
+              disabled={savingTitle}
+              onChange={(e) => setDraftTitle(e.target.value)}
+              onBlur={() => void commitTitle()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  void commitTitle();
+                } else if (e.key === 'Escape') {
+                  e.preventDefault();
+                  cancelEditTitle();
+                }
+              }}
+              aria-label="Workspace title"
+            />
+          ) : (
+            <h1
+              className={`${styles.title} ${canEditTitle ? styles.titleEditable : ''}`}
+              onClick={beginEditTitle}
+              title={canEditTitle ? 'Click to rename' : undefined}
+              role={canEditTitle ? 'button' : undefined}
+              tabIndex={canEditTitle ? 0 : undefined}
+              onKeyDown={
+                canEditTitle
+                  ? (e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        beginEditTitle();
+                      }
                     }
-                  }
-                : undefined
-            }
-          >
-            {currentTitle}
-          </h1>
-        )}
-        {scheduleEnabled && (
-          <span
-            className={`${styles.schedulePill} ${schedulePaused ? styles.schedulePillPaused : styles.schedulePillActive}`}
-            title={schedulePillText || undefined}
-          >
-            {schedulePillText}
-          </span>
-        )}
-        {hasActiveRun && (
-          <button
-            type="button"
-            className={styles.stopBtn}
-            onClick={() => onStop?.(activeRunId)}
-            disabled={!onStop || !activeRunId || stopBusy}
-            title={stopBusy ? 'Stopping…' : 'Stop current run (Ctrl+C)'}
-            aria-label="Stop current run"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <rect x="6" y="6" width="12" height="12" rx="2" />
-            </svg>
-          </button>
-        )}
-        {scheduleEnabled && !schedulePaused && !hasActiveRun && (
-          <button
-            type="button"
-            className={styles.runNowBtn}
-            onClick={onRunNow}
-            disabled={!onRunNow || hasRunningTask || runNowBusy}
-            title={hasRunningTask ? 'Already running' : runNowBusy ? 'Starting…' : 'Run now'}
-            aria-label="Run now"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <path d="M8 5v14l11-7z" />
-            </svg>
-          </button>
-        )}
-        {scheduleEnabled && !schedulePaused && (
-          <button
-            type="button"
-            className={styles.pauseBtn}
-            onClick={() => onTogglePause?.(true)}
-            disabled={!onTogglePause || pauseBusy}
-            title={
-              pauseBusy
-                ? 'Updating…'
-                : hasActiveRun
-                  ? 'Pause schedule (current run will keep going — use Stop to cancel it)'
-                  : hasRunningTask
-                    ? 'Pause schedule (current run will finish)'
-                    : 'Pause schedule'
-            }
-            aria-label="Pause schedule"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-              <rect x="6" y="5" width="4" height="14" rx="1" />
-              <rect x="14" y="5" width="4" height="14" rx="1" />
-            </svg>
-          </button>
-        )}
-        {scheduleEnabled && schedulePaused && (
-          <button
-            type="button"
-            className={styles.resumeBtn}
-            onClick={() => onTogglePause?.(false)}
-            disabled={!onTogglePause || pauseBusy}
-            title={pauseBusy ? 'Updating…' : 'Resume schedule'}
-            aria-label="Resume schedule"
-          >
-            Resume
-          </button>
-        )}
-      </div>
-      <div className={styles.headerRight}>
-        {isAgent && lastRun && (
-          <>
-            <span className={styles.metricGroup}>
-              <span className={`${styles.statusDot} ${styles[`status_${lastRun.status}`]}`} />
-              <span className={styles.metric}>
-                {RUN_STATUS_LABEL[lastRun.status] || lastRun.status}
-              </span>
+                  : undefined
+              }
+            >
+              {currentTitle}
+            </h1>
+          )}
+          {scheduleEnabled && (
+            <span
+              className={`${styles.schedulePill} ${schedulePaused ? styles.schedulePillPaused : styles.schedulePillActive}`}
+              title={`${schedulePaused ? 'Paused' : 'Periodic'}${scheduleDetail ? ` · ${scheduleDetail}` : ''}`}
+            >
+              <span className={styles.scheduleState}>{schedulePaused ? 'Paused' : 'Periodic'}</span>
+              {scheduleCadence && (
+                <span className={styles.scheduleCadence}> · {scheduleCadence}</span>
+              )}
             </span>
-            {withSeparator(
-              <span className={styles.metric}>
-                Last: {formatRelativeTime(lastRun.completedAt || lastRun.startedAt)}
+          )}
+          {hasActiveRun && (
+            <button
+              type="button"
+              className={styles.stopBtn}
+              onClick={() => onStop?.(activeRunId)}
+              disabled={!onStop || !activeRunId || stopBusy}
+              title={stopBusy ? 'Stopping…' : 'Stop current run (Ctrl+C)'}
+              aria-label="Stop current run"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <rect x="6" y="6" width="12" height="12" rx="2" />
+              </svg>
+            </button>
+          )}
+          {scheduleEnabled && !schedulePaused && !hasActiveRun && (
+            <button
+              type="button"
+              className={styles.runNowBtn}
+              onClick={onRunNow}
+              disabled={!onRunNow || hasRunningTask || runNowBusy}
+              title={hasRunningTask ? 'Already running' : runNowBusy ? 'Starting…' : 'Run now'}
+              aria-label="Run now"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            </button>
+          )}
+          {runNowSkipped && <span role="status">Run now skipped: session busy</span>}
+          {scheduleEnabled && !schedulePaused && (
+            <button
+              type="button"
+              className={styles.pauseBtn}
+              onClick={() => onTogglePause?.(true)}
+              disabled={!onTogglePause || pauseBusy}
+              title={
+                pauseBusy
+                  ? 'Updating…'
+                  : hasActiveRun
+                    ? 'Pause schedule (current run will keep going — use Stop to cancel it)'
+                    : hasRunningTask
+                      ? 'Pause schedule (current run will finish)'
+                      : 'Pause schedule'
+              }
+              aria-label="Pause schedule"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <rect x="6" y="5" width="4" height="14" rx="1" />
+                <rect x="14" y="5" width="4" height="14" rx="1" />
+              </svg>
+            </button>
+          )}
+          {scheduleEnabled && schedulePaused && (
+            <button
+              type="button"
+              className={styles.resumeBtn}
+              onClick={() => onTogglePause?.(false)}
+              disabled={!onTogglePause || pauseBusy}
+              title={pauseBusy ? 'Updating…' : 'Resume schedule'}
+              aria-label="Resume schedule"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                <path d="M8 5v14l11-7z" />
+              </svg>
+            </button>
+          )}
+        </div>
+        <div className={styles.headerRight}>
+          {otherAttention > 0 && <button type="button" className={styles.attentionChip} onClick={onShowAttention}>{otherAttention} other workspace{otherAttention === 1 ? '' : 's'} {otherAttention === 1 ? 'needs' : 'need'} you</button>}
+          {isAgent && lastRun && (
+            <>
+              <span className={`${styles.metricGroup} ${styles.headerInfo}`}>
+                <span className={`${styles.statusDot} ${styles[`status_${lastRun.status}`]}`} />
+                <span className={styles.metric}>
+                  {RUN_STATUS_LABEL[lastRun.status] || lastRun.status}
+                </span>
               </span>
-            )}
-            {nextRunText &&
-              withSeparator(<span className={styles.metric}>Next: {nextRunText}</span>)}
-          </>
-        )}
-        {isAgent && lastRun ? withSeparator(messagesStat) : messagesStat}
-        {withSeparator(
-          renderCounter(
-            'agents',
-            assignedAgentCount,
-            'agents',
-            true,
-            0,
-            assignedAgentCount > 0 ? (
-              <AgentFacepile agents={details?.assignedAgents || []} tasks={details?.tasks || []} />
-            ) : null
-          )
-        )}
-        {withSeparator(renderCounter('tasks', taskCount, 'tasks', true, activeTaskCount))}
-        {withSeparator(renderCounter('memories', memories.length, 'memories'))}
-        {withSeparator(
-          renderCounter(
-            'artifacts',
-            formatCappedCount(artifactCount, artifactCountCapped),
-            'artifacts'
-          )
-        )}
+              {withSeparator(
+                <span className={styles.metric}>
+                  Last: {formatRelativeTime(lastRun.completedAt || lastRun.startedAt)}
+                </span>,
+                styles.headerInfo
+              )}
+              {nextRunText &&
+                withSeparator(<span className={styles.metric}>Next: {nextRunText}</span>, styles.headerInfo)}
+            </>
+          )}
+          {isAgent && lastRun ? withSeparator(messagesStat, styles.headerInfo) : messagesStat}
+          {withSeparator(
+            renderCounter(
+              'agents',
+              formatCount(assignedAgentCount),
+              'agents',
+              <AgentsIcon />,
+              0,
+              assignedAgentCount > 0 ? (
+                <AgentFacepile agents={details?.assignedAgents || []} tasks={details?.tasks || []} />
+              ) : null
+            )
+          )}
+          {withSeparator(renderCounter('tasks', formatCount(taskCount), 'tasks', <TasksIcon />, activeTaskCount))}
+          {withSeparator(renderCounter('memories', formatCount(memories.length), 'memories', <MemoriesIcon />))}
+          {withSeparator(
+            renderCounter(
+              'artifacts',
+              formatCount(artifactCount, artifactCountCapped),
+              'artifacts',
+              <ArtifactsIcon />
+            )
+          )}
+        </div>
       </div>
     </div>
   );
@@ -1586,7 +1579,7 @@ const Workspace = () => {
   // immediately after changes (e.g. a title rename) instead of waiting for
   // its 5s poll. Optional-chained so the page is resilient if ever rendered
   // outside that layout.
-  const { loadWorkspaces, workspaces } = useOutletContext<FleetOutletContext>() ?? {};
+  const { loadWorkspaces, workspaces, attentionCounts, showAttention } = useOutletContext<FleetOutletContext>() ?? {};
   const workspaceId = params.workspaceId || DEFAULT_WORKSPACE_ID;
   const isGenericWorkspace = workspaceId === DEFAULT_WORKSPACE_ID;
   const [rawDetails, setDetails] = useState<WorkspaceDetails | null>(null);
@@ -1614,6 +1607,7 @@ const Workspace = () => {
   // empty even on a conversation that has history).
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useByWorkspace(workspaceId, '');
+  const [launcherWarning, setLauncherWarning] = useByWorkspace(workspaceId, '');
   // The drawer chip that's open plus its contextual slide-out panel. The
   // Workspace component instance is REUSED across workspace→workspace
   // navigations (both routes resolve to the same element), so a plain useState
@@ -1965,6 +1959,7 @@ const Workspace = () => {
 
   const handleRunNow = useCallback(async () => {
     if (runNowBusy) return;
+    useFleetActivityStore.getState().dismissRunNowSkipped(workspaceId);
     setRunNowBusy(true);
     try {
       await runWorkspaceNow(workspaceId);
@@ -2203,6 +2198,7 @@ const Workspace = () => {
 
   const loadedTasks = useCallback(() => tasksRef.current, []);
   const showTasksPanel = useCallback(() => setActivePanel('tasks'), [setActivePanel]);
+  useCtrlShiftShortcut('KeyA', useCallback(() => setActivePanel(togglePanel('artifacts')), [setActivePanel]));
   // One updater, reading and writing this workspace's own view in a single
   // functional update: an answer that arrives late decides against the view it
   // will actually land in, not against a copy that may have moved on.
@@ -2294,18 +2290,7 @@ const Workspace = () => {
   // newest run, so it clears automatically when the next run starts. Without
   // this, a failed turn (e.g. a provider usage/token limit) shows nothing.
   const failure = runFailure(getLastRunInfo(storeRuns || details?.runs));
-  // Tell the backend this workspace is being viewed so the rail clears its
-  // "unread" indicator. Keyed on isStreaming too: a run that finishes while
-  // the user is watching re-stamps last_opened_at past the completion, and
-  // the cleanup stamps on leave so everything that was on screen at that
-  // point counts as seen (a run still in flight when they navigate away
-  // will complete *after* this stamp → unread). Best-effort fire-and-forget.
-  useEffect(() => {
-    markWorkspaceOpened(workspaceId).catch(() => {});
-    return () => {
-      markWorkspaceOpened(workspaceId).catch(() => {});
-    };
-  }, [workspaceId, isStreaming]);
+  useVisibleWorkspaceRead(workspaceId, isStreaming);
   // Clear the "stopping…" lock once the cancelled run leaves the active
   // set. The cancel propagation is async (engine checkpoints), so we
   // can't clear on the cancel call returning, nor before the details load
@@ -2407,6 +2392,7 @@ const Workspace = () => {
         activePanel={activePanel}
         setActivePanel={setActivePanel}
         onTitleSaved={handleTitleSaved}
+        onLauncherWarning={(warning) => setLauncherWarning(warning || '')}
         onRunNow={handleRunNow}
         onTogglePause={handleTogglePause}
         onStop={handleStop}
@@ -2415,9 +2401,12 @@ const Workspace = () => {
         runNowBusy={runNowBusy}
         pauseBusy={pauseBusy}
         stopBusy={stopBusy}
+        otherAttention={Object.entries(attentionCounts ?? {}).filter(([id, count]) => id !== workspaceId && id !== '__null' && count > 0).length}
+        onShowAttention={showAttention ?? (() => {})}
       />
 
       {error && <div className={styles.errorBanner}>{error}</div>}
+      {launcherWarning && <div className={styles.errorBanner} role="alert">{launcherWarning}</div>}
 
 
       <div className={styles.workspaceBody}>
@@ -2732,6 +2721,7 @@ const Workspace = () => {
         details={details}
         initialSelection={settingsSelection}
         onChanged={handleSettingsChanged}
+        onLauncherWarning={(warning) => setLauncherWarning(warning || '')}
       />
     </div>
   );

@@ -1,10 +1,13 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes, useNavigate } from 'react-router';
 
 import Workspace from './Workspace';
+import { WindowUiProvider, useWindowUi } from '../windowUi';
+import WorkspaceRail from '../components/Fleet/WorkspaceRail';
+import TerminalEmulator from '../components/TerminalEmulator/TerminalEmulator';
 import styles from './Workspace.module.css';
 import previewStyles from '../components/WorkspaceFilePreviewPanel.module.css';
 import useAssistantStore from '../assistant/sessionStore';
@@ -39,9 +42,23 @@ vi.mock('@tauri-apps/api/event', () => ({
   }),
 }));
 
+vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@tauri-apps/api/window')>()),
+  getCurrentWindow: () => ({
+    isVisible: async () => true,
+    isMinimized: async () => false,
+    onResized: async () => () => {},
+  }),
+}));
+
+// The composer's shell grid and context bar need a Tauri backend.
+vi.mock('../components/TerminalEmulator/WorkspaceTerminal', () => ({ default: () => null }));
+vi.mock('../workspace/components/WorkspaceContextBar', () => ({ default: () => null }));
+
 vi.mock('../workspace/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../workspace/client')>()),
   getWorkspaceDetails: vi.fn(),
+  setWorkspaceTitle: vi.fn(),
   markWorkspaceOpened: vi.fn(async () => {}),
   getOrCreateWorkspaceSession: vi.fn(),
   listWorkspaceDir: vi.fn(async () => []),
@@ -70,6 +87,7 @@ vi.mock('../assistant/client', () => ({
 
 const workspaceClient = await import('../workspace/client');
 const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
+const setWorkspaceTitle = vi.mocked(workspaceClient.setWorkspaceTitle);
 const getOrCreateWorkspaceSession = vi.mocked(workspaceClient.getOrCreateWorkspaceSession);
 const readWorkspaceFile = vi.mocked(workspaceClient.readWorkspaceFile);
 const runWorkspaceNow = vi.mocked(workspaceClient.runWorkspaceNow);
@@ -214,9 +232,45 @@ const LISTED_WORKSPACES = [
   { id: 'b', title: 'Beta' },
 ] as WorkspaceListEntry[];
 
-const FleetOutlet = () => (
-  <Outlet context={{ workspaces: LISTED_WORKSPACES, loadWorkspaces: async () => {} }} />
-);
+const FleetOutlet = ({ attentionCounts = { b: 1 }, withRail = false }: { attentionCounts?: Record<string, number>; withRail?: boolean }) => {
+  const { railHidden, showRail } = useWindowUi();
+  const [attentionRequest, setAttentionRequest] = React.useState(0);
+  const showAttention = () => {
+    showRail();
+    setAttentionRequest((request) => request + 1);
+  };
+  return <>
+    {withRail && !railHidden && <WorkspaceRail
+      id="workspace-rail"
+      onOpenFleet={() => {}}
+      onOpenGlobalSettings={() => {}}
+      onOpenWindow={() => {}}
+      workspaces={LISTED_WORKSPACES}
+      selectedId="a"
+      attentionCounts={attentionCounts}
+      attentionRequest={attentionRequest}
+      activeRuns={{}}
+      collapsed={false}
+      onToggleCollapsed={() => {}}
+      onSelect={() => {}}
+      onCreate={() => {}}
+      onRunNow={() => {}}
+      onTogglePause={() => {}}
+      onToggleStar={() => {}}
+      onSettings={() => {}}
+      onFork={() => {}}
+      onDelete={() => {}}
+      runNowBusyId={null}
+      forkBusyId={null}
+      pauseBusyId={null}
+      schedulerPaused={false}
+      schedulerPauseReadFailed={false}
+      schedulerPauseBusy={false}
+      onToggleSchedulerPaused={() => {}}
+    />}
+    <Outlet context={{ workspaces: LISTED_WORKSPACES, loadWorkspaces: async () => {}, attentionCounts, showAttention }} />
+  </>;
+};
 
 const renderSwitchableWorkspace = () =>
   render(
@@ -287,13 +341,15 @@ const FAILED_TASK: WorkspaceTaskResponse = {
   stopRequestedAt: null,
 };
 
-const renderWorkspace = () =>
+const renderWorkspace = (attentionCounts?: Record<string, number>, withRail = false) =>
   render(
-    <MemoryRouter initialEntries={['/workspace/a']}>
+    <WindowUiProvider><MemoryRouter initialEntries={['/workspace/a']}>
       <Routes>
-        <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        <Route element={<FleetOutlet attentionCounts={attentionCounts} withRail={withRail} />}>
+          <Route path="/workspace/:workspaceId" element={<Workspace />} />
+        </Route>
       </Routes>
-    </MemoryRouter>
+    </MemoryRouter></WindowUiProvider>
   );
 
 beforeEach(() => {
@@ -304,6 +360,7 @@ beforeEach(() => {
   useAssistantStore.setState({ sessions: {}, activeSessionByTab: {}, streamingText: {} });
   useTaskStore.setState({ tasks: {}, seeded: {} });
   getWorkspaceDetails.mockImplementation(async (_workspaceId, options) => detailsFor(options));
+  setWorkspaceTitle.mockReset();
   getOrCreateWorkspaceSession.mockResolvedValue({
     session: sessionFor('a', 10n),
     providerConnectionId: 'conn-1',
@@ -317,7 +374,62 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
+describe('Workspace window header', () => {
+  it('clears a rail filter before focusing another workspace that needs attention', async () => {
+    renderWorkspace(undefined, true);
+    const filter = screen.getByRole('textbox', { name: 'Filter workspaces by name' });
+    await userEvent.type(filter, 'Alpha');
+    expect(screen.queryByText('Beta')).not.toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: '1 other workspace needs you' }));
+    await waitFor(() => expect(screen.getByText('Beta').closest('[data-workspace-id]')).toHaveFocus());
+    expect(filter).toHaveValue('');
+  });
+
+  it('does not count unattributed approvals as another workspace', async () => {
+    renderWorkspace({ __null: 2, b: 1 });
+    expect(await screen.findByRole('button', { name: 'Hide workspaces' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '1 other workspace needs you' })).toBeInTheDocument();
+  });
+
+  it('labels its CLAI rail toggle and opens the rail from the attention chip', async () => {
+    renderWorkspace(undefined, true);
+    expect(await screen.findByRole('button', { name: 'Hide workspaces' })).toHaveAttribute('aria-expanded', 'true');
+    await userEvent.click(screen.getByRole('button', { name: 'Hide workspaces' }));
+    expect(screen.getByRole('button', { name: 'Show workspaces' })).toHaveAttribute('aria-expanded', 'false');
+    await userEvent.click(screen.getByRole('button', { name: '1 other workspace needs you' }));
+    expect(screen.getByRole('button', { name: 'Hide workspaces' })).toHaveAttribute('aria-expanded', 'true');
+    await waitFor(() => expect(screen.getByText('Beta').closest('[data-workspace-id]')).toHaveFocus());
+  });
+});
+
 describe('Workspace details poll', () => {
+  it('keeps a saved inline rename and launcher warning visible after polling', async () => {
+    const warning = 'Workspace title was saved, but its app launcher could not be updated: permission denied';
+    let savedTitle = 'Alpha';
+    setWorkspaceTitle.mockImplementation(async (_id, title) => {
+      savedTitle = title;
+      return warning;
+    });
+    getWorkspaceDetails.mockImplementation(async (_id, options) => detailsFor(options, { title: savedTitle }));
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    renderWorkspace();
+    await screen.findByTitle('Click to rename');
+
+    await user.click(screen.getByTitle('Click to rename'));
+    const title = screen.getByRole('textbox', { name: 'Workspace title' });
+    await user.clear(title);
+    await user.type(title, 'Renamed{Enter}');
+
+    await waitFor(() => expect(screen.getByTitle('Click to rename')).toHaveTextContent('Renamed'));
+    expect(screen.getByRole('alert')).toHaveTextContent(warning);
+    await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+
+    expect(getWorkspaceDetails).toHaveBeenCalledTimes(2);
+    expect(screen.getByTitle('Click to rename')).toHaveTextContent('Renamed');
+    expect(screen.getByRole('alert')).toHaveTextContent(warning);
+  });
+
   it('surfaces the workspace files the poll asked for', async () => {
     renderWorkspace();
 
@@ -840,6 +952,77 @@ const ACTIVE_RUN = {
   completedAt: null,
   error: null,
 } as WorkspaceDetails['runs'][number];
+
+describe('Workspace header', () => {
+  it('keeps every panel counter a named toggle whose label the compact layout can hide', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, { artifactCount: 21725n, artifactCountCapped: true, tasks: [FAILED_TASK] })
+    );
+    renderWorkspace();
+    const artifacts = await screen.findByRole('button', { name: /artifacts/ });
+    // jsdom cannot evaluate the container query that swaps labels for icons
+    // (Chromium screenshots cover that); this pins the structure it relies on.
+    for (const [name, count] of [
+      ['agents', '0'],
+      ['tasks', '1'],
+      ['memories', '1'],
+      ['artifacts', `${(21725).toLocaleString()}+`],
+    ] as const) {
+      const button = screen.getByRole('button', { name: new RegExp(`^${count.replace('+', '\\+')} ${name}$`) });
+      expect(button).toHaveAttribute('aria-pressed', 'false');
+      expect(within(button).getByText(name)).toHaveClass(styles.metricLabel!);
+      expect(button.querySelector(`.${styles.metricIcon} svg`)).toHaveAttribute('aria-hidden', 'true');
+    }
+    await userEvent.click(artifacts);
+    expect(artifacts).toHaveAttribute('aria-pressed', 'true');
+    // Opening another window moved to the rail's rows.
+    expect(within(artifacts.closest<HTMLElement>(`.${styles.header}`)!).queryByRole('button', { name: /new window/i })).toBeNull();
+  });
+
+  it('spells out the cadence and resumes from an icon button like Run now and Pause', async () => {
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, {
+        scheduleEnabled: true,
+        schedulePaused: true,
+        scheduleKind: { type: 'interval', intervalMinutes: 120 },
+      })
+    );
+    const { unmount } = renderWorkspace();
+    const resume = await screen.findByRole('button', { name: 'Resume schedule' });
+    expect(resume).toHaveTextContent('');
+    expect(resume.querySelector('svg')).not.toBeNull();
+    expect(screen.getByTitle('Paused · every 2 h')).toHaveTextContent('Paused · every 2 h');
+    expect(screen.getByText('Paused')).toHaveClass(styles.scheduleState!);
+    unmount();
+
+    // The runtime's own zone, so the pill omits it wherever the suite runs.
+    const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, {
+        scheduleEnabled: true,
+        scheduleKind: { type: 'cron', expression: '0 18 * * *', timezone: localZone },
+      })
+    );
+    renderWorkspace();
+    const pill = await screen.findByTitle(`Periodic · daily 18:00 (cron: 0 18 * * *, ${localZone})`);
+    expect(pill.textContent).toBe('Periodic · daily 18:00');
+    expect(screen.getByRole('button', { name: 'Run now' })).toHaveTextContent('');
+    expect(screen.getByRole('button', { name: 'Pause schedule' })).toHaveTextContent('');
+  });
+
+  it('names a foreign cron zone in the schedule pill', async () => {
+    const foreignZone = Intl.DateTimeFormat().resolvedOptions().timeZone === 'Asia/Tokyo' ? 'UTC' : 'Asia/Tokyo';
+    getWorkspaceDetails.mockImplementation(async (_workspaceId, options) =>
+      detailsFor(options, {
+        scheduleEnabled: true,
+        scheduleKind: { type: 'cron', expression: '0 18 * * *', timezone: foreignZone },
+      })
+    );
+    renderWorkspace();
+    const pill = await screen.findByTitle(`Periodic · daily 18:00 (cron: 0 18 * * *, ${foreignZone})`);
+    expect(pill.textContent).toBe(`Periodic · daily 18:00 · ${foreignZone}`);
+  });
+});
 
 describe('Workspace switch with a call in flight', () => {
   const scheduledDetails = (workspaceId: string, options: WorkspaceDetailsOptions) =>
@@ -1663,4 +1846,81 @@ describe('Workspace nested task logs', () => {
   });
 
 
+});
+
+describe('Ctrl/Cmd+Shift+A', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      }
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const renderWithComposer = () =>
+    render(
+      <WindowUiProvider><MemoryRouter initialEntries={['/workspace/a']}>
+        <Routes>
+          <Route element={<FleetOutlet />}>
+            <Route path="/workspace/:workspaceId" element={<Workspace />} />
+          </Route>
+        </Routes>
+        <TerminalEmulator onSendToChat={vi.fn(async () => ({}))} />
+      </MemoryRouter></WindowUiProvider>
+    );
+  const pressA = (init: KeyboardEventInit) => fireEvent.keyDown(document.activeElement!, { key: 'A', code: 'KeyA', ...init });
+  const artifacts = () => screen.getByRole('button', { name: /artifacts/ });
+
+  it('shows and hides the artifacts panel from the focused composer, which never sees the key', async () => {
+    renderWithComposer();
+    await screen.findByRole('button', { name: /artifacts/ });
+    const composer = screen.getByPlaceholderText(/Message this workspace/);
+    expect(composer).toHaveFocus();
+    const reachedComposer = vi.fn();
+    composer.addEventListener('keydown', reachedComposer);
+
+    expect(pressA({ ctrlKey: true, shiftKey: true })).toBe(false);
+    expect(artifacts()).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('complementary', { name: 'artifacts drawer' })).toBeInTheDocument();
+    expect(composer).toHaveFocus();
+
+    pressA({ metaKey: true, shiftKey: true });
+    expect(artifacts()).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByRole('complementary', { name: /drawer/ })).toBeNull();
+    expect(reachedComposer).not.toHaveBeenCalled();
+    expect(composer).toHaveValue('');
+  });
+
+  it('acts once while held: repeats are swallowed and change nothing', async () => {
+    renderWithComposer();
+    await screen.findByRole('button', { name: /artifacts/ });
+    pressA({ ctrlKey: true, shiftKey: true });
+    expect(pressA({ ctrlKey: true, shiftKey: true, repeat: true })).toBe(false);
+    expect(artifacts()).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('switches to artifacts from another open panel', async () => {
+    renderWithComposer();
+    await userEvent.click(await screen.findByRole('button', { name: /tasks/ }));
+    expect(screen.getByRole('complementary', { name: 'tasks drawer' })).toBeInTheDocument();
+    // In act: the artifacts list loads its first folder once shown.
+    await act(async () => {
+      pressA({ ctrlKey: true, shiftKey: true });
+    });
+    expect(screen.getByRole('complementary', { name: 'artifacts drawer' })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['Alt+Ctrl+Shift+A', { altKey: true, ctrlKey: true, shiftKey: true }],
+    ['Ctrl+A', { ctrlKey: true }],
+    ['Shift+A', { shiftKey: true }],
+  ])('leaves %s alone', async (_, init) => {
+    renderWithComposer();
+    await screen.findByRole('button', { name: /artifacts/ });
+    expect(pressA(init)).toBe(true);
+    expect(artifacts()).toHaveAttribute('aria-pressed', 'false');
+  });
 });

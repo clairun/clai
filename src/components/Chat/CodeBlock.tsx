@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { oneLight } from 'react-syntax-highlighter/dist/esm/styles/prism';
+import { useAppTheme } from '../../hooks/useAppTheme';
+import { codePalette } from './codePalette';
 import styles from './CodeBlock.module.css';
 
 interface CodeBlockProps {
@@ -8,18 +9,16 @@ interface CodeBlockProps {
   language?: string;
 }
 
+// The surface (background, radius) is the stylesheet's: see .codeBlock.
 const highlighterStyle: React.CSSProperties = {
   margin: 0,
   padding: '12px 16px',
-  background: 'rgba(0, 0, 0, 0.04)',
-  border: '1px solid rgba(0, 0, 0, 0.1)',
-  borderRadius: '6px',
-  fontSize: '14px',
-  lineHeight: '1.5',
+  fontSize: '13px',
+  lineHeight: '1.55',
 };
 
 const codeTagStyle: React.CSSProperties = {
-  fontFamily: "'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'source-code-pro', monospace",
+  fontFamily: 'var(--font-mono)',
 };
 
 const FEEDBACK_MS = 1200;
@@ -34,6 +33,7 @@ const STATUS_TEXT: Record<CopyState, string> = {
 
 /** Fenced code block with a copy-to-clipboard button for its raw source. */
 const CodeBlock = ({ code, language }: CodeBlockProps) => {
+  const theme = useAppTheme();
   const [copyState, setCopyState] = useState<CopyState>('idle');
   const timerRef = useRef<number | null>(null);
 
@@ -57,7 +57,7 @@ const CodeBlock = ({ code, language }: CodeBlockProps) => {
     <div className={styles.codeBlock}>
       <SyntaxHighlighter
         language={language || 'text'}
-        style={oneLight}
+        style={codePalette(theme)}
         customStyle={highlighterStyle}
         codeTagProps={{ style: codeTagStyle }}
         PreTag="div"

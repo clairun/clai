@@ -6,6 +6,7 @@ import { FOCUS_TERMINAL_EVENT } from '../utils/workspaceUiEvents';
 
 import FleetPage from './FleetPage';
 import WorkspacePicker from '../components/TerminalEmulator/WorkspacePicker';
+import TerminalEmulator from '../components/TerminalEmulator/TerminalEmulator';
 import { useFleetStore } from '../fleet/fleetStore';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
@@ -14,11 +15,23 @@ import { shortTime } from '../fleet/fleetFeed';
 import type { FleetHighlight, FleetWorkspace } from '../generated/bindings';
 
 const mockInvoke = vi.hoisted(() => vi.fn(async () => undefined));
+vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@tauri-apps/api/window')>()),
+  getCurrentWindow: () => ({
+    isVisible: async () => true,
+    isMinimized: async () => false,
+    onResized: async () => () => {},
+  }),
+}));
+
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
 
 vi.mock('../fleet/client', () => ({ fleetSnapshot: vi.fn() }));
 vi.mock('../api/client', () => ({ listAgentDefinitions: vi.fn(async () => []) }));
 vi.mock('../components/AppUpdateBadge', () => ({ default: () => null }));
+// The real composer's heavy parts, for the tests that drive it.
+vi.mock('../components/TerminalEmulator/WorkspaceTerminal', () => ({ default: () => null }));
+vi.mock('../workspace/components/WorkspaceContextBar', () => ({ default: () => null }));
 const { fleetSnapshot } = vi.mocked(await import('../fleet/client'));
 
 const workspace = (workspaceId: string, title: string, ageMs = 0): FleetWorkspace => ({
@@ -66,6 +79,12 @@ const renderFleet = () =>
   );
 
 beforeEach(() => {
+  const items = new Map<string, string>();
+  vi.stubGlobal('localStorage', {
+    getItem: (key: string) => items.get(key) ?? null,
+    setItem: (key: string, value: string) => { items.set(key, value); },
+    removeItem: (key: string) => { items.delete(key); },
+  });
   useFleetStore.setState({ fleet: EMPTY_FLEET, selectedId: null, dismissed: {}, loadedAt: null, loadError: null, buffer: null });
   useFleetActivityStore.setState({ activeRunsByWorkspace: {} });
   useTaskStore.setState({ tasks: {}, seeded: {} });
@@ -92,6 +111,18 @@ afterEach(() => {
 });
 
 describe('FleetPage', () => {
+  it('refreshes dismissed cards on storage and focus', async () => {
+    fleetSnapshot.mockResolvedValue([]);
+    renderFleet();
+    await waitFor(() => expect(useFleetStore.getState().loadedAt).not.toBeNull());
+    localStorage.setItem('fleet.dismissed', JSON.stringify({ a: 11 }));
+    act(() => window.dispatchEvent(new StorageEvent('storage', { key: 'fleet.dismissed' })));
+    expect(useFleetStore.getState().dismissed).toEqual({ a: 11 });
+    localStorage.setItem('fleet.dismissed', JSON.stringify({ b: 12 }));
+    await act(async () => fireEvent.focus(window));
+    expect(useFleetStore.getState().dismissed).toEqual({ b: 12 });
+  });
+
   it('reloads the snapshot once for a card born untitled, and not again while it stays untitled', async () => {
     fleetSnapshot.mockResolvedValueOnce([]).mockResolvedValue([workspace('ws-new', '')]);
     renderFleet();
@@ -150,7 +181,7 @@ describe('FleetPage', () => {
     expect(useFleetStore.getState().selectedId).toBe('a');
     // Typing goes to the chosen workspace at once.
     expect(terminal).toHaveFocus();
-    expect(mockInvoke).toHaveBeenCalledWith('workspace_mark_opened', { workspaceId: 'a' });
+    await waitFor(() => expect(mockInvoke).toHaveBeenCalledWith('workspace_mark_opened', { workspaceId: 'a' }));
     expect(screen.queryByRole('listbox')).not.toBeInTheDocument();
     // The same as a click: the card is highlighted, nothing moves.
     expect(slots()).toEqual(before);
@@ -604,20 +635,31 @@ describe('FleetPage', () => {
         <MemoryRouter initialEntries={['/fleet']}>
           <Routes>
             <Route path="/fleet" element={<><FleetPage /><FakeTerminal /></>} />
+            <Route path="/workspace" element={<p data-testid="workspace-index" />} />
             <Route path="/workspace/:workspaceId" element={<Opened />} />
           </Routes>
         </MemoryRouter>
       );
 
-    it("opens from the card's icon, without selecting or zooming", async () => {
+    it("opens another window from the card's icon, without navigating, selecting or zooming", async () => {
       fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000)]);
       renderRoutes();
-      const icon = await screen.findByRole('button', { name: 'Open Alpha' });
-      expect(icon).toHaveAttribute('title', 'Open workspace');
+      const icon = await screen.findByRole('button', { name: 'Open Alpha in new window' });
+      expect(icon).toHaveAttribute('title', 'Open in new window');
       fireEvent.click(icon);
-      expect(screen.getByTestId('opened').textContent).toBe('a');
+      expect(mockInvoke).toHaveBeenCalledWith('window_open', { workspaceId: 'a' });
+      expect(screen.queryByTestId('opened')).toBeNull();
       expect(useFleetStore.getState().selectedId).toBeNull();
       expect(screen.queryByRole('dialog')).toBeNull();
+    });
+
+    it('opens another window on Shift+Enter with a selected card', async () => {
+      fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+      renderRoutes();
+      fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
+      fireEvent.keyDown(window, { key: 'Enter', shiftKey: true });
+      expect(mockInvoke).toHaveBeenCalledWith('window_open', { workspaceId: 'a' });
+      expect(screen.queryByTestId('opened')).toBeNull();
     });
 
     it('opens the selected card on Enter, but not while typing in the terminal', async () => {
@@ -630,15 +672,158 @@ describe('FleetPage', () => {
       expect(screen.getByTestId('opened').textContent).toBe('a');
     });
 
-    it('opens the selected card on Ctrl+Shift+F, from the terminal too; nothing selected, nothing happens', async () => {
-      fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+    it('opens the selected card on a double-click on its title, in this window; it stays selected through the clicks', async () => {
+      fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000)]);
       renderRoutes();
+      const title = await screen.findByRole('button', { name: 'Select Alpha' });
+      expect(title).toHaveAttribute('title', 'Double-click to open');
+      // A double-click is click, click, dblclick: a click only selects, and the second leaves it selected.
+      fireEvent.click(title);
+      expect(useFleetStore.getState().selectedId).toBe('a');
+      expect(screen.queryByTestId('opened')).toBeNull();
+      fireEvent.click(title);
+      expect(useFleetStore.getState().selectedId).toBe('a');
+      expect(screen.queryByTestId('opened')).toBeNull();
+      fireEvent.doubleClick(title);
+      expect(screen.getByTestId('opened').textContent).toBe('a');
+      expect(useFleetStore.getState().selectedId).toBe('a');
+      expect(mockInvoke).not.toHaveBeenCalledWith('window_open', expect.anything());
+    });
+
+    describe('from the terminal a selection readies', () => {
+      const renderWithComposer = (send = vi.fn(async () => ({})), props = {}, at = '/fleet') => {
+        render(
+          <MemoryRouter initialEntries={[at]}>
+            <Routes>
+              <Route path="/fleet" element={<FleetPage />} />
+              <Route path="/workspace/:workspaceId" element={<Opened />} />
+            </Routes>
+            <TerminalEmulator onSendToChat={send} {...props} />
+          </MemoryRouter>
+        );
+        return send;
+      };
+      const composer = () => document.querySelector('textarea')!;
+      const pressEnter = (init: KeyboardEventInit = {}) => fireEvent.keyDown(document.activeElement!, { key: 'Enter', ...init });
+
+      it.each([
+        ['the card', (title: HTMLElement) => title.closest('article')!.firstElementChild!],
+        ['its title', (title: HTMLElement) => title],
+      ])('opens a card picked with a click on %s on Enter, and in a new window on Shift+Enter', async (_, target) => {
+        fleetSnapshot.mockResolvedValue([workspace('s', 'Staged'), workspace('a', 'Alpha', 1000)]);
+        renderWithComposer();
+        fireEvent.click(target(await screen.findByRole('button', { name: 'Select Alpha' })));
+        expect(useFleetStore.getState().selectedId).toBe('a');
+        expect(composer()).toHaveFocus();
+        // Taken, so no newline lands in the composer.
+        expect(pressEnter({ shiftKey: true })).toBe(false);
+        expect(mockInvoke).toHaveBeenCalledWith('window_open', { workspaceId: 'a' });
+        expect(screen.queryByTestId('opened')).toBeNull();
+        expect(pressEnter()).toBe(false);
+        expect(screen.getByTestId('opened').textContent).toBe('a');
+      });
+
+      it('opens one window for a held Shift+Enter; the repeats add no newline either', async () => {
+        fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+        renderWithComposer();
+        fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
+        pressEnter({ shiftKey: true });
+        expect(pressEnter({ shiftKey: true, repeat: true })).toBe(false);
+        expect(pressEnter({ shiftKey: true, repeat: true })).toBe(false);
+        expect((mockInvoke.mock.calls as unknown[][]).filter(([cmd]) => cmd === 'window_open')).toHaveLength(1);
+      });
+
+      it('opens nothing on Enter while the help is open over the Fleet, and adds no newline', async () => {
+        fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+        renderWithComposer();
+        fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
+        fireEvent.change(composer(), { target: { value: '/help' } });
+        pressEnter();
+        expect(screen.getByRole('dialog', { name: 'Available commands' })).toBeInTheDocument();
+        expect(composer()).toHaveFocus();
+        expect(pressEnter()).toBe(false);
+        expect(screen.queryByTestId('opened')).toBeNull();
+      });
+
+      it('sends an image-only message on Enter instead of opening the card', async () => {
+        // jsdom lacks the object-URL helpers the composer's thumbnails use.
+        URL.createObjectURL = vi.fn(() => 'blob:preview');
+        URL.revokeObjectURL = vi.fn();
+        const image = { type: 'image' as const, id: 'img-1', path: '.clai/images/img-1.png', media_type: 'image/png', filename: 'shot.png', width: null, height: null };
+        fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+        const send = renderWithComposer(undefined, { onAttachImage: vi.fn(async () => ({ part: image })) });
+        fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
+        const file = new File(['x'], 'shot.png', { type: 'image/png' });
+        fireEvent.paste(composer(), { clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] } });
+        await screen.findByAltText('shot.png');
+        pressEnter();
+        await waitFor(() => expect(send).toHaveBeenCalledWith('', [expect.objectContaining({ id: 'img-1' })]));
+        expect(screen.queryByTestId('opened')).toBeNull();
+      });
+
+      it("keeps Enter in an empty composer on a workspace's page: no newline", async () => {
+        renderWithComposer(undefined, {}, '/workspace/a');
+        composer().focus();
+        expect(pressEnter()).toBe(false);
+      });
+
+      it('keeps Ctrl, Meta and Alt+Enter in the empty composer: no newline, nothing opened', async () => {
+        fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+        renderWithComposer();
+        fireEvent.click(await screen.findByRole('button', { name: 'Select Alpha' }));
+        expect(pressEnter({ ctrlKey: true })).toBe(false);
+        expect(pressEnter({ metaKey: true })).toBe(false);
+        expect(pressEnter({ altKey: true })).toBe(false);
+        expect(screen.queryByTestId('opened')).toBeNull();
+        expect(mockInvoke).not.toHaveBeenCalledWith('window_open', expect.anything());
+      });
+
+      it('opens a card picked with Ctrl+Tab on Enter', async () => {
+        fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+        renderWithComposer();
+        await screen.findByRole('button', { name: 'Select Alpha' });
+        fireEvent.keyDown(composer(), { key: 'Tab', code: 'Tab', ctrlKey: true });
+        fireEvent.keyUp(composer(), { key: 'Control' });
+        expect(useFleetStore.getState().selectedId).toBe('a');
+        expect(composer()).toHaveFocus();
+        pressEnter();
+        expect(screen.getByTestId('opened').textContent).toBe('a');
+      });
+
+      it('leaves Enter to the composer once it holds a message, and opens nothing without a selection', async () => {
+        fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+        const send = renderWithComposer();
+        await screen.findByRole('button', { name: 'Select Alpha' });
+        // No card: Enter in the empty composer opens nothing and adds no newline.
+        expect(pressEnter()).toBe(false);
+        expect(pressEnter({ shiftKey: true })).toBe(true);
+        expect(screen.queryByTestId('opened')).toBeNull();
+
+        fireEvent.click(screen.getByRole('button', { name: 'Select Alpha' }));
+        fireEvent.change(composer(), { target: { value: 'hi' } });
+        // A newline in the message, not a new window.
+        expect(pressEnter({ shiftKey: true })).toBe(true);
+        expect(mockInvoke).not.toHaveBeenCalledWith('window_open', expect.anything());
+        pressEnter();
+        await waitFor(() => expect(send).toHaveBeenCalledWith('hi', []));
+        expect(screen.queryByTestId('opened')).toBeNull();
+      });
+    });
+
+    it('opens the workspace index or selected card on Ctrl+Shift+M', async () => {
+      fleetSnapshot.mockResolvedValue([workspace('a', 'Alpha')]);
+      const first = renderRoutes();
       const terminal = await screen.findByRole('textbox', { name: 'Terminal' });
       await screen.findByRole('button', { name: 'Select Alpha' });
-      fireEvent.keyDown(terminal, { key: 'F', code: 'KeyF', ctrlKey: true, shiftKey: true });
-      expect(screen.queryByTestId('opened')).toBeNull();
+      // Still held from the press that brought us here: swallowed, and no way back.
+      expect(fireEvent.keyDown(terminal, { key: 'M', code: 'KeyM', ctrlKey: true, shiftKey: true, repeat: true })).toBe(false);
+      expect(screen.queryByTestId('workspace-index')).toBeNull();
+      fireEvent.keyDown(terminal, { key: 'M', code: 'KeyM', ctrlKey: true, shiftKey: true });
+      expect(screen.getByTestId('workspace-index')).toBeInTheDocument();
+      first.unmount();
+      renderRoutes();
       act(() => useFleetStore.getState().select('a'));
-      fireEvent.keyDown(terminal, { key: 'F', code: 'KeyF', ctrlKey: true, shiftKey: true });
+      fireEvent.keyDown(screen.getByRole('textbox', { name: 'Terminal' }), { key: 'M', code: 'KeyM', ctrlKey: true, shiftKey: true });
       expect(screen.getByTestId('opened').textContent).toBe('a');
     });
   });

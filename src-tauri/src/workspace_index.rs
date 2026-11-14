@@ -40,12 +40,56 @@ pub struct WorkspaceLoadFailure {
 
 #[derive(Debug, Clone)]
 pub enum LoadFailureReason {
-    BadName,
     IdMismatch { expected: String, actual: String },
     DuplicateId { id: String },
-    Unparseable(String),
+    Unreadable(std::io::ErrorKind),
+    InvalidConfig { line: usize, column: usize },
     DbCorrupt(String),
     MigrationFailed(String),
+}
+
+impl LoadFailureReason {
+    fn from_config_error(error: &workspace_config::WorkspaceConfigError) -> Self {
+        use workspace_config::WorkspaceConfigError;
+        match error {
+            WorkspaceConfigError::Io { source, .. } => Self::Unreadable(source.kind()),
+            WorkspaceConfigError::Parse { source, .. }
+            | WorkspaceConfigError::Serialize { source } => Self::InvalidConfig {
+                line: source.line(),
+                column: source.column(),
+            },
+        }
+    }
+}
+
+impl LoadFailureReason {
+    /// Whether the directory may hold a config the index could not use. A
+    /// directory without `config.json` holds no title or star, and a database
+    /// failure is recorded for a workspace whose config is already indexed.
+    fn may_hide_config(&self) -> bool {
+        match self {
+            Self::Unreadable(kind) => *kind != std::io::ErrorKind::NotFound,
+            Self::IdMismatch { .. } | Self::DuplicateId { .. } | Self::InvalidConfig { .. } => true,
+            Self::DbCorrupt(_) | Self::MigrationFailed(_) => false,
+        }
+    }
+}
+
+/// Category only: serde and I/O messages can quote config contents.
+impl std::fmt::Display for LoadFailureReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IdMismatch { .. } => f.write_str("config id does not match directory name"),
+            Self::DuplicateId { .. } => f.write_str("duplicate workspace id"),
+            Self::Unreadable(std::io::ErrorKind::NotFound) => f.write_str("missing config.json"),
+            Self::Unreadable(kind) => write!(f, "unreadable config.json ({kind})"),
+            Self::InvalidConfig { line, column } => {
+                write!(f, "invalid config.json at line {line} column {column}")
+            }
+            Self::DbCorrupt(_) => f.write_str("workspace database could not be opened"),
+            Self::MigrationFailed(_) => f.write_str("workspace database migration failed"),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -53,6 +97,8 @@ pub struct WorkspaceIndex {
     pub by_id: HashMap<String, WorkspaceLocator>,
     pub sorted_by_updated: Vec<String>,
     pub load_failures: Vec<WorkspaceLoadFailure>,
+    /// I/O errors that make name lookup incomplete.
+    pub scan_errors: Vec<String>,
     pools: HashMap<String, SqlitePool>,
 }
 
@@ -63,20 +109,28 @@ impl WorkspaceIndex {
             let entries = match fs::read_dir(&workspace_dir) {
                 Ok(entries) => entries,
                 Err(error) => {
-                    tracing::warn!(
-                        path = %workspace_dir.display(),
-                        "Skipping unreadable workspace dir: {}",
+                    index.scan_errors.push(format!(
+                        "Cannot scan workspace directory {}: {}",
+                        workspace_dir.display(),
                         error
-                    );
+                    ));
                     continue;
                 }
             };
 
-            for entry in entries.flatten() {
+            for entry in entries {
+                let entry = match entry {
+                    Ok(entry) => entry,
+                    Err(error) => {
+                        index.scan_errors.push(format!(
+                            "Cannot read workspace directory entry in {}: {}",
+                            workspace_dir.display(),
+                            error
+                        ));
+                        continue;
+                    }
+                };
                 let path = entry.path();
-                if !path.is_dir() {
-                    continue;
-                }
                 let Some(dir_name) = path
                     .file_name()
                     .and_then(|name| name.to_str())
@@ -84,19 +138,22 @@ impl WorkspaceIndex {
                 else {
                     continue;
                 };
-                // Dot-prefixed siblings are the app's own bookkeeping, not
-                // malformed workspaces (e.g. `.scratch`, the per-workspace
-                // sandbox temp space). Recording them as load failures would be
-                // noise the user can neither act on nor remove.
-                if dir_name.starts_with('.') {
+                // Only UUID-named entries can be workspaces. Ignore unrelated
+                // files and links before following their metadata.
+                if dir_name.starts_with('.') || Uuid::parse_str(&dir_name).is_err() {
                     continue;
                 }
-                if Uuid::parse_str(&dir_name).is_err() {
-                    index.load_failures.push(WorkspaceLoadFailure {
-                        path,
-                        reason: LoadFailureReason::BadName,
-                    });
-                    continue;
+                match fs::metadata(&path) {
+                    Ok(metadata) if metadata.is_dir() => {}
+                    Ok(_) => continue,
+                    Err(error) => {
+                        index.scan_errors.push(format!(
+                            "Cannot inspect workspace entry {}: {}",
+                            path.display(),
+                            error
+                        ));
+                        continue;
+                    }
                 }
 
                 let workspace_config = match workspace_config::load(&path) {
@@ -104,7 +161,7 @@ impl WorkspaceIndex {
                     Err(error) => {
                         index.load_failures.push(WorkspaceLoadFailure {
                             path,
-                            reason: LoadFailureReason::Unparseable(error.to_string()),
+                            reason: LoadFailureReason::from_config_error(&error),
                         });
                         continue;
                     }
@@ -133,6 +190,9 @@ impl WorkspaceIndex {
 
                 index.insert_config(path, &workspace_config);
             }
+        }
+        for error in &index.scan_errors {
+            tracing::warn!("{error}");
         }
         index.resort();
         index
@@ -194,6 +254,13 @@ impl WorkspaceIndex {
         self.pools.get(id).cloned()
     }
 
+    /// Load failures that may hide a workspace's title or star.
+    pub fn failures_hiding_configs(&self) -> impl Iterator<Item = &WorkspaceLoadFailure> {
+        self.load_failures
+            .iter()
+            .filter(|failure| failure.reason.may_hide_config())
+    }
+
     pub fn record_failure(&mut self, path: PathBuf, reason: LoadFailureReason) {
         self.load_failures
             .push(WorkspaceLoadFailure { path, reason });
@@ -250,5 +317,191 @@ mod tests {
                 interval_minutes: 5
             })
         );
+    }
+}
+
+#[cfg(test)]
+mod cli_scan_tests {
+    use super::*;
+
+    #[test]
+    fn missing_root_is_reported_as_incomplete_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let config = AppConfig {
+            workspace_dirs: vec![temp.path().join("missing")],
+            ..Default::default()
+        };
+        let index = WorkspaceIndex::scan(&config);
+        assert_eq!(index.scan_errors.len(), 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn broken_non_workspace_link_does_not_block_starred_open() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().unwrap();
+        let id = "aaaaaaaa-0000-0000-0000-000000000000";
+        let mut workspace = WorkspaceConfig::new(id.into(), "Ready".into(), 1, "manager".into());
+        workspace.starred_at = 1;
+        workspace_config::save(&temp.path().join(id), &workspace).unwrap();
+        symlink("missing", temp.path().join("notes")).unwrap();
+        let config = AppConfig {
+            workspace_dirs: vec![temp.path().to_path_buf()],
+            ..Default::default()
+        };
+
+        let index = WorkspaceIndex::scan(&config);
+        assert!(index.scan_errors.is_empty());
+        assert_eq!(
+            crate::cli::resolve(crate::cli::Command::Open(id.into()), &config, &index),
+            Ok(crate::cli::LaunchRequest::Open(id.into()))
+        );
+
+        let broken_id = "bbbbbbbb-0000-0000-0000-000000000000";
+        symlink("missing", temp.path().join(broken_id)).unwrap();
+        let incomplete = WorkspaceIndex::scan(&config);
+        assert_eq!(incomplete.scan_errors.len(), 1);
+        assert_eq!(
+            crate::cli::resolve(crate::cli::Command::Open(id.into()), &config, &incomplete)
+                .unwrap_err()
+                .code,
+            1
+        );
+        assert_eq!(
+            crate::cli::resolve(
+                crate::cli::Command::Open(broken_id.into()),
+                &config,
+                &incomplete
+            )
+            .unwrap_err()
+            .code,
+            1
+        );
+    }
+
+    #[test]
+    fn load_failure_messages_never_quote_config_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = "aaaaaaaa-0000-0000-0000-000000000000";
+        let root = temp.path().join(id);
+        let json = "{\n  \"version\": \"SECRET_MARKER\"\n}";
+        fs::create_dir_all(workspace_config::config_path(&root).parent().unwrap()).unwrap();
+        fs::write(workspace_config::config_path(&root), json).unwrap();
+        // The raw serde message does quote the value.
+        assert!(workspace_config::load(&root)
+            .unwrap_err()
+            .to_string()
+            .contains("SECRET_MARKER"));
+        fs::create_dir(temp.path().join("bbbbbbbb-0000-0000-0000-000000000000")).unwrap();
+        let config = AppConfig {
+            workspace_dirs: vec![temp.path().to_path_buf()],
+            ..Default::default()
+        };
+        let index = WorkspaceIndex::scan(&config);
+
+        let open = |name: &str| {
+            crate::cli::resolve(crate::cli::Command::Open(name.into()), &config, &index)
+                .unwrap_err()
+                .message
+        };
+        let exact = open(id);
+        assert!(exact.contains(&root.display().to_string()), "{exact}");
+        assert!(
+            exact.contains("invalid config.json at line 2 column"),
+            "{exact}"
+        );
+        assert!(!exact.contains("SECRET_MARKER"), "{exact}");
+        let title = open("Some title");
+        assert!(title.contains("invalid config.json"), "{title}");
+        assert!(!title.contains("SECRET_MARKER"), "{title}");
+        let orphan = open("bbbbbbbb-0000-0000-0000-000000000000");
+        assert!(orphan.contains("missing config.json"), "{orphan}");
+    }
+
+    const READY: &str = "aaaaaaaa-0000-0000-0000-000000000000";
+    const ORPHAN: &str = "bbbbbbbb-0000-0000-0000-000000000000";
+    const CORRUPT: &str = "cccccccc-0000-0000-0000-000000000000";
+
+    /// A starred workspace titled "Pisos" next to what a failed deletion
+    /// leaves behind: a directory with files but no `config.json`.
+    fn root_with_orphan() -> (tempfile::TempDir, AppConfig) {
+        let temp = tempfile::tempdir().unwrap();
+        let mut workspace = WorkspaceConfig::new(READY.into(), "Pisos".into(), 1, "manager".into());
+        workspace.starred_at = 1;
+        workspace_config::save(&temp.path().join(READY), &workspace).unwrap();
+        let leftover = temp.path().join(ORPHAN).join(".gocache");
+        fs::create_dir_all(&leftover).unwrap();
+        fs::write(leftover.join("README"), "cache").unwrap();
+        let config = AppConfig {
+            workspace_dirs: vec![temp.path().to_path_buf()],
+            ..Default::default()
+        };
+        (temp, config)
+    }
+
+    fn open(
+        config: &AppConfig,
+        name: &str,
+    ) -> Result<crate::cli::LaunchRequest, crate::cli::CliError> {
+        let index = WorkspaceIndex::scan(config);
+        crate::cli::resolve(crate::cli::Command::Open(name.into()), config, &index)
+    }
+
+    #[test]
+    fn directory_without_config_does_not_block_title_or_prefix_lookup() {
+        let (_temp, config) = root_with_orphan();
+        assert_eq!(WorkspaceIndex::scan(&config).load_failures.len(), 1);
+        assert_eq!(
+            open(&config, "pisos"),
+            Ok(crate::cli::LaunchRequest::Open(READY.into()))
+        );
+        assert_eq!(open(&config, &ORPHAN[..8]).unwrap_err().code, 2);
+    }
+
+    #[test]
+    fn corrupt_config_still_blocks_title_lookup() {
+        let (temp, config) = root_with_orphan();
+        let corrupt = temp.path().join(CORRUPT);
+        fs::create_dir_all(workspace_config::config_path(&corrupt).parent().unwrap()).unwrap();
+        fs::write(workspace_config::config_path(&corrupt), "{").unwrap();
+
+        let error = open(&config, "Pisos").unwrap_err();
+        assert_eq!(error.code, 1);
+        assert!(error.message.contains(CORRUPT), "{}", error.message);
+        assert!(!error.message.contains(ORPHAN), "{}", error.message);
+        assert_eq!(open(&config, &CORRUPT[..8]).unwrap_err().code, 1);
+    }
+
+    #[test]
+    fn id_lookup_is_unchanged_by_directories_without_config() {
+        let (_temp, config) = root_with_orphan();
+        assert_eq!(
+            open(&config, READY),
+            Ok(crate::cli::LaunchRequest::Open(READY.into()))
+        );
+        let error = open(&config, ORPHAN).unwrap_err();
+        assert_eq!(error.code, 1);
+        assert!(
+            error.message.contains("missing config.json"),
+            "{}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn malformed_requested_uuid_is_recorded() {
+        let temp = tempfile::tempdir().unwrap();
+        let id = "aaaaaaaa-0000-0000-0000-000000000000";
+        fs::create_dir(temp.path().join(id)).unwrap();
+        let config = AppConfig {
+            workspace_dirs: vec![temp.path().to_path_buf()],
+            ..Default::default()
+        };
+        let index = WorkspaceIndex::scan(&config);
+        assert!(index
+            .load_failures
+            .iter()
+            .any(|failure| failure.path.file_name().unwrap() == id));
     }
 }

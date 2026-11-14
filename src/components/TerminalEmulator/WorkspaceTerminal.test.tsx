@@ -93,4 +93,58 @@ describe('WorkspaceTerminal paste', () => {
 
     expect(terminalWrites()).toEqual(['echo hi']);
   });
+
+  it('paints xterm with the --color-terminal-bg token and keeps both buttons in one row', async () => {
+    document.documentElement.style.setProperty('--color-terminal-bg', '#123456');
+    try {
+      const { container, getByRole } = render(
+        <WorkspaceTerminal
+          workspaceId="ws-1"
+          visible
+          onBackToChat={vi.fn()}
+          onShellExit={vi.fn()}
+          fullscreen={false}
+          onToggleFullscreen={vi.fn()}
+        />
+      );
+      await waitFor(() =>
+        expect((container.querySelector('.xterm-viewport') as HTMLElement).style.backgroundColor).toBe('rgb(18, 52, 86)')
+      );
+      // One row: the label's width can no longer push one button under the other.
+      expect(getByRole('button', { name: 'Fullscreen' }).parentElement).toBe(
+        getByRole('button', { name: 'Back to chat' }).parentElement
+      );
+    } finally {
+      document.documentElement.style.removeProperty('--color-terminal-bg');
+    }
+  });
+
+  it('repaints xterm with the new token when the app theme switches', async () => {
+    const root = document.documentElement;
+    root.setAttribute('data-theme', 'light');
+    root.style.setProperty('--color-terminal-bg', '#123456');
+    try {
+      const { container } = render(
+        <WorkspaceTerminal
+          workspaceId="ws-1"
+          visible
+          onBackToChat={vi.fn()}
+          onShellExit={vi.fn()}
+          fullscreen={false}
+          onToggleFullscreen={vi.fn()}
+        />
+      );
+      const viewport = () => container.querySelector('.xterm-viewport') as HTMLElement;
+      await waitFor(() => expect(viewport().style.backgroundColor).toBe('rgb(18, 52, 86)'));
+
+      // Settings switches the theme: the token's value changes with it.
+      root.style.setProperty('--color-terminal-bg', '#654321');
+      root.setAttribute('data-theme', 'dark');
+
+      await waitFor(() => expect(viewport().style.backgroundColor).toBe('rgb(101, 67, 33)'));
+    } finally {
+      root.style.removeProperty('--color-terminal-bg');
+      root.removeAttribute('data-theme');
+    }
+  });
 });

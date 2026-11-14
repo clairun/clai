@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router';
 import AppTopBar from '../components/AppTopBar';
+import { AGENT_QUESTION } from '../components/AskUserPanel/AskUserPanel';
 import FleetGrid from '../components/FleetPage/FleetGrid';
 import FleetSwitcher from '../components/FleetPage/FleetSwitcher';
 import styles from '../components/FleetPage/FleetPage.module.css';
@@ -14,17 +15,20 @@ import { useMinute } from '../fleet/useMinute';
 import { useFleetToggle } from '../fleet/useFleetToggle';
 import { useFleetActivityStore } from '../stores/fleetActivityStore';
 import { useTaskStore } from '../workspace/taskStore';
-import { markWorkspaceOpened } from '../workspace/client';
+import { useVisibleWorkspaceRead } from '../hooks/useVisibleWorkspaceRead';
+import { openWorkspaceWindow } from '../windowUi';
 
 const RECENT_HOURS = RECENT_WINDOW_MS / 3_600_000;
 
 /**
  * Where Enter does its own thing, so it doesn't open the selected workspace.
- * A card's title is a button only to select the card, so Enter there opens.
+ * A card's title is a button only to select the card, so Enter there opens;
+ * so it does in the terminal's composer while it leaves Enter to the page.
  */
-const OWNS_ENTER = 'input, textarea, select, a, button:not([data-card-title]), [contenteditable="true"], [role="dialog"]';
+const OWNS_ENTER =
+  'input, textarea:not([data-leaves-enter]), select, a, button:not([data-card-title]), [contenteditable="true"], [role="dialog"]';
 /** A zoom or a modal; an agent question sits inline in its card. */
-const OPEN_DIALOG = '[role="dialog"]:not([aria-label="Agent question"])';
+const OPEN_DIALOG = `[role="dialog"]:not(${AGENT_QUESTION})`;
 
 /**
  * The Fleet: one card per recently active workspace, with the shared
@@ -33,6 +37,11 @@ const OPEN_DIALOG = '[role="dialog"]:not([aria-label="Agent question"])';
  * workspace.
  */
 const FleetPage = () => {
+  const [newWindowError, setNewWindowError] = useState('');
+  const openNewWindow = useCallback((id: string) => {
+    setNewWindowError('');
+    void openWorkspaceWindow(id).catch((err) => setNewWindowError(err instanceof Error ? err.message : 'Failed to open a new window.'));
+  }, []);
   const cards = useFleetStore((s) => s.fleet.cards);
   const now = useFleetStore((s) => s.now);
   // Panels are judged against this: freshness, shouts and captions age on the
@@ -68,6 +77,20 @@ const FleetPage = () => {
     return () => window.removeEventListener('focus', load);
   }, []);
 
+  useEffect(() => {
+    const refresh = () => useFleetStore.getState().refreshDismissed();
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === 'fleet.dismissed' || event.key === null) refresh();
+    };
+    refresh();
+    window.addEventListener('storage', onStorage);
+    window.addEventListener('focus', refresh);
+    return () => {
+      window.removeEventListener('storage', onStorage);
+      window.removeEventListener('focus', refresh);
+    };
+  }, []);
+
   // The store's clock, not `clock`: a card leaves the board on an event, not on the minute tick.
   const placed = useMemo(
     () => eligibleCards(Object.values(cards), { now, selectedId, live }),
@@ -88,16 +111,8 @@ const FleetPage = () => {
     return () => window.removeEventListener('keydown', onEscape);
   }, [select]);
 
-  // Selected is seen: the rail's unread dot clears, as on the Workspace page
-  // (see the same stamp there), and again on leaving while Main is working.
   const selectedWorking = useMainRunning(selectedId);
-  useEffect(() => {
-    if (!selectedId) return undefined;
-    markWorkspaceOpened(selectedId).catch(() => {});
-    return () => {
-      markWorkspaceOpened(selectedId).catch(() => {});
-    };
-  }, [selectedId, selectedWorking]);
+  useVisibleWorkspaceRead(selectedId, selectedWorking);
 
   // Cards born from live events (or a workspace just created here) have no
   // title yet: the snapshot has it, once per new set of untitled cards.
@@ -118,21 +133,31 @@ const FleetPage = () => {
     return { working, waiting };
   }, [cards, live]);
 
-  // Opening a workspace: the card's icon, Enter, or Ctrl+Shift+F with a card selected.
+  // Opening a workspace here: Enter, a double-click on a card's title, or
+  // Ctrl/Cmd+Shift+M, which opens the selected card's workspace, or the
+  // workspaces page without one. The card's icon and Shift+Enter open it in a
+  // new window instead.
   const navigate = useNavigate();
   const openWorkspace = useCallback((id: string) => navigate(`/workspace/${id}`), [navigate]);
-  useFleetToggle(useMemo(() => (selectedId ? () => openWorkspace(selectedId) : null), [selectedId, openWorkspace]));
+  useFleetToggle(useCallback(() => {
+    if (selectedId) openWorkspace(selectedId);
+    else navigate('/workspace');
+  }, [selectedId, openWorkspace, navigate]));
   useEffect(() => {
     if (!selectedId) return undefined;
     const onEnter = (e: KeyboardEvent) => {
-      if (e.key !== 'Enter' || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
-      if ((e.target instanceof Element && e.target.closest(OWNS_ENTER)) || document.querySelector(OPEN_DIALOG)) return;
+      if (e.key !== 'Enter' || e.defaultPrevented || e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target instanceof Element ? e.target : null;
+      // The composer left this Enter to the page: it is taken even when it opens nothing, so no newline lands there.
+      if (target?.matches('[data-leaves-enter]')) e.preventDefault();
+      if (e.repeat || target?.closest(OWNS_ENTER) || document.querySelector(OPEN_DIALOG)) return;
       e.preventDefault();
-      openWorkspace(selectedId);
+      if (e.shiftKey) openNewWindow(selectedId);
+      else openWorkspace(selectedId);
     };
     window.addEventListener('keydown', onEnter);
     return () => window.removeEventListener('keydown', onEnter);
-  }, [selectedId, openWorkspace]);
+  }, [selectedId, openWorkspace, openNewWindow]);
 
   const switcherOrder = useMemo(() => recentlyOpened(placed, cards), [placed, cards]);
 
@@ -147,7 +172,7 @@ const FleetPage = () => {
         </span>
       </AppTopBar>
       <main className={styles.gridArea} aria-label="Fleet">
-        {loadError && <p className={styles.notice}>{loadError}</p>}
+        {(loadError || newWindowError) && <p className={styles.notice} role="alert">{newWindowError || loadError}</p>}
         {onBoard.length > 0 ? (
           <FleetGrid
             order={onBoard}
@@ -158,6 +183,7 @@ const FleetPage = () => {
             now={clock}
             onSelect={select}
             onOpen={openWorkspace}
+            onOpenWindow={openNewWindow}
             onDismiss={dismiss}
           />
         ) : (

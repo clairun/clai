@@ -1,7 +1,9 @@
 import { useEffect } from 'react';
 import { BrowserRouter as Router } from 'react-router';
 import AppRoutes from './Routes';
+import { WindowUiProvider } from './windowUi';
 import { usePlatform } from './hooks/usePlatform';
+import { listenForSettingsChanges } from './utils/settingsEvents';
 
 function App() {
   const { os } = usePlatform();
@@ -16,9 +18,11 @@ function App() {
     document.documentElement.classList.add('device-desktop');
   }, [os]);
 
+  useEffect(listenForSettingsChanges, []);
+
   return (
     <Router>
-      <AppRoutes />
+      <WindowUiProvider><AppRoutes /></WindowUiProvider>
     </Router>
   );
 }

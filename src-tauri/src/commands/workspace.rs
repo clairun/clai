@@ -27,7 +27,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::assistant::sandbox::filesystem::normalize_path;
 use std::sync::RwLock;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, Manager, State, Window};
 use ts_rs::TS;
 
 const DEFAULT_WORKSPACE_ID: &str = "default";
@@ -2409,13 +2409,14 @@ struct PickedImage {
 /// read (it can only pop the picker), so it can't exfiltrate arbitrary
 /// files (e.g. `~/.ssh/id_rsa`). The commands are async, so
 /// `blocking_pick_file` runs off the main thread (required by the plugin).
-async fn pick_image(app: &AppHandle) -> Result<Option<PickedImage>, String> {
+async fn pick_image(app: &AppHandle, window: &Window) -> Result<Option<PickedImage>, String> {
     use tauri_plugin_dialog::DialogExt;
 
     let picked = app
         .dialog()
         .file()
         .add_filter("Images", &["png", "jpg", "jpeg", "gif", "webp"])
+        .set_parent(window)
         .blocking_pick_file();
 
     let Some(file_path) = picked else {
@@ -2465,12 +2466,13 @@ async fn read_image_file(source: &Path) -> Result<PickedImage, String> {
 /// allowlist, workspace-root sandbox) as the paste path.
 #[tauri::command]
 pub async fn workspace_pick_and_store_image(
+    window: Window,
     workspace_id: String,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<ContentPart>, String> {
     let root_path = resolve_agent_workspace_root(state.inner(), &workspace_id)?;
-    let Some(image) = pick_image(&app).await? else {
+    let Some(image) = pick_image(&app, &window).await? else {
         return Ok(None);
     };
     Ok(Some(store_workspace_image(
@@ -2494,13 +2496,18 @@ pub struct PickedImageResponse {
 /// new-workspace prompt). The frontend stores it with `workspace_store_image`
 /// once the workspace is created.
 #[tauri::command]
-pub async fn workspace_pick_image(app: AppHandle) -> Result<Option<PickedImageResponse>, String> {
+pub async fn workspace_pick_image(
+    app: AppHandle,
+    window: Window,
+) -> Result<Option<PickedImageResponse>, String> {
     use base64::Engine as _;
-    Ok(pick_image(&app).await?.map(|image| PickedImageResponse {
-        data_base64: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
-        media_type: image.media_type.to_string(),
-        filename: image.filename,
-    }))
+    Ok(pick_image(&app, &window)
+        .await?
+        .map(|image| PickedImageResponse {
+            data_base64: base64::engine::general_purpose::STANDARD.encode(&image.bytes),
+            media_type: image.media_type.to_string(),
+            filename: image.filename,
+        }))
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -2744,6 +2751,13 @@ pub async fn workspace_create(
     title: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<String, String> {
+    create_workspace(title, state.inner()).await
+}
+
+pub(crate) async fn create_workspace(
+    title: Option<String>,
+    state: &AppState,
+) -> Result<String, String> {
     let id = uuid::Uuid::new_v4().to_string();
     let manager_id = uuid::Uuid::new_v4().to_string();
     let now = now_millis();
@@ -2757,7 +2771,7 @@ pub async fn workspace_create(
     let mut config = WorkspaceConfig::new(id.clone(), display_title.clone(), now, manager_id);
     // Pre-wire the workspace's main agent to an existing provider so the user
     // can start chatting / scheduling without a detour to Settings.
-    config.attach_default_provider(&app_config(state.inner())?.provider_connections, now);
+    config.attach_default_provider(&app_config(state)?.provider_connections, now);
     workspace_config::save(&root, &config).map_err(|e| e.to_string())?;
     let workspace_pool = crate::db::init_workspace_db(&root, &[]).await?;
     state
@@ -2967,6 +2981,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
         let message_count =
             count_session_messages(&workspace_pool, &locator.default_agent_id).await;
         let running_task_count = running_task_count(&workspace_pool).await?;
+        let unread = locator_is_unread(&locator);
         let schedule = locator.schedule;
         let next_run_in_seconds = schedule
             .wants_countdown()
@@ -2985,8 +3000,7 @@ pub async fn workspace_list(state: State<'_, AppState>) -> Result<Vec<WorkspaceL
             schedule_paused: schedule.paused,
             schedule_kind: schedule.kind,
             next_run_in_seconds,
-            unread: locator.last_run_completed_at > 0
-                && locator.last_run_completed_at > locator.last_opened_at,
+            unread,
             starred: locator.starred_at > 0,
             updated_at: locator.updated_at,
         });
@@ -3156,7 +3170,11 @@ pub async fn workspace_set_schedule_paused(
 /// ticks are suppressed. The choice is persisted to `AppConfig` so it survives
 /// an app restart (restored in `populate_scheduler_from_workspace_agents`).
 #[tauri::command]
-pub async fn set_scheduler_paused(paused: bool, state: State<'_, AppState>) -> Result<(), String> {
+pub async fn set_scheduler_paused(
+    paused: bool,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
     // Persist first so the choice survives a restart even if the process dies
     // right after; the in-memory scheduler flip below is idempotent.
     {
@@ -3176,6 +3194,9 @@ pub async fn set_scheduler_paused(paused: bool, state: State<'_, AppState>) -> R
         scheduler.resume();
     }
 
+    drop(scheduler);
+    app.emit("scheduler://paused", paused)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -3199,9 +3220,9 @@ pub fn get_scheduler_paused(state: State<'_, AppState>) -> Result<bool, String> 
 /// config cannot be read poisons every walk of the index that rewrites each
 /// config — the MCP server and skill-source sweeps fail on the first one they
 /// cannot read. Such a leftover is left out, and stays out: the next startup
-/// scan cannot load it either, so it records a `load_failure` — a sink
-/// nothing reads today — and the directory sits on disk with no workspace in
-/// the rail. The `warn!` below is the only signal there is.
+/// scan cannot load it either, so it records a `load_failure` that only
+/// `clai open` reports, and the directory sits on disk with no workspace
+/// in the rail. The `warn!` below is the only other signal there is.
 fn restore_after_failed_delete(
     workspace_index: &RwLock<WorkspaceIndex>,
     locator: &WorkspaceLocator,
@@ -3283,10 +3304,40 @@ fn remove_workspace_root(
 /// scheduler firing on a vanished config until the next app restart.
 #[tauri::command]
 pub async fn workspace_delete(
+    app: AppHandle,
     workspace_id: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    delete_workspace(state.inner(), workspace_id).await
+    let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
+    let (result, removed) = delete_workspace_and_check_removed(state.inner(), &workspace_id).await;
+    if removed {
+        crate::assistant::tools::ask_user::purge_workspace(&workspace_id);
+        if let Some(hub) = app.try_state::<crate::attention_notifications::AttentionNotifications>()
+        {
+            hub.clear_deleted(&app, &workspace_id).await;
+        }
+        #[cfg(target_os = "linux")]
+        if let Err(error) = crate::linux_launchers::sync_workspace(state.inner(), &workspace_id) {
+            tracing::warn!(%error, %workspace_id, "Failed to remove workspace launcher");
+        }
+        if let Err(error) = app.emit(
+            "workspace://deleted",
+            serde_json::json!({"workspaceId": workspace_id}),
+        ) {
+            tracing::warn!(%error, "Failed to broadcast workspace deletion");
+        }
+    }
+    result
+}
+
+async fn delete_workspace_and_check_removed(
+    state: &AppState,
+    workspace_id: &str,
+) -> (Result<(), String>, bool) {
+    let existed = state.workspace_root(workspace_id).is_some();
+    let result = delete_workspace(state, workspace_id.to_string()).await;
+    let removed = existed && state.workspace_root(workspace_id).is_none();
+    (result, removed)
 }
 
 async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), String> {
@@ -3310,14 +3361,8 @@ async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), 
         .remove_workspace(&workspace_id)
         .ok_or_else(|| format!("Workspace {} not found.", workspace_id))?;
     // Dropping the index's pool handle does not close its connections, and
-    // Windows refuses to delete an open `data.sqlite`. `close` waits until
-    // every connection's worker thread has released the file — except that
-    // sqlx 0.8 returns early when a connection is still checked out while
-    // idle ones are closed, so also wait for the pool to drain.
-    workspace_pool.close().await;
-    while workspace_pool.size() > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
-    }
+    // Windows refuses to delete an open `data.sqlite`.
+    crate::db::close_pool(&workspace_pool).await;
 
     // Wipe the on-disk root: `.clai/config.json`, `data.sqlite`,
     // `memory/`, plus any artifact files written into the workspace
@@ -3392,10 +3437,11 @@ async fn delete_workspace(state: &AppState, workspace_id: String) -> Result<(), 
 /// Rename a workspace.
 #[tauri::command]
 pub async fn workspace_set_title(
+    app: AppHandle,
     workspace_id: String,
     title: String,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let trimmed = title.trim();
     if trimmed.is_empty() {
         return Err("Workspace name cannot be empty.".to_string());
@@ -3410,8 +3456,17 @@ pub async fn workspace_set_title(
         config.updated_at = now_millis();
         Ok(())
     })?;
+    crate::window_core::retitle_workspace(&app, &workspace_id, trimmed);
+    #[cfg(target_os = "linux")]
+    let warning = crate::linux_launchers::warning(
+        &workspace_id,
+        "Workspace title",
+        crate::linux_launchers::sync_workspace(state.inner(), &workspace_id),
+    );
+    #[cfg(not(target_os = "linux"))]
+    let warning = None;
 
-    Ok(())
+    Ok(warning)
 }
 
 /// Record that the user opened (is viewing) a workspace, clearing its
@@ -3436,6 +3491,27 @@ pub async fn workspace_mark_opened(
     Ok(())
 }
 
+fn locator_is_unread(locator: &WorkspaceLocator) -> bool {
+    locator.last_run_completed_at > 0 && locator.last_run_completed_at > locator.last_opened_at
+}
+
+/// Cheap read for visible views to reconcile completions after missed native
+/// minimize/restore events. Uses the same index fields as `workspace_list`.
+#[tauri::command]
+pub fn workspace_is_unread(
+    workspace_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
+    let locator = state
+        .workspace_index
+        .read()
+        .map_err(|e| format!("Workspace index lock error: {}", e))?
+        .locator(&workspace_id)
+        .ok_or_else(|| format!("Workspace not found: {}", workspace_id))?;
+    Ok(locator_is_unread(&locator))
+}
+
 /// Star or unstar a workspace (the rail pins starred workspaces in a
 /// dedicated section). Persists a timestamp (0 = unstarred). Deliberately
 /// does NOT bump `updated_at`, so starring never reorders the
@@ -3445,14 +3521,22 @@ pub async fn workspace_set_starred(
     workspace_id: String,
     starred: bool,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<Option<String>, String> {
     let workspace_id = resolve_workspace_id(state.inner(), Some(workspace_id))?;
     state.update_workspace_config(&workspace_id, |config| {
         config.starred_at = if starred { now_millis() } else { 0 };
         Ok(())
     })?;
+    #[cfg(target_os = "linux")]
+    let warning = crate::linux_launchers::warning(
+        &workspace_id,
+        "Workspace star",
+        crate::linux_launchers::sync_workspace(state.inner(), &workspace_id),
+    );
+    #[cfg(not(target_os = "linux"))]
+    let warning = None;
 
-    Ok(())
+    Ok(warning)
 }
 
 async fn running_task_count(pool: &DbPool) -> Result<i64, String> {
@@ -5052,6 +5136,60 @@ mod tests {
             .await
             .expect("details")
         }
+    }
+
+    #[tokio::test]
+    async fn deletion_broadcast_requires_a_workspace_that_was_present() {
+        let workspace = DetailsWorkspace::new().await;
+        let state = &workspace.state;
+
+        let (missing_result, missing_removed) =
+            delete_workspace_and_check_removed(state, "missing").await;
+        assert!(missing_result.is_err());
+        assert!(!missing_removed, "an absent workspace was not deleted");
+        assert!(state.workspace_root(DETAILS_WORKSPACE_ID).is_some());
+
+        let (delete_result, deleted) =
+            delete_workspace_and_check_removed(state, DETAILS_WORKSPACE_ID).await;
+        assert!(delete_result.is_ok());
+        assert!(deleted, "a removed workspace must be broadcast");
+    }
+
+    #[cfg(unix)]
+    struct WritableOnDrop<'path>(&'path Path);
+
+    #[cfg(unix)]
+    impl Drop for WritableOnDrop<'_> {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(self.0, fs::Permissions::from_mode(0o755));
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_wipe_that_removes_the_workspace_still_broadcasts() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let workspace = DetailsWorkspace::new().await;
+        let state = &workspace.state;
+        let root = state.workspace_root(DETAILS_WORKSPACE_ID).unwrap();
+        let parent = root.parent().unwrap();
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o555)).unwrap();
+        // Restores the mode even when an assertion panics, so the temp dir
+        // can still be cleaned up.
+        let _writable_again = WritableOnDrop(parent);
+        if fs::create_dir(parent.join("probe")).is_ok() {
+            return; // running as root: the mode bits are advisory
+        }
+
+        let (result, removed) =
+            delete_workspace_and_check_removed(state, DETAILS_WORKSPACE_ID).await;
+
+        assert!(result.is_err(), "the root cannot be removed");
+        assert!(root.exists(), "a partial wipe left its root behind");
+        assert!(workspace_config::load(&root).is_err());
+        assert!(removed, "an unindexed workspace must be broadcast");
     }
 
     #[tokio::test]

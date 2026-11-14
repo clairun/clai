@@ -6,7 +6,7 @@
  * agree on status derivation and formatting. Pure functions only — no
  * React, no side effects.
  */
-import type { ScheduleKind, WorkspaceListEntry } from '../generated/bindings';
+import type { WorkspaceListEntry } from '../generated/bindings';
 
 export type CardStatus = 'idle' | 'running' | 'attention';
 
@@ -33,39 +33,6 @@ export const deriveCardStatus = (
   if (hasPendingApprovals) return 'attention';
   if (isProcessing) return 'running';
   return 'idle';
-};
-
-/**
- * User-facing cadence label for a workspace's schedule. Returns `null`
- * when no schedule is set. Mirrors the backend's `ScheduleKind` tagged
- * union; falls back to the raw cron expression.
- */
-export const formatScheduleLabel = (
-  kind: ScheduleKind | null | undefined,
-): string | null => {
-  if (!kind || typeof kind !== 'object') return null;
-  if (kind.type === 'interval') {
-    const minutes = Number(kind.intervalMinutes ?? 0);
-    if (!Number.isFinite(minutes) || minutes <= 0) return null;
-    return `every ${minutes}m`;
-  }
-  if (kind.type === 'cron') {
-    const expr = (kind.expression || '').trim();
-    if (!expr) return null;
-    return `cron: ${expr}`;
-  }
-  return null;
-};
-
-/** Human-readable countdown to the next scheduled run. */
-export const formatNextRun = (seconds: number | bigint | null | undefined): string => {
-  if (seconds == null) return '';
-  const s = Number(seconds);
-  if (s <= 0) return 'Due now';
-  if (s < 60) return `Next run in ${s}s`;
-  if (s < 3600) return `Next run in ${Math.floor(s / 60)}m`;
-  if (s < 86400) return `Next run in ${Math.floor(s / 3600)}h`;
-  return `Next run in ${Math.floor(s / 86400)}d`;
 };
 
 export const errText = (err: unknown, fallback: string): string =>

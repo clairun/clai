@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, it, expect, vi } from 'vitest';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, act } from '@testing-library/react';
 import {
   MemoryRouter,
   Outlet,
@@ -8,6 +8,8 @@ import {
   useParams,
 } from 'react-router';
 import AppRoutes from './Routes';
+import { WindowUiProvider, useWindowUi } from './windowUi';
+import { listen as globalListen } from '@tauri-apps/api/event';
 import { listWorkspaces } from './workspace/client';
 import type { WorkspaceListEntry } from './generated/bindings';
 
@@ -55,6 +57,19 @@ vi.mock('./pages/NotFound', () => ({
   default: () => <div data-testid="not-found" />,
 }));
 
+const windowEvents = vi.hoisted(() => ({ listeners: new Map<string, (event: { payload: { workspaceId: string } }) => void>() }));
+const invoke = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
+vi.mock('@tauri-apps/api/core', () => ({ invoke }));
+vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({
+  listen: vi.fn(async (name: string, handler: (event: { payload: { workspaceId: string } }) => void) => {
+    windowEvents.listeners.set(name, handler);
+    return () => windowEvents.listeners.delete(name);
+  }),
+}) }));
+vi.mock('@tauri-apps/api/event', () => ({ listen: vi.fn(async (name: string, handler: (event: { payload: { workspaceId: string } }) => void) => {
+  windowEvents.listeners.set(name, handler);
+  return () => windowEvents.listeners.delete(name);
+}) }));
 vi.mock('./workspace/client', () => ({ listWorkspaces: vi.fn() }));
 
 /** A `localStorage` of its own: Node's global one, without a file, has none. */
@@ -71,11 +86,16 @@ const existingWorkspaces = (...ids: string[]) =>
 const HistoryProbe = () => {
   const { pathname } = useLocation();
   const navigate = useNavigate();
+  const { railHidden } = useWindowUi();
   return (
     <>
       <span data-testid="pathname">{pathname}</span>
+      <span data-testid="rail">{railHidden ? 'hidden' : 'shown'}</span>
       <button type="button" onClick={() => navigate(-1)}>
         back
+      </button>
+      <button type="button" onClick={() => navigate('/workspace/background')}>
+        open background route
       </button>
     </>
   );
@@ -83,10 +103,12 @@ const HistoryProbe = () => {
 
 const renderEntries = (entries: string[]) =>
   render(
-    <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
-      <HistoryProbe />
-      <AppRoutes />
-    </MemoryRouter>
+    <WindowUiProvider>
+      <MemoryRouter initialEntries={entries} initialIndex={entries.length - 1}>
+        <HistoryProbe />
+        <AppRoutes />
+      </MemoryRouter>
+    </WindowUiProvider>
   );
 
 const renderAt = (path: string) => renderEntries([path]);
@@ -97,9 +119,72 @@ const visit = (path: string) => renderAt(path).unmount();
 describe('AppRoutes', () => {
   beforeEach(() => {
     vi.stubGlobal('localStorage', memoryStorage());
+    vi.spyOn(document, 'hasFocus').mockReturnValue(true);
+    invoke.mockClear();
   });
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+
+  it('ignores a background route change and remembers that route on focus', () => {
+    renderAt('/fleet');
+    expect(localStorage.getItem('clai.lastView')).toBe('/fleet');
+    vi.mocked(document.hasFocus).mockReturnValue(false);
+    fireEvent.click(screen.getByRole('button', { name: 'open background route' }));
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace/background');
+    expect(localStorage.getItem('clai.lastView')).toBe('/fleet');
+    vi.mocked(document.hasFocus).mockReturnValue(true);
+    fireEvent.focus(window);
+    expect(localStorage.getItem('clai.lastView')).toBe('/workspace/background');
+  });
+
+  it('opens the workspace named by the launch query, ahead of the remembered view', async () => {
+    existingWorkspaces('requested');
+    visit('/fleet');
+    renderAt('/?workspace=requested');
+    expect(await screen.findByTestId('workspace')).toHaveTextContent('requested');
+    expect(screen.getByTestId('pathname')).toHaveTextContent('/workspace/requested');
+    await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('window_set_view', { view: { kind: 'workspace', workspaceId: 'requested' } }));
+  });
+
+  it('falls back to Fleet if the requested workspace is gone', async () => {
+    existingWorkspaces('another');
+    renderAt('/?workspace=missing');
+    expect(await screen.findByTestId('fleet-page')).toBeInTheDocument();
+  });
+
+  it('shows a deleted state when the visible workspace is deleted', async () => {
+    renderAt('/workspace/gone');
+    await vi.waitFor(() => expect(windowEvents.listeners.has('workspace://deleted')).toBe(true));
+    act(() => windowEvents.listeners.get('workspace://deleted')!({ payload: { workspaceId: 'gone' } }));
+    expect(await screen.findByRole('heading', { name: 'Workspace deleted' })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('link', { name: 'Open workspaces' }));
+    expect(screen.getByTestId('fleet-layout')).toContainElement(screen.getByTestId('fleet-index'));
+  });
+
+  // A pop-out window starts with its rail hidden; any other window starts with it shown.
+  it.each([
+    ['a pop-out', '/?workspace=gone', 'hidden'],
+    ['any other window', '/', 'shown'],
+  ])('shows the rail in %s when the user opens the workspaces from the deleted state', async (_window, launchUrl, initialRail) => {
+    window.history.replaceState({}, '', launchUrl);
+    renderAt('/workspace/gone');
+    window.history.replaceState({}, '', '/');
+    expect(screen.getByTestId('rail')).toHaveTextContent(initialRail);
+    await vi.waitFor(() => expect(windowEvents.listeners.has('workspace://deleted')).toBe(true));
+    act(() => windowEvents.listeners.get('workspace://deleted')!({ payload: { workspaceId: 'gone' } }));
+    fireEvent.click(await screen.findByRole('link', { name: 'Open workspaces' }));
+    expect(screen.getByTestId('rail')).toHaveTextContent('shown');
+  });
+
+  it('handles targeted navigation only in the receiving webview', async () => {
+    renderAt('/fleet');
+    await vi.waitFor(() => expect(windowEvents.listeners.has('window://navigate')).toBe(true));
+    expect(globalListen).not.toHaveBeenCalledWith('window://navigate', expect.anything());
+    act(() => windowEvents.listeners.get('window://navigate')!({ payload: { workspaceId: 'chosen' } }));
+    expect(await screen.findByTestId('workspace')).toHaveTextContent('chosen');
   });
 
   it('opens the workspaces page on first launch', () => {

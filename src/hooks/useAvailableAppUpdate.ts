@@ -4,7 +4,7 @@
  * Seeds from the backend's last check result (so a UI mounted after the
  * startup check still sees the update) and then follows the
  * `app-updates://available` event emitted by later checks. Consumed by the
- * persistent top-bar badge (AppUpdateBadge) and by Settings > About.
+ * persistent Fleet/rail badge (AppUpdateBadge) and by Settings > About.
  *
  * Also exposes the build's `support` profile so consumers can adapt to the
  * host's update capability (e.g. Linux, which is always notify-only).

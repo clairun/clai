@@ -38,11 +38,17 @@
     left var(--transition-fast),
     width var(--transition-fast);
   z-index: 100;
-  background: color-mix(in srgb, var(--color-bg-elevated) 92%, white);
-  border: 1px solid var(--color-border-light);
+  /* The one raised surface on the chat page. No outline; focus draws the
+     page's single accent ring. */
+  background: var(--color-bg-elevated);
+  border: none;
   border-radius: var(--radius-xl);
-  box-shadow: var(--shadow-card);
+  box-shadow: var(--shadow-lg);
   max-height: 50vh;
+}
+
+.terminal:focus-within {
+  box-shadow: var(--shadow-lg), 0 0 0 1px var(--color-border-focus);
 }
 
 /* Fullscreen: fill the detail pane and keep the left rail + top bar visible. */
@@ -56,9 +62,11 @@
   border-radius: 0;
 }
 
-/* Workspace context bar inside terminal */
+/* Workspace context bar inside terminal. The content's 12px plus the
+   input's 4px put the input text on the reply column's left edge; this 4px,
+   the bar's 4px and the pill's 8px put the chips' content there too. */
 .workspaceContextWrapper {
-  padding: 8px 14px 0;
+  padding: 8px 4px 0;
 }
 
 /* Input Area - Primary terminal input with modern design */
@@ -67,7 +75,7 @@
   flex-direction: column;
   align-items: stretch;
   gap: 8px;
-  padding: 10px 14px;
+  padding: 10px 12px;
   background: transparent;
 }
 
@@ -86,7 +94,7 @@
   background-clip: text;
   font-weight: 600;
   font-size: 14px;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans);
   user-select: none;
   padding-top: 10px; /* Align with first line of textarea */
 }
@@ -99,11 +107,7 @@
   display: flex;
   align-items: flex-end;
   gap: 6px;
-  background: var(--color-overlay-02);
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-md);
-  padding: 6px 10px;
-  transition: all 0.2s ease;
+  padding: 6px 4px;
 }
 
 /* The Fleet's target, always shown: typed text never hides it. A button:
@@ -152,10 +156,10 @@
   width: 20px;
   height: 20px;
   padding: 0;
-  border: 1px solid var(--color-border-light);
+  border: none;
   border-radius: var(--radius-full);
-  background: transparent;
-  color: var(--color-text-tertiary);
+  background: var(--color-overlay-06);
+  color: var(--color-text-secondary);
   font: inherit;
   font-size: 11px;
   font-weight: 700;
@@ -163,11 +167,9 @@
   cursor: pointer;
 }
 
-.helpButton:hover,
-.helpButton:focus-visible {
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-  outline: none;
+.helpButton:hover {
+  background: var(--color-overlay-10);
+  color: var(--color-text-primary);
 }
 
 /* ── Workspace picker (opens above the input; adds no height) ─────── */
@@ -275,11 +277,6 @@
   font-weight: 700;
 }
 
-.terminalInputWrapper:focus-within {
-  background: var(--color-bg-elevated);
-  border-color: var(--color-primary);
-  box-shadow: var(--shadow-ring-primary);
-}
 
 /* Terminal Input - Auto-growing textarea */
 .terminalInput {
@@ -292,8 +289,8 @@
   outline: none !important;
   color: var(--color-text-primary);
   caret-color: var(--color-primary-alpha-70);
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', 'Courier New', monospace;
-  font-size: 13px;
+  font-family: var(--font-sans);
+  font-size: 14px;
   line-height: 20px;
   padding: 0;
   margin: 0;
@@ -312,8 +309,8 @@
 }
 
 .terminalInput::placeholder {
-  color: var(--color-text-tertiary);
-  opacity: 0.5;
+  color: var(--color-text-placeholder);
+  opacity: 1;
 }
 
 .terminalInput::selection {
@@ -376,7 +373,7 @@
   align-items: flex-start;
   padding: 8px 12px;
   margin-bottom: 6px;
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
   line-height: 1.5;
   border-radius: 6px;
@@ -471,7 +468,7 @@
 /* Loading State */
 .loadingText {
   color: var(--color-text-disabled);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans);
   font-size: 13px;
 }
 
@@ -508,7 +505,7 @@
 }
 
 .shortcutKey {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans);
   font-size: 11px;
   font-weight: 500;
   color: var(--color-text-tertiary);
@@ -526,22 +523,20 @@
   cursor: pointer;
   flex: none;
   padding: 2px 7px;
-  border-radius: var(--radius-md);
-  border: 1px solid var(--color-border-light);
-  background: var(--color-overlay-02);
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
   color: var(--color-text-secondary);
-  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', 'Consolas', monospace;
+  font-family: var(--font-mono);
   font-size: 12px;
   font-weight: 700;
   line-height: 18px;
-  transition: all 0.15s ease;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 
 .modeToggle:hover {
-  background: var(--color-bg-elevated);
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-  box-shadow: var(--shadow-ring-primary);
+  background: var(--color-overlay-08);
+  color: var(--color-text-primary);
 }
 
 /* ── Image attachment tray ─────────────────────────────────────────── */
@@ -611,20 +606,16 @@
   font-size: 14px;
   line-height: 1;
   color: var(--color-text-secondary);
-  background: var(--color-overlay-02);
-  border: 1px solid var(--color-border-light);
-  border-radius: var(--radius-md);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  opacity: 0.85;
-  transition: all 0.15s ease;
+  transition: background var(--transition-fast), color var(--transition-fast);
 }
 
 .attachButton:hover:not(:disabled) {
-  opacity: 1;
-  background: var(--color-bg-elevated);
-  border-color: var(--color-primary);
-  color: var(--color-primary);
-  box-shadow: var(--shadow-ring-primary);
+  background: var(--color-overlay-08);
+  color: var(--color-text-primary);
 }
 
 .attachButton:disabled {

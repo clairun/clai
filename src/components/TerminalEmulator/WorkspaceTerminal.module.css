@@ -11,9 +11,9 @@
      card caps at 50vh, so this stays within it. */
   height: 33vh;
   min-height: 200px;
-  border-radius: var(--radius-xl, 12px);
+  border-radius: var(--radius-xl);
   overflow: hidden;
-  background: #0b0e14;
+  background: var(--color-terminal-bg);
 }
 
 .panelFullscreen {
@@ -39,63 +39,44 @@
   height: 100%;
 }
 
-/* Subtle floating "back to chat" affordance — no header bar, maximum terminal
-   room. Sits top-right, dim until hover so it doesn't fight terminal output. */
-.exitFloat {
+/* Floating "back to chat" and fullscreen affordances: no header bar, maximum
+   terminal room. One row with a gap, so the label's width can never push
+   one button under the other. */
+.floatActions {
   position: absolute;
   top: 8px;
   right: 10px;
   z-index: 2;
+  display: flex;
+  gap: 6px;
+}
+
+.exitFloat,
+.iconFloat {
   appearance: none;
   cursor: pointer;
   padding: 3px 10px;
-  border-radius: 7px;
-  border: 1px solid #2a2f3a;
-  background: rgba(16, 20, 29, 0.7);
-  color: #9aa4b2;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  border-radius: var(--radius-sm);
+  border: none;
+  /* Translucent over the always-dark terminal, in both themes. */
+  background: rgba(255, 255, 255, 0.07);
+  color: #b4bcc8;
+  font-family: var(--font-mono);
   font-size: 12px;
   line-height: 18px;
-  opacity: 0.55;
-  backdrop-filter: blur(4px);
   transition:
-    opacity 0.12s ease,
     background 0.12s ease,
     color 0.12s ease;
 }
 
-/* Maximize / restore affordance — mirrors .exitFloat, sits to its left. */
 .iconFloat {
-  position: absolute;
-  top: 8px;
-  right: 70px;
-  z-index: 2;
-  appearance: none;
-  cursor: pointer;
   width: 28px;
   padding: 3px 0;
-  border-radius: 7px;
-  border: 1px solid #2a2f3a;
-  background: rgba(16, 20, 29, 0.7);
-  color: #9aa4b2;
   font-size: 13px;
-  line-height: 18px;
-  opacity: 0.55;
-  backdrop-filter: blur(4px);
-  transition:
-    opacity 0.12s ease,
-    background 0.12s ease,
-    color 0.12s ease;
 }
 
+.exitFloat:hover,
 .iconFloat:hover {
-  opacity: 1;
-  background: #1f2530;
-  color: #fff;
-}
-
-.exitFloat:hover {
-  opacity: 1;
-  background: #1f2530;
+  background: rgba(255, 255, 255, 0.14);
   color: #fff;
 }

@@ -1,3 +1,7 @@
+/* Layout grid. Everything that starts a line — the toggle's icon, the nav
+   icons, the list title, section headers, row status dots — starts 15px
+   from the rail's left edge, so the eye reads one column. Icon-only
+   controls in the collapsed rail are centred instead. */
 .rail {
   display: flex;
   flex-direction: column;
@@ -15,18 +19,14 @@
   min-width: 52px;
 }
 
-/* Header (48px) and filter row (42px) are both fixed-height so the
-   workspace list always starts at the same Y. When collapsed the filter
-   row is gone, so the collapsed header takes over its height (48 + 42 =
-   90px) and stacks the toggle + New centered — keeping the first row in
-   exactly the same place whether expanded or collapsed. */
+/* ---- Header: collapse toggle + the primary action ---------------------- */
+
 .railHeader {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 10px 10px;
-  border-bottom: 1px solid var(--color-border-light);
-  height: 48px;
+  gap: 6px;
+  height: 44px;
+  padding: 0 8px 0 9px;
   box-sizing: border-box;
   flex-shrink: 0;
 }
@@ -34,9 +34,9 @@
 .railCollapsed .railHeader {
   flex-direction: column;
   justify-content: center;
-  gap: 6px;
-  padding: 10px 0;
-  height: auto;
+  gap: 4px;
+  height: 76px;
+  padding: 0;
 }
 
 .collapseToggle {
@@ -55,49 +55,29 @@
 }
 
 .collapseToggle:hover {
-  background: var(--color-overlay-04);
+  background: var(--color-overlay-06);
   color: var(--color-text-primary);
 }
 
-.railTitle {
-  flex: 1;
-  font-size: 12px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  color: var(--color-text-tertiary);
-  white-space: nowrap;
-}
-
-.railCount {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--color-text-tertiary);
-  background: var(--color-overlay-04);
-  border-radius: var(--badge-radius);
-  padding: 1px 7px;
-}
-
 .newButton {
-  flex-shrink: 0;
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 10px;
+  box-sizing: border-box;
   border: 1px solid var(--color-border-medium);
   border-radius: var(--radius-sm);
   background: var(--color-bg-elevated);
   color: var(--color-text-primary);
   font-size: 12px;
   font-weight: 600;
-  padding: 4px 8px;
-  cursor: pointer;
-  transition: border-color var(--transition-fast), background var(--transition-fast);
   white-space: nowrap;
-}
-
-.railCollapsed .newButton {
-  padding: 4px 0;
-  width: 28px;
-  text-align: center;
-  font-size: 16px;
-  line-height: 1;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast);
 }
 
 .newButton:hover {
@@ -105,92 +85,210 @@
   color: var(--color-primary);
 }
 
-/* Action row: ＋ New + Pause all, directly under the header. */
-.railActions {
+.railCollapsed .newButton {
+  flex: 0 0 auto;
+  width: 28px;
+  padding: 0;
+}
+
+/* ---- Navigation: places outside the workspace list --------------------- */
+
+.railNav {
   display: flex;
-  gap: 6px;
-  padding: 8px 10px;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 6px 8px;
   border-bottom: 1px solid var(--color-border-light);
   flex-shrink: 0;
 }
-.railActions .newButton,
-.railActions .pauseAllButton {
-  flex: 1;
-}
-.railCollapsed .railActions {
-  flex-direction: column;
+
+.railCollapsed .railNav {
   align-items: center;
-  padding: 8px 0;
+  padding: 2px 0 8px;
 }
-.railCollapsed .railActions .newButton,
-.railCollapsed .railActions .pauseAllButton {
-  flex: 0 0 auto;
+
+.navItem {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 30px;
+  padding: 0 9px;
+  box-sizing: border-box;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--transition-fast), color var(--transition-fast);
+}
+
+.navItem svg {
+  flex-shrink: 0;
+  color: var(--color-text-secondary);
+  transition: color var(--transition-fast);
+}
+
+.navItem:hover {
+  background: var(--color-overlay-06);
+}
+
+.navItem:hover svg {
+  color: var(--color-text-primary);
+}
+
+.railCollapsed .navItem {
+  justify-content: center;
+  width: 32px;
+  padding: 0;
+}
+
+/* The update pill and its "Restart to install" action. They wrap onto
+   two lines here: side by side they need ~320px and the rail has 226. */
+.updateNotice {
+  display: flex;
+  padding: 4px 0 0 9px;
+}
+
+.updateNotice:empty {
+  display: none;
+}
+
+/* The child is AppUpdateBadge's `.group`, which leaves `flex-wrap` unset
+   so each host decides; the narrow rail wraps it. */
+.updateNotice > * {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.railCollapsed .updateNotice {
+  justify-content: center;
+  padding: 2px 0 0;
+}
+
+/* Collapsed, the notice is a bare "●" button (CompactUpdateAccess). */
+.railCollapsed .updateNotice button {
+  width: 32px;
+  height: 24px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--color-primary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.railCollapsed .updateNotice button:hover {
+  background: var(--color-overlay-06);
+}
+
+/* ---- List header: title, count, pause-all ------------------------------ */
+
+.listHeader {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 8px 0 15px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+
+/* The collapsed rail has no filter row and a taller header (76px against
+   44): 36 + 34 (filter) − 32 = 38 starts the workspace list at the same
+   height in both modes. With an update pending the list still shifts on
+   toggle: the expanded update notice is taller than the collapsed "●". */
+.railCollapsed .listHeader {
+  justify-content: center;
+  height: 38px;
+  padding: 0;
+}
+
+.listTitle {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-text-secondary);
+  white-space: nowrap;
+  user-select: none;
+}
+
+.listCount {
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  padding: 0 6px;
+  border-radius: var(--badge-radius);
+  background: var(--color-overlay-06);
+  color: var(--color-text-tertiary);
+  font-variant-numeric: tabular-nums;
 }
 
 .pauseAllButton {
   flex-shrink: 0;
+  margin-left: auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 5px;
+  height: 24px;
+  padding: 0 8px;
+  box-sizing: border-box;
   border: 1px solid var(--color-border-medium);
   border-radius: var(--radius-sm);
-  background: var(--color-bg-elevated);
-  color: var(--color-text-primary);
-  font-size: 12px;
+  background: transparent;
+  color: var(--color-text-secondary);
+  font-size: 11px;
   font-weight: 600;
-  padding: 4px 8px;
-  cursor: pointer;
-  transition: border-color var(--transition-fast), background var(--transition-fast),
-    color var(--transition-fast);
   white-space: nowrap;
+  cursor: pointer;
+  transition: border-color var(--transition-fast), color var(--transition-fast),
+    background var(--transition-fast);
 }
+
 .pauseAllButton:hover:not(:disabled) {
   border-color: var(--color-primary);
   color: var(--color-primary);
 }
+
 .pauseAllButton:disabled {
   opacity: 0.6;
   cursor: default;
 }
+
 .railCollapsed .pauseAllButton {
-  padding: 4px 0;
+  margin-left: 0;
   width: 28px;
+  padding: 0;
 }
 
-/* While paused the button is the way back: amber, stands out (no banner). */
+/* While paused the button is the way back, so it carries the state: amber,
+   labelled "Resume all". */
 .pauseAllButtonActive,
 .pauseAllButtonActive:hover:not(:disabled) {
-  border-color: var(--color-warning-dark);
+  border-color: var(--color-warning-border);
   color: var(--color-warning-dark);
-  background: var(--color-warning-bg, transparent);
+  background: var(--color-warning-bg);
 }
 
-/* Quiet "Paused" cue next to the WORKSPACES title — not a warning banner. */
-.pausedPill {
-  font-size: 10px;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
-  color: var(--color-warning-dark);
-  border: 1px solid var(--color-warning-dark);
-  background: var(--color-warning-bg, transparent);
-  border-radius: var(--badge-radius);
-  padding: 1px 6px;
-  white-space: nowrap;
-}
+/* ---- Filter -------------------------------------------------------------- */
 
 .filterRow {
   position: relative;
-  padding: 8px 8px 4px;
-  height: 42px;
+  height: 34px;
+  padding: 0 6px 6px;
   box-sizing: border-box;
   flex-shrink: 0;
 }
 
 .filterInput {
   width: 100%;
-  height: 30px;
+  height: 28px;
   box-sizing: border-box;
   padding: 0 26px 0 9px;
   border: 1px solid var(--color-border-medium);
@@ -212,10 +310,10 @@
 
 .filterClear {
   position: absolute;
-  top: 8px;
-  right: 12px;
+  top: 0;
+  right: 8px;
   width: 22px;
-  height: 30px;
+  height: 28px;
   border: none;
   background: transparent;
   color: var(--color-text-tertiary);
@@ -229,6 +327,17 @@
   color: var(--color-text-primary);
 }
 
+/* ---- List ---------------------------------------------------------------- */
+
+.railList {
+  flex: 1;
+  overflow-y: auto;
+  padding: 2px 6px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
 /* Labeled group headings (Needs attention / Starred / Recent). Only
    rendered when grouping is in effect — a bare recency list stays
    headerless. */
@@ -236,13 +345,18 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 8px 9px 3px;
+  flex-shrink: 0;
+  padding: 10px 9px 4px;
   font-size: 10px;
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--color-text-tertiary);
   user-select: none;
+}
+
+.sectionHeader:first-child {
+  padding-top: 4px;
 }
 
 .sectionHeaderIcon {
@@ -256,42 +370,26 @@
   flex-shrink: 0;
   height: 1px;
   margin: 4px 6px;
-  background: var(--color-border, var(--color-overlay-08));
+  background: var(--color-border-light);
 }
 
-/* Filled/star state of the per-row star toggle. */
-.starButtonActive {
-  color: var(--color-warning-dark, #b8860b);
-}
-
-.railList {
-  flex: 1;
-  overflow-y: auto;
-  padding: 6px;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-/* Fixed height — every row is exactly this tall regardless of content:
-   scheduled (two-line: title + cadence) or not (title only, centered),
-   expanded or collapsed. The 42px content area (44 − 2px border) clears
-   both the two-line text and the 24px hover action buttons, so nothing
-   that appears or disappears per row (schedule line, attention badge,
-   hover buttons) changes the height. Non-scheduled rows show just the
-   title — no message count — centered in the same height. */
+/* One line, one height (32px) for every row: scheduled or not, in any
+   section, expanded or collapsed. Schedule, attention and unread cues sit
+   at the end of the line instead of on a second one, and the 30px content
+   box (32 − 2px border) still clears the 24px hover action buttons. */
 .row {
   position: relative;
   display: flex;
   align-items: center;
-  gap: 9px;
-  padding: 0 9px;
-  height: 44px;
+  gap: 8px;
+  flex-shrink: 0;
+  height: 32px;
+  padding: 0 8px;
   box-sizing: border-box;
+  border: 1px solid transparent;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  border: 1px solid transparent;
-  transition: background var(--transition-fast), border-color var(--transition-fast);
+  transition: background var(--transition-fast);
 }
 
 .railCollapsed .row {
@@ -301,22 +399,20 @@
 }
 
 .row:hover {
-  background: var(--color-overlay-04);
+  background: var(--color-overlay-06);
 }
 
-.rowSelected {
-  background: var(--color-primary-alpha-08);
-  border-color: var(--color-primary);
+/* Selected: a filled row, no outline — the outline read as one more box
+   in a list of boxes. */
+.rowSelected,
+.rowSelected:hover {
+  background: var(--color-primary-alpha-15);
 }
 
 .rowDropTarget {
   outline: 2px dashed var(--color-primary);
   outline-offset: -2px;
-  background: var(--color-primary-alpha-10, rgba(99, 102, 241, 0.12));
-}
-
-.rowSelected:hover {
-  background: var(--color-primary-alpha-08);
+  background: var(--color-primary-alpha-10);
 }
 
 .statusDot {
@@ -338,10 +434,14 @@
   margin-left: 6px;
 }
 
+.rowSelected .collapsedInitial {
+  color: var(--color-text-primary);
+}
+
 .collapsedBadge {
   position: absolute;
-  top: 6px;
-  right: 8px;
+  top: 4px;
+  right: 6px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -352,8 +452,8 @@
    Accent (not warning) so it reads as "news", not "problem". */
 .collapsedUnreadDot {
   position: absolute;
-  top: 6px;
-  right: 8px;
+  top: 4px;
+  right: 6px;
   width: 6px;
   height: 6px;
   border-radius: 50%;
@@ -368,36 +468,72 @@
   background: var(--color-accent-dark);
 }
 
-/* Text block — vertically centered so a title-only (non-scheduled) row
-   sits centered in the same height as a two-line scheduled row. */
 .rowBody {
   flex: 1;
   min-width: 0;
   display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 1px;
 }
 
+/* Secondary by default so 25 rows stay quiet; the selected row and rows
+   with unread activity step up. */
 .rowTitle {
+  min-width: 0;
   font-size: 13px;
-  font-weight: 600;
-  color: var(--color-text-primary);
+  font-weight: 500;
+  color: var(--color-text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
+.rowSelected .rowTitle {
+  color: var(--color-text-primary);
+}
+
+.rowUnread .rowTitle {
+  color: var(--color-text-primary);
+  font-weight: 600;
+}
+
+/* Trailing schedule cue: icon + "120m" / "cron"; the full label is in the
+   tooltip and in screen-reader text. */
 .rowMeta {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
   font-size: 11px;
   color: var(--color-accent-dark);
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-variant-numeric: tabular-nums;
+}
+
+.rowMeta svg {
+  width: 11px;
+  height: 11px;
 }
 
 .rowMetaPaused {
   color: var(--color-text-tertiary);
+}
+
+/* "Run now skipped" feedback. It appears right after a Run now click, so
+   the row is hovered or focused at that moment: unlike `.rowMeta` it is
+   never hidden under the actions, it moves left to sit beside them. */
+.rowSkipNotice {
+  flex-shrink: 0;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-warning-dark);
+  white-space: nowrap;
+}
+
+/* 6px clear of the action overlay (an absolute child, so the row's flex gap
+   does not apply to it). */
+.row:hover .rowSkipNotice,
+.row:focus-within .rowSkipNotice,
+.rowMenuOpen .rowSkipNotice {
+  margin-right: calc(var(--row-actions-overlay) + 6px);
 }
 
 .attentionBadge {
@@ -405,6 +541,7 @@
   min-width: 18px;
   height: 18px;
   padding: 0 5px;
+  box-sizing: border-box;
   border-radius: 9px;
   background: var(--color-warning-bg);
   color: var(--color-warning-dark);
@@ -425,8 +562,8 @@
    the tail the buttons cover is faded out by the `.rowBody` mask below. */
 .rowActions {
   position: absolute;
-  /* Right-aligned with the row's 9px content padding. */
-  right: 9px;
+  /* Right-aligned with the row's 8px content padding. */
+  right: 8px;
   top: 50%;
   transform: translateY(-50%);
   display: inline-flex;
@@ -439,7 +576,8 @@
 }
 
 /* Width of the action overlay: 24px icon buttons with 2px gaps — two buttons
-   (star, menu) normally, four (star, run, pause, menu) on scheduled rows.
+   (new window, menu) normally, four (run, pause, new window, menu) on
+   scheduled rows, three (resume, new window, menu) on paused ones.
    Keep in sync with `.iconButton` width and `.rowActions` gap. */
 .row {
   --row-actions-overlay: 50px;
@@ -447,6 +585,10 @@
 
 .rowScheduled {
   --row-actions-overlay: 102px;
+}
+
+.rowScheduledPaused {
+  --row-actions-overlay: 76px;
 }
 
 .row:hover .rowActions,
@@ -457,8 +599,8 @@
   pointer-events: auto;
 }
 
-/* While the actions are shown they own the right edge: fade the title (and
-   meta line) out under them instead of letting glyphs collide with buttons. */
+/* While the actions are shown they own the right edge: fade the title out
+   under them instead of letting glyphs collide with buttons. */
 .row:hover .rowBody,
 .row:focus-within .rowBody,
 .rowMenuOpen .rowBody {
@@ -474,10 +616,22 @@
   );
 }
 
-/* The badge/unread dot sit where the actions appear; while the actions are
+/* With the skip notice in the flow between title and actions, the title
+   already ends before the notice; the ellipsis is enough. */
+.rowSkipped:hover .rowBody,
+.rowSkipped:focus-within .rowBody,
+.rowSkipped.rowMenuOpen .rowBody {
+  -webkit-mask-image: none;
+  mask-image: none;
+}
+
+/* The schedule cue, badge and unread dot sit where the actions appear; while the actions are
    shown, drop them from the flow entirely. Removing (not just hiding) them
    widens `.rowBody`, but left-aligned nowrap text only reveals more tail on
    the right — inside the masked region — so nothing visibly moves. */
+.row:hover .rowMeta,
+.row:focus-within .rowMeta,
+.rowMenuOpen .rowMeta,
 .row:hover .attentionBadge,
 .row:focus-within .attentionBadge,
 .rowMenuOpen .attentionBadge,

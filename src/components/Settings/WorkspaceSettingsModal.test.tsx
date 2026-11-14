@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { useEffect, useState } from 'react';
 
@@ -42,7 +42,7 @@ vi.mock('./AgentBehaviorForm', async () => {
   const { useImperativeHandle, useState } = await import('react');
   const api = await import('../../api/client');
   return {
-    AgentBehaviorForm: ({ ref, agentId, onDirtyChange }: PageStubProps & { agentId: string | null }) => {
+    AgentBehaviorForm: ({ ref, agentId, onDirtyChange, deps }: PageStubProps & { agentId: string | null; deps: { mcpServers: { name: string }[]; providerConnections: { name: string }[] } }) => {
       const [inner, setInner] = useState(false);
       useImperativeHandle(ref, () => ({
         validate: () => ({ ok: true }),
@@ -63,6 +63,7 @@ vi.mock('./AgentBehaviorForm', async () => {
           {inner ? <p>Inside a source</p> : <button type="button" onClick={() => setInner(true)}>Open a source</button>}
           <input type="search" aria-label="Search skills" defaultValue="rust" />
           <input aria-label="Agent name" onChange={() => onDirtyChange?.(true)} />
+          <output data-testid="agent-deps">{deps.mcpServers.map((item) => item.name).join(",")} | {deps.providerConnections.map((item) => item.name).join(",")}</output>
         </>
       );
     },
@@ -85,7 +86,8 @@ import type { WorkspaceDetails } from '../../generated/bindings';
 import type { SectionHandle } from './sectionHandle';
 import { invoke } from '@tauri-apps/api/core';
 import { setWorkspaceTitle } from '../../workspace/client';
-import { workspaceCreateAgent, workspaceUpdateAgent } from '../../api/client';
+import { getMcpServers, workspaceCreateAgent, workspaceUpdateAgent } from '../../api/client';
+import { assistantClient } from '../../assistant';
 
 interface PageStubProps {
   ref?: React.Ref<SectionHandle>;
@@ -220,14 +222,17 @@ const CREW = {
   displayName: 'Reviewer',
 };
 
-const renderModal = (initialSelection?: { kind: 'general' | 'schedule' | 'team' | 'agent'; agentId?: string }) => {
+const renderModal = (
+  initialSelection?: { kind: 'general' | 'schedule' | 'team' | 'agent'; agentId?: string },
+  details: Partial<WorkspaceDetails> = {},
+) => {
   const onClose = vi.fn();
   render(
     <WorkspaceSettingsModal
       isOpen
       onClose={onClose}
       workspaceId="ws-1"
-      details={{ ...DETAILS, assignedAgents: [CREW, MAIN] } as unknown as WorkspaceDetails}
+      details={{ ...DETAILS, assignedAgents: [CREW, MAIN], ...details } as unknown as WorkspaceDetails}
       initialSelection={initialSelection}
     />,
   );
@@ -238,6 +243,20 @@ const pageHeading = (name: string) => screen.getByRole('heading', { level: 2, na
 const nav = () => screen.getByRole('navigation', { name: 'Settings pages' });
 const navItem = (name: RegExp) => within(nav()).getByRole('button', { name });
 const saveBar = () => screen.queryByRole('region', { name: 'Unsaved changes' });
+
+describe('WorkspaceSettingsModal schedule summary', () => {
+  const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  it.each([
+    [{ type: 'cron', expression: '0 18 * * *', timezone: localZone }, false, 'Daily 18:00'],
+    [{ type: 'cron', expression: '0 9 * * 1-5', timezone: localZone }, false, 'Weekdays 09:00'],
+    [{ type: 'cron', expression: '0 9 * * 1-5/2', timezone: localZone }, false, 'Cron: 0 9 * * 1-5/2'],
+    [{ type: 'interval', intervalMinutes: 90 }, true, 'Every 1 h 30 min · paused'],
+  ] as const)('summarises %j (paused: %s) as %j', (scheduleKind, schedulePaused, summary) => {
+    renderModal(undefined, { scheduleEnabled: true, schedulePaused, scheduleKind });
+    expect(navItem(/^Schedule/)).toHaveTextContent(`Schedule${summary}`);
+  });
+});
 
 describe('WorkspaceSettingsModal navigation and per-page save', () => {
   beforeEach(() => {
@@ -372,6 +391,38 @@ describe('WorkspaceSettingsModal navigation and per-page save', () => {
 
     expect(setWorkspaceTitle).toHaveBeenCalledWith('ws-1', 'Backend API');
     expect(pageHeading('Team')).toBeInTheDocument();
+  });
+
+  it('keeps a launcher warning visible after Save and close unmounts the page', async () => {
+    const user = userEvent.setup();
+    const warning = 'Workspace title was saved, but its app launcher could not be updated: permission denied';
+    vi.mocked(setWorkspaceTitle).mockResolvedValue(warning);
+    const onClose = vi.fn();
+    const Host = () => {
+      const [open, setOpen] = useState(true);
+      const [launcherWarning, setLauncherWarning] = useState<string | null>(null);
+      return <>
+        {launcherWarning && <div role="alert">{launcherWarning}</div>}
+        <WorkspaceSettingsModal
+          isOpen={open}
+          onClose={() => { onClose(); setOpen(false); }}
+          workspaceId="ws-1"
+          details={DETAILS}
+          initialSelection={{ kind: 'general' }}
+          onLauncherWarning={setLauncherWarning}
+        />
+      </>;
+    };
+    render(<Host />);
+    await user.type(screen.getByLabelText(/Title/), ' API');
+    await user.click(screen.getByRole('button', { name: 'Close settings' }));
+    expect(screen.getByText(LEAVE_PROMPT)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole('dialog', { name: 'Backend settings' })).not.toBeInTheDocument();
+    expect(screen.getByRole('alert')).toHaveTextContent(warning);
+    expect(setWorkspaceTitle).toHaveBeenCalledWith('ws-1', 'Backend API');
   });
 
   it('saves only the visible page and puts focus on its title', async () => {
@@ -539,5 +590,24 @@ describe('WorkspaceSettingsModal reopening', () => {
 
     expect(pageHeading('General')).toBeInTheDocument();
     expect(touched.some((node) => node.textContent?.includes('Open a source'))).toBe(false);
+  });
+});
+
+describe('WorkspaceSettingsModal cross-window dependencies', () => {
+  it('refreshes MCP servers and providers while the agent page stays open', async () => {
+    const servers = vi.mocked(getMcpServers);
+    const connections = vi.mocked(assistantClient.listProviderConnections);
+    servers.mockResolvedValue([{ id: 'a', name: 'Alpha' }] as never);
+    connections.mockResolvedValue([{ id: 'p', name: 'Provider A' }] as never);
+    render(<WorkspaceSettingsModal isOpen onClose={vi.fn()} workspaceId="ws-1" details={DETAILS} initialSelection={{ kind: 'new-main' }} />);
+    await waitFor(() => expect(screen.getByTestId('agent-deps')).toHaveTextContent('Alpha | Provider A'));
+
+    servers.mockResolvedValue([{ id: 'b', name: 'Beta' }] as never);
+    act(() => window.dispatchEvent(new CustomEvent('mcp-servers-changed')));
+    await waitFor(() => expect(screen.getByTestId('agent-deps')).toHaveTextContent('Beta | Provider A'));
+
+    connections.mockResolvedValue([{ id: 'q', name: 'Provider B' }] as never);
+    act(() => window.dispatchEvent(new CustomEvent('assistant-provider-connections-changed')));
+    await waitFor(() => expect(screen.getByTestId('agent-deps')).toHaveTextContent('Beta | Provider B'));
   });
 });
