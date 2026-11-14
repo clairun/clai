@@ -1,12 +1,13 @@
 import React from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Outlet, Route, Routes, useNavigate } from 'react-router';
 
 import Workspace from './Workspace';
 import { WindowUiProvider, useWindowUi } from '../windowUi';
 import WorkspaceRail from '../components/Fleet/WorkspaceRail';
+import TerminalEmulator from '../components/TerminalEmulator/TerminalEmulator';
 import styles from './Workspace.module.css';
 import previewStyles from '../components/WorkspaceFilePreviewPanel.module.css';
 import useAssistantStore from '../assistant/sessionStore';
@@ -49,6 +50,10 @@ vi.mock('@tauri-apps/api/window', async (importOriginal) => ({
     onResized: async () => () => {},
   }),
 }));
+
+// The composer's shell grid and context bar need a Tauri backend.
+vi.mock('../components/TerminalEmulator/WorkspaceTerminal', () => ({ default: () => null }));
+vi.mock('../workspace/components/WorkspaceContextBar', () => ({ default: () => null }));
 
 vi.mock('../workspace/client', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../workspace/client')>()),
@@ -1841,4 +1846,81 @@ describe('Workspace nested task logs', () => {
   });
 
 
+});
+
+describe('Ctrl/Cmd+Shift+A', () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      'ResizeObserver',
+      class {
+        observe() {}
+        disconnect() {}
+      }
+    );
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const renderWithComposer = () =>
+    render(
+      <WindowUiProvider><MemoryRouter initialEntries={['/workspace/a']}>
+        <Routes>
+          <Route element={<FleetOutlet />}>
+            <Route path="/workspace/:workspaceId" element={<Workspace />} />
+          </Route>
+        </Routes>
+        <TerminalEmulator onSendToChat={vi.fn(async () => ({}))} />
+      </MemoryRouter></WindowUiProvider>
+    );
+  const pressA = (init: KeyboardEventInit) => fireEvent.keyDown(document.activeElement!, { key: 'A', code: 'KeyA', ...init });
+  const artifacts = () => screen.getByRole('button', { name: /artifacts/ });
+
+  it('shows and hides the artifacts panel from the focused composer, which never sees the key', async () => {
+    renderWithComposer();
+    await screen.findByRole('button', { name: /artifacts/ });
+    const composer = screen.getByPlaceholderText(/Message this workspace/);
+    expect(composer).toHaveFocus();
+    const reachedComposer = vi.fn();
+    composer.addEventListener('keydown', reachedComposer);
+
+    expect(pressA({ ctrlKey: true, shiftKey: true })).toBe(false);
+    expect(artifacts()).toHaveAttribute('aria-pressed', 'true');
+    expect(screen.getByRole('complementary', { name: 'artifacts drawer' })).toBeInTheDocument();
+    expect(composer).toHaveFocus();
+
+    pressA({ metaKey: true, shiftKey: true });
+    expect(artifacts()).toHaveAttribute('aria-pressed', 'false');
+    expect(screen.queryByRole('complementary', { name: /drawer/ })).toBeNull();
+    expect(reachedComposer).not.toHaveBeenCalled();
+    expect(composer).toHaveValue('');
+  });
+
+  it('acts once while held: repeats are swallowed and change nothing', async () => {
+    renderWithComposer();
+    await screen.findByRole('button', { name: /artifacts/ });
+    pressA({ ctrlKey: true, shiftKey: true });
+    expect(pressA({ ctrlKey: true, shiftKey: true, repeat: true })).toBe(false);
+    expect(artifacts()).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('switches to artifacts from another open panel', async () => {
+    renderWithComposer();
+    await userEvent.click(await screen.findByRole('button', { name: /tasks/ }));
+    expect(screen.getByRole('complementary', { name: 'tasks drawer' })).toBeInTheDocument();
+    // In act: the artifacts list loads its first folder once shown.
+    await act(async () => {
+      pressA({ ctrlKey: true, shiftKey: true });
+    });
+    expect(screen.getByRole('complementary', { name: 'artifacts drawer' })).toBeInTheDocument();
+  });
+
+  it.each([
+    ['Alt+Ctrl+Shift+A', { altKey: true, ctrlKey: true, shiftKey: true }],
+    ['Ctrl+A', { ctrlKey: true }],
+    ['Shift+A', { shiftKey: true }],
+  ])('leaves %s alone', async (_, init) => {
+    renderWithComposer();
+    await screen.findByRole('button', { name: /artifacts/ });
+    expect(pressA(init)).toBe(true);
+    expect(artifacts()).toHaveAttribute('aria-pressed', 'false');
+  });
 });

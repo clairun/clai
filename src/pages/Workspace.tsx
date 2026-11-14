@@ -67,6 +67,7 @@ import { formatScheduleCadence, formatScheduleDetail, formatTimeUntil } from '..
 import styles from './Workspace.module.css';
 import { AgentsIcon, ArtifactsIcon, MemoriesIcon, TasksIcon } from './workspaceHeaderIcons';
 import { useWindowUi } from '../windowUi';
+import { useCtrlShiftShortcut } from '../hooks/useCtrlShiftShortcut';
 
 const DEFAULT_WORKSPACE_ID = 'default';
 const REFRESH_INTERVAL_MS = 5000;
@@ -88,6 +89,9 @@ const ARTIFACT_ADD_MENU_MARGIN = 8;
 const ARTIFACT_ADD_MENU_MIN_WIDTH = 116;
 
 type ActivePanel = 'agents' | 'tasks' | 'memories' | 'artifacts' | null;
+// A header counter (or its shortcut) opens its panel, switching from any other;
+// on the panel already showing it closes the drawer.
+const togglePanel = (panel: ActivePanel) => (current: ActivePanel) => (current === panel ? null : panel);
 type PreviewEntry = { kind: 'memory' | 'artifact'; entry: WorkspaceFileEntry; line?: number; navigationId?: number };
 type ArtifactImportKind = 'files' | 'folders';
 
@@ -1085,12 +1089,6 @@ const WorkspaceHeader = ({
   const taskCount = details?.tasks?.length || 0;
   const activeTaskCount = (details?.tasks || []).filter(isTaskActive).length;
 
-  // Click a counter to open its panel; click again (or click another) to switch.
-  // null = no panel open, chat takes the full content area.
-  const togglePanel = (panel: ActivePanel) => {
-    setActivePanel((current) => (current === panel ? null : panel));
-  };
-
   // ── Inline title rename ────────────────────────────────────────────
   // Click the title to edit it in place; Enter/blur commits, Escape
   // cancels. The generic workspace has no real title to rename.
@@ -1166,9 +1164,9 @@ const WorkspaceHeader = ({
       <button
         type="button"
         className={`${styles.metricButton} ${isActive ? styles.metricButtonActive : ''}`}
-        onClick={() => togglePanel(panel)}
+        onClick={() => setActivePanel(togglePanel(panel))}
         aria-pressed={isActive}
-        title={activeCount > 0 ? `${activeCount} ${label} in flight` : `Toggle ${label} panel`}
+        title={activeCount > 0 ? `${activeCount} ${label} in flight` : `Toggle ${label} panel${panel === 'artifacts' ? ' (Ctrl/Cmd+Shift+A)' : ''}`}
       >
         <span className={styles.metricIcon}>{icon}</span>
         {leading && <span className={styles.metricLeading}>{leading}</span>}
@@ -2200,6 +2198,7 @@ const Workspace = () => {
 
   const loadedTasks = useCallback(() => tasksRef.current, []);
   const showTasksPanel = useCallback(() => setActivePanel('tasks'), [setActivePanel]);
+  useCtrlShiftShortcut('KeyA', useCallback(() => setActivePanel(togglePanel('artifacts')), [setActivePanel]));
   // One updater, reading and writing this workspace's own view in a single
   // functional update: an answer that arrives late decides against the view it
   // will actually land in, not against a copy that may have moved on.

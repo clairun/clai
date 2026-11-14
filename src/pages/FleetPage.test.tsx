@@ -815,6 +815,9 @@ describe('FleetPage', () => {
       const first = renderRoutes();
       const terminal = await screen.findByRole('textbox', { name: 'Terminal' });
       await screen.findByRole('button', { name: 'Select Alpha' });
+      // Still held from the press that brought us here: swallowed, and no way back.
+      expect(fireEvent.keyDown(terminal, { key: 'M', code: 'KeyM', ctrlKey: true, shiftKey: true, repeat: true })).toBe(false);
+      expect(screen.queryByTestId('workspace-index')).toBeNull();
       fireEvent.keyDown(terminal, { key: 'M', code: 'KeyM', ctrlKey: true, shiftKey: true });
       expect(screen.getByTestId('workspace-index')).toBeInTheDocument();
       first.unmount();

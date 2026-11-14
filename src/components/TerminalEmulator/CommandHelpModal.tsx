@@ -50,6 +50,7 @@ const SHORTCUTS: { keys: string; description: string }[] = [
   { keys: PICKER_SHORTCUT, description: "Choose the Fleet terminal's workspace" },
   { keys: 'Ctrl/Cmd+Shift+M', description: "Open Fleet with this workspace selected; from Fleet, open the selected card's workspace, or the most recent one" },
   { keys: 'Ctrl/Cmd+Shift+F (Workspace)', description: 'Show/hide the workspace rail' },
+  { keys: 'Ctrl/Cmd+Shift+A (Workspace)', description: 'Show/hide the artifacts panel' },
   { keys: 'Ctrl+Tab / Ctrl+Shift+Tab', description: 'Switch Fleet workspaces (release Ctrl or press Enter to select)' },
   { keys: 'Enter (Fleet)', description: 'Open the selected workspace when no input or dialog is using Enter' },
   { keys: 'Escape (Fleet)', description: 'Deselect the card when no dialog or other control uses Escape' },
