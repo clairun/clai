@@ -63,10 +63,18 @@ vi.mock('../workspace/client', async (importOriginal) => ({
   getOrCreateWorkspaceSession: vi.fn(),
   listWorkspaceDir: vi.fn(async () => []),
   readWorkspaceFile: vi.fn(),
+  readWorkspaceFileBase64: vi.fn(),
   runWorkspaceNow: vi.fn(async () => {}),
   setWorkspaceSchedulePaused: vi.fn(async () => {}),
   importWorkspaceFiles: vi.fn(async () => []),
   getWorkspaceTask: vi.fn(async () => null),
+}));
+
+// vega-embed does real layout; a chart in the chat only needs to count renders.
+const embedVega = vi.hoisted(() => vi.fn(async () => ({ finalize: () => {} })));
+vi.mock('vega-embed', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('vega-embed')>()),
+  default: embedVega,
 }));
 
 vi.mock('../api/client', async (importOriginal) => ({
@@ -90,6 +98,7 @@ const getWorkspaceDetails = vi.mocked(workspaceClient.getWorkspaceDetails);
 const setWorkspaceTitle = vi.mocked(workspaceClient.setWorkspaceTitle);
 const getOrCreateWorkspaceSession = vi.mocked(workspaceClient.getOrCreateWorkspaceSession);
 const readWorkspaceFile = vi.mocked(workspaceClient.readWorkspaceFile);
+const readWorkspaceFileBase64 = vi.mocked(workspaceClient.readWorkspaceFileBase64);
 const runWorkspaceNow = vi.mocked(workspaceClient.runWorkspaceNow);
 const setWorkspaceSchedulePaused = vi.mocked(workspaceClient.setWorkspaceSchedulePaused);
 const importWorkspaceFiles = vi.mocked(workspaceClient.importWorkspaceFiles);
@@ -428,6 +437,37 @@ describe('Workspace details poll', () => {
     expect(getWorkspaceDetails).toHaveBeenCalledTimes(2);
     expect(screen.getByTitle('Click to rename')).toHaveTextContent('Renamed');
     expect(screen.getByRole('alert')).toHaveTextContent(warning);
+  });
+
+  it('leaves a chat chart alone when a poll returns the same workspace', async () => {
+    embedVega.mockClear();
+    readWorkspaceFileBase64.mockClear();
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    loadSessionMessagesPage.mockResolvedValue(
+      messagePage([
+        {
+          ...streamingAssistantMessage('sess-a', 'm1'),
+          content: [{ type: 'text', text: '![Signups](/charts/signups.vl.json)' }],
+        },
+      ])
+    );
+    readWorkspaceFileBase64.mockImplementation(async (_workspaceId, path) => ({
+      path,
+      mime: 'application/json',
+      base64: btoa('{"mark":"bar"}'),
+    }));
+    renderWorkspace();
+    await waitFor(() => expect(embedVega).toHaveBeenCalledTimes(1));
+
+    // Each poll delivers fresh objects (here, a new memories array) with the
+    // same content; re-rendering the chart for that would reset its pan & zoom.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+
+    expect(getWorkspaceDetails).toHaveBeenCalledTimes(2);
+    expect(embedVega).toHaveBeenCalledTimes(1);
+    expect(readWorkspaceFileBase64).toHaveBeenCalledTimes(1);
   });
 
   it('surfaces the workspace files the poll asked for', async () => {

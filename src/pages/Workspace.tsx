@@ -2065,15 +2065,17 @@ const Workspace = () => {
   // time — so a link to one always takes the synthesized path.
   // A file under `.clai/memory/` is a memory even when the list does not carry
   // it, so it never gets the artifact-only delete button.
-  const previewEntryForPath = useCallback(
-    (path: string): PreviewEntry => {
-      const memoryMatch = memories.find((item) => item.path === path);
-      if (memoryMatch) return { kind: 'memory', entry: memoryMatch };
-      const kind = path.startsWith('.clai/memory/') ? 'memory' : 'artifact';
-      return { kind, entry: fileEntryForPath(path) };
-    },
-    [memories]
-  );
+  // Stable identity: feeds WorkspaceFileContext; a new value re-embeds every chat chart.
+  const memoriesRef = useRef(memories);
+  useEffect(() => {
+    memoriesRef.current = memories;
+  });
+  const previewEntryForPath = useCallback((path: string): PreviewEntry => {
+    const memoryMatch = memoriesRef.current.find((item) => item.path === path);
+    if (memoryMatch) return { kind: 'memory', entry: memoryMatch };
+    const kind = path.startsWith('.clai/memory/') ? 'memory' : 'artifact';
+    return { kind, entry: fileEntryForPath(path) };
+  }, []);
   // Also opens files linked from chat, where no drawer may be open: the
   // preview only shows under the memories/artifacts drawer, so open the one
   // that owns the file unless one of them already is.
