@@ -44,6 +44,17 @@ The **Fleet** view supervises everything: scheduled workspaces float to the
 top, anything needing attention (failed or blocked tasks, input prompts) is
 flagged, and selecting a card slides in a live chat preview.
 
+## Screenshots
+
+![Fleet view](docs/screenshots/overview.png)
+*The Fleet: one card per workspace with its latest activity.*
+
+![Workspace with artifacts panel](docs/screenshots/workspace.png)
+*A workspace: chat with a helper's finished report and the artifacts panel.*
+
+![Chart in the artifacts panel](docs/screenshots/digest-chart.png)
+*A rendered chart in the artifacts panel.*
+
 ## Features
 
 - **Workspace-local agent teams** — Add helpers (e.g. a Code Reviewer or SoW

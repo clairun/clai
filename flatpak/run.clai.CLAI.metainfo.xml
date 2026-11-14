@@ -44,8 +44,16 @@
 
   <screenshots>
     <screenshot type="default">
-      <image>https://github.com/user-attachments/assets/95facd8d-d08c-40c1-8aad-b8f39d2d1d87</image>
-      <caption>Main workspace with agent chat and orchestration tools</caption>
+      <image type="source" width="1600" height="1000">https://raw.githubusercontent.com/clairun/clai/main/docs/screenshots/overview.png</image>
+      <caption>Fleet view with each workspace's latest activity</caption>
+    </screenshot>
+    <screenshot>
+      <image type="source" width="1600" height="1000">https://raw.githubusercontent.com/clairun/clai/main/docs/screenshots/workspace.png</image>
+      <caption>Workspace chat with a helper's report and artifacts panel</caption>
+    </screenshot>
+    <screenshot>
+      <image type="source" width="1600" height="1000">https://raw.githubusercontent.com/clairun/clai/main/docs/screenshots/digest-chart.png</image>
+      <caption>Rendered chart in the artifacts panel</caption>
     </screenshot>
   </screenshots>
 
