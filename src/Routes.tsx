@@ -6,6 +6,7 @@ import NotFound from './pages/NotFound';
 import FleetIndex from './pages/FleetIndex';
 import Workspace from './pages/Workspace';
 import { listWorkspaces } from './workspace/client';
+import { useWindowUi } from './windowUi';
 import { invoke } from '@tauri-apps/api/core';
 import { getCurrentWebviewWindow } from '@tauri-apps/api/webviewWindow';
 import { listen } from '@tauri-apps/api/event';
@@ -109,13 +110,17 @@ const WindowRouteEvents = () => {
   return null;
 };
 
-const DeletedWorkspace = () => (
-  <main className={deletedStyles.page}>
-    <h1>Workspace deleted</h1>
-    <p>This workspace has been deleted. This window can still open another workspace.</p>
-    <Link to="/workspace">Open workspaces</Link>
-  </main>
-);
+const DeletedWorkspace = () => {
+  const { showRail } = useWindowUi();
+  return (
+    <main className={deletedStyles.page}>
+      <h1>Workspace deleted</h1>
+      <p>This workspace has been deleted. This window can still open another workspace.</p>
+      {/* The user lost their workspace, so show the rail, where they pick another. */}
+      <Link to="/workspace" onClick={showRail}>Open workspaces</Link>
+    </main>
+  );
+};
 
 const AppRoutes = () => (
   <>
