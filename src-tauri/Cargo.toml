@@ -208,6 +208,10 @@ windows-sys = { version = "0.61.2", features = [
 # directly only exposes libc::kill. See assistant::sandbox::runner.
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+# Handle-relative file operations (openat, renameat, …) for agent craft
+# files, so a folder an agent swaps for a symlink cannot redirect them.
+# Already in the tree with `fs` through tempfile.
+rustix = { version = "1.1.4", features = ["fs"] }
 
 [dev-dependencies]
 # test-util enables tokio::test(start_paused) for virtual-time tests.

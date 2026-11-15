@@ -4,34 +4,48 @@
 //!
 //! Agents read and write it through the shell; the sandbox exposes only the
 //! running member's own directory. This module lists it for the system
-//! prompt's catalog.
+//! prompt's catalog and the settings UI, and reads, writes and deletes single
+//! files for the UI by paths relative to the craft directory, refusing any
+//! path `list` would not show.
 
 use std::fs;
-use std::io::Read;
+use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+#[cfg(unix)]
+use rustix::fs::Mode;
+use serde::Serialize;
 
 /// Each description in the catalog is cut to this many characters.
 const MAX_DESCRIPTION_CHARS: usize = 300;
 /// The catalog stops at whichever bound comes first.
-const MAX_CATALOG_ENTRIES: usize = 100;
+pub(crate) const MAX_CATALOG_ENTRIES: usize = 100;
 const MAX_CATALOG_BYTES: usize = 8 * 1024;
-/// Bounds on the walk, so a runaway directory cannot stall a run.
+/// Bounds on the walk, so a runaway directory cannot stall a run. Files sit
+/// at most `MAX_DEPTH` folders deep.
 const MAX_DEPTH: usize = 8;
 const MAX_FILES: usize = 1_000;
 /// Frontmatter must be within the start of a file.
 const FRONTMATTER_BYTES: u64 = 4 * 1024;
+/// The largest file the settings UI reads or writes.
+const MAX_FILE_BYTES: usize = 256 * 1024;
 
-/// One craft file, as the catalog lists it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// One craft file, as the catalog and the settings UI list it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, ts_rs::TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "bindings.ts")]
 pub struct AgentCraftFile {
     /// Relative to the craft directory, `/`-separated.
     pub path: String,
     pub description: Option<String>,
+    /// As written in the frontmatter.
+    pub updated_at: Option<String>,
     /// The file starts with frontmatter holding a `description` and an
     /// `updated_at` date.
     pub frontmatter_valid: bool,
     /// Newest first: `updated_at`, else the modification time, in seconds.
+    #[serde(skip)]
     sort_key: i64,
 }
 
@@ -62,26 +76,16 @@ pub fn validate_definition_id(id: &str) -> Result<(), String> {
 pub fn ensure_craft_dir(dir: &Path) -> Result<(), String> {
     fs::create_dir_all(dir)
         .map_err(|e| format!("Failed to create agent craft {}: {e}", dir.display()))?;
-    real_dir(dir)
-}
-
-fn real_dir(dir: &Path) -> Result<(), String> {
-    match fs::symlink_metadata(dir) {
-        Ok(meta) if meta.is_dir() => Ok(()),
-        Ok(_) => Err(format!("Agent craft {} is not a directory", dir.display())),
-        Err(e) => Err(format!("Agent craft {} is unavailable: {e}", dir.display())),
-    }
+    open_root(dir).map(drop)
 }
 
 /// Every visible `.md` file under `dir`, newest first. Hidden entries and
 /// symlinks are skipped; a missing directory lists nothing.
 pub fn list(dir: &Path) -> Result<Vec<AgentCraftFile>, String> {
-    if fs::symlink_metadata(dir).is_err() {
-        return Ok(Vec::new());
-    }
-    real_dir(dir)?;
     let mut files = Vec::new();
-    walk(dir, "", 0, &mut files);
+    if let Some(root) = open_root(dir)? {
+        walk(&root, "", 0, &mut files);
+    }
     files.sort_by(|a, b| {
         b.sort_key
             .cmp(&a.sort_key)
@@ -90,39 +94,35 @@ pub fn list(dir: &Path) -> Result<Vec<AgentCraftFile>, String> {
     Ok(files)
 }
 
-fn walk(dir: &Path, prefix: &str, depth: usize, files: &mut Vec<AgentCraftFile>) {
-    let Ok(entries) = fs::read_dir(dir) else {
+fn walk(folder: &Folder, prefix: &str, depth: usize, files: &mut Vec<AgentCraftFile>) {
+    let Ok(mut names) = folder.names() else {
         return;
     };
-    let mut entries: Vec<_> = entries.flatten().collect();
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
+    names.sort_unstable();
+    for name in names {
         if files.len() >= MAX_FILES {
             return;
         }
-        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
-            continue;
-        };
         if !valid_component(&name) {
             continue;
         }
-        // `DirEntry::file_type` does not follow symlinks.
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
         let path = format!("{prefix}{name}");
-        if file_type.is_dir() && depth < MAX_DEPTH {
-            walk(&entry.path(), &format!("{path}/"), depth + 1, files);
-        } else if file_type.is_file() && name.ends_with(".md") {
-            if let Some(file) = describe(&entry.path(), path) {
-                files.push(file);
+        match folder.kind(&name) {
+            Ok(Kind::Folder) if depth < MAX_DEPTH => {
+                if let Ok(child) = folder.child(&name) {
+                    walk(&child, &format!("{path}/"), depth + 1, files);
+                }
             }
+            Ok(Kind::File) if is_craft_file_name(&name) => {
+                files.extend(describe(folder, &name, path));
+            }
+            _ => {}
         }
     }
 }
 
-fn describe(path: &Path, relative: String) -> Option<AgentCraftFile> {
-    let (file, meta) = open_file(path).ok()?;
+fn describe(folder: &Folder, name: &str, relative: String) -> Option<AgentCraftFile> {
+    let (file, meta) = folder.open_file(name).ok()?;
     let mut head = Vec::new();
     let _ = file.take(FRONTMATTER_BYTES).read_to_end(&mut head);
     // The cut may split a character, and a file may not be UTF-8 at all:
@@ -146,6 +146,7 @@ fn describe(path: &Path, relative: String) -> Option<AgentCraftFile> {
             && frontmatter.description.is_some()
             && updated.is_some(),
         description: frontmatter.description,
+        updated_at: frontmatter.updated_at,
         sort_key: updated.unwrap_or(modified),
     })
 }
@@ -231,39 +232,322 @@ pub fn catalog(files: &[AgentCraftFile]) -> String {
     }
     if shown < files.len() {
         catalog.push_str(&format!(
-            "- … {} older files not listed. Your craft has outgrown its catalog: consolidate overlapping lessons and delete stale ones.\n",
+            "- … {} older files not listed: list the directory to see them.\n",
             files.len() - shown
         ));
     }
     catalog
 }
 
-/// A path component the catalog lists: visible, and free of control
-/// characters.
+/// A path component the catalog lists: a visible name, free of control
+/// characters. Backslashes, and on Windows colons (drive prefixes, alternate
+/// data streams), are refused so a name cannot become a path.
 fn valid_component(name: &str) -> bool {
-    !name.is_empty() && !name.starts_with('.') && !name.chars().any(|c| c.is_control() || c == '\\')
+    !name.is_empty()
+        && !name.starts_with('.')
+        && !name
+            .chars()
+            .any(|c| c.is_control() || c == '\\' || (cfg!(windows) && c == ':'))
 }
 
-/// Opens a regular file without following a symlink at `path`, so one
-/// swapped in after the directory was listed is refused rather than read.
-/// Non-blocking, so a FIFO swapped in is refused rather than waited on.
-fn open_file(path: &Path) -> std::io::Result<(fs::File, fs::Metadata)> {
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::custom_flags(
-        &mut options,
-        libc::O_NOFOLLOW | libc::O_NONBLOCK,
-    );
-    let file = options.open(path)?;
+fn is_craft_file_name(name: &str) -> bool {
+    name.ends_with(".md")
+}
+
+/// The `/`-separated names of `relative` if `list` could return it: valid
+/// components naming a Markdown file no deeper than the walk goes.
+fn listable_names(relative: &str) -> Option<Vec<&str>> {
+    let names: Vec<&str> = relative.split('/').collect();
+    let (file, folders) = names.split_last()?;
+    let listable = folders.len() <= MAX_DEPTH
+        && is_craft_file_name(file)
+        && names.iter().all(|name| valid_component(name));
+    listable.then_some(names)
+}
+
+fn invalid_path(relative: &str) -> String {
+    format!("Invalid craft file path: {relative:?}")
+}
+
+/// A file operation; only writing creates the folders on the way.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Op {
+    Read,
+    Write,
+    Delete,
+}
+
+impl Op {
+    fn failed(self, relative: &str, error: io::Error) -> String {
+        let verb = match self {
+            Self::Read => "read",
+            Self::Write => "write",
+            Self::Delete => "delete",
+        };
+        format!("Failed to {verb} {relative}: {error}")
+    }
+}
+
+/// The folder holding `relative`'s file, and the file's name; `None` when a
+/// folder on the way does not exist and `op` does not create it. Refused
+/// unless `list` could show the path: every folder on the way is a real
+/// folder, and the file, if it exists, is a regular one.
+fn locate<'a>(dir: &Path, relative: &'a str, op: Op) -> Result<Option<(Folder, &'a str)>, String> {
+    let names = listable_names(relative).ok_or_else(|| invalid_path(relative))?;
+    let (file, folders) = names.split_last().expect("listable paths have a file");
+    let Some(mut folder) = open_root(dir)? else {
+        return Ok(None);
+    };
+    let failed = |e: io::Error| op.failed(relative, e);
+    for name in folders {
+        folder = match folder.kind(name) {
+            Ok(Kind::Folder) => folder.child(name),
+            Ok(_) => return Err(invalid_path(relative)),
+            Err(e) if e.kind() != ErrorKind::NotFound => return Err(failed(e)),
+            Err(_) if op == Op::Write => folder.child_or_create(name),
+            Err(_) => return Ok(None),
+        }
+        .map_err(failed)?;
+    }
+    match folder.kind(file) {
+        Ok(Kind::File) => Ok(Some((folder, file))),
+        Ok(_) => Err(invalid_path(relative)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(Some((folder, file))),
+        Err(e) => Err(failed(e)),
+    }
+}
+
+/// The craft directory, or `None` when it does not exist.
+fn open_root(dir: &Path) -> Result<Option<Folder>, String> {
+    match Folder::open(dir) {
+        Ok(folder) => Ok(Some(folder)),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Agent craft {} is unavailable: {e}", dir.display())),
+    }
+}
+
+/// What a folder entry is, without following a symlink.
+enum Kind {
+    File,
+    Folder,
+    Other,
+}
+
+/// A folder inside a craft directory. On Unix it is an open handle reached
+/// from the craft directory one folder at a time without following a
+/// symlink, and every operation, listing included, is relative to it, so
+/// swapping a folder for a symlink midway cannot lead one outside the craft
+/// directory.
+#[cfg(unix)]
+struct Folder(std::os::fd::OwnedFd);
+
+#[cfg(unix)]
+impl Folder {
+    const FLAGS: rustix::fs::OFlags = rustix::fs::OFlags::RDONLY
+        .union(rustix::fs::OFlags::DIRECTORY)
+        .union(rustix::fs::OFlags::NOFOLLOW)
+        .union(rustix::fs::OFlags::CLOEXEC);
+
+    fn open(dir: &Path) -> io::Result<Self> {
+        Ok(Self(rustix::fs::open(dir, Self::FLAGS, Mode::empty())?))
+    }
+
+    fn child(&self, name: &str) -> io::Result<Self> {
+        Ok(Self(rustix::fs::openat(
+            &self.0,
+            name,
+            Self::FLAGS,
+            Mode::empty(),
+        )?))
+    }
+
+    fn child_or_create(&self, name: &str) -> io::Result<Self> {
+        match rustix::fs::mkdirat(&self.0, name, Mode::from_raw_mode(0o777)) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => self.child(name),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    fn names(&self) -> io::Result<Vec<String>> {
+        Ok(rustix::fs::Dir::read_from(&self.0)?
+            .flatten()
+            .filter_map(|entry| entry.file_name().to_str().ok().map(str::to_string))
+            .collect())
+    }
+
+    fn kind(&self, name: &str) -> io::Result<Kind> {
+        use rustix::fs::{statat, AtFlags, FileType};
+        let stat = statat(&self.0, name, AtFlags::SYMLINK_NOFOLLOW)?;
+        Ok(match FileType::from_raw_mode(stat.st_mode) {
+            FileType::RegularFile => Kind::File,
+            FileType::Directory => Kind::Folder,
+            _ => Kind::Other,
+        })
+    }
+
+    /// Non-blocking, so a FIFO swapped in is refused rather than waited on.
+    fn open_file(&self, name: &str) -> io::Result<(fs::File, fs::Metadata)> {
+        use rustix::fs::OFlags;
+        let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        let fd = rustix::fs::openat(&self.0, name, flags, Mode::empty())?;
+        regular_file(fd.into())
+    }
+
+    fn create_new(&self, name: &str) -> io::Result<fs::File> {
+        use rustix::fs::OFlags;
+        let flags =
+            OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+        let fd = rustix::fs::openat(&self.0, name, flags, Mode::from_raw_mode(0o666))?;
+        Ok(fd.into())
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        Ok(rustix::fs::renameat(&self.0, from, &self.0, to)?)
+    }
+
+    fn remove(&self, name: &str) -> io::Result<()> {
+        Ok(rustix::fs::unlinkat(
+            &self.0,
+            name,
+            rustix::fs::AtFlags::empty(),
+        )?)
+    }
+}
+
+/// Elsewhere the folder is a checked path, so a folder or file swapped for a
+/// symlink between the check and the use is followed. Agents' shells run unsandboxed
+/// there, so the race reaches nothing they cannot already reach.
+#[cfg(not(unix))]
+struct Folder(PathBuf);
+
+#[cfg(not(unix))]
+impl Folder {
+    fn open(dir: &Path) -> io::Result<Self> {
+        Self::real_dir(dir.to_path_buf())
+    }
+
+    fn child(&self, name: &str) -> io::Result<Self> {
+        Self::real_dir(self.0.join(name))
+    }
+
+    fn child_or_create(&self, name: &str) -> io::Result<Self> {
+        match fs::create_dir(self.0.join(name)) {
+            Err(e) if e.kind() != ErrorKind::AlreadyExists => Err(e),
+            _ => self.child(name),
+        }
+    }
+
+    fn real_dir(path: PathBuf) -> io::Result<Self> {
+        if fs::symlink_metadata(&path)?.is_dir() {
+            Ok(Self(path))
+        } else {
+            Err(io::Error::new(ErrorKind::InvalidInput, "not a directory"))
+        }
+    }
+
+    fn names(&self) -> io::Result<Vec<String>> {
+        Ok(fs::read_dir(&self.0)?
+            .flatten()
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .collect())
+    }
+
+    fn kind(&self, name: &str) -> io::Result<Kind> {
+        let meta = fs::symlink_metadata(self.0.join(name))?;
+        Ok(if meta.is_file() {
+            Kind::File
+        } else if meta.is_dir() {
+            Kind::Folder
+        } else {
+            Kind::Other
+        })
+    }
+
+    fn open_file(&self, name: &str) -> io::Result<(fs::File, fs::Metadata)> {
+        regular_file(fs::File::open(self.0.join(name))?)
+    }
+
+    fn create_new(&self, name: &str) -> io::Result<fs::File> {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(self.0.join(name))
+    }
+
+    fn rename(&self, from: &str, to: &str) -> io::Result<()> {
+        fs::rename(self.0.join(from), self.0.join(to))
+    }
+
+    fn remove(&self, name: &str) -> io::Result<()> {
+        fs::remove_file(self.0.join(name))
+    }
+}
+
+fn regular_file(file: fs::File) -> io::Result<(fs::File, fs::Metadata)> {
     let meta = file.metadata()?;
     if meta.is_file() {
         Ok((file, meta))
     } else {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
+        Err(io::Error::new(
+            ErrorKind::InvalidInput,
             "not a regular file",
         ))
+    }
+}
+
+pub fn read(dir: &Path, relative: &str) -> Result<String, String> {
+    let failed = |e| Op::Read.failed(relative, e);
+    let (folder, name) =
+        locate(dir, relative, Op::Read)?.ok_or_else(|| failed(ErrorKind::NotFound.into()))?;
+    let (file, meta) = folder.open_file(name).map_err(failed)?;
+    if meta.len() > MAX_FILE_BYTES as u64 {
+        return Err(format!("{relative} is larger than {MAX_FILE_BYTES} bytes"));
+    }
+    let mut content = String::new();
+    file.take(MAX_FILE_BYTES as u64)
+        .read_to_string(&mut content)
+        .map_err(failed)?;
+    Ok(content)
+}
+
+/// Creates or replaces the file, and any folders on the way.
+pub fn write(dir: &Path, relative: &str, content: &str) -> Result<(), String> {
+    if content.len() > MAX_FILE_BYTES {
+        return Err(format!("Craft files are limited to {MAX_FILE_BYTES} bytes"));
+    }
+    let failed = |e| Op::Write.failed(relative, e);
+    let (folder, name) =
+        locate(dir, relative, Op::Write)?.ok_or_else(|| failed(ErrorKind::NotFound.into()))?;
+    replace(&folder, name, content).map_err(failed)
+}
+
+/// Writes a new file and renames it into place, so a failed write leaves the
+/// old file intact and a symlink swapped in at `name` is replaced, not
+/// followed.
+fn replace(folder: &Folder, name: &str, content: &str) -> io::Result<()> {
+    // Hidden, so `list` skips it if it is ever left behind.
+    let temp = format!(".{}.tmp", uuid::Uuid::new_v4());
+    let result = folder
+        .create_new(&temp)
+        .and_then(|mut file| {
+            file.write_all(content.as_bytes())?;
+            file.sync_all()
+        })
+        .and_then(|()| folder.rename(&temp, name));
+    if result.is_err() {
+        let _ = folder.remove(&temp);
+    }
+    result
+}
+
+/// Deleting a file that is already gone, or whose folder is, succeeds.
+pub fn delete(dir: &Path, relative: &str) -> Result<(), String> {
+    let Some((folder, name)) = locate(dir, relative, Op::Delete)? else {
+        return Ok(());
+    };
+    match folder.remove(name) {
+        Err(e) if e.kind() != ErrorKind::NotFound => Err(Op::Delete.failed(relative, e)),
+        _ => Ok(()),
     }
 }
 
@@ -275,6 +559,7 @@ mod tests {
         AgentCraftFile {
             path: path.to_string(),
             description: description.map(str::to_string),
+            updated_at: None,
             frontmatter_valid: valid,
             sort_key: 0,
         }
@@ -362,7 +647,8 @@ mod tests {
         content.push_str("é and more");
         assert!(!content.is_char_boundary(FRONTMATTER_BYTES as usize));
         fs::write(&path, &content).unwrap();
-        let file = describe(&path, "long.md".into()).unwrap();
+        let folder = Folder::open(temp.path()).unwrap();
+        let file = describe(&folder, "long.md", "long.md".into()).unwrap();
         assert!(file.frontmatter_valid);
         assert_eq!(file.description.as_deref(), Some("Use when long"));
     }
@@ -386,7 +672,7 @@ mod tests {
             .collect();
         let text = catalog(&many);
         assert_eq!(text.lines().count(), MAX_CATALOG_ENTRIES + 1);
-        assert!(text.ends_with("- … 5 older files not listed. Your craft has outgrown its catalog: consolidate overlapping lessons and delete stale ones.\n"));
+        assert!(text.ends_with("- … 5 older files not listed: list the directory to see them.\n"));
 
         let wide: Vec<_> = (0..60)
             .map(|i| file(&format!("{i}.md"), Some(&long), true))
@@ -432,7 +718,8 @@ mod tests {
         symlink(&outside, dir.join("sub")).unwrap();
         symlink(outside.join("secret.md"), dir.join("link.md")).unwrap();
         // A symlink swapped in after the listing saw a regular file.
-        assert_eq!(describe(&dir.join("link.md"), "link.md".into()), None);
+        let folder = Folder::open(&dir).unwrap();
+        assert_eq!(describe(&folder, "link.md", "link.md".into()), None);
         assert!(list(&dir).unwrap().is_empty());
 
         let linked = temp.path().join("linked-craft");
@@ -458,9 +745,13 @@ mod tests {
 
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
+            let folder = Folder::open(&dir).unwrap();
             let _ = sender.send((
-                open_file(&fifo).map(|_| ()).map_err(|e| e.kind()),
-                describe(&fifo, "pipe.md".into()),
+                folder
+                    .open_file("pipe.md")
+                    .map(|_| ())
+                    .map_err(|e| e.kind()),
+                describe(&folder, "pipe.md", "pipe.md".into()),
                 list(&dir).map(|files| files.len()),
             ));
         });
@@ -470,5 +761,293 @@ mod tests {
         assert_eq!(opened, Err(std::io::ErrorKind::InvalidInput));
         assert_eq!(described, None);
         assert_eq!(listed, Ok(0));
+    }
+
+    #[test]
+    fn files_round_trip_through_write_read_and_delete() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("craft");
+        ensure_craft_dir(&dir).unwrap();
+        let content = lesson("Use when nested", "2026-11-15");
+
+        write(&dir, "rust/async/lesson.md", &content).unwrap();
+        let listed: Vec<String> = list(&dir).unwrap().into_iter().map(|f| f.path).collect();
+        assert_eq!(listed, ["rust/async/lesson.md"]);
+        assert_eq!(read(&dir, &listed[0]).unwrap(), content);
+        assert_eq!(
+            list(&dir).unwrap()[0].updated_at.as_deref(),
+            Some("2026-11-15")
+        );
+
+        write(&dir, "rust/async/lesson.md", "replaced").unwrap();
+        assert_eq!(read(&dir, "rust/async/lesson.md").unwrap(), "replaced");
+        // Only the file itself: no temporary file is left beside it.
+        assert_eq!(
+            fs::read_dir(dir.join("rust").join("async"))
+                .unwrap()
+                .count(),
+            1
+        );
+
+        delete(&dir, "rust/async/lesson.md").unwrap();
+        assert!(list(&dir).unwrap().is_empty());
+        delete(&dir, "rust/async/lesson.md").unwrap();
+        delete(&dir, "missing/lesson.md").unwrap();
+        delete(&temp.path().join("no-craft"), "lesson.md").unwrap();
+        assert!(read(&dir, "rust/async/lesson.md")
+            .unwrap_err()
+            .starts_with("Failed to read rust/async/lesson.md"));
+    }
+
+    #[test]
+    fn paths_list_would_not_show_are_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("craft");
+        ensure_craft_dir(&dir).unwrap();
+        fs::write(dir.join("notes.txt"), "x").unwrap();
+        fs::write(dir.join(".hidden.md"), "x").unwrap();
+        fs::create_dir(dir.join("folder.md")).unwrap();
+        let absolute = temp.path().join("outside.md");
+        let too_deep = format!("{}x.md", "d/".repeat(MAX_DEPTH + 1));
+        let deepest = format!("{}x.md", "d/".repeat(MAX_DEPTH));
+        let refused = [
+            "",
+            absolute.to_str().unwrap(),
+            "../x.md",
+            "a/../../x.md",
+            "./x.md",
+            "a//x.md",
+            "x.md/",
+            ".hidden.md",
+            "a/.b/x.md",
+            "notes.txt",
+            "notes.txt/x.md",
+            "folder.md",
+            "a\\b.md",
+            "a\nb.md",
+            &too_deep,
+        ];
+        for path in refused {
+            assert_eq!(read(&dir, path), Err(invalid_path(path)), "{path:?}");
+            assert_eq!(write(&dir, path, "x"), Err(invalid_path(path)), "{path:?}");
+            assert_eq!(delete(&dir, path), Err(invalid_path(path)), "{path:?}");
+        }
+        assert!(!absolute.exists());
+        assert_eq!(fs::read_to_string(dir.join(".hidden.md")).unwrap(), "x");
+        assert!(dir.join("folder.md").is_dir());
+        assert!(!dir.join("a").exists());
+
+        // The deepest file `list` still shows is accepted; one deeper is not
+        // listed either.
+        write(&dir, &deepest, &lesson("Use when deep", "2026-11-15")).unwrap();
+        fs::create_dir_all(dir.join(&too_deep).parent().unwrap()).unwrap();
+        fs::write(dir.join(&too_deep), lesson("Use when deep", "2026-11-15")).unwrap();
+        let listed: Vec<String> = list(&dir).unwrap().into_iter().map(|f| f.path).collect();
+        assert_eq!(listed, [deepest]);
+    }
+
+    /// A failed replacement removes its temporary file.
+    #[test]
+    fn a_failed_replace_leaves_no_temporary_file() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir(temp.path().join("x.md")).unwrap();
+        let folder = Folder::open(temp.path()).unwrap();
+        assert!(replace(&folder, "x.md", "x").is_err());
+        let names: Vec<_> = fs::read_dir(temp.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["x.md"]);
+    }
+
+    /// I/O errors are reported as such, not as an invalid path.
+    #[cfg(unix)]
+    #[test]
+    fn io_errors_are_not_reported_as_invalid_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        // SAFETY: geteuid has no preconditions and cannot fail.
+        if unsafe { libc::geteuid() } == 0 {
+            return; // Root ignores the permissions this test relies on.
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("craft");
+        ensure_craft_dir(&dir).unwrap();
+        let locked = dir.join("locked");
+        fs::create_dir(&locked).unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o500)).unwrap();
+        let created = write(&dir, "locked/sub/x.md", "x");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let results = [
+            read(&dir, "locked/x.md").map(drop),
+            delete(&dir, "locked/x.md"),
+        ];
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let denied = || io::Error::from_raw_os_error(libc::EACCES);
+        assert_eq!(created, Err(Op::Write.failed("locked/sub/x.md", denied())));
+        assert_eq!(
+            results,
+            [
+                Err(Op::Read.failed("locked/x.md", denied())),
+                Err(Op::Delete.failed("locked/x.md", denied())),
+            ]
+        );
+    }
+
+    #[test]
+    fn oversized_content_is_refused_and_the_old_file_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("craft");
+        ensure_craft_dir(&dir).unwrap();
+        write(&dir, "a.md", "old").unwrap();
+        assert!(write(&dir, "a.md", &"x".repeat(MAX_FILE_BYTES + 1)).is_err());
+        assert_eq!(read(&dir, "a.md").unwrap(), "old");
+
+        fs::write(dir.join("big.md"), "x".repeat(MAX_FILE_BYTES + 1)).unwrap();
+        assert!(read(&dir, "big.md").unwrap_err().contains("larger than"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_operations_never_follow_symlinks() {
+        use std::os::unix::fs::symlink;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("craft");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&dir).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.md"), "secret").unwrap();
+        symlink(&outside, dir.join("sub")).unwrap();
+        symlink(outside.join("secret.md"), dir.join("link.md")).unwrap();
+
+        for path in [
+            "sub/secret.md",
+            "sub/new.md",
+            "sub/deeper/new.md",
+            "link.md",
+        ] {
+            assert_eq!(read(&dir, path), Err(invalid_path(path)), "{path:?}");
+            assert_eq!(write(&dir, path, "x"), Err(invalid_path(path)), "{path:?}");
+            assert_eq!(delete(&dir, path), Err(invalid_path(path)), "{path:?}");
+        }
+        assert_eq!(
+            fs::read_to_string(outside.join("secret.md")).unwrap(),
+            "secret"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+        assert!(fs::symlink_metadata(dir.join("link.md")).is_ok());
+
+        let linked = temp.path().join("linked-craft");
+        symlink(&outside, &linked).unwrap();
+        assert!(read(&linked, "secret.md").is_err());
+        assert!(write(&linked, "new.md", "x").is_err());
+        assert!(delete(&linked, "secret.md").is_err());
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+    }
+
+    /// File operations on a FIFO are refused at once, without waiting for a
+    /// writer or reader.
+    #[cfg(unix)]
+    #[test]
+    fn file_operations_refuse_a_fifo_without_blocking() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+        use std::os::unix::fs::FileTypeExt;
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("craft");
+        fs::create_dir_all(&dir).unwrap();
+        let fifo = dir.join("pipe.md");
+        let c_path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `c_path` is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = sender.send([
+                read(&dir, "pipe.md").map(|_| ()),
+                write(&dir, "pipe.md", "x"),
+                delete(&dir, "pipe.md"),
+            ]);
+        });
+        let results = receiver
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("a FIFO blocked");
+        let refused = Err(invalid_path("pipe.md"));
+        assert_eq!(results, [refused.clone(), refused.clone(), refused]);
+        assert!(fs::symlink_metadata(&fifo).unwrap().file_type().is_fifo());
+    }
+
+    /// An agent swaps a folder for a symlink after CLAI opened it: the
+    /// operations still act on the folder that was opened.
+    #[cfg(unix)]
+    #[test]
+    fn a_folder_swapped_for_a_symlink_after_opening_is_not_followed() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("craft");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.md"), "secret").unwrap();
+        ensure_craft_dir(&dir).unwrap();
+        write(&dir, "x/lesson.md", "lesson").unwrap();
+
+        let (folder, name) = locate(&dir, "x/lesson.md", Op::Read).unwrap().unwrap();
+        fs::rename(dir.join("x"), dir.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("x")).unwrap();
+
+        replace(&folder, "secret.md", "agent").unwrap();
+        folder.remove("secret.md").unwrap();
+        replace(&folder, name, "edited").unwrap();
+        assert_eq!(
+            fs::read_to_string(outside.join("secret.md")).unwrap(),
+            "secret"
+        );
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+        assert_eq!(
+            fs::read_to_string(dir.join("moved").join(name)).unwrap(),
+            "edited"
+        );
+    }
+
+    /// An agent swaps a folder for a symlink after `list` opened it: the walk
+    /// goes on in the folder that was opened, and nothing outside is listed.
+    #[cfg(unix)]
+    #[test]
+    fn list_does_not_follow_a_folder_swapped_for_a_symlink() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("craft");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(
+            outside.join("leak.md"),
+            lesson("Use when leaking", "2026-01-01"),
+        )
+        .unwrap();
+        ensure_craft_dir(&dir).unwrap();
+        write(
+            &dir,
+            "x/lesson.md",
+            &lesson("Use when inside", "2026-01-01"),
+        )
+        .unwrap();
+
+        let folder = Folder::open(&dir).unwrap().child("x").unwrap();
+        fs::rename(dir.join("x"), dir.join("moved")).unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("x")).unwrap();
+
+        let mut files = Vec::new();
+        walk(&folder, "x/", 1, &mut files);
+        let paths: Vec<&str> = files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["x/lesson.md"]);
+        assert_eq!(files[0].description.as_deref(), Some("Use when inside"));
+        let paths: Vec<String> = list(&dir).unwrap().into_iter().map(|f| f.path).collect();
+        assert_eq!(paths, ["moved/lesson.md"]);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_prefixes_and_streams_are_refused() {
+        for path in ["C:x.md", "a.txt:x.md"] {
+            assert_eq!(listable_names(path), None, "{path:?}");
+        }
     }
 }
