@@ -639,6 +639,10 @@ fn sandbox_prompt(
     }
 }
 
+/// How many craft files a member should aim to keep; past it, every run asks
+/// the member to prune.
+const CRAFT_TARGET_FILES: usize = 15;
+
 /// A member's craft: what it is for, and a catalog of what it holds. The
 /// catalog names files without their contents, so the prompt stays small
 /// however much the agent has learnt.
@@ -650,13 +654,19 @@ fn push_craft(prompt: &mut String, dir: &std::path::Path) {
     prompt.push_str(&format!(
         "\n## Your Craft\n\
          `{dir_text}` holds your craft: what you have learnt about how to do your work, carried into every run, in every workspace that assigns you. You reach it through the shell; on Linux and macOS no other agent's shell can. The user can read, edit and delete it in the CLAI app. The workspace's `.clai/memory/` belongs to its Main and is read-only to you.\n\n\
-         You are a craftsman striving for mastery, and a humble one. Record only what makes you better at your craft:\n\
-         - root causes of your own mistakes;\n\
-         - techniques that proved themselves;\n\
-         - findings that reviewers keep raising about your work;\n\
-         - calibration of your blind spots.\n\
-         Never record facts about a project or workspace, user data, paths, hosts, task status, secrets, or summaries of work: they belong to the workspace, not to your craft.\n\n\
-         Your lessons are fallible. Revise or delete one when fresh evidence contradicts it. Prefer a few sharp lessons to many vague ones, and merge overlapping ones. At the end of a task, ask yourself what a master would have done differently, and write a lesson only if it changes what you will do next time.\n\n\
+         You are a craftsman striving for mastery, and a humble one. Your craft is how you work, not what you worked on: it must hold in any repository, for any user, in any workspace.\n\n\
+         Write principles, not incidents. When something goes wrong or proves itself, ask why, and keep asking until the answer no longer names this project, file, path or task; record that answer as a rule you can apply elsewhere. Name the incident in one line at most, as an illustration. Keep a precise technical fact that holds wherever you meet it (an API quirk, a version-specific behaviour) as the principle's example. Too narrow: \"In repo X, tests need flag Y.\" Craft: \"When local and CI results differ, compare the runtime environment before suspecting the code.\"\n\n\
+         At the end of a task, ask what a master would have done differently. Write a lesson only if it changes what you will do next time.\n\n\
+         Before writing, ask: would this change what I do in an unrelated project? If not, don't write it. Never record:\n\
+         - project or workspace facts;\n\
+         - instructions from a user or workspace (they reach you with the task);\n\
+         - history: what was proposed, rejected or shipped;\n\
+         - user data, paths, hosts, task status or secrets.\n\n\
+         Grow by refining, not by adding. One principle per file. Moving lessons out of sight (hidden folders, other extensions) is not pruning. Keep your craft to at most {CRAFT_TARGET_FILES} files: a few lessons you actually use beat a long catalog you skim.\n\n\
+         Maintain it only when there is a reason:\n\
+         - When you write a lesson, check the catalog below for related ones. Open only those, and decide whether they need refactoring: merge them with the new lesson, sharpen them, split one that mixes two principles, or delete one the new lesson supersedes. Prefer improving an existing lesson to creating a file.\n\
+         - When a lesson you followed proves wrong or useless, fix or delete it in the same run.\n\
+         - When the app tells you your craft is over its target size, merge and prune it.\n\n\
          Organise the directory as you like: `.md` files, in subfolders if useful. Each file starts with frontmatter whose `description` says when to read it:\n\
          ```\n\
          ---\n\
@@ -671,7 +681,15 @@ fn push_craft(prompt: &mut String, dir: &std::path::Path) {
         Ok(files) if files.is_empty() => {
             prompt.push_str("Empty: you have not recorded any lessons yet.\n");
         }
-        Ok(files) => prompt.push_str(&crate::agent_craft::catalog(&files)),
+        Ok(files) => {
+            prompt.push_str(&crate::agent_craft::catalog(&files));
+            if files.len() > CRAFT_TARGET_FILES {
+                prompt.push_str(&format!(
+                    "\nYour craft holds {} files, over its target of {CRAFT_TARGET_FILES}. Once your task is done, merge lessons that share a principle and delete stale ones until it holds at most {CRAFT_TARGET_FILES} files. Never combine unrelated lessons in one file to meet the number. If a file you did not touch changes or disappears while you prune, another run is pruning too: stop.\n",
+                    files.len()
+                ));
+            }
+        }
         Err(error) => {
             tracing::warn!(%error, "Could not list agent craft");
             prompt.push_str("Unavailable this run: list the directory yourself.\n");
@@ -847,8 +865,17 @@ mod tests {
             let text = prompt_text(&member, &trigger);
             assert!(text.contains("## Your Craft"));
             assert!(text.contains(&format!("`{}` holds your craft", shown_dir)));
-            assert!(text.contains("what a master would have done differently"));
-            assert!(text.contains("Never record facts about a project or workspace"));
+            for rule in [
+                "Write principles, not incidents.",
+                "Grow by refining, not by adding.",
+                "Maintain it only when there is a reason:",
+                "Open only those",
+                "One principle per file.",
+                "what a master would have done differently",
+                &format!("to at most {CRAFT_TARGET_FILES} files"),
+            ] {
+                assert!(text.contains(rule), "missing {rule:?}");
+            }
             assert!(!text.contains("## Agent Memory"));
             assert!(!text.contains("write there only under `.clai/memory/`"));
             assert!(text.contains("not even under `.clai/memory/`"));
@@ -885,6 +912,41 @@ mod tests {
         let text = prompt_text(&no_shell, &RunTrigger::Scheduled);
         assert!(!text.contains("## Your Craft"));
         assert!(!text.contains("## Agent Memory"));
+    }
+
+    #[test]
+    fn a_craft_over_its_target_size_asks_to_be_pruned() {
+        let temp = tempfile::tempdir().unwrap();
+        let member = RunContext {
+            execution: shell_execution(),
+            craft_dir: Some(temp.path().to_path_buf()),
+            ..Default::default()
+        };
+        let fill = |count: usize| {
+            for i in 0..count {
+                std::fs::write(temp.path().join(format!("{i}.md")), "").unwrap();
+            }
+            prompt_text(&member, &RunTrigger::Scheduled)
+        };
+        let nudge = "Your craft holds";
+
+        assert!(!fill(CRAFT_TARGET_FILES).contains(nudge));
+
+        let over = CRAFT_TARGET_FILES + 1;
+        let text = fill(over);
+        let catalog = text.split("### Catalog\n").nth(1).unwrap();
+        assert!(
+            catalog.contains(&format!(
+                "\n\nYour craft holds {over} files, over its target of {CRAFT_TARGET_FILES}."
+            )),
+            "{text}"
+        );
+
+        // Past the catalog's own bound, both notes are shown.
+        let many = crate::agent_craft::MAX_CATALOG_ENTRIES + 1;
+        let text = fill(many);
+        assert!(text.contains("- … 1 older files not listed"), "{text}");
+        assert!(text.contains(&format!("Your craft holds {many} files")));
     }
 
     /// The prompt names the craft folder where the sandbox exposes it,

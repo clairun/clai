@@ -20,7 +20,7 @@ use serde::Serialize;
 /// Each description in the catalog is cut to this many characters.
 const MAX_DESCRIPTION_CHARS: usize = 300;
 /// The catalog stops at whichever bound comes first.
-const MAX_CATALOG_ENTRIES: usize = 100;
+pub(crate) const MAX_CATALOG_ENTRIES: usize = 100;
 const MAX_CATALOG_BYTES: usize = 8 * 1024;
 /// Bounds on the walk, so a runaway directory cannot stall a run. Files sit
 /// at most `MAX_DEPTH` folders deep.
@@ -232,7 +232,7 @@ pub fn catalog(files: &[AgentCraftFile]) -> String {
     }
     if shown < files.len() {
         catalog.push_str(&format!(
-            "- … {} older files not listed. Your craft has outgrown its catalog: consolidate overlapping lessons and delete stale ones.\n",
+            "- … {} older files not listed: list the directory to see them.\n",
             files.len() - shown
         ));
     }
@@ -672,7 +672,7 @@ mod tests {
             .collect();
         let text = catalog(&many);
         assert_eq!(text.lines().count(), MAX_CATALOG_ENTRIES + 1);
-        assert!(text.ends_with("- … 5 older files not listed. Your craft has outgrown its catalog: consolidate overlapping lessons and delete stale ones.\n"));
+        assert!(text.ends_with("- … 5 older files not listed: list the directory to see them.\n"));
 
         let wide: Vec<_> = (0..60)
             .map(|i| file(&format!("{i}.md"), Some(&long), true))
