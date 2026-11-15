@@ -9,6 +9,7 @@ const api = vi.hoisted(() => ({
   workspaceUpdateAgent: vi.fn(),
   workspaceDeleteAgent: vi.fn(),
   getSandboxStatus: vi.fn(),
+  listAgentCraft: vi.fn(),
 }));
 vi.mock('../../api/client', () => api);
 
@@ -138,6 +139,7 @@ describe('AgentBehaviorForm', () => {
     api.workspaceUpdateAgent.mockReset().mockResolvedValue({});
     api.workspaceDeleteAgent.mockReset();
     api.getSandboxStatus.mockReset().mockResolvedValue(LINUX);
+    api.listAgentCraft.mockReset().mockResolvedValue([]);
     resetSandboxStatusForTests();
   });
 
@@ -417,6 +419,28 @@ describe('AgentBehaviorForm', () => {
       await screen.findByDisplayValue('Reviewer');
 
       expect(screen.getByRole('button', { name: 'Add a skill source' })).toBeInTheDocument();
+    });
+  });
+
+  describe('craft', () => {
+    it('opens a shared agent\'s craft in its own view', async () => {
+      renderForm({ agentId: 'agent-1', initialAgent: REVIEWER, craftDefinitionId: 'agent-1' });
+      await screen.findByDisplayValue('Reviewer');
+
+      await userEvent.click(screen.getByRole('button', { name: 'Open craft' }));
+      expect(screen.getByRole('heading', { name: 'Craft' })).toHaveFocus();
+      expect(api.listAgentCraft).toHaveBeenCalledWith('agent-1');
+      await screen.findByText(/Nothing here yet/);
+
+      await userEvent.click(screen.getByRole('button', { name: 'Back to Reviewer' }));
+      expect(screen.getByRole('button', { name: 'Open craft' })).toHaveFocus();
+    });
+
+    it('is not offered without a shared definition', async () => {
+      renderForm({ agentId: 'agent-1' });
+      await screen.findByDisplayValue('Reviewer');
+      expect(screen.getByRole('button', { name: 'Edit local access' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Open craft' })).toBeNull();
     });
   });
 

@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   AgentAvatarRef,
+  AgentCraftFile,
   ExecutionCapabilityConfig,
   McpCatalogEntry,
   McpOAuthStartResponse,
@@ -182,6 +183,27 @@ export const saveWorkspaceTeamPolicy = async (
     return handleApiError(error, 'Failed to save workspace team settings');
   }
 };
+
+// ============================================================================
+// Agent craft (what a shared agent has learnt about its work)
+// ============================================================================
+
+// Unwrapped, unlike the rest of this module: the backend's errors already name
+// the file and what failed, and the craft page shows them as they are.
+
+/** Newest first; empty when the agent has written nothing yet. */
+export const listAgentCraft = (definitionId: string): Promise<AgentCraftFile[]> =>
+  invoke('agent_craft_list', { definitionId });
+
+export const readAgentCraft = (definitionId: string, path: string): Promise<string> =>
+  invoke('agent_craft_read', { definitionId, path });
+
+/** Replaces the file with `content`, verbatim. */
+export const writeAgentCraft = (definitionId: string, path: string, content: string): Promise<void> =>
+  invoke('agent_craft_write', { definitionId, path, content });
+
+export const deleteAgentCraft = (definitionId: string, path: string): Promise<void> =>
+  invoke('agent_craft_delete', { definitionId, path });
 
 // ============================================================================
 // Workspace-Scoped Agent CRUD

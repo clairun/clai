@@ -210,6 +210,7 @@ const AgentEditor = ({ definition, deps, onBack, onSaved }: AgentEditorProps) =>
           deps={deps}
           saving={saving}
           onDirtyChange={setDirty}
+          craftDefinitionId={definition?.id}
         />
       </div>
     </div>

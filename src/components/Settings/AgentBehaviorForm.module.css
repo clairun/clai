@@ -52,6 +52,11 @@
   font-size: 12px;
 }
 
+/* A panel that is only its title row. */
+.headerOnly {
+  border-bottom: none;
+}
+
 /* ── Local access view ────────────────────────────────────────────── */
 
 .accessBody {

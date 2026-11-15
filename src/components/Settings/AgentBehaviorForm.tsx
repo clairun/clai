@@ -7,9 +7,9 @@
  * (a shared definition, saved through `saveBehavior`). Both drive it through
  * `SectionHandle`.
  *
- * Laid out as an overview that fits one screen, with two drill-in views for
- * what does not: one skill source, and local access. `back()` on the handle
- * leaves a drill-in view.
+ * Laid out as an overview that fits one screen, with drill-in views for what
+ * does not: one skill source, local access, and a shared agent's craft.
+ * `back()` on the handle leaves a drill-in view.
  */
 
 import React, { useCallback, useEffect, useId, useImperativeHandle, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -32,6 +32,7 @@ import { useReportDirty, type SectionHandle } from './sectionHandle';
 import McpServerSelect from './McpServerSelect';
 import { NoSkills, SkillSearch, SkillSources, SkillSourceView, groupSkills } from './SkillPicker';
 import { AccessView, accessSummary, type AccessDraft } from './AgentAccess';
+import { CraftView } from './AgentCraft';
 import { useSandboxStatus } from '../../hooks/useSandboxStatus';
 import { Switch } from './ListEditors';
 import form from './SettingsForm.module.css';
@@ -82,7 +83,7 @@ export interface AgentFormDeps {
   defaultExecution: Partial<ExecutionCapabilityConfig> | null | undefined;
 }
 
-type View = { kind: 'overview' } | { kind: 'source'; key: string } | { kind: 'access' };
+type View = { kind: 'overview' } | { kind: 'source'; key: string } | { kind: 'access' } | { kind: 'craft' };
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -207,10 +208,13 @@ export const AgentBehaviorForm = ({
   saving,              // host save in flight — disables inputs
   onDirtyChange,
   onDeleted,
+  craftDefinitionId,
 }: {
   ref: React.Ref<SectionHandle>;
   workspaceId: string;
   agentId: string | null;
+  /** The shared definition whose craft the form shows; absent for a Main and a new agent. */
+  craftDefinitionId?: string;
   initialAgent?: AgentDetail;
   saveBehavior?: (payload: AgentBehaviorPayload) => Promise<void>;
   deps: AgentFormDeps;
@@ -443,6 +447,19 @@ export const AgentBehaviorForm = ({
     }
   }
 
+  if (view.kind === 'craft' && craftDefinitionId) {
+    return (
+      <div className={form.page} ref={rootRef}>
+        <CraftView
+          definitionId={craftDefinitionId}
+          headingRef={viewHeading}
+          onBack={backToOverview}
+          context={context}
+        />
+      </div>
+    );
+  }
+
   if (view.kind === 'access') {
     return (
       <div className={form.page} ref={rootRef}>
@@ -630,6 +647,26 @@ export const AgentBehaviorForm = ({
               </ul>
             </div>
           </section>
+
+          {craftDefinitionId && (
+            <section className={form.panel}>
+              <header className={`${form.panelHeader} ${styles.headerOnly}`}>
+                <h3 className={form.panelTitle}>Craft</h3>
+                <span className={form.panelMeta}>What it has learnt about its work</span>
+                <span className={form.panelActions}>
+                  <button
+                    type="button"
+                    className={form.quietButton}
+                    data-opener="craft"
+                    onClick={() => openView({ kind: 'craft' }, 'craft')}
+                    aria-label="Open craft"
+                  >
+                    Open ›
+                  </button>
+                </span>
+              </header>
+            </section>
+          )}
         </div>
       </div>
       {errorBanner}
