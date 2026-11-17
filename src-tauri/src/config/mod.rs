@@ -66,27 +66,31 @@ impl SkillDefinition {
     }
 }
 
-/// Normalize provider connections after load, migrating legacy shapes.
+/// Backfill legacy provider connections in memory after load.
 ///
 /// Before the `protocol_id` / `provider_id` split, a connection stored the
 /// wire protocol under `providerId`. serde now routes that legacy key into the
 /// brand `provider_id` field, leaving `protocol_id` empty. Backfill it (and
 /// default the brand to the protocol when a connection has only a protocol) so
-/// existing users keep their providers without recreating them. Returns whether
-/// anything changed (so the caller can persist the migrated config once).
-fn normalize_provider_connections(config: &mut ClaiConfig) -> bool {
-    let mut changed = false;
+/// existing users keep their providers without recreating them. The file on
+/// disk is left as the user wrote it.
+fn normalize_provider_connections(config: &mut ClaiConfig) {
     for conn in &mut config.provider_connections {
-        if conn.protocol_id.is_empty() && !conn.provider_id.is_empty() {
+        if conn.protocol_id.is_empty() {
             conn.protocol_id = conn.provider_id.clone();
-            changed = true;
         }
-        if conn.provider_id.is_empty() && !conn.protocol_id.is_empty() {
+        if conn.provider_id.is_empty() {
             conn.provider_id = conn.protocol_id.clone();
-            changed = true;
         }
     }
-    changed
+}
+
+/// Prepares a freshly loaded config for use and returns whether it must be
+/// saved. Only app-managed state (the bundled skill source) triggers a save;
+/// user data such as provider connections is only normalized in memory.
+fn prepare_loaded_config(config: &mut ClaiConfig) -> bool {
+    normalize_provider_connections(config);
+    bundled::ensure_bundled_skill_source(config)
 }
 
 impl ConfigManager {
@@ -109,12 +113,7 @@ impl ConfigManager {
             ClaiConfig::default()
         };
 
-        // Migrate legacy provider connections: before the protocol_id/provider_id
-        // split, the protocol lived under `providerId` (now the brand field).
-        // Backfill protocol_id from it so old configs load and keep working.
-        let migrated = normalize_provider_connections(&mut config);
-
-        let needs_save = bundled::ensure_bundled_skill_source(&mut config) || migrated;
+        let needs_save = prepare_loaded_config(&mut config);
 
         let manager = Self {
             config: Mutex::new(config),
@@ -952,10 +951,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_provider_connection_deserializes_and_migrates() {
+    fn legacy_provider_connection_is_backfilled_without_saving() {
         use crate::assistant::types::ProviderConnection;
         // A pre-split config entry: protocol under the old `providerId` key,
-        // no `protocolId`. Must load (not panic) and migrate to protocol_id.
+        // no `protocolId`.
         let legacy = r#"{
             "id": "abc",
             "name": "Claude Code",
@@ -967,53 +966,56 @@ mod tests {
             "createdAt": 1,
             "updatedAt": 2
         }"#;
-        let conn: ProviderConnection = serde_json::from_str(legacy).expect("legacy must parse");
-        assert_eq!(
-            conn.protocol_id, "",
-            "protocolId is absent in legacy config"
-        );
-        assert_eq!(
-            conn.provider_id, "claude-code",
-            "old providerId lands in brand field"
-        );
+        let mut config = ClaiConfig::default();
+        // Register the bundled skill source up front so it needs no save.
+        bundled::ensure_bundled_skill_source(&mut config);
+        config
+            .provider_connections
+            .push(serde_json::from_str::<ProviderConnection>(legacy).expect("legacy must parse"));
 
-        let mut config = ClaiConfig {
-            provider_connections: vec![conn],
-            ..Default::default()
-        };
-        let changed = normalize_provider_connections(&mut config);
-        assert!(changed, "migration should report a change");
-        let migrated = &config.provider_connections[0];
-        assert_eq!(migrated.protocol_id, "claude-code", "protocol backfilled");
-        assert_eq!(migrated.provider_id, "claude-code", "brand preserved");
+        assert!(
+            !prepare_loaded_config(&mut config),
+            "a legacy connection alone must not rewrite the user's config"
+        );
+        let conn = &config.provider_connections[0];
+        assert_eq!(conn.protocol_id, "claude-code", "protocol backfilled");
+        assert_eq!(conn.provider_id, "claude-code", "brand preserved");
     }
 
     #[test]
-    fn normalize_provider_connections_is_noop_for_current_shape() {
+    fn normalize_provider_connections_fills_only_missing_ids() {
         use crate::assistant::types::{AuthMode, ProviderConnection};
+        let connection = |protocol_id: &str, provider_id: &str| ProviderConnection {
+            id: "x".into(),
+            name: "x".into(),
+            protocol_id: protocol_id.into(),
+            provider_id: provider_id.into(),
+            auth_mode: AuthMode::DeveloperApiKey,
+            base_url: None,
+            secret_ref: "provider-connection::x".into(),
+            model_id: String::new(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        };
         let mut config = ClaiConfig {
-            provider_connections: vec![ProviderConnection {
-                id: "x".into(),
-                name: "Groq".into(),
-                protocol_id: "openai".into(),
-                provider_id: "groq".into(),
-                auth_mode: AuthMode::DeveloperApiKey,
-                base_url: Some("https://api.groq.com/openai/v1".into()),
-                secret_ref: "provider-connection::x".into(),
-                model_id: "llama-3.3-70b".into(),
-                account_label: None,
-                enabled: true,
-                created_at: 0,
-                updated_at: 0,
-            }],
+            provider_connections: vec![connection("openai", "groq"), connection("openai", "")],
             ..Default::default()
         };
-        assert!(
-            !normalize_provider_connections(&mut config),
-            "current shape untouched"
+
+        normalize_provider_connections(&mut config);
+
+        let ids: Vec<_> = config
+            .provider_connections
+            .iter()
+            .map(|c| (c.protocol_id.as_str(), c.provider_id.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            [("openai", "groq"), ("openai", "openai")],
+            "current shape untouched; a missing brand defaults to the protocol"
         );
-        assert_eq!(config.provider_connections[0].protocol_id, "openai");
-        assert_eq!(config.provider_connections[0].provider_id, "groq");
     }
 
     #[test]

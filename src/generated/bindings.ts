@@ -565,7 +565,7 @@ export type ProviderConnection = { id: string, name: string,
  * `#[serde(default)]` so a *legacy* config (which stored the protocol
  * under the old `providerId` key, now absorbed by the brand `provider_id`
  * field below) still deserializes instead of crashing the app on load.
- * `ConfigManager` then migrates it — see `normalize_provider_connections`.
+ * `ConfigManager` backfills it in memory — see `normalize_provider_connections`.
  */
 protocolId: string, 
 /**
