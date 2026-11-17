@@ -138,7 +138,8 @@ async fn close_unstarted_run(
     };
     let message = error.to_string();
     if let Err(close_error) =
-        run_lifecycle::fail_run_with_sink(pool, run_id, &message, |event| emit(run_id, event)).await
+        run_lifecycle::fail_run_with_sink(pool, run_id, &message, None, |event| emit(run_id, event))
+            .await
     {
         tracing::warn!(run_id, error = %close_error, "could not mark unstarted run failed");
     }

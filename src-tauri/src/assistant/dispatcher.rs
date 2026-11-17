@@ -313,7 +313,7 @@ pub(crate) async fn start_cycle(
     match workspace_tasks_repo::mark_running(pool, task_id, run_id).await? {
         Some(task) => Ok(CycleStart::Run(Some(Box::new(task)))),
         None => Ok(CycleStart::Cancelled(
-            repository::complete_run(pool, run_id, RunStatus::Cancelled, None).await?,
+            repository::complete_run(pool, run_id, RunStatus::Cancelled, None, None).await?,
         )),
     }
 }

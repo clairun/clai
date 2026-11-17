@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
+use crate::assistant::providers::failure::FailureKind;
 use crate::assistant::workspace_tasks_repo::TaskStatus;
 use crate::config::workspace_config::AgentAvatarRef;
 
@@ -295,6 +296,11 @@ pub struct AssistantRun {
     pub completed_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    /// What a failed run's provider error asks of the user; `None` when the
+    /// failure was not classified, and for runs that predate classification.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub error_kind: Option<FailureKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]

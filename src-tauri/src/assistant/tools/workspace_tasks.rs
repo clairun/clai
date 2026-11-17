@@ -1379,6 +1379,7 @@ mod tests {
             started_at: 1,
             completed_at: None,
             error: error.map(str::to_string),
+            error_kind: None,
         }
     }
 

@@ -752,6 +752,29 @@ mod tests {
         assert_eq!(queue_left, 0);
     }
 
+    #[tokio::test]
+    async fn error_kind_is_null_for_runs_created_before_migration() {
+        use crate::assistant::repository;
+
+        let pool = pool_migrated_before(20261117000000).await;
+        for statement in [
+            "INSERT INTO assistant_sessions (id, context_json, created_at, updated_at)
+             VALUES ('s', '{}', 1, 1)",
+            "INSERT INTO assistant_runs
+                 (id, session_id, status, \"trigger\", connection_id, protocol_id, model_id,
+                  error, started_at, completed_at)
+             VALUES ('r', 's', 'failed', 'user_message', 'c', 'openai', 'm', 'HTTP 429', 1, 2)",
+        ] {
+            sqlx::query(statement).execute(&pool).await.unwrap();
+        }
+
+        run_all_migrations(&pool).await;
+
+        let run = repository::get_run(&pool, "r").await.unwrap().unwrap();
+        assert_eq!(run.error.as_deref(), Some("HTTP 429"));
+        assert_eq!(run.error_kind, None);
+    }
+
     /// The migration closes all but the newest active run of a session so
     /// the one-active-run index can be created.
     #[tokio::test]

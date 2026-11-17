@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use futures::Stream;
 use thiserror::Error;
 
+use super::failure::{FailureKind, ProviderFailure};
 use crate::assistant::types::{
     CompletionRequest, ModelInfo, ProtocolFamily, ProviderConnection, ProviderEvent,
 };
@@ -39,8 +40,30 @@ pub enum ProviderError {
     NotConfigured,
     #[error("provider transport is not implemented yet")]
     NotImplemented,
+    /// Failed before or without an HTTP status: transport, decoding, CLI.
     #[error("provider request failed: {0}")]
     RequestFailed(String),
+    /// The provider answered with a non-success HTTP status.
+    #[error("provider request failed: {0}")]
+    Failed(ProviderFailure),
+}
+
+impl ProviderError {
+    pub fn kind(&self) -> Option<FailureKind> {
+        match self {
+            Self::Failed(failure) => Some(failure.kind),
+            _ => None,
+        }
+    }
+
+    /// Whether compacting the conversation may let the request through. A
+    /// classified failure says so by its kind; anything else by its text.
+    pub fn is_context_limit(&self) -> bool {
+        match self {
+            Self::Failed(failure) => failure.kind == FailureKind::ContextTooLong,
+            other => is_context_limit_error(&other.to_string()),
+        }
+    }
 }
 
 #[async_trait]
@@ -92,12 +115,32 @@ pub trait ProviderAdapter: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::is_context_limit_error;
+    use super::*;
+    use crate::assistant::providers::failure::classify_http;
 
     #[test]
     fn context_limit_classifier_matches_codex_turn_start_input_too_large() {
         assert!(is_context_limit_error(
             "Error: turn/start: Input exceeds the maximum length of 1048576 characters (input_too_large, actual_chars=1072355)"
         ));
+    }
+
+    #[test]
+    fn a_classified_failure_is_a_context_limit_by_kind_only() {
+        let throttled = classify_http(
+            "anthropic",
+            429,
+            None,
+            "rate limit of 30,000 input tokens per minute",
+        );
+        assert!(!ProviderError::Failed(throttled).is_context_limit());
+        let too_long = classify_http(
+            "zai",
+            400,
+            None,
+            r#"{"error":{"code":"1261","message":"Prompt exceeds max length"}}"#,
+        );
+        assert!(ProviderError::Failed(too_long).is_context_limit());
+        assert!(ProviderError::RequestFailed("prompt is too long".into()).is_context_limit());
     }
 }

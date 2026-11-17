@@ -20,6 +20,7 @@
 use crate::assistant::conversation::RunConversation;
 use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput};
 use crate::assistant::events::AssistantUiEvent;
+use crate::assistant::providers::failure::FailureKind;
 use crate::assistant::repository::{
     self, CreateMessageParams, CreateRunParams, CreateToolCallParams,
 };
@@ -80,8 +81,9 @@ pub(crate) async fn fail_run(
     session: &AssistantSession,
     run_id: &str,
     error_msg: &str,
+    error_kind: Option<FailureKind>,
 ) -> Result<(), AssistantEngineError> {
-    fail_run_with_sink(&deps.pool, run_id, error_msg, |event| {
+    fail_run_with_sink(&deps.pool, run_id, error_msg, error_kind, |event| {
         let _ = deps.emit(session, Some(run_id), event);
     })
     .await
@@ -91,12 +93,15 @@ pub(crate) async fn fail_run_with_sink(
     pool: &DbPool,
     run_id: &str,
     error_msg: &str,
+    error_kind: Option<FailureKind>,
     mut emit: impl FnMut(AssistantUiEvent),
 ) -> Result<(), AssistantEngineError> {
     for tool_call in repository::fail_running_tool_calls_for_run(pool, run_id, error_msg).await? {
         emit(AssistantUiEvent::ToolCallFailed { tool_call });
     }
-    let run = repository::complete_run(pool, run_id, RunStatus::Failed, Some(error_msg)).await?;
+    let run =
+        repository::complete_run(pool, run_id, RunStatus::Failed, Some(error_msg), error_kind)
+            .await?;
     emit(AssistantUiEvent::RunFailed { run });
     Ok(())
 }
@@ -119,7 +124,8 @@ pub(crate) async fn cancel_run(
             AssistantUiEvent::ToolCallFailed { tool_call },
         );
     }
-    let run = repository::complete_run(&deps.pool, run_id, RunStatus::Cancelled, None).await?;
+    let run =
+        repository::complete_run(&deps.pool, run_id, RunStatus::Cancelled, None, None).await?;
     let _ = deps.emit(
         session,
         Some(run_id),
@@ -145,8 +151,8 @@ pub(crate) async fn complete_run(
     run_id: &str,
     had_warnings: bool,
 ) -> Result<(), AssistantEngineError> {
-    let run =
-        repository::complete_run(&deps.pool, run_id, final_status(had_warnings), None).await?;
+    let run = repository::complete_run(&deps.pool, run_id, final_status(had_warnings), None, None)
+        .await?;
     let _ = deps.emit(
         session,
         Some(run_id),
@@ -337,6 +343,47 @@ pub(crate) async fn record_tool_call_result(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn a_failed_run_stores_and_emits_its_error_kind() {
+        let (_tmp, pool) = crate::db::test_support::workspace_pool().await;
+        let session = repository::create_session(&pool, Default::default())
+            .await
+            .unwrap();
+        let run = repository::create_run(
+            &pool,
+            repository::CreateRunParams {
+                session_id: session.id,
+                status: RunStatus::Running,
+                trigger: crate::assistant::types::RunTrigger::UserMessage,
+                connection_id: "c".into(),
+                protocol_id: "openai".into(),
+                model_id: "m".into(),
+                error: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let mut emitted = Vec::new();
+        fail_run_with_sink(
+            &pool,
+            &run.id,
+            "HTTP 429: Usage limit reached.",
+            Some(FailureKind::UsageLimit),
+            |event| emitted.push(event),
+        )
+        .await
+        .unwrap();
+
+        let [AssistantUiEvent::RunFailed { run: failed }] = emitted.as_slice() else {
+            panic!("expected one RunFailed event, got {emitted:?}");
+        };
+        assert_eq!(failed.error_kind, Some(FailureKind::UsageLimit));
+        let stored = repository::get_run(&pool, &run.id).await.unwrap().unwrap();
+        assert_eq!(stored.error_kind, Some(FailureKind::UsageLimit));
+    }
+
     #[test]
     fn a_run_without_warnings_completes_cleanly() {
         assert!(matches!(final_status(false), RunStatus::Completed));
