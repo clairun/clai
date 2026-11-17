@@ -17,7 +17,7 @@ use crate::assistant::types::{
 };
 
 use super::catalog;
-use super::failure::read_failure;
+use super::failure::{anthropic_refusal, classify_stream_error, read_failure};
 use super::types::{ProviderAdapter, ProviderError};
 use super::ModelsSource;
 
@@ -147,7 +147,8 @@ impl ProviderAdapter for AnthropicAdapter {
         }
 
         let byte_stream = resp.bytes_stream();
-        let event_stream = sse_to_provider_events(byte_stream);
+        let event_stream =
+            sse_to_provider_events(byte_stream, catalog::error_code_brand(connection));
 
         Ok(Box::pin(event_stream))
     }
@@ -371,6 +372,8 @@ struct SseState {
     emitted_start: bool,
     /// Accumulate tool use blocks by index
     tool_calls: Vec<PartialToolCall>,
+    /// Classifies errors reported inside the stream (`error_code_brand`).
+    brand: String,
 }
 
 #[derive(Default, Clone)]
@@ -382,12 +385,14 @@ struct PartialToolCall {
 
 fn sse_to_provider_events(
     byte_stream: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+    brand: String,
 ) -> impl Stream<Item = Result<ProviderEvent, ProviderError>> + Send {
     let state = SseState {
         stream: byte_stream.boxed(),
         buf: Vec::new(),
         emitted_start: false,
         tool_calls: Vec::new(),
+        brand,
     };
 
     futures::stream::unfold(state, |mut state| async move {
@@ -409,8 +414,12 @@ fn sse_to_provider_events(
                     }
                 };
 
-                let events =
-                    parse_sse_frame(&frame, &mut state.emitted_start, &mut state.tool_calls);
+                let events = parse_sse_frame(
+                    &frame,
+                    &state.brand,
+                    &mut state.emitted_start,
+                    &mut state.tool_calls,
+                );
                 if !events.is_empty() {
                     return Some((events, state));
                 }
@@ -443,6 +452,7 @@ fn sse_to_provider_events(
                         if !text.trim().is_empty() {
                             let events = parse_sse_frame(
                                 text.trim(),
+                                &state.brand,
                                 &mut state.emitted_start,
                                 &mut state.tool_calls,
                             );
@@ -480,6 +490,7 @@ fn find_sse_frame_delimiter(buf: &[u8]) -> Option<(usize, usize)> {
 )]
 fn parse_sse_frame(
     frame: &str,
+    brand: &str,
     emitted_start: &mut bool,
     tool_calls: &mut Vec<PartialToolCall>,
 ) -> Vec<Result<ProviderEvent, ProviderError>> {
@@ -638,13 +649,16 @@ fn parse_sse_frame(
             // The terminal frame carries the stop reason (`max_tokens` =
             // output budget exhausted). Capture it, or truncated output is
             // indistinguishable from complete output downstream.
-            if let Some(reason) = json
-                .get("delta")
-                .and_then(|d| d.get("stop_reason"))
-                .and_then(|r| r.as_str())
-            {
-                events.push(Ok(ProviderEvent::StopReason {
-                    reason: reason.to_string(),
+            // A refusal fails the turn as OpenAI's `content_filter` does.
+            let delta = &json["delta"];
+            if let Some(reason) = delta["stop_reason"].as_str() {
+                events.push(Ok(match reason {
+                    "refusal" => ProviderEvent::ProviderError {
+                        failure: anthropic_refusal(delta),
+                    },
+                    _ => ProviderEvent::StopReason {
+                        reason: reason.to_string(),
+                    },
                 }));
             }
         }
@@ -652,13 +666,9 @@ fn parse_sse_frame(
             events.push(Ok(ProviderEvent::MessageComplete));
         }
         "error" => {
-            let message = json
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(|m| m.as_str())
-                .unwrap_or("Unknown Anthropic API error")
-                .to_string();
-            events.push(Ok(ProviderEvent::ProviderError { message }));
+            events.push(Ok(ProviderEvent::ProviderError {
+                failure: classify_stream_error(brand, &json),
+            }));
         }
         _ => {
             // Unknown event type, ignore
@@ -671,6 +681,8 @@ fn parse_sse_frame(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::providers::failure::FailureKind;
+    use crate::assistant::providers::retry::until_first_output;
     use crate::assistant::types::{ContentPart, MessageRole, ProviderInputMessage};
     use futures::StreamExt;
 
@@ -868,7 +880,9 @@ mod tests {
             Ok(Bytes::from(bytes[split_at..].to_vec())),
         ]);
 
-        let events = sse_to_provider_events(stream).collect::<Vec<_>>().await;
+        let events = sse_to_provider_events(stream, "anthropic".into())
+            .collect::<Vec<_>>()
+            .await;
 
         assert!(events.iter().any(|event| matches!(
             event,
@@ -876,12 +890,55 @@ mod tests {
         )));
     }
 
+    /// The documented example of an error inside the stream
+    /// (platform.claude.com/docs/en/build-with-claude/streaming#error-events).
+    #[test]
+    fn overloaded_error_event_is_transient() {
+        let frame = "event: error\ndata: {\"type\": \"error\", \"error\": {\"type\": \"overloaded_error\", \"message\": \"Overloaded\"}}";
+        let mut emitted_start = true;
+        let mut tool_calls = Vec::new();
+        let events = parse_sse_frame(frame, "anthropic", &mut emitted_start, &mut tool_calls);
+        assert!(matches!(
+            events.as_slice(),
+            [Ok(ProviderEvent::ProviderError { failure })]
+                if failure.kind == FailureKind::Transient && failure.message == "Overloaded"
+        ));
+    }
+
+    /// A refusal fails the turn as OpenAI's `content_filter` does: after
+    /// output the event reaches the turn, before it the request fails.
+    #[tokio::test]
+    async fn refusal_stop_reason_is_content_filtered() {
+        let refusal = |explanation: &str| {
+            let frame = format!("event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"refusal\",\"stop_details\":{{\"type\":\"refusal\",\"category\":null,\"explanation\":{explanation}}}}}}}\n\n");
+            Ok(Bytes::from(frame))
+        };
+        let text = "event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello..\"}}\n\n";
+        let stream = futures::stream::iter([Ok(Bytes::from(text)), refusal("\"Declined.\"")]);
+        let events = sse_to_provider_events(stream, "anthropic".into())
+            .collect::<Vec<_>>()
+            .await;
+        assert!(matches!(
+            events.as_slice(),
+            [.., Ok(ProviderEvent::TextDelta { .. }), Ok(ProviderEvent::ProviderError { failure })]
+                if failure.kind == FailureKind::ContentFiltered && failure.message == "Declined."
+        ));
+
+        let stream = futures::stream::iter([refusal("null")]);
+        let opened =
+            until_first_output(Box::pin(sse_to_provider_events(stream, "anthropic".into())));
+        assert!(matches!(
+            opened.await,
+            Err(ProviderError::Failed(failure)) if failure.kind == FailureKind::ContentFiltered
+        ));
+    }
+
     #[test]
     fn parse_thinking_delta_emits_thinking() {
         let frame = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"pondering\"}}";
         let mut emitted_start = true;
         let mut tool_calls = Vec::new();
-        let events = parse_sse_frame(frame, &mut emitted_start, &mut tool_calls);
+        let events = parse_sse_frame(frame, "anthropic", &mut emitted_start, &mut tool_calls);
         assert!(events.iter().any(|e| matches!(
             e,
             Ok(ProviderEvent::ThinkingDelta { text }) if text == "pondering"
@@ -893,7 +950,7 @@ mod tests {
         let frame = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"signature_delta\",\"signature\":\"abc123\"}}";
         let mut emitted_start = true;
         let mut tool_calls = Vec::new();
-        let events = parse_sse_frame(frame, &mut emitted_start, &mut tool_calls);
+        let events = parse_sse_frame(frame, "anthropic", &mut emitted_start, &mut tool_calls);
         assert!(events.iter().any(|e| matches!(
             e,
             Ok(ProviderEvent::ThinkingSignature { signature }) if signature == "abc123"
@@ -908,9 +965,9 @@ mod tests {
         let mut emitted_start = true;
         let mut tool_calls = Vec::new();
         let start = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash_exec\",\"input\":{\"command\":\"ls\"}}}";
-        parse_sse_frame(start, &mut emitted_start, &mut tool_calls);
+        parse_sse_frame(start, "anthropic", &mut emitted_start, &mut tool_calls);
         let stop = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}";
-        let events = parse_sse_frame(stop, &mut emitted_start, &mut tool_calls);
+        let events = parse_sse_frame(stop, "anthropic", &mut emitted_start, &mut tool_calls);
         assert!(events.iter().any(|e| matches!(
             e,
             Ok(ProviderEvent::ToolCallReady { tool_call })
@@ -925,11 +982,11 @@ mod tests {
         let mut emitted_start = true;
         let mut tool_calls = Vec::new();
         let start = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash_exec\",\"input\":{}}}";
-        parse_sse_frame(start, &mut emitted_start, &mut tool_calls);
+        parse_sse_frame(start, "anthropic", &mut emitted_start, &mut tool_calls);
         let delta = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\":\\\"ls\\\"}\"}}";
-        parse_sse_frame(delta, &mut emitted_start, &mut tool_calls);
+        parse_sse_frame(delta, "anthropic", &mut emitted_start, &mut tool_calls);
         let stop = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}";
-        let events = parse_sse_frame(stop, &mut emitted_start, &mut tool_calls);
+        let events = parse_sse_frame(stop, "anthropic", &mut emitted_start, &mut tool_calls);
         assert!(events.iter().any(|e| matches!(
             e,
             Ok(ProviderEvent::ToolCallReady { tool_call })
@@ -945,11 +1002,11 @@ mod tests {
         let mut emitted_start = true;
         let mut tool_calls = Vec::new();
         let start = "event: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"bash_exec\",\"input\":{}}}";
-        parse_sse_frame(start, &mut emitted_start, &mut tool_calls);
+        parse_sse_frame(start, "anthropic", &mut emitted_start, &mut tool_calls);
         let delta = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"command\\\": oops\"}}";
-        parse_sse_frame(delta, &mut emitted_start, &mut tool_calls);
+        parse_sse_frame(delta, "anthropic", &mut emitted_start, &mut tool_calls);
         let stop = "event: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}";
-        let events = parse_sse_frame(stop, &mut emitted_start, &mut tool_calls);
+        let events = parse_sse_frame(stop, "anthropic", &mut emitted_start, &mut tool_calls);
         assert!(events.iter().any(|e| matches!(
             e,
             Ok(ProviderEvent::ToolCallReady { tool_call })
@@ -1014,7 +1071,7 @@ mod tests {
         let mut emitted_start = true;
         let mut tool_calls = Vec::new();
         let frame = "event: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"max_tokens\"},\"usage\":{\"output_tokens\":4096}}\n\n";
-        let events = parse_sse_frame(frame, &mut emitted_start, &mut tool_calls);
+        let events = parse_sse_frame(frame, "anthropic", &mut emitted_start, &mut tool_calls);
         assert!(matches!(
             events.as_slice(),
             [Ok(ProviderEvent::StopReason { reason })] if reason == "max_tokens"
@@ -1023,6 +1080,8 @@ mod tests {
         // A null stop_reason (Anthropic sends one in early message_delta
         // frames) must not emit a bogus empty event.
         let frame = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":null}}\n\n";
-        assert!(parse_sse_frame(frame, &mut emitted_start, &mut tool_calls).is_empty());
+        assert!(
+            parse_sse_frame(frame, "anthropic", &mut emitted_start, &mut tool_calls).is_empty()
+        );
     }
 }

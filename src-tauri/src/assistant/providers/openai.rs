@@ -17,7 +17,7 @@ use crate::assistant::types::{
 };
 
 use super::catalog;
-use super::failure::read_failure;
+use super::failure::{classify_stream_finish, read_failure};
 use super::types::{ProviderAdapter, ProviderError};
 use super::ModelsSource;
 
@@ -151,7 +151,8 @@ impl ProviderAdapter for OpenAiAdapter {
         }
 
         let byte_stream = resp.bytes_stream();
-        let event_stream = sse_to_provider_events(byte_stream);
+        let event_stream =
+            sse_to_provider_events(byte_stream, catalog::error_code_brand(connection));
 
         Ok(Box::pin(event_stream))
     }
@@ -471,16 +472,20 @@ struct SseState {
     buf: Vec<u8>,
     is_first: bool,
     tool_calls: Vec<PartialToolCall>,
+    /// Classifies errors reported inside the stream (`error_code_brand`).
+    brand: String,
 }
 
 fn sse_to_provider_events(
     byte_stream: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+    brand: String,
 ) -> impl Stream<Item = Result<ProviderEvent, ProviderError>> + Send {
     let state = SseState {
         stream: byte_stream.boxed(),
         buf: Vec::new(),
         is_first: true,
         tool_calls: Vec::new(),
+        brand,
     };
 
     futures::stream::unfold(state, |mut state| async move {
@@ -503,7 +508,12 @@ fn sse_to_provider_events(
                     }
                 };
 
-                let events = parse_sse_frame(&frame, &mut state.is_first, &mut state.tool_calls);
+                let events = parse_sse_frame(
+                    &frame,
+                    &state.brand,
+                    &mut state.is_first,
+                    &mut state.tool_calls,
+                );
                 if !events.is_empty() {
                     return Some((events, state));
                 }
@@ -538,6 +548,7 @@ fn sse_to_provider_events(
                         if !text.trim().is_empty() {
                             let events = parse_sse_frame(
                                 text.trim(),
+                                &state.brand,
                                 &mut state.is_first,
                                 &mut state.tool_calls,
                             );
@@ -572,6 +583,7 @@ fn find_sse_frame_delimiter(buf: &[u8]) -> Option<(usize, usize)> {
 )]
 fn parse_sse_frame(
     frame: &str,
+    brand: &str,
     is_first: &mut bool,
     tool_calls_buf: &mut Vec<PartialToolCall>,
 ) -> Vec<Result<ProviderEvent, ProviderError>> {
@@ -686,20 +698,11 @@ fn parse_sse_frame(
 
                 // The terminal chunk may carry its tool-call fragment in
                 // the same delta as the finish reason, so apply the delta
-                // first; then flush accumulated tool calls and surface the
-                // terminal reason (`length` = output budget exhausted) so
-                // consumers can reject truncated output.
-                if let Some(reason) = choice
+                // first.
+                let finish_reason = choice
                     .and_then(|c| c.get("finish_reason"))
-                    .and_then(|r| r.as_str())
-                {
-                    if reason == "tool_calls" {
-                        flush_announced_tool_calls(tool_calls_buf, &mut events);
-                    }
-                    events.push(Ok(ProviderEvent::StopReason {
-                        reason: reason.to_string(),
-                    }));
-                }
+                    .and_then(|r| r.as_str());
+                push_finish(brand, &json, finish_reason, tool_calls_buf, &mut events);
             }
             Err(e) => {
                 tracing::warn!("Failed to parse SSE JSON: {} (data: {})", e, data);
@@ -708,6 +711,31 @@ fn parse_sse_frame(
     }
 
     events
+}
+
+/// A failure the chunk reports, or else its finish reason (`length` = output
+/// budget exhausted) so consumers can reject truncated output, after the
+/// tool calls a `tool_calls` finish announces.
+fn push_finish(
+    brand: &str,
+    chunk: &serde_json::Value,
+    finish_reason: Option<&str>,
+    tool_calls_buf: &mut Vec<PartialToolCall>,
+    events: &mut Vec<Result<ProviderEvent, ProviderError>>,
+) {
+    if let Some(failure) = classify_stream_finish(brand, finish_reason, chunk) {
+        events.push(Ok(ProviderEvent::ProviderError { failure }));
+        return;
+    }
+    let Some(reason) = finish_reason else {
+        return;
+    };
+    if reason == "tool_calls" {
+        flush_announced_tool_calls(tool_calls_buf, events);
+    }
+    events.push(Ok(ProviderEvent::StopReason {
+        reason: reason.to_string(),
+    }));
 }
 
 /// Flush on the terminal `finish_reason:"tool_calls"` frame. When the
@@ -853,7 +881,9 @@ mod tests {
             Ok(Bytes::from(bytes[split_at..].to_vec())),
         ]);
 
-        let events = sse_to_provider_events(stream).collect::<Vec<_>>().await;
+        let events = sse_to_provider_events(stream, "openai".into())
+            .collect::<Vec<_>>()
+            .await;
 
         assert!(matches!(
             events.first(),
@@ -1070,7 +1100,7 @@ mod tests {
         let first = format!(
             "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"{call_id}\",\"type\":\"function\",\"function\":{{\"name\":\"bash_exec\",\"arguments\":\"\"}}}}]}}}}]}}\n\n"
         );
-        let events = parse_sse_frame(&first, &mut is_first, &mut tool_calls);
+        let events = parse_sse_frame(&first, "openai", &mut is_first, &mut tool_calls);
         assert!(events.is_empty());
 
         // 27 fragments with a present-but-empty id, each carrying a slice
@@ -1085,12 +1115,12 @@ mod tests {
                 "data: {{\"choices\":[{{\"delta\":{{\"tool_calls\":[{{\"index\":0,\"id\":\"\",\"function\":{{\"arguments\":\"{}\"}}}}]}}}}]}}\n\n",
                 slice.replace('"', r#"\""#)
             );
-            let events = parse_sse_frame(&frame, &mut is_first, &mut tool_calls);
+            let events = parse_sse_frame(&frame, "openai", &mut is_first, &mut tool_calls);
             assert!(events.is_empty(), "fragments carry no terminal reason");
         }
 
         let terminal = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
-        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        let events = parse_sse_frame(terminal, "openai", &mut is_first, &mut tool_calls);
         assert!(matches!(
             events.as_slice(),
             [
@@ -1113,10 +1143,10 @@ mod tests {
         let mut tool_calls = Vec::new();
         // Fragments that never carried an id: nothing to flush.
         let fragment = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"name\":\"bash_exec\",\"arguments\":\"{}\"}}]}}]}\n\n";
-        assert!(parse_sse_frame(fragment, &mut is_first, &mut tool_calls).is_empty());
+        assert!(parse_sse_frame(fragment, "openai", &mut is_first, &mut tool_calls).is_empty());
 
         let terminal = "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\"}]}\n\n";
-        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        let events = parse_sse_frame(terminal, "openai", &mut is_first, &mut tool_calls);
         assert!(matches!(
             events.as_slice(),
             [
@@ -1135,7 +1165,7 @@ mod tests {
         let mut is_first = false;
         let mut tool_calls = Vec::new();
         let terminal = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"bash_exec","arguments":"{\"cmd\":\"ls\"}"}}]},"finish_reason":"tool_calls"}]}"#;
-        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        let events = parse_sse_frame(terminal, "openai", &mut is_first, &mut tool_calls);
         assert!(matches!(
             events.as_slice(),
             [
@@ -1156,10 +1186,10 @@ mod tests {
         let mut is_first = false;
         let mut tool_calls = Vec::new();
         let head = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_2","function":{"name":"bash_exec","arguments":"{\"cmd\":"}}]}}]}"#;
-        assert!(parse_sse_frame(head, &mut is_first, &mut tool_calls).is_empty());
+        assert!(parse_sse_frame(head, "openai", &mut is_first, &mut tool_calls).is_empty());
 
         let terminal = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"ls\"}"}}]},"finish_reason":"tool_calls"}]}"#;
-        let events = parse_sse_frame(terminal, &mut is_first, &mut tool_calls);
+        let events = parse_sse_frame(terminal, "openai", &mut is_first, &mut tool_calls);
         assert!(matches!(
             events.as_slice(),
             [
@@ -1170,5 +1200,162 @@ mod tests {
                 tool_call.params == serde_json::json!({"cmd": "ls"}) &&
                 reason == "tool_calls"
         ));
+    }
+
+    mod stream_errors {
+        use super::*;
+        use crate::assistant::providers::failure::FailureKind;
+        use crate::assistant::providers::retry::{
+            retry_transient, until_first_output, RetryHooks, RetryStop,
+        };
+        use crate::assistant::providers::types::ProviderStream;
+        use tokio_util::sync::CancellationToken;
+
+        /// OpenRouter's documented mid-stream failure: HTTP 200, then one
+        /// chunk with a top-level `error` and `finish_reason:"error"`
+        /// (openrouter.ai/docs/api-reference/streaming).
+        const ERROR_CHUNK: &str = r#"data: {"id":"cmpl-abc123","object":"chat.completion.chunk","created":1234567890,"model":"openai/gpt-4o","provider":"openai","error":{"code":502,"message":"Provider disconnected unexpectedly"},"choices":[{"index":0,"delta":{"content":""},"finish_reason":"error"}]}"#;
+        const TEXT: &str = r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#;
+        const THINKING: &str = r#"data: {"choices":[{"delta":{"reasoning_content":"Hmm"}}]}"#;
+        const DONE: &str = "data: [DONE]";
+
+        fn finish(reason: &str) -> String {
+            format!(r#"data: {{"choices":[{{"delta":{{}},"finish_reason":"{reason}"}}]}}"#)
+        }
+
+        fn sse(frames: &[String]) -> ProviderStream {
+            let body: String = frames.iter().map(|frame| format!("{frame}\n\n")).collect();
+            let bytes = futures::stream::iter(vec![Ok(Bytes::from(body))]);
+            Box::pin(sse_to_provider_events(bytes, "openrouter".into()))
+        }
+
+        async fn events(frames: &[String]) -> Vec<ProviderEvent> {
+            sse(frames).map(|event| event.unwrap()).collect().await
+        }
+
+        /// Opens the streams in `attempts`, one per request, the way the
+        /// turn and the compaction open theirs. Returns what the caller gets
+        /// and the number of requests.
+        async fn open(attempts: &[&[String]]) -> (Result<Vec<ProviderEvent>, RetryStop>, usize) {
+            let cancel = CancellationToken::new();
+            let hooks = RetryHooks::silent(&cancel);
+            let mut requests = 0;
+            let opened = retry_transient(&hooks, || {
+                let frames = attempts[requests];
+                requests += 1;
+                until_first_output(sse(frames))
+            })
+            .await;
+            let outcome = match opened {
+                Ok(stream) => Ok(stream.map(|event| event.unwrap()).collect().await),
+                Err(stop) => Err(stop),
+            };
+            (outcome, requests)
+        }
+
+        fn s(frames: &[&str]) -> Vec<String> {
+            frames.iter().map(|frame| frame.to_string()).collect()
+        }
+
+        #[tokio::test]
+        async fn error_chunk_becomes_a_classified_provider_error() {
+            assert!(matches!(
+                events(&s(&[ERROR_CHUNK])).await.as_slice(),
+                [
+                    ProviderEvent::MessageStart,
+                    ProviderEvent::ProviderError { failure },
+                ] if failure.kind == FailureKind::Transient
+                    && failure.message == "Provider disconnected unexpectedly"
+            ));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn error_chunk_as_the_first_chunk_is_retried() {
+            let (outcome, requests) = open(&[&s(&[ERROR_CHUNK]), &s(&[TEXT, DONE])]).await;
+            assert_eq!(requests, 2);
+            let events = outcome.unwrap();
+            assert!(events.iter().any(
+                |event| matches!(event, ProviderEvent::TextDelta { text } if text == "Hello")
+            ));
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, ProviderEvent::ProviderError { .. })));
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn error_chunk_after_output_is_not_retried() {
+            for output in [TEXT, THINKING] {
+                let (outcome, requests) = open(&[&s(&[output, ERROR_CHUNK])]).await;
+                assert_eq!(requests, 1, "{output}");
+                assert!(
+                    matches!(
+                        outcome.unwrap().as_slice(),
+                        [
+                            ProviderEvent::MessageStart,
+                            ProviderEvent::TextDelta { .. } | ProviderEvent::ThinkingDelta { .. },
+                            ProviderEvent::ProviderError { failure },
+                        ] if failure.kind == FailureKind::Transient
+                    ),
+                    "{output}"
+                );
+            }
+        }
+
+        #[tokio::test(start_paused = true)]
+        async fn filtered_finish_reasons_are_content_filtered_and_not_retried() {
+            for reason in ["sensitive", "content_filter"] {
+                let after_text = events(&[TEXT.into(), finish(reason)]).await;
+                assert!(
+                    matches!(
+                        after_text.as_slice(),
+                        [
+                            ProviderEvent::MessageStart,
+                            ProviderEvent::TextDelta { .. },
+                            ProviderEvent::ProviderError { failure },
+                        ] if failure.kind == FailureKind::ContentFiltered
+                    ),
+                    "{reason}: {after_text:?}"
+                );
+                let (outcome, requests) = open(&[&[finish(reason)]]).await;
+                assert_eq!(requests, 1, "{reason}");
+                assert!(
+                    matches!(
+                        outcome,
+                        Err(RetryStop::Failed(ref error))
+                            if error.kind() == Some(FailureKind::ContentFiltered)
+                    ),
+                    "{reason}"
+                );
+            }
+        }
+
+        /// The turn compacts once when the opening fails with
+        /// `is_context_limit`; a context-window finish before any output
+        /// now fails the opening.
+        #[tokio::test(start_paused = true)]
+        async fn context_window_finish_before_output_goes_to_compaction() {
+            let (outcome, requests) = open(&[&[finish("model_context_window_exceeded")]]).await;
+            assert_eq!(requests, 1);
+            let Err(RetryStop::Failed(error)) = outcome else {
+                panic!("expected a failed opening, got {outcome:?}");
+            };
+            assert!(error.is_context_limit());
+        }
+
+        /// A stream with no output is read to its end before it is handed
+        /// over; the caller must still be able to poll it.
+        #[tokio::test]
+        async fn a_stream_without_output_is_replayed_whole() {
+            let (outcome, requests) = open(&[&[finish("stop"), DONE.into()]]).await;
+            assert_eq!(requests, 1);
+            assert!(matches!(
+                outcome.unwrap().as_slice(),
+                [
+                    ProviderEvent::MessageStart,
+                    ProviderEvent::StopReason { .. },
+                    ProviderEvent::MessageComplete,
+                ]
+            ));
+        }
     }
 }

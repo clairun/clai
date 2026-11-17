@@ -5,10 +5,12 @@
 use std::future::Future;
 use std::time::Duration;
 
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use super::failure::FailureKind;
-use super::types::ProviderError;
+use super::types::{ProviderError, ProviderStream};
+use crate::assistant::types::ProviderEvent;
 
 const BACKOFF: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(8)];
 /// The initial attempt plus one retry per backoff step.
@@ -105,6 +107,39 @@ fn retry_delay(backoff: Duration, error: ProviderError) -> Result<Duration, Prov
     }
 }
 
+/// Reads an opened `stream` up to its first output, and returns the stream
+/// with the events read put back in front. An error the provider reports
+/// before that output fails the request as an HTTP error would, so
+/// [`retry_transient`] and the context-limit recovery act on its kind;
+/// nothing was shown yet, so a retry repeats nothing.
+pub async fn until_first_output(stream: ProviderStream) -> Result<ProviderStream, ProviderError> {
+    let mut stream = stream.fuse();
+    let mut read = Vec::new();
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(ProviderEvent::ProviderError { failure }) => {
+                return Err(ProviderError::Failed(failure));
+            }
+            Ok(event) if !is_output(&event) => read.push(Ok(event)),
+            item => {
+                read.push(item);
+                break;
+            }
+        }
+    }
+    Ok(Box::pin(futures::stream::iter(read).chain(stream)))
+}
+
+/// Events the turn shows or keeps: text, thinking and tool calls.
+fn is_output(event: &ProviderEvent) -> bool {
+    matches!(
+        event,
+        ProviderEvent::TextDelta { .. }
+            | ProviderEvent::ThinkingDelta { .. }
+            | ProviderEvent::ToolCallReady { .. }
+    )
+}
+
 /// `5400 s` as "1 h 30 min".
 fn human_duration(duration: Duration) -> String {
     let secs = duration.as_secs();
@@ -131,7 +166,7 @@ mod tests {
     fn failure(kind: FailureKind, retry_after: Option<u64>) -> ProviderError {
         ProviderError::Failed(ProviderFailure {
             kind,
-            status: 503,
+            status: Some(503),
             provider_code: None,
             message: "overloaded".into(),
             retry_after: retry_after.map(Duration::from_secs),
@@ -205,6 +240,56 @@ mod tests {
             Err(RetryStop::Failed(ProviderError::Failed(failure))) => failure.message,
             other => panic!("expected a provider failure, got {other:?}"),
         }
+    }
+
+    /// Text, thinking and a ready tool call each end the read: an error
+    /// after them reaches the caller as an event. Anything else is read past.
+    #[tokio::test]
+    async fn until_first_output_stops_at_text_thinking_or_a_tool_call() {
+        use crate::assistant::types::ToolInvocationDraft;
+        let error = || ProviderEvent::ProviderError {
+            failure: ProviderFailure::in_stream(FailureKind::Transient, "overloaded".into()),
+        };
+        let outputs = [
+            ProviderEvent::TextDelta { text: "a".into() },
+            ProviderEvent::ThinkingDelta { text: "b".into() },
+            ProviderEvent::ToolCallReady {
+                tool_call: ToolInvocationDraft {
+                    tool_call_id: "call-1".into(),
+                    tool_name: "t".into(),
+                    params: serde_json::json!({}),
+                },
+            },
+        ];
+        for output in outputs {
+            let label = format!("{output:?}");
+            let stream: ProviderStream = Box::pin(futures::stream::iter(
+                [ProviderEvent::MessageStart, output, error()].map(Ok),
+            ));
+            let replayed: Vec<_> = until_first_output(stream)
+                .await
+                .unwrap_or_else(|error| panic!("{label}: {error}"))
+                .collect()
+                .await;
+            assert_eq!(replayed.len(), 3, "{label}");
+        }
+
+        let silent: ProviderStream = Box::pin(futures::stream::iter(
+            [
+                ProviderEvent::MessageStart,
+                ProviderEvent::ToolCallDelta {
+                    tool_call_id: "call-1".into(),
+                    partial: serde_json::json!({}),
+                },
+                error(),
+            ]
+            .map(Ok),
+        ));
+        let failed = until_first_output(silent).await.err();
+        assert_eq!(
+            failed.and_then(|error| error.kind()),
+            Some(FailureKind::Transient)
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -288,7 +373,7 @@ mod tests {
         let message = |text: &str, secs: u64| {
             let error = ProviderError::Failed(ProviderFailure {
                 kind: FailureKind::Transient,
-                status: 429,
+                status: Some(429),
                 provider_code: None,
                 message: text.into(),
                 retry_after: Some(Duration::from_secs(secs)),

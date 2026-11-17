@@ -4,7 +4,8 @@
 //! [`ProviderFailure`] whose [`FailureKind`] names the one thing the user, or
 //! CLAI, can do about it. A brand that reuses one status for several meanings
 //! (Z.ai sends 429 for throttling, overload and an exhausted plan) is told
-//! apart by its `error.code`, listed in [`error_codes`].
+//! apart by its `error.code`, listed in [`error_codes`]. An error reported
+//! inside a stream that opened with HTTP 200 goes through the same rules.
 
 use std::fmt;
 use std::time::Duration;
@@ -63,17 +64,19 @@ impl FailureKind {
                 Some("The provider is busy or temporarily unavailable; try again shortly.")
             }
             Self::ContextTooLong => Some("The request is too long for the model's context window."),
-            Self::ContentFiltered => Some("The provider's content filter blocked the request."),
+            Self::ContentFiltered => Some("The provider's content filter stopped the response."),
             Self::Other => None,
         }
     }
 }
 
-/// A provider's non-success HTTP response, classified.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// A provider's non-success HTTP response, or an error it reported inside
+/// a stream, classified.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderFailure {
     pub kind: FailureKind,
-    pub status: u16,
+    /// `None` for an error reported inside a stream that names no status.
+    pub status: Option<u16>,
     /// The brand's own `error.code`, such as Z.ai's `"1310"`.
     pub provider_code: Option<String>,
     /// The provider's own message, or the whole body when it has none.
@@ -81,15 +84,31 @@ pub struct ProviderFailure {
     pub retry_after: Option<Duration>,
 }
 
+impl ProviderFailure {
+    /// An error the provider reported inside a stream, classified as `kind`.
+    pub fn in_stream(kind: FailureKind, message: String) -> Self {
+        Self {
+            kind,
+            status: None,
+            provider_code: None,
+            message,
+            retry_after: None,
+        }
+    }
+}
+
 impl fmt::Display for ProviderFailure {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status = self.status;
         let message = &self.message;
-        match (self.kind.lead(), message.is_empty()) {
-            (Some(lead), false) => write!(f, "HTTP {status}: {lead} {message}"),
-            (Some(lead), true) => write!(f, "HTTP {status}: {lead}"),
-            (None, false) => write!(f, "HTTP {status}: {message}"),
-            (None, true) => write!(f, "HTTP {status}"),
+        let text = match (self.kind.lead(), message.is_empty()) {
+            (Some(lead), false) => format!("{lead} {message}"),
+            (Some(lead), true) => lead.to_string(),
+            (None, _) => message.clone(),
+        };
+        match (self.status, text.is_empty()) {
+            (Some(status), true) => write!(f, "HTTP {status}"),
+            (Some(status), false) => write!(f, "HTTP {status}: {text}"),
+            (None, _) => f.write_str(&text),
         }
     }
 }
@@ -127,18 +146,109 @@ pub fn classify_http(
     let (provider_code, message) = parse_error_body(body);
     let kind = classify(
         brand,
-        status,
+        Some(status),
         retry_after.is_some(),
         provider_code.as_deref(),
         &message,
     );
     ProviderFailure {
         kind,
-        status,
+        status: Some(status),
         provider_code,
         message,
         retry_after,
     }
+}
+
+/// An error event inside a stream: `envelope` holds `error` as an HTTP error
+/// body would (OpenRouter's chunk, Anthropic's `error` event). The stream
+/// opened with HTTP 200, so a status the error names only helps classify it.
+pub fn classify_stream_error(brand: &str, envelope: &Value) -> ProviderFailure {
+    tracing::warn!(brand, %envelope, "Provider reported an error inside the stream");
+    let (provider_code, message) = error_fields(envelope);
+    let message = message
+        .filter(|message| !message.is_empty())
+        .unwrap_or("The provider ended the response with an error.")
+        .to_string();
+    let status = stream_error_status(&envelope["error"]);
+    let kind = classify(brand, status, false, provider_code.as_deref(), &message);
+    ProviderFailure {
+        provider_code,
+        ..ProviderFailure::in_stream(kind, message)
+    }
+}
+
+/// The failure an OpenAI-protocol stream `chunk` reports, if any: a
+/// top-level `error`, or a `finish_reason` that names a failure. A normal
+/// finish such as `stop`, `length` or `tool_calls` is `None`.
+pub fn classify_stream_finish(
+    brand: &str,
+    finish_reason: Option<&str>,
+    chunk: &Value,
+) -> Option<ProviderFailure> {
+    // OpenRouter ends a failed stream with `error` next to
+    // `finish_reason:"error"` (openrouter.ai/docs/api-reference/streaming).
+    if !chunk["error"].is_null() || finish_reason == Some("error") {
+        return Some(classify_stream_error(brand, chunk));
+    }
+    let reason = finish_reason?;
+    // `sensitive`, `network_error` and `model_context_window_exceeded` are
+    // Z.ai's (docs.z.ai/api-reference/llm/chat-completion); `content_filter`
+    // is OpenAI's (github.com/openai/openai-openapi, `finish_reason`).
+    let kind = match reason {
+        "sensitive" | "content_filter" => FailureKind::ContentFiltered,
+        "network_error" => FailureKind::Transient,
+        "model_context_window_exceeded" => FailureKind::ContextTooLong,
+        _ => return None,
+    };
+    Some(ProviderFailure::in_stream(
+        kind,
+        format!("Finish reason: {reason}."),
+    ))
+}
+
+/// Anthropic's `stop_reason:"refusal"`: its streaming classifiers stopped the
+/// response, and `delta.stop_details.explanation` may say why
+/// (platform.claude.com/docs/en/test-and-evaluate/strengthen-guardrails/handle-streaming-refusals).
+pub fn anthropic_refusal(delta: &Value) -> ProviderFailure {
+    let explanation = delta["stop_details"]["explanation"]
+        .as_str()
+        .filter(|explanation| !explanation.is_empty());
+    ProviderFailure::in_stream(
+        FailureKind::ContentFiltered,
+        explanation.unwrap_or("Stop reason: refusal.").to_string(),
+    )
+}
+
+/// OpenRouter's numeric `code` mirrors the HTTP status; Anthropic names only
+/// the `type`.
+fn stream_error_status(error: &Value) -> Option<u16> {
+    let status = error["code"]
+        .as_u64()
+        .and_then(|code| u16::try_from(code).ok())
+        .filter(|code| (100..600).contains(code));
+    status.or_else(|| error["type"].as_str().and_then(error_type_status))
+}
+
+/// The status of each error `type` Anthropic documents
+/// (https://platform.claude.com/docs/en/api/errors). Not gated on brand, so
+/// another brand's Anthropic-protocol endpoint is read the same way.
+fn error_type_status(error_type: &str) -> Option<u16> {
+    let status = match error_type {
+        "invalid_request_error" => 400,
+        "authentication_error" => 401,
+        "billing_error" => 402,
+        "permission_error" => 403,
+        "not_found_error" => 404,
+        "conflict_error" => 409,
+        "request_too_large" => 413,
+        "rate_limit_error" => 429,
+        "api_error" => 500,
+        "timeout_error" => 504,
+        "overloaded_error" => 529,
+        _ => return None,
+    };
+    Some(status)
 }
 
 // Matched as substrings, so each phrase must not occur inside an unrelated
@@ -155,16 +265,16 @@ const QUOTA_PHRASES: &[&str] = &[
     "monthly limit",
 ];
 
-/// First match wins.
+/// First match wins. `status` is `None` for a stream error that names none.
 fn classify(
     brand: &str,
-    status: u16,
+    status: Option<u16>,
     has_retry_after: bool,
     code: Option<&str>,
     message: &str,
 ) -> FailureKind {
     // 1. A 429 that says when to come back is throttling, whatever its text.
-    if status == 429 && has_retry_after {
+    if status == Some(429) && has_retry_after {
         return FailureKind::Transient;
     }
     // 2. The brand's own code.
@@ -173,15 +283,15 @@ fn classify(
     }
     // 3. Statuses with a single meaning. 529 is Anthropic's overload.
     match status {
-        401 => return FailureKind::Auth,
-        402 => return FailureKind::Billing,
-        408 | 500..=599 => return FailureKind::Transient,
-        413 => return FailureKind::ContextTooLong,
+        Some(401) => return FailureKind::Auth,
+        Some(402) => return FailureKind::Billing,
+        Some(408 | 500..=599) => return FailureKind::Transient,
+        Some(413) => return FailureKind::ContextTooLong,
         _ => {}
     }
     // 4. Brands also report spend and plan limits as 400, 403 or 429, so the
     //    text decides. Neither list holds "rate limit": that is throttling.
-    if (400..500).contains(&status) {
+    if status.is_none_or(|status| (400..500).contains(&status)) {
         let lower = message.to_ascii_lowercase();
         let mentions = |phrases: &[&str]| phrases.iter().any(|phrase| lower.contains(phrase));
         if mentions(BILLING_PHRASES) {
@@ -193,8 +303,8 @@ fn classify(
     }
     // 5. What is left.
     match status {
-        429 => FailureKind::Transient,
-        403 => FailureKind::Auth,
+        Some(429) => FailureKind::Transient,
+        Some(403) => FailureKind::Auth,
         _ if is_context_limit_error(message) => FailureKind::ContextTooLong,
         _ => FailureKind::Other,
     }
@@ -247,6 +357,11 @@ fn parse_error_body(body: &str) -> (Option<String>, String) {
     let Ok(json) = serde_json::from_str::<Value>(body) else {
         return (None, body.to_string());
     };
+    let (code, message) = error_fields(&json);
+    (code, message.unwrap_or(body).to_string())
+}
+
+fn error_fields(json: &Value) -> (Option<String>, Option<&str>) {
     let error = &json["error"];
     let code = match &error["code"] {
         Value::String(code) => Some(code.clone()),
@@ -256,9 +371,8 @@ fn parse_error_body(body: &str) -> (Option<String>, String) {
     let message = error["message"]
         .as_str()
         .or_else(|| error.as_str())
-        .or_else(|| json["message"].as_str())
-        .unwrap_or(body);
-    (code, message.to_string())
+        .or_else(|| json["message"].as_str());
+    (code, message)
 }
 
 #[cfg(test)]
@@ -335,8 +449,105 @@ mod tests {
             assert_eq!(failure.kind, kind, "{row}");
             assert_eq!(failure.provider_code.as_deref(), code, "{row}");
             assert_eq!(failure.retry_after, retry_after, "{row}");
-            assert_eq!(failure.status, status, "{row}");
+            assert_eq!(failure.status, Some(status), "{row}");
         }
+    }
+
+    #[test]
+    fn classify_stream_finish_cases() {
+        let openrouter = |code: Value, message: &str| {
+            serde_json::json!({
+                "error": { "code": code, "message": message },
+                "choices": [{ "index": 0, "delta": { "content": "" }, "finish_reason": "error" }],
+            })
+        };
+        let finish = |reason: &str| serde_json::json!({ "choices": [{ "delta": {}, "finish_reason": reason }] });
+        #[rustfmt::skip]
+        let cases = vec![
+            // A top-level error: OpenRouter's numeric code is the HTTP status.
+            ("openrouter", openrouter(502.into(), "Provider disconnected unexpectedly"), Some(Transient)),
+            ("openrouter", openrouter(429.into(), "Rate limit exceeded"), Some(Transient)),
+            ("openrouter", openrouter(402.into(), "Insufficient credits"), Some(Billing)),
+            ("openrouter", openrouter(403.into(), "Key limit exceeded (monthly limit)"), Some(UsageLimit)),
+            // No status: the brand's code, then the text decides.
+            ("zai", openrouter("1305".into(), "The service may be temporarily overloaded"), Some(Transient)),
+            ("custom-openai", openrouter("server_error".into(), "weekly quota reached"), Some(UsageLimit)),
+            ("custom-openai", openrouter("server_error".into(), "Provider disconnected unexpectedly"), Some(Other)),
+            ("custom-openai", finish("error"), Some(Other)),
+            // A finish_reason that names a failure.
+            ("zai", finish("sensitive"), Some(ContentFiltered)),
+            ("openai", finish("content_filter"), Some(ContentFiltered)),
+            ("zai", finish("network_error"), Some(Transient)),
+            ("zai", finish("model_context_window_exceeded"), Some(ContextTooLong)),
+            // A normal finish, including an explicit `"error": null`.
+            ("openai", finish("stop"), None),
+            ("openai", finish("length"), None),
+            ("openai", finish("tool_calls"), None),
+            ("openai", serde_json::json!({ "error": null, "choices": [{ "finish_reason": "stop" }] }), None),
+            ("openai", serde_json::json!({ "choices": [{ "delta": { "content": "hi" } }] }), None),
+        ];
+        for (brand, chunk, kind) in cases {
+            let reason = chunk["choices"][0]["finish_reason"].as_str();
+            let failure = classify_stream_finish(brand, reason, &chunk);
+            assert_eq!(failure.map(|f| f.kind), kind, "{brand} {chunk}");
+        }
+    }
+
+    #[test]
+    fn anthropic_stream_errors_are_classified_by_their_documented_type() {
+        #[rustfmt::skip]
+        let cases = [
+            ("overloaded_error", "Overloaded", Transient),
+            ("api_error", "Internal server error", Transient),
+            ("rate_limit_error", "Number of request tokens has exceeded your per-minute rate limit", Transient),
+            ("invalid_request_error", "prompt is too long: 210000 tokens > 200000 maximum", ContextTooLong),
+            ("future_error", "Something new", Other),
+        ];
+        for (error_type, message, kind) in cases {
+            let event: Value = serde_json::from_str(&anthropic(error_type, message)).unwrap();
+            let failure = classify_stream_error("anthropic", &event);
+            assert_eq!(failure.kind, kind, "{error_type}");
+            assert_eq!(failure.message, message);
+        }
+    }
+
+    /// The stream opened with HTTP 200, so the banner names no status, and an
+    /// error without a message reads as a sentence rather than raw JSON.
+    #[test]
+    fn a_stream_failure_names_no_http_status() {
+        let chunk =
+            serde_json::json!({ "error": { "code": 502, "message": "Provider disconnected" } });
+        assert_eq!(
+            classify_stream_error("openrouter", &chunk).to_string(),
+            "The provider is busy or temporarily unavailable; try again shortly. Provider disconnected"
+        );
+        let bare = serde_json::json!({ "choices": [{ "delta": {}, "finish_reason": "error" }] });
+        assert_eq!(
+            classify_stream_finish("openai", Some("error"), &bare)
+                .unwrap()
+                .to_string(),
+            "The provider ended the response with an error."
+        );
+    }
+
+    #[test]
+    fn anthropic_refusal_keeps_the_explanation_when_there_is_one() {
+        let explained = serde_json::json!({
+            "stop_reason": "refusal",
+            "stop_details": { "type": "refusal", "category": "cyber", "explanation": "Declined: cyber harm." },
+        });
+        let unexplained = serde_json::json!({
+            "stop_reason": "refusal",
+            "stop_details": { "type": "refusal", "category": null, "explanation": null },
+        });
+        assert_eq!(
+            anthropic_refusal(&explained).to_string(),
+            "The provider's content filter stopped the response. Declined: cyber harm."
+        );
+        assert_eq!(
+            anthropic_refusal(&unexplained).to_string(),
+            "The provider's content filter stopped the response. Stop reason: refusal."
+        );
     }
 
     #[test]

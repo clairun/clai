@@ -3,7 +3,7 @@ use crate::assistant::{
     conversation::{is_compaction_summary_message, RunConversation},
     providers::types::is_context_limit_error,
 };
-use futures::StreamExt;
+use futures::{StreamExt, TryFutureExt};
 use std::sync::Arc;
 use tauri::Manager;
 
@@ -11,8 +11,11 @@ use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput
 use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::network::run_state::RunNetwork;
 use crate::assistant::providers;
-use crate::assistant::providers::retry::{retry_transient, RetryHooks, RetryStop, MAX_ATTEMPTS};
-use crate::assistant::providers::types::{ProviderAdapter, ProviderError};
+use crate::assistant::providers::failure::{FailureKind, ProviderFailure};
+use crate::assistant::providers::retry::{
+    retry_transient, until_first_output, RetryHooks, RetryStop, MAX_ATTEMPTS,
+};
+use crate::assistant::providers::types::{ProviderAdapter, ProviderError, ProviderStream};
 use crate::assistant::repository;
 use crate::assistant::repository::CreateMessageParams;
 use crate::assistant::run_context::RunContext;
@@ -78,7 +81,9 @@ pub async fn run_session_turn(
 
         let retry = run_retry_hooks(deps, &session, &run_id, &input.cancel_token);
         let stream_result = retry_transient(&retry, || {
-            adapter.stream_completion(&connection, request.clone())
+            adapter
+                .stream_completion(&connection, request.clone())
+                .and_then(until_first_output)
         })
         .await;
 
@@ -136,14 +141,15 @@ pub async fn run_session_turn(
                 cancel_run(deps, &session, &run_id).await?;
                 return Ok(());
             }
-            StreamExit::ProviderReported { message } => {
+            StreamExit::ProviderReported(failure) => {
                 fail_terminal_api_stream(
                     deps,
                     &session,
                     &run_id,
                     &state,
                     (&assistant_message.id, produced_no_content),
-                    &message,
+                    &failure.to_string(),
+                    Some(failure.kind),
                 )
                 .await?;
                 return Ok(());
@@ -156,6 +162,7 @@ pub async fn run_session_turn(
                     &state,
                     (&assistant_message.id, produced_no_content),
                     &message,
+                    None,
                 )
                 .await?;
                 return Err(AssistantEngineError::Provider(
@@ -265,10 +272,11 @@ async fn fail_terminal_api_stream(
     state: &ApiTurnState,
     assistant_message: (&str, bool),
     provider_message: &str,
+    kind: Option<FailureKind>,
 ) -> Result<String, AssistantEngineError> {
     let message =
         failure_message_with_compaction_context(provider_message, &state.compaction_attempt);
-    fail_run(deps, session, run_id, &message, None).await?;
+    fail_run(deps, session, run_id, &message, kind).await?;
     if state.iteration == 0 && assistant_message.1 {
         discard_unanswered_run_input(deps, session, run_id, Some(assistant_message.0)).await;
     }
@@ -719,9 +727,6 @@ async fn execute_api_tool_calls(
     Ok(ToolLoopOutcome::Continue)
 }
 
-type ProviderStream =
-    std::pin::Pin<Box<dyn futures::Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>;
-
 async fn consume_api_stream(
     stream: ProviderStream,
     cancel: &tokio_util::sync::CancellationToken,
@@ -800,8 +805,8 @@ async fn consume_api_stream_with_sink(
                     // so we also capture in-memory state (text + tool_calls)
                     // when the provider hangs up before sending [DONE].
                 }
-                ProviderEvent::ProviderError { message } => {
-                    break StreamExit::ProviderReported { message };
+                ProviderEvent::ProviderError { failure } => {
+                    break StreamExit::ProviderReported(failure);
                 }
             },
             Some(Err(e)) => {
@@ -1033,9 +1038,10 @@ mod tests {
     #[test]
     fn failed_turn_with_streamed_content_is_still_persisted() {
         assert!(exit_keeps_streamed_message(
-            &StreamExit::ProviderReported {
-                message: "overloaded".to_string(),
-            },
+            &StreamExit::ProviderReported(ProviderFailure::in_stream(
+                FailureKind::Transient,
+                "overloaded".to_string(),
+            )),
             false
         ));
         assert!(exit_keeps_streamed_message(
@@ -1053,9 +1059,10 @@ mod tests {
     fn contentless_cancel_or_failure_does_not_finalize_the_placeholder() {
         for exit in [
             StreamExit::Cancelled,
-            StreamExit::ProviderReported {
-                message: "boom".to_string(),
-            },
+            StreamExit::ProviderReported(ProviderFailure::in_stream(
+                FailureKind::Other,
+                "boom".to_string(),
+            )),
             StreamExit::StreamFailed {
                 message: "boom".to_string(),
             },
@@ -2434,8 +2441,9 @@ enum StreamExit {
     Completed,
     /// The user pressed Stop.
     Cancelled,
-    /// The provider reported an error inside the stream (`ProviderError`).
-    ProviderReported { message: String },
+    /// The provider reported an error inside the stream after output; one
+    /// before output fails the request in `until_first_output`.
+    ProviderReported(ProviderFailure),
     /// The stream itself yielded a transport error.
     StreamFailed { message: String },
 }
@@ -2460,7 +2468,7 @@ fn exit_keeps_streamed_message(exit: &StreamExit, produced_no_content: bool) -> 
     match exit {
         StreamExit::Completed => true,
         StreamExit::Cancelled
-        | StreamExit::ProviderReported { .. }
+        | StreamExit::ProviderReported(_)
         | StreamExit::StreamFailed { .. } => !produced_no_content,
     }
 }

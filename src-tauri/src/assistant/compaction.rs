@@ -1,11 +1,13 @@
-use futures::StreamExt;
+use futures::{StreamExt, TryFutureExt};
 use std::future::Future;
 use std::ops::Range;
 use std::path::Path;
 
 use crate::assistant::conversation::{tool_groups, RunConversation};
 use crate::assistant::providers;
-use crate::assistant::providers::retry::{retry_transient, RetryHooks, RetryStop};
+use crate::assistant::providers::retry::{
+    retry_transient, until_first_output, RetryHooks, RetryStop,
+};
 use crate::assistant::providers::types::ProviderError;
 use crate::assistant::token_estimate::{json_string, text_tokens, tool_tokens};
 use crate::assistant::types::{
@@ -387,7 +389,9 @@ async fn summarize_window(
     };
 
     let mut stream = retry_transient(retry, || {
-        adapter.stream_sessionless_completion(connection, request.clone(), summary_working_dir)
+        adapter
+            .stream_sessionless_completion(connection, request.clone(), summary_working_dir)
+            .and_then(until_first_output)
     })
     .await
     .map_err(|stop| match stop {
@@ -400,7 +404,7 @@ async fn summarize_window(
         match event.map_err(provider_error_message)? {
             ProviderEvent::TextDelta { text } => summary.push_str(&text),
             ProviderEvent::StopReason { reason } => stop_reason = Some(reason),
-            ProviderEvent::ProviderError { message } => return Err(message),
+            ProviderEvent::ProviderError { failure } => return Err(failure.to_string()),
             ProviderEvent::MessageStart
             | ProviderEvent::ThinkingDelta { .. }
             | ProviderEvent::ThinkingSignature { .. }
