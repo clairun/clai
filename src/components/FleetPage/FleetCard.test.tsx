@@ -6,9 +6,11 @@ import FleetCard from './FleetCard';
 
 const live: FleetLive = { runs: {}, tasks: {} };
 const base = emptyCard('ws-1', 'Project');
-const run = (status: AssistantRun['status'], error: string | null = null): AssistantRun => ({
+const run = (
+  status: AssistantRun['status'], error: string | null = null, errorKind?: AssistantRun['errorKind'],
+): AssistantRun => ({
   id: 'r1', sessionId: 'main', status, trigger: 'user_message', connectionId: 'c',
-  protocolId: 'p', modelId: 'm', startedAt: 1n, completedAt: 2n, error,
+  protocolId: 'p', modelId: 'm', startedAt: 1n, completedAt: 2n, error, errorKind,
 });
 const renderCard = (lastMainRun: AssistantRun | null) => render(
   <FleetCard card={{ ...base, lastMainRun }} feed={null} shouts={new Set()} live={live}
@@ -16,16 +18,33 @@ const renderCard = (lastMainRun: AssistantRun | null) => render(
 );
 
 describe('Fleet card run failure', () => {
-  it('shows the usage-limit detail as an alert', () => {
-    renderCard(run('failed', 'Usage limit reached. Try again tomorrow.'));
-    expect(screen.getByRole('alert')).toHaveTextContent('Usage limit reached. Try again tomorrow.');
-    expect(screen.getByRole('alert')).toHaveAttribute('data-limit');
+  it('shows a usage limit as a wait, with what to do', () => {
+    renderCard(run('failed', 'Usage limit reached. Your limit will reset at 14:00', 'usage_limit'));
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Usage limit reached. Your limit will reset at 14:00');
+    expect(alert).toHaveTextContent('Wait for it to reset');
+    expect(alert).toHaveTextContent('⏳');
+    expect(alert).toHaveAttribute('data-kind', 'usage_limit');
+  });
+
+  it('shows the action for other kinds without the usage-limit wait', () => {
+    renderCard(run('failed', 'The provider rejected the API key.', 'auth'));
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('Update the key in Settings → AI Provider.');
+    expect(alert).not.toHaveTextContent('⏳');
+  });
+
+  it('marks a failure by its kind, not by limit words in its text', () => {
+    renderCard(run('failed', 'Rate limit reached for requests', 'transient'));
+    expect(screen.getByRole('alert')).toHaveAttribute('data-kind', 'transient');
+    expect(screen.getByRole('alert')).not.toHaveTextContent('⏳');
   });
 
   it('shows other failures and clears after success or warnings', () => {
     const view = renderCard(run('failed', 'Provider unavailable'));
     expect(screen.getByRole('alert')).toHaveTextContent('Provider unavailable');
-    expect(screen.getByRole('alert')).not.toHaveAttribute('data-limit');
+    expect(screen.getByRole('alert')).not.toHaveAttribute('data-kind');
+    expect(screen.getByRole('alert')).toHaveTextContent(/^⚠Provider unavailable$/);
     view.rerender(<FleetCard card={{ ...base, lastMainRun: run('completed') }} feed={null} shouts={new Set()} live={live}
       faces={{}} now={3} loud={null} onSelect={() => {}} onOpen={() => {}} onOpenWindow={() => {}} onDismiss={() => {}} />);
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
