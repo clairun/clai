@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::assistant::providers::failure::FailureKind;
+use crate::assistant::providers::failure::{FailureKind, ProviderFailure};
 use crate::assistant::workspace_tasks_repo::TaskStatus;
 use crate::config::workspace_config::AgentAvatarRef;
 
@@ -561,8 +561,10 @@ pub enum ProviderEvent {
         reason: String,
     },
     MessageComplete,
+    /// An error the provider reported inside the stream, classified by the
+    /// adapter that parsed it.
     ProviderError {
-        message: String,
+        failure: ProviderFailure,
     },
 }
 

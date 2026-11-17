@@ -616,7 +616,8 @@ async fn test_api_provider_connection(
                         got_response = true;
                         break;
                     }
-                    Ok(ProviderEvent::ProviderError { message }) => {
+                    Ok(ProviderEvent::ProviderError { failure }) => {
+                        let message = failure.to_string();
                         tracing::error!(
                             connection_id = %connection.id,
                             error = %message,

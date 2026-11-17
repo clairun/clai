@@ -12,6 +12,8 @@ use crate::assistant::types::{
     CompletionRequest, ModelInfo, ProtocolFamily, ProviderConnection, ProviderEvent,
 };
 
+pub type ProviderStream = Pin<Box<dyn Stream<Item = Result<ProviderEvent, ProviderError>> + Send>>;
+
 pub fn is_context_limit_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     [

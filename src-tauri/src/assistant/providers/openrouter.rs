@@ -138,7 +138,7 @@ mod tests {
         assert!(matches!(
             validate_openrouter_key_at(&url, "invalid-key").await,
             Err(ProviderError::Failed(failure))
-                if failure.status == 401 && failure.kind == FailureKind::Auth
+                if failure.status == Some(401) && failure.kind == FailureKind::Auth
         ));
     }
 }
