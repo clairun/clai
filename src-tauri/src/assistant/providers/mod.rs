@@ -5,6 +5,7 @@ pub mod failure;
 pub mod openai;
 pub mod openrouter;
 pub mod registry;
+pub mod retry;
 pub mod types;
 
 use crate::assistant::types::{ModelInfo, ProviderConnection};

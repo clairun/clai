@@ -11,6 +11,7 @@ use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput
 use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::network::run_state::RunNetwork;
 use crate::assistant::providers;
+use crate::assistant::providers::retry::{retry_transient, RetryHooks, RetryStop, MAX_ATTEMPTS};
 use crate::assistant::providers::types::{ProviderAdapter, ProviderError};
 use crate::assistant::repository;
 use crate::assistant::repository::CreateMessageParams;
@@ -75,17 +76,33 @@ pub async fn run_session_turn(
         )
         .await?;
 
-        // Call the provider
-        let stream_result = adapter.stream_completion(&connection, request).await;
+        let retry = run_retry_hooks(deps, &session, &run_id, &input.cancel_token);
+        let stream_result = retry_transient(&retry, || {
+            adapter.stream_completion(&connection, request.clone())
+        })
+        .await;
 
         let stream = match stream_result {
             Ok(s) => s,
-            Err(e) => {
+            Err(RetryStop::Cancelled) => {
+                cancel_run(deps, &session, &run_id).await?;
+                return Ok(());
+            }
+            Err(RetryStop::Failed(e)) => {
                 if !state.retried_after_context_compaction && e.is_context_limit() {
                     state.retried_after_context_compaction = true;
-                    if try_context_limit_recovery(deps, &session, &connection, &run_id, &mut state)
-                        .await?
-                    {
+                    let recovered = try_context_limit_recovery(
+                        deps,
+                        &session,
+                        &connection,
+                        &run_id,
+                        &input.cancel_token,
+                        &mut state,
+                    )
+                    .await?;
+                    // A Stop during the compaction's retry delay ends the run
+                    // as cancelled at the top of the loop.
+                    if recovered || input.cancel_token.is_cancelled() {
                         continue;
                     }
                 }
@@ -166,6 +183,31 @@ pub async fn run_session_turn(
     complete_run(deps, &session, &run_id, state.tool_context.had_warnings()).await?;
 
     Ok(())
+}
+
+/// Retries for `run_id`'s provider requests: stopped by the run's cancel
+/// token and announced to the UI as `RunRetrying`.
+fn run_retry_hooks<'a>(
+    deps: &'a AssistantDeps,
+    session: &'a AssistantSession,
+    run_id: &'a str,
+    cancel: &'a tokio_util::sync::CancellationToken,
+) -> RetryHooks<'a> {
+    RetryHooks {
+        cancel,
+        on_retry: Box::new(move |notice| {
+            let _ = deps.emit(
+                session,
+                Some(run_id),
+                AssistantUiEvent::RunRetrying {
+                    run_id: run_id.to_string(),
+                    attempt: notice.attempt,
+                    max_attempts: MAX_ATTEMPTS,
+                    delay_ms: u32::try_from(notice.delay.as_millis()).unwrap_or(u32::MAX),
+                },
+            );
+        }),
+    }
 }
 
 async fn consume_and_finalize_api_stream(
@@ -446,6 +488,7 @@ async fn prepare_api_request(
             Some(run_id),
             compaction::verbatim_tail_tokens(&system_prompt_text, tool_defs),
             &mut state.conversation,
+            &run_retry_hooks(deps, session, run_id, &state.tool_context.cancel_token),
         )
         .await
         {
@@ -527,6 +570,7 @@ async fn try_context_limit_recovery(
     session: &crate::assistant::types::AssistantSession,
     connection: &crate::assistant::types::ProviderConnection,
     run_id: &str,
+    cancel: &tokio_util::sync::CancellationToken,
     state: &mut ApiTurnState,
 ) -> Result<bool, AssistantEngineError> {
     match compaction_service::compact_for_context_limit_recovery(
@@ -536,6 +580,7 @@ async fn try_context_limit_recovery(
         None,
         run_id,
         &mut state.conversation,
+        &run_retry_hooks(deps, session, run_id, cancel),
     )
     .await
     {

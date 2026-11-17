@@ -27,6 +27,9 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
   const event: AssistantUiEvent = envelope.event;
   const store = useAssistantStore.getState();
   useFleetStore.getState().applyEvent(envelope);
+  // Any later event of a retrying run means the retry is over: it streamed,
+  // failed or was cancelled. A further `run_retrying` sets a new one below.
+  if (envelope.runId) store.clearRunRetry(sessionId, envelope.runId);
 
   switch (event.type) {
     case 'session_created':
@@ -103,6 +106,16 @@ const handleEvent = (envelope: AssistantEventEnvelope): void => {
     case 'tool_call_completed':
     case 'tool_call_failed':
       store.setToolCall(sessionId, event.payload.tool_call);
+      break;
+
+    case 'run_retrying':
+      store.setRunRetry(sessionId, {
+        runId: event.payload.run_id,
+        attempt: event.payload.attempt,
+        maxAttempts: event.payload.max_attempts,
+        delayMs: event.payload.delay_ms,
+        retryAt: Date.now() + event.payload.delay_ms,
+      });
       break;
 
     case 'ask_user_requested':

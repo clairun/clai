@@ -12,6 +12,7 @@ import { WorkspaceFileContext, useDocumentLocation } from '../Chat/WorkspaceFile
 import VirtualizedList from '../common/VirtualizedList';
 import { isRunMarkerText } from '../../assistant/runMarker';
 import type { RunFailure } from '../../assistant/runErrors';
+import type { RunRetry } from '../../assistant/sessionStore';
 import RunFailureBanner from '../RunFailureBanner/RunFailureBanner';
 import type {
   AssistantMessage,
@@ -432,9 +433,18 @@ const formatElapsed = (ms: number): string => {
   return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 };
 
+// Static wording, no countdown: the text sits in a live region, which would
+// read every tick aloud. Once the wait is over nothing arrives until the
+// provider answers, which can take a while.
+const formatRetry = ({ delayMs, retryAt, attempt, maxAttempts }: RunRetry, now: number): string =>
+  now < retryAt
+    ? `Provider temporarily unavailable — retrying in ${Math.ceil(delayMs / 1000)} s (attempt ${attempt} of ${maxAttempts})`
+    : `Retrying (attempt ${attempt} of ${maxAttempts})…`;
+
 interface RunningIndicatorProps {
   identity: AgentIdentity;
   runStartedAt?: number | null;
+  runRetry?: RunRetry | null;
 }
 
 /**
@@ -454,7 +464,7 @@ interface RunningIndicatorProps {
  * something to say, the transcript row directly above was already saying it,
  * so the footer read as a duplicated stray line detached from the block.
  */
-const RunningIndicator = memo(({ identity, runStartedAt }: RunningIndicatorProps) => {
+const RunningIndicator = memo(({ identity, runStartedAt, runRetry }: RunningIndicatorProps) => {
   // Tick once a second to advance the elapsed readout. The footer only mounts
   // while streaming, so the interval is short-lived.
   const [now, setNow] = useState(() => Date.now());
@@ -468,6 +478,10 @@ const RunningIndicator = memo(({ identity, runStartedAt }: RunningIndicatorProps
     <div className={styles.runningIndicator}>
       <AgentAvatar identity={identity} size={22} activity="running" ring={false} label="Working" />
       {elapsed && <span className={styles.runningMeta}>{elapsed}</span>}
+      {/* Mounted for the whole run so screen readers announce the text when it changes. */}
+      <span className={styles.runningMeta} role="status">
+        {runRetry && formatRetry(runRetry, now)}
+      </span>
     </div>
   );
 });
@@ -491,6 +505,8 @@ interface ChatMessageListProps {
   // Epoch ms when the in-flight run started, for the running indicator's
   // elapsed-time readout.
   runStartedAt?: number | null;
+  // The in-flight run's pending provider retry, named in the running footer.
+  runRetry?: RunRetry | null;
   // Whose face the in-flight footer wears. Omit to render no footer at all
   // while streaming: a task transcript is opened from a card that already
   // shows the assignee's running face, and its own header repeats it, so a
@@ -529,6 +545,7 @@ const ChatMessageList = ({
   toolCalls = EMPTY_TOOL_CALLS,
   runFailure = null,
   runStartedAt = null,
+  runRetry = null,
   runningIdentity = null,
   queuedMessageIds,
   onDeleteQueuedMessage,
@@ -718,7 +735,7 @@ const ChatMessageList = ({
   // mutually exclusive — a failed run is no longer streaming.
   const footer = isStreaming ? (
     runningIdentity ? (
-      <RunningIndicator identity={runningIdentity} runStartedAt={runStartedAt} />
+      <RunningIndicator identity={runningIdentity} runStartedAt={runStartedAt} runRetry={runRetry} />
     ) : null
   ) : runFailure ? (
     <RunFailureBanner failure={runFailure} className={styles.runFailure} />

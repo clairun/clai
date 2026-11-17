@@ -14,7 +14,7 @@ import { useStableRoster } from '../components/Agents/useStableRoster';
 import { useOpenTask, type TaskView } from './useOpenTask';
 import { useTask, useTaskStore, useWorkspaceTasks } from '../workspace/taskStore';
 import * as assistantClient from '../assistant/client';
-import useAssistantStore, { isRunActive } from '../assistant/sessionStore';
+import useAssistantStore, { isRunActive, type RunRetry } from '../assistant/sessionStore';
 import AskUserPanel from '../components/AskUserPanel/AskUserPanel';
 import { restorePendingAsk } from '../assistant/pendingAsks';
 import { hydrateSession, useSessionChatActions } from '../assistant/sessionChat';
@@ -1388,6 +1388,7 @@ interface ChatFirstLayoutProps {
   isStreaming: boolean;
   failure: RunFailure | null;
   runStartedAt: number | null;
+  runRetry: RunRetry | null;
   queuedMessageIds: string[];
   onDeleteQueuedMessage: (messageId: string) => void;
   onEditQueuedMessage: (messageId: string, text: string) => Promise<void>;
@@ -1411,6 +1412,7 @@ const ChatFirstLayout = ({
   isStreaming,
   failure,
   runStartedAt,
+  runRetry,
   queuedMessageIds,
   onDeleteQueuedMessage,
   onEditQueuedMessage,
@@ -1500,6 +1502,7 @@ const ChatFirstLayout = ({
             isStreaming={isStreaming}
             runFailure={failure}
             runStartedAt={runStartedAt}
+            runRetry={runRetry}
             runningIdentity={mainFace}
             queuedMessageIds={queuedMessageIds}
             onDeleteQueuedMessage={onDeleteQueuedMessage}
@@ -1815,6 +1818,9 @@ const Workspace = () => {
   );
   const runStartedAt = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId]?.runStartedAt ?? null : null
+  );
+  const runRetry = useAssistantStore((state) =>
+    sessionId ? state.sessions[sessionId]?.runRetry ?? null : null
   );
   const storeQueuedMessageIds = useAssistantStore((state) =>
     sessionId ? state.sessions[sessionId]?.queuedMessageIds : undefined
@@ -2433,6 +2439,7 @@ const Workspace = () => {
             isStreaming={isStreaming}
             failure={failure}
             runStartedAt={runStartedAt}
+            runRetry={runRetry}
             queuedMessageIds={queuedMessageIds}
             onDeleteQueuedMessage={handleDeleteQueuedMessage}
             onEditQueuedMessage={handleEditQueuedMessage}

@@ -30,6 +30,16 @@ export interface PendingAskUser {
   extraContext: string | null;
 }
 
+/** A provider request of `runId` that failed temporarily and is retried after `delayMs`. */
+export interface RunRetry {
+  runId: string;
+  attempt: number;
+  maxAttempts: number;
+  delayMs: number;
+  /** Epoch ms (client clock) when the wait ends and the attempt starts. */
+  retryAt: number;
+}
+
 export interface SessionState {
   session: AssistantSession;
   messages: AssistantMessage[];
@@ -43,6 +53,9 @@ export interface SessionState {
   runStartedAt: number | null;
   /** Non-null while the agent is blocked on an ask_user question. */
   pendingAskUser: PendingAskUser | null;
+  /** Non-null while the run waits to retry a failed provider request; cleared
+   *  by the run's next event. */
+  runRetry: RunRetry | null;
   /** Ids of user messages still waiting in the queue (written while a run
    *  was active, not yet picked up). Rendered with a "Queued" chip; cleared
    *  by `queued_messages_delivered` / `message_deleted` events, and gated on
@@ -128,6 +141,9 @@ export interface AssistantStoreState {
   setRunStatus: (sessionId: string, run: AssistantRun) => void;
   setAskUserPending: (sessionId: string, request: PendingAskUser) => void;
   clearAskUserPending: (sessionId: string, pendingId?: string | null) => void;
+  setRunRetry: (sessionId: string, retry: RunRetry) => void;
+  /** Clears the retry notice if it belongs to `runId`. */
+  clearRunRetry: (sessionId: string, runId: string) => void;
   setToolCall: (sessionId: string, toolCall: ToolInvocation) => void;
   loadSessionData: (
     sessionId: string,
@@ -151,6 +167,7 @@ const createInitialSessionState = (session: AssistantSession): SessionState => (
   isStreaming: false,
   runStartedAt: null,
   pendingAskUser: null,
+  runRetry: null,
   queuedMessageIds: [],
   olderMessageCursor: null,
   hasOlderMessages: false,
@@ -177,6 +194,7 @@ const endLiveRun = (state: AssistantStoreState, sessionId: string) => {
   delete state.streamingText[sessionId];
   s.runStartedAt = null;
   s.pendingAskUser = null;
+  s.runRetry = null;
 };
 
 const useAssistantStore = create<AssistantStoreState>()(
@@ -424,6 +442,21 @@ const useAssistantStore = create<AssistantStoreState>()(
           s.pendingAskUser = null;
         }),
 
+      setRunRetry: (sessionId, retry) =>
+        set((state) => {
+          const s = state.sessions[sessionId];
+          if (!s) return;
+          s.runRetry = retry;
+        }),
+
+      clearRunRetry: (sessionId, runId) =>
+        set((state) => {
+          const s = state.sessions[sessionId];
+          // Guarded so the run's other events, deltas above all, leave the
+          // session's identity alone.
+          if (s?.runRetry?.runId === runId) s.runRetry = null;
+        }),
+
       setToolCall: (sessionId, toolCall) =>
         set((state) => {
           const s = state.sessions[sessionId];
@@ -514,6 +547,8 @@ const useAssistantStore = create<AssistantStoreState>()(
             // AskUserPanel within ~5s and the user could never reach the
             // textarea/options. Cleared on ask_user_resolved.
             pendingAskUser: existing?.pendingAskUser || null,
+            // Live too, and also gone once the snapshot ends the run.
+            runRetry: existing?.runRetry ?? null,
           };
           if (endLive) endLiveRun(state, sessionId);
         }),
