@@ -108,7 +108,12 @@ export type AssistantMessagePage = { messages: Array<AssistantMessage>, toolCall
  */
 totalCount: number, };
 
-export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, protocolId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, error: string | null, };
+export type AssistantRun = { id: string, sessionId: string, status: RunStatus, trigger: RunTrigger, connectionId: string, protocolId: string, modelId: string, startedAt: bigint, completedAt: bigint | null, error: string | null, 
+/**
+ * What a failed run's provider error asks of the user; `None` when the
+ * failure was not classified, and for runs that predate classification.
+ */
+errorKind?: FailureKind, };
 
 export type AssistantSession = { id: string, context: SessionContext, createdAt: bigint, updatedAt: bigint, };
 
@@ -153,6 +158,11 @@ providerId: string | null, apiKey: string | null, authMode: AuthMode | null, bas
 export type ExecutionCapabilityConfig = { sandbox: ExecutionSandboxConfig, filesystem: FilesystemCapabilityConfig, shell: ShellCapabilityConfig, web: WebCapabilityConfig, };
 
 export type ExecutionSandboxConfig = { networkAccess: NetworkPolicy, sessionBusMode: SandboxSessionBusConfig, };
+
+/**
+ * What a failed provider request asks for: one kind per action.
+ */
+export type FailureKind = "auth" | "usage_limit" | "billing" | "model_unavailable" | "transient" | "context_too_long" | "content_filtered" | "other";
 
 /**
  * Why a `failed` task failed; set exactly when the status is `failed`.

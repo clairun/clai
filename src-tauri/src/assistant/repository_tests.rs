@@ -639,7 +639,7 @@ async fn test_complete_run_with_warnings() {
     .await
     .unwrap();
 
-    let completed = complete_run(&pool, &run.id, RunStatus::CompletedWithWarnings, None)
+    let completed = complete_run(&pool, &run.id, RunStatus::CompletedWithWarnings, None, None)
         .await
         .unwrap();
 
@@ -718,7 +718,7 @@ async fn test_full_session_lifecycle() {
     .unwrap();
 
     // 4. Complete the run
-    complete_run(&pool, &run.id, RunStatus::Completed, None)
+    complete_run(&pool, &run.id, RunStatus::Completed, None, None)
         .await
         .unwrap();
 

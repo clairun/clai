@@ -16,6 +16,8 @@ use crate::assistant::types::{
     ProviderConnection, ProviderDescriptor, ProviderEvent, ResolvedImage, ToolInvocationDraft,
 };
 
+use super::catalog;
+use super::failure::read_failure;
 use super::types::{ProviderAdapter, ProviderError};
 use super::ModelsSource;
 
@@ -56,6 +58,7 @@ impl ProviderAdapter for AnthropicAdapter {
             ModelsSource::OpenAiCompatible { url, capabilities } => {
                 let api_key = get_api_key(connection)?;
                 return super::fetch_models_openai_compatible(
+                    &catalog::error_code_brand(connection),
                     &url,
                     Some(api_key.as_str()),
                     capabilities.as_ref(),
@@ -85,13 +88,8 @@ impl ProviderAdapter for AnthropicAdapter {
             })?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            tracing::error!(url = %url, status = %status, body = %body, "Provider returned error");
-            return Err(ProviderError::RequestFailed(format!(
-                "HTTP {}: {}",
-                status, body
-            )));
+            let brand = catalog::error_code_brand(connection);
+            return Err(ProviderError::Failed(read_failure(&brand, resp).await));
         }
 
         let body: serde_json::Value = resp
@@ -144,12 +142,8 @@ impl ProviderAdapter for AnthropicAdapter {
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::RequestFailed(format!(
-                "HTTP {}: {}",
-                status, body
-            )));
+            let brand = catalog::error_code_brand(connection);
+            return Err(ProviderError::Failed(read_failure(&brand, resp).await));
         }
 
         let byte_stream = resp.bytes_stream();

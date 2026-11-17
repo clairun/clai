@@ -17,6 +17,7 @@ use crate::assistant::types::{
 };
 
 use super::catalog;
+use super::failure::read_failure;
 use super::types::{ProviderAdapter, ProviderError};
 use super::ModelsSource;
 
@@ -55,6 +56,7 @@ impl ProviderAdapter for OpenAiAdapter {
             ModelsSource::Curated(models) => return Ok(models),
             ModelsSource::OpenAiCompatible { url, capabilities } => {
                 return super::fetch_models_openai_compatible(
+                    &catalog::error_code_brand(connection),
                     &url,
                     api_key.as_deref(),
                     capabilities.as_ref(),
@@ -84,18 +86,8 @@ impl ProviderAdapter for OpenAiAdapter {
         })?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            tracing::error!(
-                url = %models_url,
-                status = %status,
-                body = %body,
-                "Provider returned error"
-            );
-            return Err(ProviderError::RequestFailed(format!(
-                "HTTP {}: {}",
-                status, body
-            )));
+            let brand = catalog::error_code_brand(connection);
+            return Err(ProviderError::Failed(read_failure(&brand, resp).await));
         }
 
         let body: serde_json::Value = resp
@@ -154,12 +146,8 @@ impl ProviderAdapter for OpenAiAdapter {
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let status = resp.status();
-            let body = resp.text().await.unwrap_or_default();
-            return Err(ProviderError::RequestFailed(format!(
-                "HTTP {}: {}",
-                status, body
-            )));
+            let brand = catalog::error_code_brand(connection);
+            return Err(ProviderError::Failed(read_failure(&brand, resp).await));
         }
 
         let byte_stream = resp.bytes_stream();

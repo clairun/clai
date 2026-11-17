@@ -1,7 +1,7 @@
 use crate::assistant::network::run_state::RunNetwork;
 use crate::assistant::{
     cli_session::reset_cli_session_for_rotation, conversation::content_text,
-    conversation::tool_groups, conversation::RunConversation,
+    conversation::tool_groups, conversation::RunConversation, providers::failure::FailureKind,
     providers::types::is_context_limit_error,
 };
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -290,7 +290,7 @@ pub async fn run_session_turn(
             "CLI provider '{}' is registered but not implemented yet",
             connection.protocol_id
         );
-        fail_run(deps, &session, &run_id, &message).await?;
+        fail_run(deps, &session, &run_id, &message, None).await?;
         discard_if_unanswered(deps, &session, &run_id, &None).await;
         return Err(AssistantEngineError::Provider(
             crate::assistant::providers::types::ProviderError::RequestFailed(message),
@@ -580,7 +580,8 @@ pub async fn run_session_turn(
             } else {
                 message
             };
-            if is_usage_limit_error(&message) {
+            let error_kind = is_usage_limit_error(&message).then_some(FailureKind::UsageLimit);
+            if error_kind.is_some() {
                 // A usage/rate limit is a non-retryable failure (the user must
                 // wait until the stated reset time), distinct from a transient
                 // crash. Log it as such so it's diagnosable; the provider's
@@ -594,7 +595,7 @@ pub async fn run_session_turn(
                     message
                 );
             }
-            fail_run(deps, &session, &run_id, &message).await?;
+            fail_run(deps, &session, &run_id, &message, error_kind).await?;
             discard_if_unanswered(deps, &session, &run_id, &assistant_slot).await;
             Err(AssistantEngineError::Provider(
                 crate::assistant::providers::types::ProviderError::RequestFailed(message),
@@ -689,7 +690,7 @@ fn should_recover_cli_context_limit(message: &str) -> bool {
 ///
 /// Unlike a transient crash these are non-retryable until the stated reset
 /// time, so callers treat them distinctly.
-fn is_usage_limit_error(message: &str) -> bool {
+pub(crate) fn is_usage_limit_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("usage limit")
         || lower.contains("session limit")

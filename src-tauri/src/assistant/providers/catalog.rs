@@ -395,6 +395,36 @@ pub fn entry_for_connection(connection: &ProviderConnection) -> Option<ProviderC
         .or_else(|| get_entry(&connection.provider_id))
 }
 
+/// The brand whose error codes apply to a connection. A connection saved as
+/// a custom, unknown or empty brand, or as the legacy `openai` brand that
+/// pre-brand connections carry whatever server they use, takes the brand
+/// whose origin its base URL points at: a custom URL on `api.z.ai` gets
+/// Z.ai's codes. Only error classification reads this.
+pub fn error_code_brand(connection: &ProviderConnection) -> String {
+    let stored_brand_is_trusted = get_entry(&connection.provider_id)
+        .is_some_and(|entry| entry.category != ProviderCategory::Custom && entry.id != "openai");
+    if !stored_brand_is_trusted {
+        if let Some(entry) = connection.base_url.as_deref().and_then(entry_at_origin) {
+            return entry.id;
+        }
+    }
+    connection.provider_id.clone()
+}
+
+/// The entry whose base shares `base_url`'s origin, whatever the paths.
+fn entry_at_origin(base_url: &str) -> Option<ProviderCatalogEntry> {
+    let wanted = origin(base_url)?;
+    catalog_entries()
+        .into_iter()
+        .find(|entry| entry.default_base_url.as_deref().and_then(origin).as_ref() == Some(&wanted))
+}
+
+/// Host and port, without the scheme; `None` when `url` does not parse.
+fn origin(url: &str) -> Option<(String, Option<u16>)> {
+    let url = url::Url::parse(url.trim()).ok()?;
+    Some((url.host_str()?.to_ascii_lowercase(), url.port()))
+}
+
 /// Unknown custom brands require a key; only explicit catalog entries can be keyless.
 pub fn requires_api_key(provider_id: &str) -> bool {
     get_entry(provider_id)
@@ -405,6 +435,69 @@ pub fn requires_api_key(provider_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn connection_at(provider_id: &str, base_url: Option<&str>) -> ProviderConnection {
+        ProviderConnection {
+            id: "test".into(),
+            name: "Test".into(),
+            protocol_id: "openai".into(),
+            provider_id: provider_id.into(),
+            auth_mode: crate::assistant::types::AuthMode::DeveloperApiKey,
+            base_url: base_url.map(Into::into),
+            secret_ref: "provider-connection::test".into(),
+            model_id: "m".into(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn catalog_origins_are_unique() {
+        let mut seen = std::collections::HashMap::new();
+        for entry in catalog_entries() {
+            let Some(base) = entry.default_base_url else {
+                continue;
+            };
+            let origin = origin(&base).expect("catalog bases parse");
+            if let Some(other) = seen.insert(origin, entry.id.clone()) {
+                panic!("{} and {other} share the origin of {base}", entry.id);
+            }
+        }
+    }
+
+    #[test]
+    fn error_code_brand_resolves_custom_and_legacy_connections_by_origin() {
+        #[rustfmt::skip]
+        let cases = [
+            // The GLM Coding Plan: Z.ai's origin under another path.
+            ("custom-openai", Some("https://api.z.ai/api/coding/paas/v4"), "zai"),
+            ("custom-openai", Some("HTTPS://API.Z.AI/api/paas/v4/"), "zai"),
+            ("openai", Some("https://api.z.ai/api/paas/v4"), "zai"),
+            ("", Some("https://api.z.ai/api/paas/v4"), "zai"),
+            ("my-proxy", Some("https://api.z.ai/api/paas/v4"), "zai"),
+            ("custom-anthropic", Some("https://api.anthropic.com"), "anthropic"),
+            ("openai", Some("http://localhost:11434"), "ollama"),
+            ("openai", Some("http://localhost:1234/v1"), "lmstudio"),
+            ("openai", Some("http://localhost"), "openai"),
+            ("openai", None, "openai"),
+            ("openai", Some("https://api.openai.com/v1"), "openai"),
+            ("custom-openai", Some("https://llm.example.com/v1"), "custom-openai"),
+            ("custom-openai", Some("not a url"), "custom-openai"),
+            ("custom-openai", None, "custom-openai"),
+            // A catalog brand is kept wherever it points.
+            ("openrouter", Some("https://api.z.ai/api/paas/v4"), "openrouter"),
+            ("zai", None, "zai"),
+        ];
+        for (brand, base_url, expected) in cases {
+            assert_eq!(
+                error_code_brand(&connection_at(brand, base_url)),
+                expected,
+                "{brand} at {base_url:?}"
+            );
+        }
+    }
 
     #[test]
     fn catalog_is_non_empty_and_ids_unique() {

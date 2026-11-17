@@ -81,8 +81,7 @@ pub async fn run_session_turn(
         let stream = match stream_result {
             Ok(s) => s,
             Err(e) => {
-                if !state.retried_after_context_compaction && is_context_limit_error(&e.to_string())
-                {
+                if !state.retried_after_context_compaction && e.is_context_limit() {
                     state.retried_after_context_compaction = true;
                     if try_context_limit_recovery(deps, &session, &connection, &run_id, &mut state)
                         .await?
@@ -210,7 +209,7 @@ async fn fail_opening_api_stream(
     let provider_message = error.to_string();
     let failure =
         failure_message_with_compaction_context(&provider_message, &state.compaction_attempt);
-    fail_run(deps, session, run_id, &failure).await?;
+    fail_run(deps, session, run_id, &failure, error.kind()).await?;
     if state.iteration == 0 {
         discard_unanswered_run_input(deps, session, run_id, None).await;
     }
@@ -227,7 +226,7 @@ async fn fail_terminal_api_stream(
 ) -> Result<String, AssistantEngineError> {
     let message =
         failure_message_with_compaction_context(provider_message, &state.compaction_attempt);
-    fail_run(deps, session, run_id, &message).await?;
+    fail_run(deps, session, run_id, &message, None).await?;
     if state.iteration == 0 && assistant_message.1 {
         discard_unanswered_run_input(deps, session, run_id, Some(assistant_message.0)).await;
     }
@@ -249,7 +248,7 @@ async fn accept_api_stream(
     )
     .await
     {
-        fail_run(deps, session, run_id, &e).await?;
+        fail_run(deps, session, run_id, &e, None).await?;
         return Err(AssistantEngineError::Persistence(e));
     }
     state

@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod catalog;
 pub mod cli;
+pub mod failure;
 pub mod openai;
 pub mod openrouter;
 pub mod registry;
@@ -100,6 +101,7 @@ fn models_source(
 /// catalog entry's provider-level `capabilities` because a bare id list
 /// carries no per-model data.
 pub(crate) async fn fetch_models_openai_compatible(
+    brand: &str,
     url: &str,
     api_key: Option<&str>,
     caps: Option<&catalog::ProviderCaps>,
@@ -114,13 +116,9 @@ pub(crate) async fn fetch_models_openai_compatible(
         types::ProviderError::RequestFailed(e.to_string())
     })?;
     if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        tracing::error!(url = %url, status = %status, body = %body, "Provider returned error");
-        return Err(types::ProviderError::RequestFailed(format!(
-            "HTTP {}: {}",
-            status, body
-        )));
+        return Err(types::ProviderError::Failed(
+            failure::read_failure(brand, resp).await,
+        ));
     }
     let body: serde_json::Value = resp
         .json()

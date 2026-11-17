@@ -10,6 +10,7 @@ use crate::assistant::types::{
     CompletionRequest, ModelInfo, ProtocolFamily, ProviderConnection, ProviderEvent,
 };
 
+use super::failure::read_failure;
 use super::openai::{endpoint_url, get_api_key, OpenAiAdapter};
 use super::types::{ProviderAdapter, ProviderError};
 
@@ -73,10 +74,9 @@ async fn validate_openrouter_key_at(url: &str, key: &str) -> Result<(), Provider
         .await
         .map_err(|error| ProviderError::RequestFailed(error.to_string()))?;
     if !response.status().is_success() {
-        return Err(ProviderError::RequestFailed(format!(
-            "OpenRouter API key validation failed: HTTP {}",
-            response.status()
-        )));
+        return Err(ProviderError::Failed(
+            read_failure(OPENROUTER_PROVIDER_ID, response).await,
+        ));
     }
     Ok(())
 }
@@ -84,6 +84,7 @@ async fn validate_openrouter_key_at(url: &str, key: &str) -> Result<(), Provider
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::assistant::providers::failure::FailureKind;
 
     fn connection() -> ProviderConnection {
         ProviderConnection {
@@ -136,7 +137,8 @@ mod tests {
 
         assert!(matches!(
             validate_openrouter_key_at(&url, "invalid-key").await,
-            Err(ProviderError::RequestFailed(message)) if message.contains("HTTP 401")
+            Err(ProviderError::Failed(failure))
+                if failure.status == 401 && failure.kind == FailureKind::Auth
         ));
     }
 }

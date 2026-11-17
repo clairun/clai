@@ -540,7 +540,7 @@ async fn test_api_provider_connection(
     if let Err(error) = adapter.validate_connection(connection).await {
         return Ok(TestResult {
             success: false,
-            error: Some(error.to_string()),
+            error: Some(format!("{}: {error}", connection.name)),
         });
     }
 
@@ -834,7 +834,10 @@ mod tests {
         );
         let error = result.error.expect("failure carries an error message");
         assert!(
-            error.contains("OpenRouter API key validation failed"),
+            error.starts_with(
+                "OpenRouter (regression): provider request failed: \
+                 HTTP 401: The provider rejected the API key."
+            ),
             "unexpected error: {error}"
         );
         assert_eq!(

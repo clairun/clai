@@ -4,6 +4,7 @@ use serde::Serialize;
 use sqlx::{QueryBuilder, Row, Sqlite, SqliteConnection};
 use uuid::Uuid;
 
+use crate::assistant::providers::failure::FailureKind;
 use crate::assistant::types::{
     AssistantCompaction, AssistantMessage, AssistantRun, AssistantSession, CompactionStatus,
     CompactionStrategy, CompactionTrigger, ContentPart, MessageOrigin, MessageRole, RunStatus,
@@ -116,6 +117,10 @@ fn map_run_row(row: &sqlx::sqlite::SqliteRow) -> Result<AssistantRun, String> {
         started_at: row.get("started_at"),
         completed_at: row.get("completed_at"),
         error: row.get("error"),
+        error_kind: row
+            .get::<Option<String>, _>("error_kind")
+            .map(|kind| parse_enum_text(kind, "run error kind"))
+            .transpose()?,
     })
 }
 
@@ -729,6 +734,7 @@ pub(crate) async fn insert_run_if_idle(
         started_at: now_ms(),
         completed_at: None,
         error: params.error,
+        error_kind: None,
     };
 
     let inserted = sqlx::query(
@@ -794,7 +800,7 @@ pub async fn create_run(pool: &DbPool, params: CreateRunParams) -> Result<Assist
 pub async fn latest_run(pool: &DbPool, session_id: &str) -> Result<Option<AssistantRun>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, error_kind, started_at, completed_at
         FROM assistant_runs
         WHERE session_id = ?
         ORDER BY started_at DESC, id DESC
@@ -867,7 +873,7 @@ pub async fn get_active_run(
 ) -> Result<Option<AssistantRun>, String> {
     let sql = format!(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, error_kind, started_at, completed_at
         FROM assistant_runs
         WHERE session_id = ?
           AND status IN {ACTIVE_RUN_STATUSES}
@@ -902,7 +908,7 @@ pub async fn latest_run_connection_id(
 pub async fn get_run(pool: &DbPool, run_id: &str) -> Result<Option<AssistantRun>, String> {
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, error_kind, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -940,7 +946,7 @@ pub async fn update_run_status(
 
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, error_kind, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -960,18 +966,20 @@ pub async fn complete_run(
     run_id: &str,
     status: RunStatus,
     error: Option<&str>,
+    error_kind: Option<FailureKind>,
 ) -> Result<AssistantRun, String> {
     let completed_at = now_ms();
 
     sqlx::query(
         r#"
         UPDATE assistant_runs
-        SET status = ?, error = ?, completed_at = ?
+        SET status = ?, error = ?, error_kind = ?, completed_at = ?
         WHERE id = ?
         "#,
     )
     .bind(enum_text(&status)?)
     .bind(error)
+    .bind(error_kind.as_ref().map(enum_text).transpose()?)
     .bind(completed_at)
     .bind(run_id)
     .execute(pool)
@@ -980,7 +988,7 @@ pub async fn complete_run(
 
     let row = sqlx::query(
         r#"
-        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, started_at, completed_at
+        SELECT id, session_id, status, trigger, connection_id, protocol_id, model_id, error, error_kind, started_at, completed_at
         FROM assistant_runs
         WHERE id = ?
         "#,
@@ -1479,6 +1487,7 @@ mod tests {
             CompactionStrategy::LocalSummary,
             CompactionStrategy::SessionRotationSummary,
         ]);
+        check(&FailureKind::ALL);
         check(&[
             CompactionStatus::Running,
             CompactionStatus::Completed,
