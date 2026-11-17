@@ -2,6 +2,7 @@ use crate::assistant::{conversation::RunConversation, conversation::COMPACTION_M
 use std::path::Path;
 
 use crate::assistant::compaction::{self, CompactionOutcome, PreparedCompaction};
+use crate::assistant::providers::retry::RetryHooks;
 use crate::assistant::repository::{self, CreateCompactionParams, CreateMessageParams};
 use crate::assistant::types::{
     AssistantSession, CompactionTrigger, ContentPart, MessageRole, ProviderConnection,
@@ -88,6 +89,7 @@ pub async fn compact_conversation(
     run_id: Option<&str>,
     verbatim_tail_tokens: usize,
     conversation: &mut RunConversation,
+    retry: &RetryHooks<'_>,
 ) -> Result<Option<CompactionOutcome>, String> {
     let prepared = compaction::prepare_compaction(
         session,
@@ -97,6 +99,7 @@ pub async fn compact_conversation(
         run_id,
         verbatim_tail_tokens,
         conversation,
+        retry,
     )
     .await?;
     match prepared {
@@ -114,6 +117,7 @@ pub async fn compact_for_context_limit_recovery(
     summary_working_dir: Option<&Path>,
     run_id: &str,
     conversation: &mut RunConversation,
+    retry: &RetryHooks<'_>,
 ) -> Result<Option<CompactionOutcome>, String> {
     let prepared = compaction::prepare_context_limit_recovery(
         session,
@@ -121,6 +125,7 @@ pub async fn compact_for_context_limit_recovery(
         summary_working_dir,
         run_id,
         conversation,
+        retry,
     )
     .await?;
     match prepared {

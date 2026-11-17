@@ -88,6 +88,14 @@ pub enum AssistantUiEvent {
     RunCancelled {
         run: AssistantRun,
     },
+    /// A provider request failed with a transient error; attempt `attempt`
+    /// of `max_attempts` starts after `delay_ms` unless the run is stopped.
+    RunRetrying {
+        run_id: RunId,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u32,
+    },
     /// The `ask_user` tool is awaiting a human answer. The FE renders an
     /// inline answer block (radios — or checkboxes when `multi_select` —
     /// for options, textarea for free text) keyed by `pending_id` and

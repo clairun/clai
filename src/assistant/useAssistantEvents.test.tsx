@@ -184,6 +184,54 @@ describe('useAssistantEvents — run lifecycle', () => {
   });
 });
 
+describe('useAssistantEvents — run_retrying', () => {
+  const RUN = 'run-1';
+  const retrying = (attempt: number, delayMs: number) => ({
+    type: 'run_retrying',
+    payload: { run_id: RUN, attempt, max_attempts: 3, delay_ms: delayMs },
+  });
+  const runRetry = () => useAssistantStore.getState().sessions[SESSION.id]!.runRetry;
+
+  beforeEach(async () => {
+    useAssistantStore.getState().initSession(SESSION);
+    mount();
+    await Promise.resolve();
+    fire(retrying(2, 2000), RUN);
+  });
+
+  it('records the pending retry with its attempt, total, delay and end', () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    try {
+      fire(retrying(3, 8000), RUN);
+      expect(runRetry()).toEqual({
+        runId: RUN,
+        attempt: 3,
+        maxAttempts: 3,
+        delayMs: 8000,
+        retryAt: 1_008_000,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it.each([
+    ['a delta', { type: 'assistant_delta', payload: { message_id: 'msg-1', text: 'Hi' } }],
+    ['run_failed', { type: 'run_failed', payload: { run: { id: RUN, status: 'failed', startedAt: 1n } } }],
+    ['run_cancelled', { type: 'run_cancelled', payload: { run: { id: RUN, status: 'cancelled' } } }],
+  ])('clears once the run moves on with %s', (_, event) => {
+    fire(event, RUN);
+    expect(runRetry()).toBeNull();
+  });
+
+  it("keeps it through events that are not the run's", () => {
+    // A message the user sends during the wait carries no run id.
+    fire({ type: 'message_created', payload: { message: { id: 'm-u', role: 'user', content: [] } } });
+    fire({ type: 'assistant_delta', payload: { message_id: 'msg-x', text: 'x' } }, 'run-other');
+    expect(runRetry()).toMatchObject({ runId: RUN, attempt: 2 });
+  });
+});
+
 describe('useAssistantEvents — run_skipped', () => {
   const RUN_SKIPPED = {
     type: 'run_skipped',

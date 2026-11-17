@@ -5,6 +5,7 @@ use std::path::Path;
 
 use crate::assistant::conversation::{tool_groups, RunConversation};
 use crate::assistant::providers;
+use crate::assistant::providers::retry::{retry_transient, RetryHooks, RetryStop};
 use crate::assistant::providers::types::ProviderError;
 use crate::assistant::token_estimate::{json_string, text_tokens, tool_tokens};
 use crate::assistant::types::{
@@ -265,6 +266,7 @@ pub async fn prepare_compaction(
     run_id: Option<&str>,
     verbatim_tail_tokens: usize,
     conversation: &RunConversation,
+    retry: &RetryHooks<'_>,
 ) -> Result<Option<PreparedCompaction>, String> {
     prepare_with(
         &session.id,
@@ -275,7 +277,15 @@ pub async fn prepare_compaction(
         verbatim_tail_tokens,
         conversation,
         |messages| async move {
-            summarize_window(session, connection, summary_working_dir, run_id, &messages).await
+            summarize_window(
+                session,
+                connection,
+                summary_working_dir,
+                run_id,
+                &messages,
+                retry,
+            )
+            .await
         },
     )
     .await
@@ -287,6 +297,7 @@ pub async fn prepare_context_limit_recovery(
     summary_working_dir: Option<&Path>,
     run_id: &str,
     conversation: &RunConversation,
+    retry: &RetryHooks<'_>,
 ) -> Result<Option<PreparedCompaction>, String> {
     prepare_compaction(
         session,
@@ -296,6 +307,7 @@ pub async fn prepare_context_limit_recovery(
         Some(run_id),
         0,
         conversation,
+        retry,
     )
     .await
 }
@@ -348,6 +360,7 @@ async fn summarize_window(
     summary_working_dir: Option<&Path>,
     source_run_id: Option<&str>,
     messages: &[AssistantMessage],
+    retry: &RetryHooks<'_>,
 ) -> Result<String, String> {
     let adapter = providers::resolve_connection_adapter(connection).map_err(|e| e.to_string())?;
     let transcript = transcript_for_summary(messages);
@@ -373,10 +386,14 @@ async fn summarize_window(
         images: Default::default(),
     };
 
-    let mut stream = adapter
-        .stream_sessionless_completion(connection, request, summary_working_dir)
-        .await
-        .map_err(provider_error_message)?;
+    let mut stream = retry_transient(retry, || {
+        adapter.stream_sessionless_completion(connection, request.clone(), summary_working_dir)
+    })
+    .await
+    .map_err(|stop| match stop {
+        RetryStop::Failed(error) => provider_error_message(error),
+        RetryStop::Cancelled => "Compaction was cancelled".to_string(),
+    })?;
     let mut summary = String::new();
     let mut stop_reason: Option<String> = None;
     while let Some(event) = stream.next().await {

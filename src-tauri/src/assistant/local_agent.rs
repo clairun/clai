@@ -25,6 +25,7 @@ use crate::assistant::local_mcp::{self, ToolBinding};
 use crate::assistant::providers::cli::{
     CLAUDE_CODE_PROVIDER_ID, CODEX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
 };
+use crate::assistant::providers::retry::RetryHooks;
 use crate::assistant::repository::{self, CreateMessageParams};
 use crate::assistant::run_context::RunContext;
 use crate::assistant::run_lifecycle::{
@@ -343,6 +344,7 @@ pub async fn run_session_turn(
             Some(&run_id),
             compaction::verbatim_tail_tokens(&system_prompt, &[]),
             &mut conversation,
+            &RetryHooks::silent(&input.cancel_token),
         )
         .await
         {
@@ -521,6 +523,7 @@ pub async fn run_session_turn(
                     Some(&run_context.workspace_root),
                     &run_id,
                     &mut conversation,
+                    &RetryHooks::silent(&input.cancel_token),
                 )
                 .await
                 {

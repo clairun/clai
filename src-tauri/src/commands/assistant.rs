@@ -1,12 +1,14 @@
 use crate::assistant::cli_session::reset_cli_session_for_rotation;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, State};
+use tokio_util::sync::CancellationToken;
 
 use crate::assistant::compaction;
 use crate::assistant::dispatcher::{self, Kick};
 use crate::assistant::display;
 use crate::assistant::engine::AssistantDeps;
 use crate::assistant::events::{emit_event, AssistantUiEvent};
+use crate::assistant::providers::retry::RetryHooks;
 use crate::assistant::repository;
 use crate::assistant::runtime;
 use crate::assistant::signals;
@@ -482,6 +484,7 @@ pub async fn assistant_compact_session(
         None,
         compaction::VERBATIM_TAIL_MAX_TOKENS,
         &mut conversation,
+        &RetryHooks::silent(&CancellationToken::new()),
     )
     .await?;
 

@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
+import { act, render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 
 // VirtualizedList windows its children by scroll geometry, which jsdom
 // doesn't have (zero heights). Replace it with a plain list that renders
@@ -90,6 +90,7 @@ vi.mock('../../assistant/client', () => ({ getToolCallResult, getToolCallInput }
 
 import ChatMessageList from './ChatMessageList';
 import { clearToolCallResultCache } from '../../assistant/toolCallResult';
+import type { RunRetry } from '../../assistant/sessionStore';
 import { mainIdentity } from '../Agents/agentIdentity';
 import { useTaskStore } from '../../workspace/taskStore';
 import type {
@@ -1150,6 +1151,36 @@ describe('ChatMessageList', () => {
     // An m:ss timer (~0:08), and no token count.
     expect(screen.getByText(/^0:0\d$/)).toBeInTheDocument();
     expect(screen.queryByText(/tokens/)).toBeNull();
+  });
+
+  it('names a pending provider retry in the running footer, then the attempt once the wait is over', () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    try {
+      const messages: AssistantMessage[] = [msg({ id: 'm1', role: 'user', content: [{ type: 'text', text: 'hi' }] })];
+      const list = (runRetry: RunRetry | null) => (
+        <ChatMessageList workspaceId="ws-1"
+          messages={messages}
+          isStreaming
+          runningIdentity={RUNNING_IDENTITY}
+          runRetry={runRetry}
+        />
+      );
+      const { rerender } = render(list(null));
+      // The live region is there, empty, before the retry, so its text is announced.
+      const status = screen.getByRole('status');
+      expect(status).toHaveTextContent(/^$/);
+
+      rerender(list({ runId: 'run-1', attempt: 2, maxAttempts: 3, delayMs: 8000, retryAt: 1_008_000 }));
+      expect(screen.getByRole('status')).toBe(status);
+      expect(status).toHaveTextContent('Provider temporarily unavailable — retrying in 8 s (attempt 2 of 3)');
+
+      act(() => vi.advanceTimersByTime(7000));
+      expect(status).toHaveTextContent('retrying in 8 s');
+      act(() => vi.advanceTimersByTime(1000));
+      expect(status).toHaveTextContent(/^Retrying \(attempt 2 of 3\)…$/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('renders no running footer while streaming when no identity is given', () => {

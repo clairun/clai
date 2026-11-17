@@ -11,6 +11,8 @@ const msg = (id: string): AssistantMessage =>
 const run = (id: string, status: string, startedAt = 0): AssistantRun =>
   ({ id, status, startedAt }) as unknown as AssistantRun;
 
+const RETRY = { runId: 'run-1', attempt: 2, maxAttempts: 3, delayMs: 8000, retryAt: 8000 };
+
 const ASK_REQUEST = {
   pendingId: 'pending-abc',
   question: 'Pick one',
@@ -104,6 +106,15 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     );
   });
 
+  it('preserves a pending provider retry across a snapshot refresh', () => {
+    const store = useAssistantStore.getState();
+    store.initSession(SESSION);
+    store.setRunStatus(SESSION.id, run('run-1', 'running'));
+    store.setRunRetry(SESSION.id, RETRY);
+    store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'running')], []);
+    expect(useAssistantStore.getState().sessions[SESSION.id]!.runRetry).toEqual(RETRY);
+  });
+
   it('preserves streaming text across a snapshot refresh', () => {
     const store = useAssistantStore.getState();
     store.initSession(SESSION);
@@ -123,12 +134,14 @@ describe('loadSessionData — snapshot refresh preserves in-flight FE state', ()
     store.setRunStatus(SESSION.id, run('run-1', 'running'));
     store.appendDelta(SESSION.id, 'msg-1', 'Hello');
     store.setAskUserPending(SESSION.id, ASK_REQUEST);
+    store.setRunRetry(SESSION.id, RETRY);
     store.loadSessionData(SESSION.id, SESSION, [], [run('run-1', 'completed')], []);
     const state = useAssistantStore.getState();
     const s = state.sessions[SESSION.id]!;
     expect(s.isStreaming).toBe(false);
     expect(s.runStartedAt).toBeNull();
     expect(s.pendingAskUser).toBeNull();
+    expect(s.runRetry).toBeNull();
     expect(state.streamingText[SESSION.id]).toBeUndefined();
   });
 
