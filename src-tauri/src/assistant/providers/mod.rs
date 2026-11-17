@@ -55,6 +55,41 @@ pub fn connection_supports_images(connection: &ProviderConnection) -> bool {
     )
 }
 
+/// Where a connection's models are listed, per its catalog entry
+/// (`catalog::entry_for_connection`).
+enum ModelsSource {
+    /// The entry's curated list; nothing is fetched.
+    Curated(Vec<ModelInfo>),
+    /// A dedicated OpenAI-style models URL apart from the chat base.
+    OpenAiCompatible {
+        url: String,
+        capabilities: Option<catalog::ProviderCaps>,
+    },
+    /// The adapter's own `models` endpoint.
+    Endpoint(String),
+}
+
+/// Routes model listing for both adapters; `endpoint_url` is the adapter's
+/// URL rule.
+fn models_source(
+    connection: &ProviderConnection,
+    endpoint_url: fn(&ProviderConnection, &str) -> String,
+) -> ModelsSource {
+    let Some(entry) = catalog::entry_for_connection(connection) else {
+        return ModelsSource::Endpoint(endpoint_url(connection, "models"));
+    };
+    match entry.models_endpoint_style {
+        catalog::ModelsEndpointStyle::None => ModelsSource::Curated(entry.curated_models),
+        catalog::ModelsEndpointStyle::OpenAiCompatible { url } => ModelsSource::OpenAiCompatible {
+            url,
+            capabilities: entry.capabilities,
+        },
+        catalog::ModelsEndpointStyle::Standard => {
+            ModelsSource::Endpoint(endpoint_url(connection, "models"))
+        }
+    }
+}
+
 /// Fetch a model list from an absolute OpenAI-compatible models URL
 /// (`Authorization: Bearer`, `{"data":[{"id":..}]}` response shape).
 ///
@@ -219,6 +254,122 @@ mod tests {
             "anthropic",
             "claude-sonnet-4-5"
         )));
+    }
+
+    /// Each catalog entry's final URLs, as a connection saved from the catalog
+    /// (base = `default_base_url`) requests them, against the endpoints the
+    /// provider documents. A new entry must add its row here.
+    #[test]
+    fn catalog_entries_resolve_to_documented_endpoints() {
+        use super::catalog::catalog_entries;
+        use super::{anthropic, models_source, openai, ModelsSource};
+
+        const DOCUMENTED: &[(&str, &str, Option<&str>)] = &[
+            (
+                "openai",
+                "https://api.openai.com/v1/chat/completions",
+                Some("https://api.openai.com/v1/models"),
+            ),
+            (
+                "deepseek",
+                "https://api.deepseek.com/v1/chat/completions",
+                Some("https://api.deepseek.com/v1/models"),
+            ),
+            (
+                "perplexity",
+                "https://api.perplexity.ai/chat/completions",
+                None,
+            ),
+            (
+                "zai",
+                "https://api.z.ai/api/paas/v4/chat/completions",
+                Some("https://api.z.ai/api/paas/v4/models"),
+            ),
+            (
+                "openrouter",
+                "https://openrouter.ai/api/v1/chat/completions",
+                Some("https://openrouter.ai/api/v1/models"),
+            ),
+            (
+                "anthropic",
+                "https://api.anthropic.com/v1/messages",
+                Some("https://api.anthropic.com/v1/models"),
+            ),
+            (
+                "minimax",
+                "https://api.minimax.io/anthropic/v1/messages",
+                Some("https://api.minimax.io/v1/models"),
+            ),
+            (
+                "litellm",
+                "http://localhost:4000/v1/chat/completions",
+                Some("http://localhost:4000/v1/models"),
+            ),
+            (
+                "ollama",
+                "http://localhost:11434/v1/chat/completions",
+                Some("http://localhost:11434/v1/models"),
+            ),
+            (
+                "lmstudio",
+                "http://localhost:1234/v1/chat/completions",
+                Some("http://localhost:1234/v1/models"),
+            ),
+            (
+                "vllm",
+                "http://localhost:8000/v1/chat/completions",
+                Some("http://localhost:8000/v1/models"),
+            ),
+        ];
+
+        let mut checked = Vec::new();
+        for entry in catalog_entries() {
+            if entry.default_base_url.is_none() {
+                continue; // custom-* entries: the user supplies the base
+            }
+            let mut conn = connection(&entry.protocol_id, &entry.id, "");
+            conn.base_url = entry.default_base_url.clone();
+            let (endpoint_url, chat_endpoint): (fn(&ProviderConnection, &str) -> String, _) =
+                match entry.protocol_id.as_str() {
+                    "anthropic" => (anthropic::endpoint_url, "messages"),
+                    _ => (openai::endpoint_url, "chat/completions"),
+                };
+            let chat = endpoint_url(&conn, chat_endpoint);
+            let models = match models_source(&conn, endpoint_url) {
+                ModelsSource::Curated(_) => None,
+                ModelsSource::OpenAiCompatible { url, .. } | ModelsSource::Endpoint(url) => {
+                    Some(url)
+                }
+            };
+            let (_, want_chat, want_models) = DOCUMENTED
+                .iter()
+                .find(|(id, _, _)| *id == entry.id)
+                .unwrap_or_else(|| {
+                    panic!("no documented endpoints for catalog entry {}", entry.id)
+                });
+            assert_eq!(chat, *want_chat, "{} chat URL", entry.id);
+            assert_eq!(models.as_deref(), *want_models, "{} models URL", entry.id);
+            checked.push(entry.id);
+        }
+        assert_eq!(checked.len(), DOCUMENTED.len(), "stale rows in DOCUMENTED");
+    }
+
+    /// A connection saved before brands existed has the `openai` brand; at
+    /// Perplexity's base it must route like a Perplexity connection.
+    #[test]
+    fn legacy_openai_brand_at_perplexity_base_routes_as_perplexity() {
+        use super::{models_source, openai, ModelsSource};
+
+        let mut conn = connection("openai", "openai", "");
+        conn.base_url = Some("https://api.perplexity.ai/".to_string());
+        assert_eq!(
+            openai::endpoint_url(&conn, "chat/completions"),
+            "https://api.perplexity.ai/chat/completions"
+        );
+        assert!(matches!(
+            models_source(&conn, openai::endpoint_url),
+            ModelsSource::Curated(_)
+        ));
     }
 
     #[test]

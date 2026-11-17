@@ -548,7 +548,7 @@ async fn test_api_provider_connection(
     // implement it), fall back to a minimal completion request to verify auth
     // and connectivity. Catalog entries with no live model endpoint skip this
     // so the test cannot pass solely from a curated static list.
-    let has_live_models_endpoint = catalog::get_entry(&connection.provider_id)
+    let has_live_models_endpoint = catalog::entry_for_connection(connection)
         .map(|entry| {
             !matches!(
                 entry.models_endpoint_style,

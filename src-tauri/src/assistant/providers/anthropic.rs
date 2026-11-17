@@ -16,8 +16,8 @@ use crate::assistant::types::{
     ProviderConnection, ProviderDescriptor, ProviderEvent, ResolvedImage, ToolInvocationDraft,
 };
 
-use super::catalog::{self, ModelsEndpointStyle};
 use super::types::{ProviderAdapter, ProviderError};
+use super::ModelsSource;
 
 pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
 
@@ -51,27 +51,20 @@ impl ProviderAdapter for AnthropicAdapter {
         &self,
         connection: &ProviderConnection,
     ) -> Result<Vec<ModelInfo>, ProviderError> {
-        // Quirk-as-data: route model listing per the catalog entry's declared
-        // style — curated list only, or a dedicated models URL apart from the
-        // chat base (e.g. MiniMax).
-        if let Some(entry) = catalog::get_entry(&connection.provider_id) {
-            match &entry.models_endpoint_style {
-                ModelsEndpointStyle::None => return Ok(entry.curated_models.clone()),
-                ModelsEndpointStyle::OpenAiCompatible { url } => {
-                    let api_key = get_api_key(connection)?;
-                    return super::fetch_models_openai_compatible(
-                        url,
-                        Some(api_key.as_str()),
-                        entry.capabilities.as_ref(),
-                    )
-                    .await;
-                }
-                ModelsEndpointStyle::Standard => {}
+        let url = match super::models_source(connection, endpoint_url) {
+            ModelsSource::Curated(models) => return Ok(models),
+            ModelsSource::OpenAiCompatible { url, capabilities } => {
+                let api_key = get_api_key(connection)?;
+                return super::fetch_models_openai_compatible(
+                    &url,
+                    Some(api_key.as_str()),
+                    capabilities.as_ref(),
+                )
+                .await;
             }
-        }
+            ModelsSource::Endpoint(url) => url,
+        };
         let api_key = get_api_key(connection)?;
-        let base = base_url(connection);
-        let url = format!("{}/v1/models", base);
 
         tracing::info!(
             url = %url,
@@ -136,8 +129,7 @@ impl ProviderAdapter for AnthropicAdapter {
         ProviderError,
     > {
         let api_key = get_api_key(connection)?;
-        let base = base_url(connection);
-        let url = format!("{}/v1/messages", base);
+        let url = endpoint_url(connection, "messages");
         let body = build_request_body(&request);
 
         let client = Client::new();
@@ -173,13 +165,15 @@ fn get_api_key(connection: &ProviderConnection) -> Result<String, ProviderError>
         .ok_or(ProviderError::NotConfigured)
 }
 
-fn base_url(connection: &ProviderConnection) -> String {
-    connection
+/// Anthropic-compatible bases omit the version, as the Anthropic SDKs'
+/// `base_url` does (e.g. `https://api.minimax.io/anthropic`).
+pub(super) fn endpoint_url(connection: &ProviderConnection, endpoint: &str) -> String {
+    let base = connection
         .base_url
         .as_deref()
         .unwrap_or(DEFAULT_BASE_URL)
-        .trim_end_matches('/')
-        .to_string()
+        .trim_end_matches('/');
+    format!("{base}/v1/{endpoint}")
 }
 
 // =============================================================================
