@@ -23,7 +23,7 @@
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
-use crate::assistant::types::ModelInfo;
+use crate::assistant::types::{ModelInfo, ProviderConnection};
 
 /// Where a catalog entry sits in the picker (also drives form defaults).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
@@ -94,6 +94,10 @@ pub struct ProviderCatalogEntry {
     /// Extra request headers (e.g. OpenRouter attribution).
     pub extra_headers: Vec<(String, String)>,
     pub models_endpoint_style: ModelsEndpointStyle,
+    /// `default_base_url` is the OpenAI API root as written: no `/v1` is
+    /// appended to it (see `openai::api_root`).
+    #[serde(skip)]
+    pub base_url_is_api_root: bool,
     /// Capability defaults when the models endpoint is thin/absent.
     pub capabilities: Option<ProviderCaps>,
 }
@@ -136,6 +140,7 @@ fn hosted_openai(
         docs_url: Some(docs_url.to_string()),
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
+        base_url_is_api_root: false,
         capabilities: None,
     }
 }
@@ -143,9 +148,23 @@ fn hosted_openai(
 /// The bundled provider catalog (v1). See the provider-catalog design doc §5.
 #[expect(
     clippy::too_many_lines,
-    reason = "lint debt: 152 lines against a 100-line budget; split it, do not raise the budget"
+    reason = "lint debt: 159 lines against a 100-line budget; split it, do not raise the budget"
 )]
 pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
+    // Sonar chat is served at `<base>/chat/completions`, and has no models
+    // listing: `/models` is not routed and `/v1/models` lists Agent API
+    // models, which Sonar chat rejects.
+    let mut perplexity = hosted_openai(
+        "perplexity",
+        "Perplexity",
+        "Sonar models with built-in web search.",
+        "https://api.perplexity.ai",
+        "https://www.perplexity.ai/settings/api",
+        &["sonar", "sonar-pro", "sonar-reasoning"],
+    );
+    perplexity.models_endpoint_style = ModelsEndpointStyle::None;
+    perplexity.base_url_is_api_root = true;
+
     let mut entries = vec![
         // --- Hosted, OpenAI-compatible ---
         hosted_openai(
@@ -164,14 +183,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
             "https://platform.deepseek.com/api_keys",
             &["deepseek-chat", "deepseek-reasoner"],
         ),
-        hosted_openai(
-            "perplexity",
-            "Perplexity",
-            "Sonar models with built-in web search.",
-            "https://api.perplexity.ai",
-            "https://www.perplexity.ai/settings/api",
-            &["sonar", "sonar-pro", "sonar-reasoning"],
-        ),
+        perplexity,
         hosted_openai(
             "zai",
             "Z.ai (GLM)",
@@ -228,6 +240,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         docs_url: Some("https://console.anthropic.com/settings/keys".to_string()),
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
+        base_url_is_api_root: false,
         capabilities: None,
     });
     // MiniMax — Anthropic-compatible endpoint (user preference; international, not the CN variant).
@@ -247,6 +260,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         models_endpoint_style: ModelsEndpointStyle::OpenAiCompatible {
             url: "https://api.minimax.io/v1/models".to_string(),
         },
+        base_url_is_api_root: false,
         capabilities: Some(ProviderCaps {
             supports_tools: true,
             supports_images: false,
@@ -302,6 +316,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         docs_url: None,
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
+        base_url_is_api_root: false,
         capabilities: None,
     });
     entries.push(ProviderCatalogEntry {
@@ -318,6 +333,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         docs_url: None,
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
+        base_url_is_api_root: false,
         capabilities: None,
     });
 
@@ -346,6 +362,7 @@ fn self_hosted(
         docs_url: Some(docs_url.to_string()),
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
+        base_url_is_api_root: false,
         capabilities: None,
     }
 }
@@ -353,6 +370,29 @@ fn self_hosted(
 /// Look up a catalog entry by its brand id.
 pub fn get_entry(provider_id: &str) -> Option<ProviderCatalogEntry> {
     catalog_entries().into_iter().find(|e| e.id == provider_id)
+}
+
+/// The entry whose base is the API root as written and equals `base`,
+/// ignoring case and a trailing `/` as the settings UI does.
+pub fn api_root_entry(base: &str) -> Option<ProviderCatalogEntry> {
+    let base = base.trim_end_matches('/');
+    catalog_entries().into_iter().find(|e| {
+        e.base_url_is_api_root
+            && e.default_base_url
+                .as_deref()
+                .is_some_and(|d| d.trim_end_matches('/').eq_ignore_ascii_case(base))
+    })
+}
+
+/// The entry that drives a connection's quirks: the as-written entry its
+/// base matches, else its brand's. Connections saved before brands existed
+/// carry the `openai` brand whatever server they point at.
+pub fn entry_for_connection(connection: &ProviderConnection) -> Option<ProviderCatalogEntry> {
+    connection
+        .base_url
+        .as_deref()
+        .and_then(api_root_entry)
+        .or_else(|| get_entry(&connection.provider_id))
 }
 
 /// Unknown custom brands require a key; only explicit catalog entries can be keyless.

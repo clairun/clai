@@ -16,10 +16,12 @@ use crate::assistant::types::{
     ProviderConnection, ProviderDescriptor, ProviderEvent, ResolvedImage, ToolInvocationDraft,
 };
 
-use super::catalog::{self, ModelsEndpointStyle};
+use super::catalog;
 use super::types::{ProviderAdapter, ProviderError};
+use super::ModelsSource;
 
 pub const OPENAI_PROVIDER_ID: &str = "openai";
+const DEFAULT_API_ROOT: &str = "https://api.openai.com/v1";
 
 pub fn provider_descriptor() -> ProviderDescriptor {
     ProviderDescriptor {
@@ -49,34 +51,17 @@ impl ProviderAdapter for OpenAiAdapter {
         connection: &ProviderConnection,
     ) -> Result<Vec<ModelInfo>, ProviderError> {
         let api_key = get_api_key_opt(connection);
-        // Quirk-as-data: route model listing per the catalog entry's declared
-        // style — curated list only, or a dedicated models URL apart from the
-        // chat base (e.g. MiniMax).
-        if let Some(entry) = catalog::get_entry(&connection.provider_id) {
-            match &entry.models_endpoint_style {
-                ModelsEndpointStyle::None => return Ok(entry.curated_models.clone()),
-                ModelsEndpointStyle::OpenAiCompatible { url } => {
-                    return super::fetch_models_openai_compatible(
-                        url,
-                        api_key.as_deref(),
-                        entry.capabilities.as_ref(),
-                    )
-                    .await;
-                }
-                ModelsEndpointStyle::Standard => {}
+        let models_url = match super::models_source(connection, endpoint_url) {
+            ModelsSource::Curated(models) => return Ok(models),
+            ModelsSource::OpenAiCompatible { url, capabilities } => {
+                return super::fetch_models_openai_compatible(
+                    &url,
+                    api_key.as_deref(),
+                    capabilities.as_ref(),
+                )
+                .await;
             }
-        }
-        let models_url = {
-            let base = connection
-                .base_url
-                .as_deref()
-                .unwrap_or("https://api.openai.com/v1")
-                .trim_end_matches('/');
-            if base.ends_with("/v1") {
-                format!("{}/models", base)
-            } else {
-                format!("{}/v1/models", base)
-            }
+            ModelsSource::Endpoint(url) => url,
         };
 
         tracing::info!(
@@ -149,7 +134,7 @@ impl ProviderAdapter for OpenAiAdapter {
         ProviderError,
     > {
         let api_key = get_api_key(connection)?;
-        let url = completions_url(connection);
+        let url = endpoint_url(connection, "chat/completions");
         let body = build_request_body(&request);
 
         let client = Client::new();
@@ -230,18 +215,42 @@ fn requires_api_key(connection: &ProviderConnection) -> bool {
     catalog::requires_api_key(&connection.provider_id)
 }
 
-fn completions_url(connection: &ProviderConnection) -> String {
+/// URL of `endpoint` (e.g. `chat/completions`) under the connection's API root.
+pub(super) fn endpoint_url(connection: &ProviderConnection, endpoint: &str) -> String {
+    format!("{}/{endpoint}", api_root(connection))
+}
+
+/// The versioned API root, which the OpenAI SDKs call `base_url`
+/// (`https://api.openai.com/v1`, `https://api.z.ai/api/paas/v4`).
+///
+/// A base whose last segment is a version, or a catalog base flagged as the
+/// root as written, is used as written. Any other base is read as a server
+/// root serving the API under `/v1`, which is how CLAI has always read stored
+/// custom URLs such as `http://localhost:11434`.
+fn api_root(connection: &ProviderConnection) -> String {
+    let catalog_base = catalog::get_entry(&connection.provider_id).and_then(|e| e.default_base_url);
     let base = connection
         .base_url
         .as_deref()
-        .unwrap_or("https://api.openai.com/v1")
+        .or(catalog_base.as_deref())
+        .unwrap_or(DEFAULT_API_ROOT)
         .trim_end_matches('/');
-
-    if base.ends_with("/v1") {
-        format!("{}/chat/completions", base)
+    if ends_with_version_segment(base) || catalog::api_root_entry(base).is_some() {
+        base.to_string()
     } else {
-        format!("{}/v1/chat/completions", base)
+        format!("{base}/v1")
     }
+}
+
+/// `v`, a digit, then only alphanumerics: `v1`, `v4`, `v1beta`.
+fn ends_with_version_segment(base: &str) -> bool {
+    base.rsplit('/')
+        .next()
+        .and_then(|segment| segment.strip_prefix('v'))
+        .is_some_and(|rest| {
+            rest.starts_with(|c: char| c.is_ascii_digit())
+                && rest.chars().all(|c| c.is_ascii_alphanumeric())
+        })
 }
 
 // =============================================================================
@@ -922,6 +931,89 @@ mod tests {
             *seen_auth.lock().unwrap(),
             vec![None, Some("Bearer valid-key".to_string())]
         );
+    }
+
+    /// Stored and hand-typed bases are read as they are, never rewritten:
+    /// a versioned root or an as-written catalog base is used as written,
+    /// anything else keeps the `/v1` that CLAI has always appended.
+    #[test]
+    fn api_root_keeps_legacy_bases_and_honours_versioned_ones() {
+        let cases = [
+            (
+                "custom-openai",
+                Some("http://localhost:11434"),
+                "http://localhost:11434/v1",
+            ),
+            (
+                "custom-openai",
+                Some("http://localhost:11434/"),
+                "http://localhost:11434/v1",
+            ),
+            (
+                "groq",
+                Some("https://api.groq.com/openai"),
+                "https://api.groq.com/openai/v1",
+            ),
+            (
+                "groq",
+                Some("https://api.groq.com/openai/v1/"),
+                "https://api.groq.com/openai/v1",
+            ),
+            (
+                "custom-openai",
+                Some("https://v1.example.com"),
+                "https://v1.example.com/v1",
+            ),
+            (
+                "custom-openai",
+                Some("https://api.z.ai/api/coding/paas/v4"),
+                "https://api.z.ai/api/coding/paas/v4",
+            ),
+            (
+                "custom-openai",
+                Some("https://example.com/api/v1beta"),
+                "https://example.com/api/v1beta",
+            ),
+            (
+                "custom-openai",
+                Some("https://example.com/vision"),
+                "https://example.com/vision/v1",
+            ),
+            (
+                "custom-openai",
+                Some("https://example.com/v1-beta"),
+                "https://example.com/v1-beta/v1",
+            ),
+            (
+                "deepseek",
+                Some("https://api.deepseek.com/v1"),
+                "https://api.deepseek.com/v1",
+            ),
+            (
+                "litellm",
+                Some("http://localhost:4000"),
+                "http://localhost:4000/v1",
+            ),
+            (
+                "perplexity",
+                Some("https://api.perplexity.ai"),
+                "https://api.perplexity.ai",
+            ),
+            // Saved before brands existed: the base, not the brand, decides.
+            (
+                "openai",
+                Some("https://API.perplexity.ai/"),
+                "https://API.perplexity.ai",
+            ),
+            // No stored base: the brand's catalog base, else OpenAI.
+            ("openrouter", None, "https://openrouter.ai/api/v1"),
+            ("custom-openai", None, "https://api.openai.com/v1"),
+        ];
+        for (brand, base, want) in cases {
+            let mut connection = conn_with_brand(brand);
+            connection.base_url = base.map(str::to_string);
+            assert_eq!(api_root(&connection), want, "{brand} {base:?}");
+        }
     }
 
     #[test]

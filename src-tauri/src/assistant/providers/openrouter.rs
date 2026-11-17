@@ -10,7 +10,7 @@ use crate::assistant::types::{
     CompletionRequest, ModelInfo, ProtocolFamily, ProviderConnection, ProviderEvent,
 };
 
-use super::openai::{get_api_key, OpenAiAdapter};
+use super::openai::{endpoint_url, get_api_key, OpenAiAdapter};
 use super::types::{ProviderAdapter, ProviderError};
 
 pub const OPENROUTER_PROVIDER_ID: &str = "openrouter";
@@ -58,20 +58,11 @@ async fn validate_openrouter_key(connection: &ProviderConnection) -> Result<(), 
     validate_openrouter_key_at(&key_validation_url(connection), &key).await
 }
 
-/// OpenRouter's authenticated key endpoint, derived from the connection's
-/// base like every other URL in this adapter, so a custom base validates
-/// against itself instead of openrouter.ai proper.
+/// OpenRouter's authenticated key endpoint, under the connection's API root
+/// like every other URL in this adapter, so a custom base validates against
+/// itself instead of openrouter.ai proper.
 fn key_validation_url(connection: &ProviderConnection) -> String {
-    let base = connection
-        .base_url
-        .as_deref()
-        .unwrap_or("https://openrouter.ai/api/v1")
-        .trim_end_matches('/');
-    if base.ends_with("/v1") {
-        format!("{base}/key")
-    } else {
-        format!("{base}/v1/key")
-    }
+    endpoint_url(connection, "key")
 }
 
 async fn validate_openrouter_key_at(url: &str, key: &str) -> Result<(), ProviderError> {
