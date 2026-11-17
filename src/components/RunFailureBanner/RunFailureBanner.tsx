@@ -12,11 +12,14 @@ const RunFailureBanner = ({ failure, className, ref }: RunFailureBannerProps) =>
   <div
     ref={ref}
     className={className ? `${styles.banner} ${className}` : styles.banner}
-    data-limit={failure.isLimit || undefined}
+    data-kind={failure.kind}
     role="alert"
   >
-    <span className={styles.icon} aria-hidden="true">{failure.isLimit ? '⏳' : '⚠'}</span>
-    <span>{failure.text}</span>
+    <span className={styles.icon} aria-hidden="true">{failure.kind === 'usage_limit' ? '⏳' : '⚠'}</span>
+    <div className={styles.body}>
+      <span>{failure.text}</span>
+      {failure.action && <span className={styles.action}>{failure.action}</span>}
+    </div>
   </div>
 );
 

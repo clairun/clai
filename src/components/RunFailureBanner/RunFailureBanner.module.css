@@ -11,9 +11,9 @@
   line-height: 1.45;
 }
 
-/* Usage/rate limit — calmer than a hard error: it resolves on its own at the
+/* Usage limit — calmer than a hard error: it resolves on its own at the
    stated reset time. */
-.banner[data-limit] {
+.banner[data-kind='usage_limit'] {
   border-color: var(--color-warning-border);
   background: color-mix(in srgb, var(--color-warning-bg) 60%, var(--color-bg-elevated));
   color: var(--color-text-primary);
@@ -21,4 +21,14 @@
 
 .icon {
   flex-shrink: 0;
+}
+
+.body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.action {
+  font-weight: 600;
 }

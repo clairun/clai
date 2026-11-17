@@ -136,6 +136,6 @@ describe('sending from a workspace', () => {
     useFleetStore.getState().applyEvent({ sessionId: 's', runId: 'r1', workspaceId: 'ws', timestamp: 1n, event: { type: 'run_failed', payload: { run } } });
     const card = useFleetStore.getState().fleet.cards.ws!;
     expect(card.mainSessionId).toBe('s');
-    expect(runFailure(card.lastMainRun)).toEqual({ text: 'Credit balance is too low', isLimit: false });
+    expect(runFailure(card.lastMainRun)).toEqual({ text: 'Credit balance is too low' });
   });
 });

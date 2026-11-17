@@ -52,9 +52,7 @@ impl FailureKind {
         Self::Other,
     ];
 
-    /// The sentence shown before the provider's own message. Only
-    /// `UsageLimit` may name a limit: `src/assistant/runErrors.ts` reads any
-    /// limit phrase in a run error as a usage limit.
+    /// The sentence shown before the provider's own message.
     fn lead(self) -> Option<&'static str> {
         match self {
             Self::Auth => Some("The provider rejected the API key."),
@@ -266,7 +264,6 @@ fn parse_error_body(body: &str) -> (Option<String>, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::assistant::local_agent::is_usage_limit_error;
     use FailureKind::*;
 
     fn zai(code: &str, message: &str) -> String {
@@ -387,21 +384,6 @@ mod tests {
         let mut seen = std::collections::HashSet::new();
         for (code, _) in ZAI_ERROR_CODES {
             assert!(seen.insert(code), "Z.ai lists {code} twice");
-        }
-    }
-
-    /// Transitional, until the frontend reads `error_kind` (PR 3):
-    /// `runErrors.ts` marks a run error as a limit by phrase, so only the
-    /// `UsageLimit` lead may contain one.
-    #[test]
-    fn only_the_usage_limit_lead_names_a_limit() {
-        for kind in FailureKind::ALL {
-            let lead = kind.lead().unwrap_or_default();
-            assert_eq!(
-                is_usage_limit_error(lead),
-                kind == UsageLimit,
-                "{kind:?}: {lead}"
-            );
         }
     }
 }

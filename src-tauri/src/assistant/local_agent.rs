@@ -690,7 +690,7 @@ fn should_recover_cli_context_limit(message: &str) -> bool {
 ///
 /// Unlike a transient crash these are non-retryable until the stated reset
 /// time, so callers treat them distinctly.
-pub(crate) fn is_usage_limit_error(message: &str) -> bool {
+fn is_usage_limit_error(message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     lower.contains("usage limit")
         || lower.contains("session limit")
