@@ -583,9 +583,9 @@ pub async fn run_session_turn(
             } else {
                 message
             };
-            let error_kind = is_usage_limit_error(&message).then_some(FailureKind::UsageLimit);
-            if error_kind.is_some() {
-                // A usage/rate limit is a non-retryable failure (the user must
+            let error_kind = cli_failure_kind(&message);
+            if error_kind == Some(FailureKind::UsageLimit) {
+                // A usage limit is a non-retryable failure (the user must
                 // wait until the stated reset time), distinct from a transient
                 // crash. Log it as such so it's diagnosable; the provider's
                 // message is already user-facing so we pass it through unchanged.
@@ -593,7 +593,7 @@ pub async fn run_session_turn(
                     target: "clai::usage_limit",
                     provider = provider_runtime.metadata_source(),
                     run_id = %run_id,
-                    "{} reported a usage/rate limit: {}",
+                    "{} reported a usage limit: {}",
                     provider_runtime.display_name(),
                     message
                 );
@@ -684,23 +684,35 @@ fn should_recover_cli_context_limit(message: &str) -> bool {
     is_context_limit_error(message)
 }
 
-/// Detects a provider usage/rate-limit failure from a CLI error message.
+/// The kind of a CLI provider's limit failure, read from its message. Claude
+/// Code, OpenCode and `codex exec` report limits as free text only; the Codex
+/// app-server's `usageLimitExceeded` code is folded into the text by
+/// `classify_error_message`.
 ///
-/// Both CLI providers surface these as free-text only (no structured error
-/// code on the wire), so we match on the message:
-///   - Claude Code: "You've hit your session limit · resets 4:40pm (…)"
+/// A plan or quota limit is `UsageLimit`: the user waits for it to reset.
+///   - Claude Code: "You've hit your 5-hour limit · resets 4:40pm (…)"
 ///   - Codex:       "You've hit your usage limit. … try again at 9:47 PM."
 ///
-/// Unlike a transient crash these are non-retryable until the stated reset
-/// time, so callers treat them distinctly.
-fn is_usage_limit_error(message: &str) -> bool {
+/// Throttling is `Transient`:
+///   - Claude Code: "API Error: Server is temporarily limiting requests (not
+///     your usage limit) · …", checked first because it names a usage limit
+///   - Codex:       "rate limit exceeded: Rate limit reached for … Please try
+///     again in 11.054s."
+fn cli_failure_kind(message: &str) -> Option<FailureKind> {
     let lower = message.to_ascii_lowercase();
-    lower.contains("usage limit")
-        || lower.contains("session limit")
-        || lower.contains("rate limit")
-        || lower.contains("rate_limit")
+    if lower.contains("not your usage limit") {
+        return Some(FailureKind::Transient);
+    }
+    let usage_limit = lower.contains("usage limit")
         || lower.contains("quota")
-        || (lower.contains("you've hit your") && lower.contains("limit"))
+        || (lower.contains("you've hit your") && lower.contains("limit"));
+    if usage_limit {
+        Some(FailureKind::UsageLimit)
+    } else if lower.contains("rate limit") {
+        Some(FailureKind::Transient)
+    } else {
+        None
+    }
 }
 
 async fn clear_cli_session_id(
@@ -5675,30 +5687,40 @@ mod tests {
     }
 
     #[test]
-    fn detects_real_usage_limit_messages() {
-        // Captured verbatim from the live CLI streams.
-        assert!(is_usage_limit_error(
-            "You've hit your usage limit. To get more access now, send a request to your admin or try again at 9:47 PM."
-        ));
-        assert!(is_usage_limit_error(
-            "You've hit your session limit · resets 4:40pm (Europe/Madrid)"
-        ));
-        // Common API-style phrasings should also classify.
-        assert!(is_usage_limit_error("rate limit exceeded"));
-        assert!(is_usage_limit_error("Error: rate_limit_error"));
-        assert!(is_usage_limit_error("You have exceeded your quota"));
-    }
-
-    #[test]
-    fn does_not_flag_unrelated_failures() {
-        assert!(!is_usage_limit_error(
-            "Codex exited with status exit status: 2"
-        ));
-        assert!(!is_usage_limit_error("user cancelled MCP tool call"));
-        assert!(!is_usage_limit_error(
-            "No conversation found with session ID"
-        ));
-        assert!(!is_usage_limit_error(""));
+    fn classifies_cli_limit_messages() {
+        use FailureKind::{Transient, UsageLimit};
+        let cases = [
+            // Captured from the live CLI streams.
+            ("You've hit your usage limit. To get more access now, send a request to your admin or try again at 9:47 PM.", Some(UsageLimit)),
+            ("You've hit your session limit · resets 4:40pm (Europe/Madrid)", Some(UsageLimit)),
+            // Claude Code's plan and spend limit lines.
+            ("You've hit your limit · resets 4pm (Asia/Kuala_Lumpur)", Some(UsageLimit)),
+            ("You've hit your 5-hour limit · resets 4:40pm (Europe/Madrid)", Some(UsageLimit)),
+            ("You've hit your monthly spend limit.", Some(UsageLimit)),
+            // Codex: a typographic apostrophe, an exhausted API quota, and
+            // the app-server's `usageLimitExceeded` code folded in.
+            ("You\u{2019}ve hit your usage limit. Try again at 9:47 PM.", Some(UsageLimit)),
+            ("Quota exceeded. Check your plan and billing details.", Some(UsageLimit)),
+            ("To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus. (usage limit exceeded)", Some(UsageLimit)),
+            // OpenCode.
+            ("Workspace usage limit reached. Model use is paused until the limit resets.", Some(UsageLimit)),
+            // Anthropic's monthly spend cap arrives as a rate-limit error.
+            ("API Error: Request rejected (429) · You have reached your API usage limits: your organization has crossed its monthly API usage threshold, set based on your organization's API tier. You will regain access on 2026-09-01 at 00:00 UTC.", Some(UsageLimit)),
+            // Claude Code throttling, for subscribers and for API keys.
+            ("API Error: Server is temporarily limiting requests (not your usage limit) · this may be a temporary capacity issue. If it persists, check https://status.claude.com.", Some(Transient)),
+            ("API Error: Request rejected (429) · This request would exceed your account's rate limit. Please try again later.", Some(Transient)),
+            ("Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"}}", Some(Transient)),
+            // Codex throttling after its own retries.
+            ("rate limit exceeded: Rate limit reached for gpt-5.1 in organization org-AAA on tokens per min (TPM): Limit 30000, Used 22999, Requested 12528. Please try again in 11.054s.", Some(Transient)),
+            // Unrelated failures.
+            ("Codex exited with status exit status: 2", None),
+            ("user cancelled MCP tool call", None),
+            ("No conversation found with session ID", None),
+            ("", None),
+        ];
+        for (message, expected) in cases {
+            assert_eq!(cli_failure_kind(message), expected, "{message}");
+        }
     }
 
     #[test]
