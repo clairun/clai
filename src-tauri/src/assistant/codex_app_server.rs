@@ -421,8 +421,8 @@ pub(crate) fn server_request_response(id: &Value, method: &str) -> Value {
 /// Turn a Codex app-server error (`error.message` + `error.codexErrorInfo`)
 /// into a message that CLAI's existing CLI error classifiers recognize.
 ///
-/// The `exec` path only sees free text, so the recovery classifiers
-/// (`is_context_limit_error`, `is_usage_limit_error`) match on phrases. The
+/// The `exec` path only sees free text, so the classifiers
+/// (`is_context_limit_error`, `cli_failure_kind`) match on phrases. The
 /// app-server gives us a *structured* code (`contextWindowExceeded`,
 /// `usageLimitExceeded`); we fold the matching phrase into the message so the
 /// same recovery/notice paths fire.
