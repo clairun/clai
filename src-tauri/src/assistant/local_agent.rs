@@ -684,12 +684,35 @@ fn should_recover_cli_context_limit(message: &str) -> bool {
     is_context_limit_error(message)
 }
 
+/// Plan, quota, credit and spend limits as the CLIs word them, lowercase.
+const CLI_USAGE_LIMIT_PHRASES: &[&str] = &[
+    "usage limit",
+    "quota",
+    // Claude Code reports every message with these prefixes as a usage limit:
+    // "You've hit your team's shared budget. …", "You've reached your Fable
+    // limit." Its "seat type doesn't include …", "usage allocation has been
+    // disabled by your admin" and "<model> requires usage credits." are left
+    // out because they never reset.
+    "you've hit your",
+    "you've reached your",
+    // Claude Code: "You're out of usage credits", "Your org is out of usage · …"
+    "out of usage",
+    "out of extra usage",
+    // The Claude apps gateway; its "spend limit unavailable" is not a limit.
+    "spend limit reached",
+    // Codex: "Your workspace is out of credits. Add credits to continue."
+    "out of credits",
+    // Codex: "You hit your spend cap set in your workspace. …"
+    "spend cap",
+];
+
 /// The kind of a CLI provider's limit failure, read from its message. Claude
 /// Code, OpenCode and `codex exec` report limits as free text only; the Codex
-/// app-server's `usageLimitExceeded` code is folded into the text by
+/// app-server's limit codes are folded into the text by
 /// `classify_error_message`.
 ///
-/// A plan or quota limit is `UsageLimit`: the user waits for it to reset.
+/// A message with a `CLI_USAGE_LIMIT_PHRASES` phrase is `UsageLimit`: the user
+/// waits for the limit to reset or raises it.
 ///   - Claude Code: "You've hit your 5-hour limit · resets 4:40pm (…)"
 ///   - Codex:       "You've hit your usage limit. … try again at 9:47 PM."
 ///
@@ -703,10 +726,10 @@ fn cli_failure_kind(message: &str) -> Option<FailureKind> {
     if lower.contains("not your usage limit") {
         return Some(FailureKind::Transient);
     }
-    let usage_limit = lower.contains("usage limit")
-        || lower.contains("quota")
-        || (lower.contains("you've hit your") && lower.contains("limit"));
-    if usage_limit {
+    if CLI_USAGE_LIMIT_PHRASES
+        .iter()
+        .any(|phrase| lower.contains(phrase))
+    {
         Some(FailureKind::UsageLimit)
     } else if lower.contains("rate limit") {
         Some(FailureKind::Transient)
@@ -5704,6 +5727,17 @@ mod tests {
             ("To use Codex with your ChatGPT plan, upgrade to Plus: https://chatgpt.com/explore/plus. (usage limit exceeded)", Some(UsageLimit)),
             // OpenCode.
             ("Workspace usage limit reached. Model use is paused until the limit resets.", Some(UsageLimit)),
+            // More Claude Code limit lines.
+            ("You've reached your Fable limit.", Some(UsageLimit)),
+            ("You've hit your team's shared budget. Switch to another model to continue.", Some(UsageLimit)),
+            ("You're out of usage credits · resets 4pm (Europe/Madrid)", Some(UsageLimit)),
+            ("Your org is out of usage · add funds to continue", Some(UsageLimit)),
+            ("You're out of extra usage", Some(UsageLimit)),
+            ("spend limit reached · resets Dec 1", Some(UsageLimit)),
+            // More Codex limit lines.
+            ("Your workspace is out of credits. Ask your workspace owner to refill in order to continue.", Some(UsageLimit)),
+            ("You hit your spend cap set by the owner of your workspace. Ask an owner to increase your spend cap to continue.", Some(UsageLimit)),
+            ("You've reached your workspace credit limit", Some(UsageLimit)),
             // Anthropic's monthly spend cap arrives as a rate-limit error.
             ("API Error: Request rejected (429) · You have reached your API usage limits: your organization has crossed its monthly API usage threshold, set based on your organization's API tier. You will regain access on 2026-09-01 at 00:00 UTC.", Some(UsageLimit)),
             // Claude Code throttling, for subscribers and for API keys.
@@ -5712,7 +5746,11 @@ mod tests {
             ("Error: 429 {\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"This request would exceed your account's rate limit. Please try again later.\"}}", Some(Transient)),
             // Codex throttling after its own retries.
             ("rate limit exceeded: Rate limit reached for gpt-5.1 in organization org-AAA on tokens per min (TPM): Limit 30000, Used 22999, Requested 12528. Please try again in 11.054s.", Some(Transient)),
-            // Unrelated failures.
+            // Codex's `rateLimitExceeded` code folded in.
+            ("Codex turn failed (rate limit exceeded)", Some(Transient)),
+            // Unrelated failures, including a Claude apps gateway that cannot
+            // read its spend limit.
+            ("spend limit unavailable", None),
             ("Codex exited with status exit status: 2", None),
             ("user cancelled MCP tool call", None),
             ("No conversation found with session ID", None),
@@ -5721,6 +5759,12 @@ mod tests {
         for (message, expected) in cases {
             assert_eq!(cli_failure_kind(message), expected, "{message}");
         }
+        // A Codex session budget is no provider limit.
+        let budget = codex_app_server::classify_error_message(
+            Some("sessionBudgetExceeded"),
+            "session budget exceeded",
+        );
+        assert_eq!(cli_failure_kind(&budget), None);
     }
 
     #[test]

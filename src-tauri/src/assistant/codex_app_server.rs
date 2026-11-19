@@ -424,19 +424,23 @@ pub(crate) fn server_request_response(id: &Value, method: &str) -> Value {
 /// The `exec` path only sees free text, so the classifiers
 /// (`is_context_limit_error`, `cli_failure_kind`) match on phrases. The
 /// app-server gives us a *structured* code (`contextWindowExceeded`,
-/// `usageLimitExceeded`); we fold the matching phrase into the message so the
-/// same recovery/notice paths fire.
+/// `usageLimitExceeded`, `rateLimitExceeded`); we fold the matching phrase
+/// into the message so the same recovery/notice paths fire.
+///
+/// `sessionBudgetExceeded` is left as it is: it is a token budget for one
+/// Codex session, set by Codex's config or host, so neither waiting nor the
+/// provider lifts it.
 pub(crate) fn classify_error_message(codex_error_info: Option<&str>, message: &str) -> String {
-    match codex_error_info {
-        Some("contextWindowExceeded")
-            if !message.to_ascii_lowercase().contains("context window") =>
-        {
-            format!("{message} (context window exceeded)")
-        }
-        Some("usageLimitExceeded") if !message.to_ascii_lowercase().contains("usage limit") => {
-            format!("{message} (usage limit exceeded)")
-        }
-        _ => message.to_string(),
+    let phrase = match codex_error_info {
+        Some("contextWindowExceeded") => "context window",
+        Some("usageLimitExceeded") => "usage limit",
+        Some("rateLimitExceeded") => "rate limit",
+        _ => return message.to_string(),
+    };
+    if message.to_ascii_lowercase().contains(phrase) {
+        message.to_string()
+    } else {
+        format!("{message} ({phrase} exceeded)")
     }
 }
 
@@ -658,6 +662,13 @@ mod tests {
         assert!(ctx.to_ascii_lowercase().contains("context window"));
         let usage = classify_error_message(Some("usageLimitExceeded"), "boom");
         assert!(usage.to_ascii_lowercase().contains("usage limit"));
+        let rate = classify_error_message(Some("rateLimitExceeded"), "boom");
+        assert!(rate.to_ascii_lowercase().contains("rate limit"));
+        // A session budget is no provider limit, so its text stays as sent.
+        assert_eq!(
+            classify_error_message(Some("sessionBudgetExceeded"), "boom"),
+            "boom"
+        );
         // Already-descriptive messages are left alone.
         assert_eq!(
             classify_error_message(Some("contextWindowExceeded"), "the context window is full"),
