@@ -425,8 +425,8 @@ export default function WorkspaceFilePreviewPanel({
   onDelete,
 }: WorkspaceFilePreviewPanelProps) {
   const [file, setFile] = useState<LoadedFile | null>(null);
-  // Armed two-click delete (no blocking dialog — window.confirm doesn't
-  // reliably block in the Tauri webview). First click arms (red), second
+  // Armed two-click delete (no blocking dialog — window.confirm never
+  // asks in the Tauri webview). First click arms (red), second
   // deletes. The armed state stores WHICH path is armed, so navigating to
   // another file disarms by derivation (no reset effect), and it
   // auto-expires after a few seconds.

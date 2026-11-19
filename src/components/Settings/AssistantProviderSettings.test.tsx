@@ -1,5 +1,5 @@
-import { describe, expect, it, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 const client = vi.hoisted(() => ({
@@ -24,8 +24,12 @@ const client = vi.hoisted(() => ({
     },
   ]),
   getProviderSecretHint: vi.fn().mockResolvedValue(null),
+  deleteProviderConnection: vi.fn(),
 }));
 vi.mock('../../assistant', () => ({ assistantClient: client }));
+const mockAsk = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: mockAsk }));
+vi.mock('@tauri-apps/api/event', () => ({ emit: vi.fn().mockResolvedValue(undefined) }));
 // The other tabs are heavy modules this test never opens; the provider pane
 // and the modal shell around it are both real, because their overlays stack.
 vi.mock('./McpServersSettings', () => ({ default: () => <div /> }));
@@ -85,5 +89,61 @@ describe('provider overlays over the Settings modal', () => {
     await user.keyboard('{Escape}');
 
     expect(document.body.style.overflow).toBe('hidden');
+  });
+});
+
+// Deleting a connection also wipes its API key from the keychain, so the
+// click must wait for the user's answer.
+describe('deleting a provider connection', () => {
+  const WORK = {
+    id: 'conn-1',
+    name: 'Work OpenAI',
+    protocolId: 'openai',
+    providerId: 'openai',
+    authMode: 'developer_api_key',
+    baseUrl: null,
+    secretRef: 'conn-1',
+    modelId: 'gpt-5',
+    accountLabel: null,
+    enabled: true,
+  };
+
+  beforeEach(() => {
+    let connections = [WORK];
+    client.listProviderConnections.mockImplementation(async () => connections);
+    client.deleteProviderConnection.mockReset().mockImplementation(async (id: string) => {
+      connections = connections.filter((connection) => connection.id !== id);
+    });
+    mockAsk.mockReset();
+  });
+
+  it('keeps the connection when the user cancels', async () => {
+    const user = userEvent.setup();
+    mockAsk.mockResolvedValue(false);
+    openSettings();
+
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+
+    await waitFor(() => expect(mockAsk).toHaveBeenCalledTimes(1));
+    expect(mockAsk).toHaveBeenCalledWith(
+      expect.stringContaining('"Work OpenAI"'),
+      expect.objectContaining({ kind: 'warning', okLabel: 'Delete' })
+    );
+    expect(client.deleteProviderConnection).not.toHaveBeenCalled();
+    expect(screen.getByText('Work OpenAI')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeEnabled();
+  });
+
+  it('deletes the connection once when the user confirms', async () => {
+    const user = userEvent.setup();
+    mockAsk.mockResolvedValue(true);
+    openSettings();
+
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+
+    expect(await screen.findByText('Connection deleted.')).toBeInTheDocument();
+    expect(client.deleteProviderConnection).toHaveBeenCalledTimes(1);
+    expect(client.deleteProviderConnection).toHaveBeenCalledWith('conn-1');
+    expect(screen.queryByText('Work OpenAI')).toBeNull();
   });
 });
