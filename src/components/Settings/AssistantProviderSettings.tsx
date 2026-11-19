@@ -16,6 +16,7 @@ import modalStyles from './McpServerFormModal.module.css';
 import { openExternal } from '../../utils/openExternal';
 import { useOverlayLayer } from '../../hooks/useOverlayLayer';
 
+import { askOnce } from '../../utils/askOnce';
 import { notifySettingsChanged } from '../../utils/settingsEvents';
 
 const CONNECTIONS_CHANGED_EVENT = 'assistant-provider-connections-changed';
@@ -516,9 +517,13 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
   }, [editingId, form, isCliAdapter, requiresKey, loadData]);
 
   const handleDelete = useCallback(async (connection: ProviderConnection) => {
-    if (!window.confirm(`Delete provider connection "${connection.name}"?`)) {
-      return;
-    }
+    const confirmed = await askOnce(`Delete provider connection "${connection.name}"? This cannot be undone.`, {
+      title: 'Delete connection?',
+      kind: 'warning',
+      okLabel: 'Delete',
+      cancelLabel: 'Cancel',
+    });
+    if (!confirmed) return;
 
     setDeletingId(connection.id);
     setError(null);

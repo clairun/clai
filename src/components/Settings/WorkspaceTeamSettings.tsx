@@ -20,6 +20,7 @@ import {
   type WorkspaceAssignmentPayload,
 } from '../../api/client';
 import AgentCardPicker from '../Agents/AgentCardPicker';
+import { askOnce } from '../../utils/askOnce';
 import { openGlobalSettings } from '../../utils/globalSettings';
 import { useReportDirty, type SectionHandle } from './sectionHandle';
 import { PathGrantEditor, Switch } from './ListEditors';
@@ -267,13 +268,11 @@ export const AssignmentSection = ({
     // it. Confirming matches the other destructive action in this modal
     // (AgentBehaviorForm's "Delete agent").
     const name = definition?.name || 'this agent';
-    if (
-      !window.confirm(
-        `Remove ${name} from this crew? The context and path grants it has here are deleted, and adding it back gives it a new callable id.`
-      )
-    ) {
-      return;
-    }
+    const confirmed = await askOnce(
+      `Remove ${name} from this crew? The context and path grants it has here are deleted, and adding it back gives it a new callable id.`,
+      { title: 'Remove from crew?', kind: 'warning', okLabel: 'Remove', cancelLabel: 'Cancel' }
+    );
+    if (!confirmed) return;
     setBusy(true);
     setError(null);
     try {

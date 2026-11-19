@@ -5,6 +5,8 @@ import { createRef } from 'react';
 
 const mockInvoke = vi.hoisted(() => vi.fn());
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mockInvoke }));
+const mockAsk = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: mockAsk }));
 
 import { AssignmentSection, TeamPolicySection } from './WorkspaceTeamSettings';
 import type { SectionHandle } from './sectionHandle';
@@ -111,6 +113,7 @@ const policy = {
 
 beforeEach(() => {
   mockInvoke.mockReset();
+  mockAsk.mockReset();
   mockInvoke.mockImplementation((cmd: string) => {
     if (cmd === 'agent_definitions_list') return Promise.resolve(DEFINITIONS);
     if (cmd === 'workspace_team_policy') return Promise.resolve(policy);
@@ -247,7 +250,7 @@ describe('AssignmentSection editor', () => {
   it('hands the modal back control after unassigning instead of sitting on a dead row', async () => {
     const user = userEvent.setup();
     const onUnassigned = vi.fn();
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    mockAsk.mockResolvedValue(true);
     render(
       <AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
     );
@@ -255,8 +258,12 @@ describe('AssignmentSection editor', () => {
 
     await user.click(screen.getByRole('button', { name: 'Remove from crew' }));
 
-    expect(confirm).toHaveBeenCalledWith(expect.stringContaining('Remove Reviewer from this crew?'));
+    expect(mockAsk).toHaveBeenCalledWith(
+      expect.stringContaining('Remove Reviewer from this crew?'),
+      expect.objectContaining({ kind: 'warning', okLabel: 'Remove' })
+    );
     await waitFor(() => expect(onUnassigned).toHaveBeenCalledWith('assign-1'));
+    expect(mockInvoke.mock.calls.filter(([cmd]) => cmd === 'workspace_delete_agent')).toHaveLength(1);
     expect(mockInvoke).toHaveBeenCalledWith('workspace_delete_agent', {
       workspaceId: WORKSPACE,
       agentId: 'assign-1',
@@ -266,7 +273,7 @@ describe('AssignmentSection editor', () => {
   it('drops nothing when the remove is not confirmed', async () => {
     const user = userEvent.setup();
     const onUnassigned = vi.fn();
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    mockAsk.mockResolvedValue(false);
     render(
       <AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" onUnassigned={onUnassigned} />
     );
@@ -274,6 +281,8 @@ describe('AssignmentSection editor', () => {
 
     await user.click(screen.getByRole('button', { name: 'Remove from crew' }));
 
+    await waitFor(() => expect(mockAsk).toHaveBeenCalledTimes(1));
+    expect(screen.getByRole('button', { name: 'Remove from crew' })).toBeEnabled();
     expect(mockInvoke).not.toHaveBeenCalledWith('workspace_delete_agent', expect.anything());
     expect(onUnassigned).not.toHaveBeenCalled();
   });
@@ -321,14 +330,13 @@ describe('AssignmentSection editor', () => {
   it('opens the shared definition without prompting over an unsaved draft', async () => {
     const user = userEvent.setup();
     const opened = recordGlobalSettingsOpens();
-    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
     render(<AssignmentSection workspaceId={WORKSPACE} agentId="assign-1" />);
     await screen.findByText('assign-1');
 
     await user.type(screen.getByLabelText('Context for this workspace'), ' and docs');
     await user.click(screen.getByRole('button', { name: 'Edit in Settings → Agents' }));
 
-    expect(confirm).not.toHaveBeenCalled();
+    expect(mockAsk).not.toHaveBeenCalled();
     expect(opened).toEqual([{ tab: 'agents', agentDefinitionId: 'def-review' }]);
     expect(screen.getByLabelText('Context for this workspace')).toHaveValue(
       'API crate only and docs'

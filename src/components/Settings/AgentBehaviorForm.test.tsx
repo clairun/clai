@@ -12,6 +12,8 @@ const api = vi.hoisted(() => ({
   listAgentCraft: vi.fn(),
 }));
 vi.mock('../../api/client', () => api);
+const mockAsk = vi.hoisted(() => vi.fn());
+vi.mock('@tauri-apps/plugin-dialog', () => ({ ask: mockAsk }));
 
 import { AgentBehaviorForm, type AgentDetail, type AgentFormDeps } from './AgentBehaviorForm';
 import type { SectionHandle } from './sectionHandle';
@@ -140,6 +142,7 @@ describe('AgentBehaviorForm', () => {
     api.workspaceDeleteAgent.mockReset();
     api.getSandboxStatus.mockReset().mockResolvedValue(LINUX);
     api.listAgentCraft.mockReset().mockResolvedValue([]);
+    mockAsk.mockReset();
     resetSandboxStatusForTests();
   });
 
@@ -963,7 +966,7 @@ describe('AgentBehaviorForm', () => {
   it('freezes every control while a delete is in flight, not only while the host saves', async () => {
     let finishDelete: () => void = () => {};
     api.workspaceDeleteAgent.mockReturnValue(new Promise<void>((resolve) => { finishDelete = resolve; }));
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    mockAsk.mockResolvedValue(true);
     renderForm({ agentId: 'agent-1' });
     await screen.findByDisplayValue('Reviewer');
 
@@ -988,19 +991,24 @@ describe('AgentBehaviorForm', () => {
   it('deletes only after the user confirms, then tells the host', async () => {
     const onDeleted = vi.fn();
     api.workspaceDeleteAgent.mockResolvedValue(undefined);
-    const confirm = vi.spyOn(window, 'confirm');
     renderForm({ agentId: 'agent-1', onDeleted });
     await screen.findByDisplayValue('Reviewer');
 
-    confirm.mockReturnValueOnce(false);
+    mockAsk.mockResolvedValueOnce(false);
     await userEvent.click(screen.getByRole('button', { name: 'Delete agent' }));
+    await waitFor(() => expect(mockAsk).toHaveBeenCalledTimes(1));
     expect(api.workspaceDeleteAgent).not.toHaveBeenCalled();
+    expect(onDeleted).not.toHaveBeenCalled();
 
-    confirm.mockReturnValueOnce(true);
+    mockAsk.mockResolvedValueOnce(true);
     await userEvent.click(screen.getByRole('button', { name: 'Delete agent' }));
     await waitFor(() => expect(onDeleted).toHaveBeenCalledTimes(1));
+    expect(api.workspaceDeleteAgent).toHaveBeenCalledTimes(1);
     expect(api.workspaceDeleteAgent).toHaveBeenCalledWith('ws-1', 'agent-1');
-    expect(confirm).toHaveBeenCalledWith('Delete agent "Reviewer"? This cannot be undone.');
+    expect(mockAsk).toHaveBeenLastCalledWith(
+      'Delete agent "Reviewer"? This cannot be undone.',
+      expect.objectContaining({ kind: 'warning', okLabel: 'Delete' })
+    );
   });
 
   it('routes saves through saveBehavior when a host supplies one and hides Delete', async () => {

@@ -6,8 +6,8 @@
  */
 
 import React, { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
-import { ask } from '@tauri-apps/plugin-dialog';
 import { deleteAgentCraft, listAgentCraft, readAgentCraft, writeAgentCraft } from '../../api/client';
+import { askOnce } from '../../utils/askOnce';
 import type { AgentCraftFile } from '../../generated/bindings';
 import form from './SettingsForm.module.css';
 import styles from './AgentCraft.module.css';
@@ -37,7 +37,6 @@ export const CraftView = ({ definitionId, headingRef, onBack, context }: {
   const [error, setError] = useState<string | null>(null);
   const listRef = useRef<HTMLUListElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const asking = useRef(false);
   // The file whose row takes focus once the editor closes.
   const returnFocusTo = useRef<string | null>(null);
 
@@ -66,22 +65,10 @@ export const CraftView = ({ definitionId, headingRef, onBack, context }: {
     (rows.find((row) => row.dataset.path === path) ?? rows[0] ?? headingRef.current)?.focus();
   }, [open, busy, headingRef]);
 
-  // One question at a time: a double-click must not stack two dialogs. A ref,
-  // not `busy`, so the buttons stay enabled and keep focus when it closes.
-  const confirm = async (...args: Parameters<typeof ask>) => {
-    if (asking.current) return false;
-    asking.current = true;
-    try {
-      return await ask(...args);
-    } finally {
-      asking.current = false;
-    }
-  };
-
   const mayDiscard = async () =>
     !open ||
     open.text === open.saved ||
-    confirm(`Discard your changes to ${open.path}?`, {
+    askOnce(`Discard your changes to ${open.path}?`, {
       title: 'Discard changes?',
       kind: 'warning',
       okLabel: 'Discard',
@@ -128,7 +115,7 @@ export const CraftView = ({ definitionId, headingRef, onBack, context }: {
     });
 
   const remove = async (file: OpenFile) => {
-    const confirmed = await confirm(`Delete ${file.path}? The agent stops seeing this lesson. This cannot be undone.`, {
+    const confirmed = await askOnce(`Delete ${file.path}? The agent stops seeing this lesson. This cannot be undone.`, {
       title: 'Delete craft file?',
       kind: 'warning',
       okLabel: 'Delete',

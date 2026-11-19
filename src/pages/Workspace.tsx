@@ -442,8 +442,8 @@ const ArtifactTreeRow = ({
   onFolderDrop,
 }: ArtifactTreeRowProps) => {
   // Two-click delete (Insomnia-style): the first click ARMS the button (turns
-  // red), the second click deletes. No blocking dialog — window.confirm does
-  // not reliably block in the Tauri webview, and a popup per delete is
+  // red), the second click deletes. No blocking dialog — in the Tauri webview
+  // window.confirm returns a Promise and never asks, and a popup per delete is
   // annoying when clearing several files. Arming auto-expires after a few
   // seconds and mouse-leave disarms, so a stray click can't linger.
   const [deleteArmed, setDeleteArmed] = useState(false);
@@ -803,8 +803,8 @@ const ArtifactsList = ({
 
   // Delete a file or folder (recursive), then refresh the parent directory
   // level so the row disappears. Confirmation happens in the row itself (the
-  // armed two-click trash button) — window.confirm does not reliably block
-  // in the Tauri webview.
+  // armed two-click trash button) — in the Tauri webview window.confirm
+  // returns a Promise and never asks.
   const handleDelete = useCallback(
     async (entry: WorkspaceDirEntry) => {
       const isFolder = entry.kind === 'directory';

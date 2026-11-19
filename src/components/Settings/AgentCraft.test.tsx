@@ -174,11 +174,14 @@ describe('CraftView', () => {
   it('asks once when Delete is clicked twice before the dialog appears', async () => {
     renderView();
     await openTests();
-    mockAsk.mockReturnValue(new Promise(() => {}));
+    let answer!: (value: boolean) => void;
+    mockAsk.mockReturnValue(new Promise<boolean>((resolve) => { answer = resolve; }));
     const remove = screen.getByRole('button', { name: 'Delete' });
 
     await userEvent.dblClick(remove);
     expect(mockAsk).toHaveBeenCalledTimes(1);
+    // Close the dialog: the one-dialog guard is app-wide and outlives this test.
+    answer(false);
   });
 
   it('ignores Escape while a save is running', async () => {

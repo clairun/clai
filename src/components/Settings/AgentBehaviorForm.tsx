@@ -27,6 +27,7 @@ import type {
   SandboxSessionBusConfig,
   ProviderConnection,
 } from '../../generated/bindings';
+import { askOnce } from '../../utils/askOnce';
 import { openGlobalSettings } from '../../utils/globalSettings';
 import { useReportDirty, type SectionHandle } from './sectionHandle';
 import McpServerSelect from './McpServerSelect';
@@ -391,7 +392,13 @@ export const AgentBehaviorForm = ({
 
   const handleDelete = useCallback(async () => {
     if (!canDelete || !agent?.id) return;
-    if (!window.confirm(`Delete agent "${agent.name}"? This cannot be undone.`)) return;
+    const confirmed = await askOnce(`Delete agent "${agent.name}"? This cannot be undone.`, {
+      title: 'Delete agent?',
+      kind: 'warning',
+      okLabel: 'Delete',
+      cancelLabel: 'Cancel',
+    });
+    if (!confirmed) return;
     setDeleting(true);
     setError(null);
     try {
