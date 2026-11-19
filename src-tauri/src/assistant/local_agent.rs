@@ -404,8 +404,7 @@ pub async fn run_session_turn(
     // the same chat bubble. That keeps recovery bounded without showing the
     // user a stray empty turn or a "send your message again" error.
     let mut assistant_slot: Option<AssistantMessage> = None;
-    let mut retried_after_session_lost = false;
-    let mut retried_after_context_compaction = false;
+    let mut recoveries_used = RecoveriesUsed::default();
 
     let run_result = loop {
         let attempt = match provider_runtime {
@@ -494,8 +493,12 @@ pub async fn run_session_turn(
         // id and retry exactly once with a fresh session — transparently. The
         // retried turn reuses `assistant_slot`, and a freshly-minted session
         // can't itself be "lost", so this is naturally bounded.
-        if let Err(LocalAgentRunError::Failed { message, .. }) = &attempt {
-            if !retried_after_session_lost && is_session_lost_error(provider_runtime, message) {
+        match attempt
+            .as_ref()
+            .err()
+            .and_then(|error| error.recovery(provider_runtime, &recoveries_used))
+        {
+            Some(Recovery::FreshSession) => {
                 tracing::info!(
                     target: "clai::cli_session",
                     provider = provider_runtime.metadata_source(),
@@ -504,11 +507,10 @@ pub async fn run_session_turn(
                     provider_runtime.display_name()
                 );
                 clear_cli_session_id(deps, &mut session).await?;
-                retried_after_session_lost = true;
+                recoveries_used.fresh_session = true;
                 continue;
             }
-
-            if !retried_after_context_compaction && should_recover_cli_context_limit(message) {
+            Some(Recovery::Compact) => {
                 tracing::info!(
                     target: "clai::cli_session",
                     provider = provider_runtime.metadata_source(),
@@ -538,7 +540,7 @@ pub async fn run_session_turn(
                                 summary_message: outcome.summary_message,
                             },
                         );
-                        retried_after_context_compaction = true;
+                        recoveries_used.compact = true;
                         continue;
                     }
                     Ok(None) => {
@@ -560,6 +562,7 @@ pub async fn run_session_turn(
                     }
                 }
             }
+            None => {}
         }
 
         break attempt;
@@ -573,17 +576,13 @@ pub async fn run_session_turn(
             complete_run(deps, &session, &run_id, had_warnings).await
         }
         Err(LocalAgentRunError::Cancelled) => cancel_run(deps, &session, &run_id).await,
-        Err(LocalAgentRunError::Failed { message }) => {
-            let message = if should_recover_cli_context_limit(&message) {
-                compaction::context_limit_failure_message(
-                    provider_runtime.display_name(),
-                    &message,
-                    &compaction_attempt,
-                )
-            } else {
-                message
-            };
-            let error_kind = cli_failure_kind(&message);
+        Err(LocalAgentRunError::Failed { message, stderr }) => {
+            let (message, error_kind) = cli_failure_notice(
+                provider_runtime.display_name(),
+                message,
+                stderr.as_deref(),
+                &compaction_attempt,
+            );
             if error_kind == Some(FailureKind::UsageLimit) {
                 // A usage limit is a non-retryable failure (the user must
                 // wait until the stated reset time), distinct from a transient
@@ -682,6 +681,23 @@ fn is_session_lost_error(provider_runtime: CliProviderRuntime, message: &str) ->
 
 fn should_recover_cli_context_limit(message: &str) -> bool {
     is_context_limit_error(message)
+}
+
+/// The user-facing message and kind of a failed CLI run, classified from the
+/// CLI's own `message` only; `stderr` is appended for display.
+fn cli_failure_notice(
+    provider_name: &str,
+    message: String,
+    stderr: Option<&str>,
+    compaction_attempt: &compaction::CompactionAttempt,
+) -> (String, Option<FailureKind>) {
+    let message = if should_recover_cli_context_limit(&message) {
+        compaction::context_limit_failure_message(provider_name, &message, compaction_attempt)
+    } else {
+        message
+    };
+    let kind = cli_failure_kind(&message);
+    (with_stderr(message, stderr), kind)
 }
 
 /// Plan, quota, credit and spend limits as the CLIs word them, lowercase.
@@ -1516,17 +1532,12 @@ async fn run_claude_turn(
     .await;
     emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
 
-    if let Some(message) = result_error {
-        let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed { message: enriched });
-    }
-    if !status.success() {
-        let base = format!("Claude Code exited with status {}", status);
-        return Err(LocalAgentRunError::Failed {
-            message: append_stderr_tail(&base, &stderr_tail),
-        });
-    }
-    Ok(())
+    cli_exit_outcome(
+        CliProviderRuntime::ClaudeCode.display_name(),
+        result_error,
+        status,
+        &stderr_tail,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1738,17 +1749,12 @@ async fn run_codex_turn(
     .await;
     emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
 
-    if let Some(message) = result_error {
-        let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed { message: enriched });
-    }
-    if !status.success() {
-        let base = format!("Codex exited with status {}", status);
-        return Err(LocalAgentRunError::Failed {
-            message: append_stderr_tail(&base, &stderr_tail),
-        });
-    }
-    Ok(())
+    cli_exit_outcome(
+        CliProviderRuntime::Codex.display_name(),
+        result_error,
+        status,
+        &stderr_tail,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1904,6 +1910,7 @@ async fn run_codex_turn_app_server(
 
     let mut state = CodexStreamState::new();
     let mut result_error: Option<String> = None;
+    let mut connection_closed = false;
     // Set on turn/started, cleared on turn/completed. Steering is only valid
     // while a turn is active, and `turn/steer` must carry this exact id.
     let mut active_turn_id: Option<String> = None;
@@ -1981,9 +1988,7 @@ async fn run_codex_turn_app_server(
             // Stdout closed without `turn/completed`: the server died mid-turn.
             // Surface it as a failure so the run isn't finalized as a silently
             // truncated success (partial parts are still persisted below).
-            if result_error.is_none() {
-                result_error = Some("codex app-server closed the connection mid-turn".to_string());
-            }
+            connection_closed = true;
             break;
         };
         if aps::is_server_request(&message) {
@@ -2077,11 +2082,9 @@ async fn run_codex_turn_app_server(
     .await;
     emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
 
-    if let Some(message) = result_error {
-        let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed { message: enriched });
-    }
-    Ok(())
+    let failed_exit =
+        connection_closed.then(|| "codex app-server closed the connection mid-turn".to_string());
+    cli_turn_outcome(result_error, failed_exit, &stderr_tail)
 }
 
 fn app_server_turn_start_error(response: &Value) -> Option<String> {
@@ -2725,17 +2728,12 @@ async fn run_opencode_turn(
     .await;
     emit_pending_on_err(finalized, deps, session, run_id, &mut state.update_throttle)?;
 
-    if let Some(message) = result_error {
-        let enriched = append_stderr_tail(&message, &stderr_tail);
-        return Err(LocalAgentRunError::Failed { message: enriched });
-    }
-    if !status.success() {
-        let base = format!("OpenCode exited with status {}", status);
-        return Err(LocalAgentRunError::Failed {
-            message: append_stderr_tail(&base, &stderr_tail),
-        });
-    }
-    Ok(())
+    cli_exit_outcome(
+        CliProviderRuntime::OpenCode.display_name(),
+        result_error,
+        status,
+        &stderr_tail,
+    )
 }
 
 fn opencode_turn_prompt(system_prompt: &str, prompt: &str) -> String {
@@ -2969,15 +2967,16 @@ fn opencode_config_content(mcp_url: &str, mcp_token: &str) -> Result<String, Loc
     serde_json::to_string(&config).map_err(|e| LocalAgentRunError::failed(e.to_string()))
 }
 
-fn append_stderr_tail(message: &str, tail: &Arc<Mutex<VecDeque<String>>>) -> String {
-    let Ok(buffer) = tail.lock() else {
-        return message.to_string();
-    };
-    if buffer.is_empty() {
-        return message.to_string();
+fn stderr_tail_text(tail: &Arc<Mutex<VecDeque<String>>>) -> Option<String> {
+    let buffer = tail.lock().ok()?;
+    (!buffer.is_empty()).then(|| buffer.iter().cloned().collect::<Vec<_>>().join("\n"))
+}
+
+fn with_stderr(message: String, stderr: Option<&str>) -> String {
+    match stderr {
+        Some(stderr) => format!("{message}\n--- stderr ---\n{stderr}"),
+        None => message,
     }
-    let snippet: Vec<String> = buffer.iter().cloned().collect();
-    format!("{}\n--- stderr ---\n{}", message, snippet.join("\n"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4997,14 +4996,85 @@ fn spawn_stderr_logger(
 
 enum LocalAgentRunError {
     Cancelled,
-    Failed { message: String },
+    /// `message` alone decides the failure kind and context-limit recovery;
+    /// `stderr` is shown after it but not classified, because it carries
+    /// arbitrary logs.
+    Failed {
+        message: String,
+        stderr: Option<String>,
+    },
 }
 
 impl LocalAgentRunError {
     fn failed(message: impl Into<String>) -> Self {
         Self::Failed {
             message: message.into(),
+            stderr: None,
         }
+    }
+
+    /// How the run loop recovers from this failed attempt, if it can. Each
+    /// recovery runs at most once per run.
+    fn recovery(
+        &self,
+        provider_runtime: CliProviderRuntime,
+        used: &RecoveriesUsed,
+    ) -> Option<Recovery> {
+        let Self::Failed { message, .. } = self else {
+            return None;
+        };
+        if !used.fresh_session && is_session_lost_error(provider_runtime, message) {
+            Some(Recovery::FreshSession)
+        } else if !used.compact && should_recover_cli_context_limit(message) {
+            Some(Recovery::Compact)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Recovery {
+    FreshSession,
+    Compact,
+}
+
+#[derive(Default)]
+struct RecoveriesUsed {
+    fresh_session: bool,
+    compact: bool,
+}
+
+/// The result of a CLI process that has exited; see `cli_turn_outcome`.
+fn cli_exit_outcome(
+    cli: &str,
+    reported: Option<String>,
+    status: std::process::ExitStatus,
+    stderr_tail: &Arc<Mutex<VecDeque<String>>>,
+) -> Result<(), LocalAgentRunError> {
+    let failed_exit = (!status.success()).then(|| format!("{cli} exited with status {status}"));
+    cli_turn_outcome(reported, failed_exit, stderr_tail)
+}
+
+/// The result of a finished CLI turn. An error the CLI reported itself is
+/// classified alone, with stderr as context. A failed exit it did not explain
+/// (`failed_exit`) is classified together with stderr, the only explanation:
+/// `codex exec` prints a rejected `turn/start` (e.g. `input_too_large`) there.
+fn cli_turn_outcome(
+    reported: Option<String>,
+    failed_exit: Option<String>,
+    stderr_tail: &Arc<Mutex<VecDeque<String>>>,
+) -> Result<(), LocalAgentRunError> {
+    match (reported, failed_exit) {
+        (Some(message), _) => Err(LocalAgentRunError::Failed {
+            message,
+            stderr: stderr_tail_text(stderr_tail),
+        }),
+        (None, Some(exit)) => Err(LocalAgentRunError::failed(with_stderr(
+            exit,
+            stderr_tail_text(stderr_tail).as_deref(),
+        ))),
+        (None, None) => Ok(()),
     }
 }
 
@@ -5819,6 +5889,177 @@ mod tests {
             .expect("idle-timeout override missing from Claude Code env");
         assert_eq!(idle.1, idle_ms);
         assert!(env.iter().any(|(k, _)| *k == "MCP_TIMEOUT"));
+    }
+
+    fn stderr_tail(lines: &[&str]) -> Arc<Mutex<VecDeque<String>>> {
+        Arc::new(Mutex::new(
+            lines.iter().map(|line| line.to_string()).collect(),
+        ))
+    }
+
+    fn turn_failure(
+        reported: Option<&str>,
+        failed_exit: Option<&str>,
+        stderr: &[&str],
+    ) -> LocalAgentRunError {
+        cli_turn_outcome(
+            reported.map(str::to_string),
+            failed_exit.map(str::to_string),
+            &stderr_tail(stderr),
+        )
+        .expect_err("a failed turn")
+    }
+
+    fn recovery_after(error: &LocalAgentRunError, used: RecoveriesUsed) -> Option<Recovery> {
+        error.recovery(CliProviderRuntime::Codex, &used)
+    }
+
+    fn first_recovery(error: &LocalAgentRunError) -> Option<Recovery> {
+        recovery_after(error, RecoveriesUsed::default())
+    }
+
+    fn notice(error: LocalAgentRunError) -> (String, Option<FailureKind>) {
+        let LocalAgentRunError::Failed { message, stderr } = error else {
+            panic!("expected a failure");
+        };
+        cli_failure_notice(
+            "Codex",
+            message,
+            stderr.as_deref(),
+            &compaction::CompactionAttempt::NothingToCompact,
+        )
+    }
+
+    fn failed_status() -> std::process::ExitStatus {
+        #[cfg(unix)]
+        let status = std::os::unix::process::ExitStatusExt::from_raw(2 << 8);
+        #[cfg(windows)]
+        let status = std::os::windows::process::ExitStatusExt::from_raw(2);
+        status
+    }
+    const TURN_START_TOO_LARGE: &str = "Error: turn/start: Input exceeds the maximum length of 1048576 characters (input_too_large, actual_chars=1072355)";
+
+    #[test]
+    fn cli_stderr_does_not_decide_the_failure_kind() {
+        let error = turn_failure(
+            Some("Claude Code run failed"),
+            Some("Codex exited with status exit status: 2"),
+            &["write failed: Disk quota exceeded"],
+        );
+        assert_eq!(first_recovery(&error), None);
+        assert_eq!(
+            notice(error),
+            (
+                "Claude Code run failed\n--- stderr ---\nwrite failed: Disk quota exceeded"
+                    .to_string(),
+                None
+            )
+        );
+    }
+
+    #[test]
+    fn cli_reported_usage_limit_survives_stderr() {
+        let error = turn_failure(
+            Some("You've hit your usage limit. Try again at 9:47 PM."),
+            None,
+            &["DEBUG codex_core: sending request"],
+        );
+        let (shown, kind) = notice(error);
+        assert_eq!(kind, Some(FailureKind::UsageLimit));
+        assert!(shown.ends_with("--- stderr ---\nDEBUG codex_core: sending request"));
+    }
+
+    #[test]
+    fn cli_stderr_context_phrase_does_not_trigger_compaction() {
+        let error = turn_failure(
+            Some("Codex run failed"),
+            None,
+            &["DEBUG tokens left in this context window: 1200"],
+        );
+        assert_eq!(first_recovery(&error), None);
+        assert_eq!(
+            notice(error).0,
+            "Codex run failed\n--- stderr ---\nDEBUG tokens left in this context window: 1200"
+        );
+    }
+
+    #[test]
+    fn cli_reported_context_limit_compacts_once() {
+        let error = turn_failure(
+            Some("Codex ran out of room in the model's context window."),
+            None,
+            &[],
+        );
+        assert_eq!(first_recovery(&error), Some(Recovery::Compact));
+        assert_eq!(
+            recovery_after(
+                &error,
+                RecoveriesUsed {
+                    fresh_session: false,
+                    compact: true
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn cli_unexplained_exit_is_classified_with_its_stderr() {
+        let status = failed_status();
+        let error = cli_exit_outcome("Codex", None, status, &stderr_tail(&[TURN_START_TOO_LARGE]))
+            .expect_err("a failed exit");
+        assert_eq!(first_recovery(&error), Some(Recovery::Compact));
+        let (shown, _) = notice(error);
+        assert!(shown.ends_with(&format!(
+            "Provider error: Codex exited with status {status}\n--- stderr ---\n{TURN_START_TOO_LARGE}"
+        )));
+    }
+
+    #[test]
+    fn cli_successful_exit_without_an_error_is_ok() {
+        let status = std::process::ExitStatus::default();
+        assert!(cli_exit_outcome("Codex", None, status, &stderr_tail(&["noise"])).is_ok());
+    }
+
+    #[test]
+    fn cli_stderr_does_not_decide_a_lost_session() {
+        let error = turn_failure(Some("Codex run failed"), None, &["Session not found"]);
+        assert_eq!(first_recovery(&error), None);
+    }
+
+    #[test]
+    fn cli_lost_session_restarts_once_before_compaction() {
+        // `codex exec resume` prints the first line on stderr alone and exits 1;
+        // the context-limit line shows which recovery comes first.
+        let error = turn_failure(
+            None,
+            Some("Codex exited with status exit status: 1"),
+            &[
+                "Error: thread/resume: thread/resume failed: no rollout found for thread id 729ca14e (code -32600)",
+                TURN_START_TOO_LARGE,
+            ],
+        );
+        assert_eq!(first_recovery(&error), Some(Recovery::FreshSession));
+        assert_eq!(
+            recovery_after(
+                &error,
+                RecoveriesUsed {
+                    fresh_session: true,
+                    compact: false
+                }
+            ),
+            Some(Recovery::Compact)
+        );
+        assert_eq!(
+            recovery_after(
+                &error,
+                RecoveriesUsed {
+                    fresh_session: true,
+                    compact: true
+                }
+            ),
+            None
+        );
     }
 
     #[test]
