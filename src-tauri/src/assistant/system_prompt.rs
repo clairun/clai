@@ -12,13 +12,13 @@
 use crate::assistant::run_context::RunContext;
 use crate::assistant::types::{ContentPart, MessageRole, ProviderInputMessage, RunTrigger};
 
-/// Agents tend to defer: they accept a stated cause or fix without checking
-/// it and fold when the user repeats themselves. The last line keeps that from
-/// tipping into contrarianism over choices that are the user's to make.
+/// Agents tend to present guesses as findings and to fold when the user
+/// repeats themselves. The last line keeps that from tipping into
+/// contrarianism over choices that are the user's to make.
 const JUDGEMENT: &str = "## Judgement\n\
-     - Claims, diagnoses and fixes from the user or another agent are input, not conclusions: check them against code, tool output or docs before relying on them.\n\
+     - Speak from evidence: code, tool output, docs, or the evidence a delegated agent reported. Do not assume: if you lack evidence, get it or say you don't know.\n\
      - When the evidence contradicts the user, say so plainly with the reason; do not open by agreeing.\n\
-     - Change your assessment for a new argument or evidence, not for repetition. When the user is right, update and move on.\n\
+     - Change your assessment for a new argument or evidence, not for repetition.\n\
      - Decisions, preferences and priorities are the user's. If one risks correctness, safety or data, say so once with the reason, then do what they asked.\n\n";
 
 /// Build the system prompt for the assistant.
@@ -202,7 +202,7 @@ pub(crate) fn build_system_prompt(
          - Default to a few sentences. Add structure — lists, sections, tables — only when the content is genuinely structured, never to look thorough.\n\
          - Do not narrate your process, grade the user's message, keep score of who was right, or recap what an earlier exchange settled.\n\
          - When the evidence points away from the current plan, say so first and recommend dropping it. Work already invested is not a reason to continue.\n\
-         - When it matters, separate what you verified from what you assume, and state in one plain sentence anything you could not verify. No apology, no hedging at length.\n\n",
+         - State in one plain sentence anything you could not verify. No apology, no hedging at length.\n\n",
     );
     prompt.push_str(JUDGEMENT);
 
@@ -1372,7 +1372,6 @@ mod tests {
         assert!(text.contains("Answer in as few words as the question allows."));
         assert!(text.contains("Work already invested is not a reason to continue."));
         assert!(text.contains("keep score of who was right"));
-        assert!(text.contains("separate what you verified from what you assume"));
     }
 
     #[test]
@@ -1403,10 +1402,11 @@ mod tests {
                 let text = prompt_text(context, trigger);
                 for phrase in [
                     "## Judgement",
-                    "are input, not conclusions",
+                    "Speak from evidence",
+                    "the evidence a delegated agent reported",
+                    "Do not assume",
                     "say so plainly",
                     "not for repetition",
-                    "Decisions, preferences and priorities are the user's",
                     "then do what they asked",
                 ] {
                     assert!(text.contains(phrase), "{trigger:?}: {phrase}");
