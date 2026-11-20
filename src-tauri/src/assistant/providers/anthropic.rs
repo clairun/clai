@@ -25,8 +25,10 @@ pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
-/// `max_tokens` when neither the request nor the brand sets one.
-const DEFAULT_MAX_TOKENS: u32 = 8192;
+/// `max_tokens` when neither the request nor the brand sets one: the
+/// largest value every current Claude model accepts (Claude Sonnet 4.5,
+/// Opus 4.5 and Haiku 4.5 cap output at 64000).
+const DEFAULT_MAX_TOKENS: u32 = 64_000;
 
 pub fn provider_descriptor() -> ProviderDescriptor {
     ProviderDescriptor {
@@ -905,8 +907,8 @@ mod tests {
             (&minimax, None, 131_072),
             (&minimax_by_origin, None, 131_072),
             (&legacy_anthropic_at_minimax, None, 131_072),
-            (&anthropic, None, 8192),
-            (&custom, None, 8192),
+            (&anthropic, None, 64_000),
+            (&custom, None, 64_000),
             (&minimax, Some(1024), 1024),
             (&anthropic, Some(1024), 1024),
         ];
