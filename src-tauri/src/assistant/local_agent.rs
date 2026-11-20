@@ -56,10 +56,8 @@ const CODEX_TURN_INPUT_MAX_CHARS: usize = 1_048_576;
 /// messages into the active turn.
 const STEER_POLL_INTERVAL_MS: u64 = 400;
 
-/// Bound on each app-server handshake request (`initialize`,
-/// `thread/start|resume`). Generous: covers a cold `codex` start on a slow
-/// disk, but converts a wedged server into a clear fast-fail.
-const APP_SERVER_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// JSON-RPC id of the `turn/start` request, the last of the app-server handshake.
+const TURN_START_REQUEST_ID: i64 = 4;
 
 /// MCP server *startup* timeout (ms) for CLI providers that read `MCP_TIMEOUT`
 /// (Claude Code, Codex). Distinct from the per-tool backstop
@@ -1600,6 +1598,14 @@ async fn run_codex_turn(
         .unwrap_or("codex");
     let binary = crate::providers::resolve_command_path(configured_binary)
         .unwrap_or_else(|| configured_binary.to_string());
+    let codex = tokio::select! {
+        _ = cancel_token.cancelled() => return Err(LocalAgentRunError::Cancelled),
+        checked = codex_app_server::check_codex_cli(crate::providers::build_host_cli_command(
+            &binary,
+            &[],
+            Some(workspace_root),
+        )) => checked.map_err(LocalAgentRunError::failed)?,
+    };
     // Env (MCP token + timeout) goes through the helper so it survives the
     // `flatpak-spawn --host` hop — under Flatpak the host CLI runs in the
     // host's environment, not the sandbox's.
@@ -1617,6 +1623,7 @@ async fn run_codex_turn(
             command.arg("resume");
             add_codex_common_args(
                 &mut command,
+                &codex,
                 connection,
                 mcp_url,
                 &developer_instructions,
@@ -1628,6 +1635,7 @@ async fn run_codex_turn(
         None => {
             add_codex_common_args(
                 &mut command,
+                &codex,
                 connection,
                 mcp_url,
                 &developer_instructions,
@@ -1860,30 +1868,34 @@ async fn run_codex_turn_app_server(
         let m = connection.model_id.trim();
         (!m.is_empty() && m != "default").then_some(m)
     };
-    let cwd = Some(workspace_root.to_string_lossy().into_owned());
-    let tool_timeout = crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT.as_secs();
+    let cwd = workspace_root.to_string_lossy();
+    let thread_options = aps::ThreadOptions {
+        thread_id: existing_thread_id.as_deref(),
+        cwd: Some(cwd.as_ref()),
+        model,
+        developer_instructions: &developer_instructions,
+        mcp_url,
+        mcp_token_env: MCP_TOKEN_ENV,
+        mcp_tool_timeout_secs: crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT.as_secs(),
+    };
 
-    // Handshake: initialize -> thread/start|resume. Startup notifications are
-    // ignored by the request/await helper.
+    // Handshake: initialize -> config/read -> thread/start|resume. Startup
+    // notifications are ignored by the request/await helper.
     let initialized = aps_request_await(
         &mut transport,
         cancel_token,
         aps::initialize_request(1, client_version),
     )
     .await?;
-    let thread_config = aps::thread_config(mcp_url, MCP_TOKEN_ENV, tool_timeout, &initialized);
-    let thread_request = match existing_thread_id.as_deref() {
-        Some(thread_id) => {
-            aps::thread_resume_request(2, thread_id, model, thread_config, &developer_instructions)
-        }
-        None => aps::thread_start_request(
-            2,
-            cwd.as_deref(),
-            model,
-            thread_config,
-            &developer_instructions,
-        ),
-    };
+    let codex = aps::isolating_codex(&initialized).map_err(LocalAgentRunError::failed)?;
+    let effective_config = aps_request_await(
+        &mut transport,
+        cancel_token,
+        aps::config_read_request(2, &thread_options),
+    )
+    .await?;
+    let thread_request = aps::thread_request(3, &codex, &thread_options, &effective_config)
+        .map_err(LocalAgentRunError::failed)?;
     let thread_result = aps_request_await(&mut transport, cancel_token, thread_request).await?;
     if let Some(thread_id) = thread_result
         .get("thread")
@@ -1904,7 +1916,11 @@ async fn run_codex_turn_app_server(
         input.push(aps::local_image_user_input(&image_path.to_string_lossy()));
     }
     transport
-        .send(&aps::turn_start_request(3, &thread_id, input))
+        .send(&aps::turn_start_request(
+            TURN_START_REQUEST_ID,
+            &thread_id,
+            input,
+        ))
         .await
         .map_err(LocalAgentRunError::failed)?;
 
@@ -1915,7 +1931,7 @@ async fn run_codex_turn_app_server(
     // while a turn is active, and `turn/steer` must carry this exact id.
     let mut active_turn_id: Option<String> = None;
     // Monotonic id for client-initiated requests after the handshake
-    // (steer/interrupt), kept distinct from the handshake ids 1/2/3.
+    // (steer/interrupt), kept distinct from the handshake ids 1-4.
     let mut next_request_id: i64 = 10;
     // steer request id -> the queued message rows carried by that steer,
     // awaiting the server's accept/reject response. Best-effort and per-turn:
@@ -2004,7 +2020,7 @@ async fn run_codex_turn_app_server(
             continue;
         }
         if aps::is_response(&message) {
-            if aps::response_id(&message) == Some(3) {
+            if aps::response_id(&message) == Some(TURN_START_REQUEST_ID) {
                 if let Some(error) = app_server_turn_start_error(&message) {
                     result_error = Some(error);
                     break;
@@ -2109,7 +2125,7 @@ async fn aps_request_await(
     // Bound the handshake so a stalled `codex app-server` (broken install,
     // auth stall) fails fast with a clear error instead of hanging the run
     // until the user cancels. Mirrors the MCP_STARTUP_TIMEOUT_MS posture.
-    let deadline = tokio::time::Instant::now() + APP_SERVER_HANDSHAKE_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + codex_app_server::HANDSHAKE_TIMEOUT;
     transport
         .send(&request)
         .await
@@ -2120,7 +2136,7 @@ async fn aps_request_await(
             _ = tokio::time::sleep_until(deadline) => {
                 return Err(LocalAgentRunError::failed(format!(
                     "codex app-server did not answer the handshake within {}s",
-                    APP_SERVER_HANDSHAKE_TIMEOUT.as_secs()
+                    codex_app_server::HANDSHAKE_TIMEOUT.as_secs()
                 )));
             }
             msg = transport.recv() => msg,
@@ -2855,6 +2871,7 @@ fn resolve_codex_image_paths(
 
 fn add_codex_common_args(
     command: &mut Command,
+    codex: &codex_app_server::IsolatingCodex,
     connection: &ProviderConnection,
     mcp_url: &str,
     developer_instructions: &str,
@@ -2864,24 +2881,24 @@ fn add_codex_common_args(
     command
         .arg("--json")
         .arg("--skip-git-repo-check")
-        .arg("--ignore-user-config")
-        .arg("--ignore-rules")
-        .arg("--disable")
-        .arg("shell_tool")
+        .args(codex_app_server::exec_isolation_args(
+            codex,
+            &workspace_root.to_string_lossy(),
+        ))
         .arg("-c")
         .arg(format!(
             "developer_instructions={}",
-            toml_string_value(developer_instructions)
+            codex_app_server::toml_string(developer_instructions)
         ))
         .arg("-c")
         .arg(format!(
             "mcp_servers.clai.url={}",
-            toml_string_value(mcp_url)
+            codex_app_server::toml_string(mcp_url)
         ))
         .arg("-c")
         .arg(format!(
             "mcp_servers.clai.bearer_token_env_var={}",
-            toml_string_value(MCP_TOKEN_ENV)
+            codex_app_server::toml_string(MCP_TOKEN_ENV)
         ))
         .arg("-c")
         .arg("mcp_servers.clai.enabled=true")
@@ -2892,21 +2909,18 @@ fn add_codex_common_args(
             "mcp_servers.clai.tool_timeout_sec={}",
             crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT.as_secs()
         ))
-        // Unlike the app-server path, `exec` learns no Codex version, so it
-        // cannot safely send `features.code_mode.direct_only_tool_namespaces`
-        // (see `codex_app_server::thread_config`): with a code-mode model a
-        // CLAI call waiting on the user can still be terminated here.
         // Bypass Codex's own approval/sandbox layer entirely — this is the
         // direct parallel of `--permission-mode bypassPermissions` that we pass
         // to Claude Code. CLAI provides the external sandbox (our MCP
         // `bash_exec` runs under bwrap) and permission system, and Codex's
-        // native `shell_tool` is disabled, so Codex has no unmediated execution
-        // path of its own. Without this, non-interactive `exec` has no approval
-        // channel and auto-cancels every MCP tool call as "user cancelled MCP
-        // tool call" — neither `approval_policy=never` nor `--sandbox` fixes
-        // that, because the MCP call still goes through Codex's confirmation
-        // gate. The flag is documented for exactly this "externally sandboxed"
-        // case and is accepted by both `exec` and `exec resume`.
+        // own tools, `shell_tool` among them, are off, so Codex has no
+        // unmediated execution path of its own. Without this, non-interactive
+        // `exec` has no approval channel and auto-cancels every MCP tool call
+        // as "user cancelled MCP tool call" — neither `approval_policy=never`
+        // nor `--sandbox` fixes that, because the MCP call still goes through
+        // Codex's confirmation gate. The flag is documented for exactly this
+        // "externally sandboxed" case and is accepted by both `exec` and
+        // `exec resume`.
         .arg("--dangerously-bypass-approvals-and-sandbox");
 
     let model = connection.model_id.trim();
@@ -2917,10 +2931,6 @@ fn add_codex_common_args(
     if include_new_session_flags {
         command.arg("--cd").arg(workspace_root);
     }
-}
-
-fn toml_string_value(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 fn opencode_config_content(mcp_url: &str, mcp_token: &str) -> Result<String, LocalAgentRunError> {
@@ -5087,6 +5097,48 @@ impl From<String> for LocalAgentRunError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `exec` and `exec resume` run isolated, like an app-server thread.
+    #[test]
+    fn codex_exec_is_isolated() {
+        let connection = ProviderConnection {
+            id: "c".to_string(),
+            name: "Codex".to_string(),
+            protocol_id: "codex".to_string(),
+            provider_id: "codex".to_string(),
+            auth_mode: crate::assistant::types::AuthMode::SubscriptionLogin,
+            base_url: None,
+            secret_ref: String::new(),
+            model_id: String::new(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let codex = codex_app_server::isolating_codex_cli("codex-cli 0.170.0").unwrap();
+        let isolation = codex_app_server::exec_isolation_args(&codex, "/ws");
+        for new_session in [true, false] {
+            let mut command = Command::new("codex");
+            add_codex_common_args(
+                &mut command,
+                &codex,
+                &connection,
+                "http://127.0.0.1:4000/mcp",
+                "system",
+                new_session,
+                Path::new("/ws"),
+            );
+            let args: Vec<String> = command
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            assert!(
+                args.windows(isolation.len()).any(|run| run == isolation),
+                "{args:?}"
+            );
+        }
+    }
 
     /// E1: Claude Code runs on the host in the workspace, which the shell can
     /// write; it must not load project settings or MCP servers from there.
