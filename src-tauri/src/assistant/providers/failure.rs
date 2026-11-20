@@ -277,9 +277,12 @@ fn classify(
     if status == Some(429) && has_retry_after {
         return FailureKind::Transient;
     }
-    // 2. The brand's own code.
+    // 2. The brand's own code, then an unknown model in any protocol's words.
     if let Some(kind) = code.and_then(|code| code_kind(brand, code)) {
         return kind;
+    }
+    if is_unknown_model(status, code, message) {
+        return FailureKind::ModelUnavailable;
     }
     // 3. Statuses with a single meaning. 529 is Anthropic's overload.
     match status {
@@ -308,6 +311,17 @@ fn classify(
         _ if is_context_limit_error(message) => FailureKind::ContextTooLong,
         _ => FailureKind::Other,
     }
+}
+
+/// A model id the provider does not serve, in each protocol's words:
+/// OpenAI's `model_not_found` code, or a 404 whose message names the model,
+/// as Anthropic (`model: <id>`), Ollama (`model '<id>' not found`, or
+/// `model "<id>"` when scheduling) and vLLM ("The model `<id>` does not exist") send.
+/// Any other 404 is about the URL, not the model.
+fn is_unknown_model(status: Option<u16>, code: Option<&str>, message: &str) -> bool {
+    const PREFIXES: &[&str] = &["model:", "model '", "model \"", "The model `"];
+    code == Some("model_not_found")
+        || (status == Some(404) && PREFIXES.iter().any(|prefix| message.starts_with(prefix)))
 }
 
 fn code_kind(brand: &str, code: &str) -> Option<FailureKind> {
@@ -438,7 +452,23 @@ mod tests {
             ("custom-openai", 429, None, openai(Value::Null, "Rate limit exceeded"), Transient, None),
             ("custom-openai", 429, None, openai("rate_limit".into(), "weekly quota reached"), UsageLimit, Some("rate_limit")),
             ("custom-openai", 400, None, openai("context_length_exceeded".into(), "This model's maximum context length is 8192 tokens"), ContextTooLong, Some("context_length_exceeded")),
-            ("custom-openai", 404, None, openai("model_not_found".into(), "The model `x` does not exist"), Other, Some("model_not_found")),
+            // An unknown model, as each protocol reports it.
+            ("openai", 404, None, openai("model_not_found".into(), "The model `o4-mini` does not exist or you do not have access to it."), ModelUnavailable, Some("model_not_found")),
+            ("anthropic", 404, None, anthropic("not_found_error", "model: claude-3-5-haiku-latest"), ModelUnavailable, None),
+            // Ollama: a model never pulled (`ChatHandler`, all chat endpoints), and the
+            // scheduler's wording as `openai.NewError` wraps it.
+            ("ollama", 404, None, r#"{"error":"model 'llama9' not found"}"#.into(), ModelUnavailable, None),
+            ("ollama", 404, None, serde_json::json!({ "error": { "type": "not_found_error", "message": "model \"llama9\" not found, try pulling it first", "code": null } }).to_string(), ModelUnavailable, None),
+            // vLLM's `_check_model`.
+            ("custom-openai", 404, None, serde_json::json!({ "error": { "message": "The model `llama9` does not exist. Valid aliases: qwen3.", "type": "NotFoundError", "param": "model", "code": 404 } }).to_string(), ModelUnavailable, Some("404")),
+            // OpenAI's code, relayed by a compatible server on another status.
+            ("custom-openai", 400, None, openai("model_not_found".into(), "The model `llama9` does not exist"), ModelUnavailable, Some("model_not_found")),
+            // A 404 about the URL, or a message naming the model on another status, is not.
+            ("anthropic", 404, None, anthropic("not_found_error", "The requested resource could not be found."), Other, None),
+            ("custom-openai", 404, None, openai(Value::Null, "Invalid URL (POST /v1/chat/completion)"), Other, None),
+            ("ollama", 404, None, "404 page not found".into(), Other, None),
+            ("custom-openai", 404, None, openai(Value::Null, "The page does not exist"), Other, None),
+            ("anthropic", 400, None, anthropic("invalid_request_error", "model: Field required"), Other, None),
             // Z.ai's codes apply to the Z.ai brand only.
             ("custom-openai", 429, None, zai("1305", "The service may be temporarily overloaded"), Transient, Some("1305")),
             ("custom-openai", 429, None, zai("1309", "Your GLM Coding Plan package has expired"), Transient, Some("1309")),
@@ -474,6 +504,7 @@ mod tests {
             ("custom-openai", openrouter("server_error".into(), "weekly quota reached"), Some(UsageLimit)),
             ("custom-openai", openrouter("server_error".into(), "Provider disconnected unexpectedly"), Some(Other)),
             ("custom-openai", finish("error"), Some(Other)),
+            ("custom-openai", openrouter("model_not_found".into(), "The model `llama9` does not exist"), Some(ModelUnavailable)),
             // A finish_reason that names a failure.
             ("zai", finish("sensitive"), Some(ContentFiltered)),
             ("openai", finish("content_filter"), Some(ContentFiltered)),
@@ -501,6 +532,8 @@ mod tests {
             ("api_error", "Internal server error", Transient),
             ("rate_limit_error", "Number of request tokens has exceeded your per-minute rate limit", Transient),
             ("invalid_request_error", "prompt is too long: 210000 tokens > 200000 maximum", ContextTooLong),
+            ("not_found_error", "model: claude-3-5-haiku-latest", ModelUnavailable),
+            ("not_found_error", "The requested resource could not be found.", Other),
             ("future_error", "Something new", Other),
         ];
         for (error_type, message, kind) in cases {
