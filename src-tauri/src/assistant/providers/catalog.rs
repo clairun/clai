@@ -106,6 +106,10 @@ fn model(id: &str) -> ModelInfo {
     model_with_capabilities(id, true, true)
 }
 
+fn text_model(id: &str) -> ModelInfo {
+    model_with_capabilities(id, true, false)
+}
+
 fn model_with_capabilities(id: &str, supports_tools: bool, supports_images: bool) -> ModelInfo {
     ModelInfo {
         id: id.to_string(),
@@ -124,7 +128,7 @@ fn hosted_openai(
     description: &str,
     base_url: &str,
     docs_url: &str,
-    curated: &[&str],
+    curated_models: Vec<ModelInfo>,
 ) -> ProviderCatalogEntry {
     ProviderCatalogEntry {
         id: id.to_string(),
@@ -136,7 +140,7 @@ fn hosted_openai(
         base_url_locked: true,
         requires_api_key: true,
         logo_asset: format!("provider-catalog/{id}.svg"),
-        curated_models: curated.iter().map(|m| model(m)).collect(),
+        curated_models,
         docs_url: Some(docs_url.to_string()),
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::Standard,
@@ -148,7 +152,7 @@ fn hosted_openai(
 /// The bundled provider catalog (v1). See the provider-catalog design doc §5.
 #[expect(
     clippy::too_many_lines,
-    reason = "lint debt: 159 lines against a 100-line budget; split it, do not raise the budget"
+    reason = "lint debt: 179 lines against a 100-line budget; split it, do not raise the budget"
 )]
 pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
     // Sonar chat is served at `<base>/chat/completions`, and has no models
@@ -160,7 +164,12 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         "Sonar models with built-in web search.",
         "https://api.perplexity.ai",
         "https://www.perplexity.ai/settings/api",
-        &["sonar", "sonar-pro", "sonar-reasoning"],
+        // Source: https://docs.perplexity.ai/docs/resources/changelog, checked 2026-11-19.
+        vec![
+            model("sonar"),
+            model("sonar-pro"),
+            model("sonar-reasoning-pro"),
+        ],
     );
     perplexity.models_endpoint_style = ModelsEndpointStyle::None;
     perplexity.base_url_is_api_root = true;
@@ -173,7 +182,15 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
             "GPT models from OpenAI.",
             "https://api.openai.com/v1",
             "https://platform.openai.com/api-keys",
-            &["gpt-5.1", "gpt-5.1-mini", "gpt-4.1", "o4-mini"],
+            // GPT-6 models are left out: through Chat Completions, which this
+            // adapter speaks, they call no tools, or only with reasoning off.
+            // Source: https://developers.openai.com/api/docs/models, checked 2026-11-19.
+            vec![
+                model("gpt-5.6-sol"),
+                model("gpt-5.6-terra"),
+                model("gpt-5.6-luna"),
+                model("gpt-5.5"),
+            ],
         ),
         hosted_openai(
             "deepseek",
@@ -181,7 +198,8 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
             "DeepSeek chat and reasoning models.",
             "https://api.deepseek.com/v1",
             "https://platform.deepseek.com/api_keys",
-            &["deepseek-chat", "deepseek-reasoner"],
+            // Source: https://api-docs.deepseek.com/quick_start/pricing, checked 2026-11-19.
+            vec![model("deepseek-flash"), text_model("deepseek-v4-pro")],
         ),
         perplexity,
         hosted_openai(
@@ -190,7 +208,14 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
             "Zhipu GLM models via the OpenAI-compatible endpoint.",
             "https://api.z.ai/api/paas/v4",
             "https://z.ai/manage-apikey/apikey-list",
-            &["glm-4.6", "glm-4.5-air"],
+            // The text-model `model` enum of https://docs.z.ai/openapi.json, checked 2026-11-19.
+            vec![
+                text_model("glm-5.3"),
+                text_model("glm-5.2"),
+                text_model("glm-5.1"),
+                text_model("glm-5"),
+                text_model("glm-4.6"),
+            ],
         ),
     ];
 
@@ -201,7 +226,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         "One key, hundreds of models routed across providers.",
         "https://openrouter.ai/api/v1",
         "https://openrouter.ai/keys",
-        &[],
+        Vec::new(),
     );
     openrouter.extra_headers = vec![
         ("HTTP-Referer".to_string(), "https://clai.run".to_string()),
@@ -254,7 +279,10 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         base_url_locked: true,
         requires_api_key: true,
         logo_asset: "provider-catalog/minimax.svg".to_string(),
-        curated_models: vec![model_with_capabilities("MiniMax-M2", true, false)],
+        // Source: https://platform.minimax.io/docs/faq/models, checked 2026-11-19.
+        // Both accept images, but `capabilities` below gates images off for
+        // the brand; keep these flags in step with it.
+        curated_models: vec![text_model("MiniMax-M3"), text_model("MiniMax-M3.1-Flash")],
         docs_url: Some("https://www.minimax.io/platform".to_string()),
         extra_headers: Vec::new(),
         models_endpoint_style: ModelsEndpointStyle::OpenAiCompatible {
@@ -606,6 +634,28 @@ mod tests {
                     m.id
                 );
             }
+        }
+    }
+
+    /// A revert guard like the Anthropic one above: ids each vendor retired,
+    /// or never published, that were once curated here.
+    #[test]
+    fn curated_ids_are_not_known_dead_ids() {
+        const DEAD: &[(&str, &str)] = &[
+            ("openai", "o4-mini"),
+            ("openai", "gpt-5.1-mini"),
+            ("deepseek", "deepseek-chat"),
+            ("deepseek", "deepseek-reasoner"),
+            ("perplexity", "sonar-reasoning"),
+            ("zai", "glm-4.5-air"),
+            ("minimax", "MiniMax-M2"),
+        ];
+        for (brand, dead) in DEAD {
+            let e = get_entry(brand).expect("brand present");
+            assert!(
+                e.curated_models.iter().all(|m| m.id != *dead),
+                "{brand} curates dead model {dead}"
+            );
         }
     }
 

@@ -765,28 +765,31 @@ pub fn models_for_provider(provider_id: &str) -> Option<Vec<ModelInfo>> {
                 supports_images: true,
             },
         ],
+        // The current-generation models of Codex 0.170's bundled catalog
+        // (`codex debug models --bundled`, checked 2026-11-19), without the
+        // hidden ones and those it marks previous-generation or legacy.
         CODEX_PROVIDER_ID => vec![
             ModelInfo {
-                id: "gpt-5.5".to_string(),
-                display_name: "GPT-5.5".to_string(),
+                id: "gpt-6.2-sol".to_string(),
+                display_name: "GPT-6.2 Sol".to_string(),
                 supports_tools: true,
                 supports_images: true,
             },
             ModelInfo {
-                id: "gpt-5.4".to_string(),
-                display_name: "GPT-5.4".to_string(),
+                id: "gpt-6.2-astra".to_string(),
+                display_name: "GPT-6.2 Astra".to_string(),
                 supports_tools: true,
                 supports_images: true,
             },
             ModelInfo {
-                id: "gpt-5.4-mini".to_string(),
-                display_name: "GPT-5.4 Mini".to_string(),
+                id: "gpt-6.1-terra".to_string(),
+                display_name: "GPT-6.1 Terra".to_string(),
                 supports_tools: true,
                 supports_images: true,
             },
             ModelInfo {
-                id: "gpt-5.3-codex".to_string(),
-                display_name: "GPT-5.3 Codex".to_string(),
+                id: "gpt-6-luna".to_string(),
+                display_name: "GPT-6 Luna".to_string(),
                 supports_tools: true,
                 supports_images: true,
             },
