@@ -84,7 +84,7 @@ pub(crate) fn build_system_prompt(
             // A worker session is told not to fan out unless asked (Task
             // Worker Context below), so it gets no standing order to assign.
             let ownership = if matches!(trigger, RunTrigger::WorkspaceTask) {
-                "in this task, do what your instructions ask, pass work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so they can be told and it can be reviewed. \
+                "in this task, do what your instructions ask, pass work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so they can be told what you did and it can be reviewed. \
                  When a check or a review finds a problem in work you passed on, send it back to the task that produced it. "
             } else {
                 "assign it to them, including small fixes to what they delivered, and when a check or a review finds a problem in their work, send it back to the task that produced it. \
@@ -1836,7 +1836,7 @@ mod tests {
 
     /// The ownership rule a manager gets in a task-worker run.
     const WORKER_OWNERSHIP: [&str; 2] = [
-        "Work that a member's role covers is theirs by default: in this task, do what your instructions ask, pass work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so they can be told and it can be reviewed.",
+        "Work that a member's role covers is theirs by default: in this task, do what your instructions ask, pass work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so they can be told what you did and it can be reviewed.",
         "When a check or a review finds a problem in work you passed on, send it back to the task that produced it.",
     ];
 
