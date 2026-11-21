@@ -663,10 +663,8 @@ const TOOLS: CraftFolder = CraftFolder {
 };
 
 // A file too long to measure is over every size limit.
-const _: () = assert!(
-    crate::agent_craft::HEAD_BYTES as usize / 4 > PRINCIPLES.max_chars
-        && crate::agent_craft::HEAD_BYTES as usize / 4 > TOOLS.max_chars
-);
+const _: () = assert!(crate::agent_craft::HEAD_BYTES as usize / 4 > PRINCIPLES.max_chars);
+const _: () = assert!(crate::agent_craft::HEAD_BYTES as usize / 4 > TOOLS.max_chars);
 
 /// How many oversize files the nudge after the catalog names, and how much
 /// of each path it shows.
