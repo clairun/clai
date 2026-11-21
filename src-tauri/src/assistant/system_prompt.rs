@@ -72,14 +72,23 @@ pub(crate) fn build_system_prompt(
         .collect();
     if let Some(own_agent) = own_agent {
         if !member_agents.is_empty() {
-            prompt.push_str(
+            // A worker session is told not to fan out unless asked (Task
+            // Worker Context below), so it gets no standing order to assign.
+            let ownership = if matches!(trigger, RunTrigger::WorkspaceTask) {
+                "in this task, assign it to them only if your instructions ask for fan-out, and otherwise say in your reply which member's role covers it. "
+            } else {
+                "assign it to them, including small fixes to what they delivered, and when a check fails because of their work, send the failure back to the task that produced it. \
+                 Fix a member's work yourself only when the round trip would cost more than the fix is worth, and then ask that member to review what you changed. "
+            };
+            prompt.push_str(&format!(
                 "## Your Role\n\
                  You are the **manager** of this workspace. The user talks to you; you decide how the work gets done. \
-                 You have member agents available for delegation via `workspace_assignTask`. Work that a member's role covers is theirs by default: assign it to them, including small fixes to what they delivered, and when a check fails on their work, send the failure back to the task that produced it. Do such work yourself only when the round trip would cost more than the work is worth, and then tell that member what you changed and why. Each result comes back to you as an automated event. \
+                 You have member agents available for delegation via `workspace_assignTask`; each result comes back to you as an automated event. \
+                 Work that a member's role covers is theirs by default: {ownership}\
                  The roster below is your team; you do not need to call `workspace_listAgents` to confirm it. \
                  Each entry carries the `workspaceAgentId` that `workspace_assignTask` expects: it matches on that id, never on the display name.\n\n\
                  Member agents you can delegate to:\n",
-            );
+            ));
             for agent in &member_agents {
                 let summary = agent
                     .description
@@ -1785,8 +1794,9 @@ mod tests {
         ));
         assert!(text.contains("never on the display name"));
         // Members own the work their role covers, fixes to it included.
-        assert!(text.contains("Work that a member's role covers is theirs by default"));
+        assert!(text.contains("Work that a member's role covers is theirs by default: assign it to them, including small fixes"));
         assert!(text.contains("send the failure back to the task that produced it"));
+        assert!(text.contains("and then ask that member to review what you changed."));
         assert!(!text.contains("prefer delegating"));
         // Self-tasking needs the manager's own id, not an inference from the
         // roster block further down the prompt.
@@ -1893,6 +1903,11 @@ mod tests {
         assert!(!text.contains("Your own `workspaceAgentId`"));
         assert!(!text.contains("### How tasks run"));
         assert!(text.contains("never create task chains"));
+        // Nor a standing order to assign, which the worker context forbids.
+        assert!(text.contains("Work that a member's role covers is theirs by default: in this task, assign it to them only if your instructions ask for fan-out, and otherwise say in your reply which member's role covers it."));
+        assert!(!text.contains("send the failure back to the task that produced it"));
+        assert!(!text.contains("assign it to them, including small fixes"));
+        assert!(!text.contains("ask that member to review"));
     }
 
     #[test]
