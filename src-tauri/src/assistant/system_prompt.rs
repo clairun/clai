@@ -78,9 +78,10 @@ pub(crate) fn build_system_prompt(
                 "in this task, do what your instructions ask, assign work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so it can go to them for review. "
             } else {
                 "assign it to them, including small fixes to what they delivered, and when a check fails because of their work, send the failure back to the task that produced it. \
-                 If it fails the same check again, tell the user instead of sending it back again. \
-                 A review of a member's work goes to someone other than its author. \
-                 Fix a member's work yourself only when the round trip would cost more than the fix is worth, and then ask that member to review what you changed. "
+                 Keep sending findings back until none above minor is open, and ask the user about the minor ones. \
+                 A review of a member's work goes to a new task, never to the task that produced it, so the reviewer starts without that context: \
+                 assign it to a member whose role is reviewing if there is one, and otherwise the member who did the work can take it. \
+                 Fix a member's work yourself only when the round trip would cost more than the fix is worth, and then ask that member to review what you changed before it goes out. "
             };
             prompt.push_str(&format!(
                 "## Your Role\n\
@@ -1774,9 +1775,9 @@ mod tests {
     /// The ownership rule a manager gets outside a task-worker run.
     const MANAGER_OWNERSHIP: [&str; 4] = [
         "Work that a member's role covers is theirs by default: assign it to them, including small fixes to what they delivered, and when a check fails because of their work, send the failure back to the task that produced it.",
-        "If it fails the same check again, tell the user instead of sending it back again.",
-        "A review of a member's work goes to someone other than its author.",
-        "Fix a member's work yourself only when the round trip would cost more than the fix is worth, and then ask that member to review what you changed.",
+        "Keep sending findings back until none above minor is open, and ask the user about the minor ones.",
+        "A review of a member's work goes to a new task, never to the task that produced it, so the reviewer starts without that context: assign it to a member whose role is reviewing if there is one, and otherwise the member who did the work can take it.",
+        "Fix a member's work yourself only when the round trip would cost more than the fix is worth, and then ask that member to review what you changed before it goes out.",
     ];
 
     #[test]
@@ -1807,6 +1808,7 @@ mod tests {
         for sentence in MANAGER_OWNERSHIP {
             assert!(text.contains(sentence), "missing {sentence:?}");
         }
+        assert!(!text.contains("in this task, do what your instructions ask"));
         assert!(!text.contains("prefer delegating"));
         // Self-tasking needs the manager's own id, not an inference from the
         // roster block further down the prompt.
