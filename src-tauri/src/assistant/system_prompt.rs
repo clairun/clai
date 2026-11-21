@@ -75,9 +75,11 @@ pub(crate) fn build_system_prompt(
             // A worker session is told not to fan out unless asked (Task
             // Worker Context below), so it gets no standing order to assign.
             let ownership = if matches!(trigger, RunTrigger::WorkspaceTask) {
-                "in this task, assign it to them only if your instructions ask for fan-out, and otherwise say in your reply which member's role covers it. "
+                "in this task, do what your instructions ask, assign work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so it can go to them for review. "
             } else {
                 "assign it to them, including small fixes to what they delivered, and when a check fails because of their work, send the failure back to the task that produced it. \
+                 If it fails the same check again, tell the user instead of sending it back again. \
+                 A review of a member's work goes to someone other than its author. \
                  Fix a member's work yourself only when the round trip would cost more than the fix is worth, and then ask that member to review what you changed. "
             };
             prompt.push_str(&format!(
@@ -1769,6 +1771,14 @@ mod tests {
         }
     }
 
+    /// The ownership rule a manager gets outside a task-worker run.
+    const MANAGER_OWNERSHIP: [&str; 4] = [
+        "Work that a member's role covers is theirs by default: assign it to them, including small fixes to what they delivered, and when a check fails because of their work, send the failure back to the task that produced it.",
+        "If it fails the same check again, tell the user instead of sending it back again.",
+        "A review of a member's work goes to someone other than its author.",
+        "Fix a member's work yourself only when the round trip would cost more than the fix is worth, and then ask that member to review what you changed.",
+    ];
+
     #[test]
     fn build_system_prompt_documents_parallel_task_mechanics_for_manager() {
         let context = RunContext {
@@ -1794,9 +1804,9 @@ mod tests {
         ));
         assert!(text.contains("never on the display name"));
         // Members own the work their role covers, fixes to it included.
-        assert!(text.contains("Work that a member's role covers is theirs by default: assign it to them, including small fixes"));
-        assert!(text.contains("send the failure back to the task that produced it"));
-        assert!(text.contains("and then ask that member to review what you changed."));
+        for sentence in MANAGER_OWNERSHIP {
+            assert!(text.contains(sentence), "missing {sentence:?}");
+        }
         assert!(!text.contains("prefer delegating"));
         // Self-tasking needs the manager's own id, not an inference from the
         // roster block further down the prompt.
@@ -1904,10 +1914,10 @@ mod tests {
         assert!(!text.contains("### How tasks run"));
         assert!(text.contains("never create task chains"));
         // Nor a standing order to assign, which the worker context forbids.
-        assert!(text.contains("Work that a member's role covers is theirs by default: in this task, assign it to them only if your instructions ask for fan-out, and otherwise say in your reply which member's role covers it."));
-        assert!(!text.contains("send the failure back to the task that produced it"));
-        assert!(!text.contains("assign it to them, including small fixes"));
-        assert!(!text.contains("ask that member to review"));
+        assert!(text.contains("Work that a member's role covers is theirs by default: in this task, do what your instructions ask, assign work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so it can go to them for review."));
+        for sentence in MANAGER_OWNERSHIP {
+            assert!(!text.contains(sentence), "unexpected {sentence:?}");
+        }
     }
 
     #[test]
