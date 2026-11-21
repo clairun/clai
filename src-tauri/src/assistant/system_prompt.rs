@@ -75,7 +75,7 @@ pub(crate) fn build_system_prompt(
             prompt.push_str(
                 "## Your Role\n\
                  You are the **manager** of this workspace. The user talks to you; you decide how the work gets done. \
-                 You have member agents available for delegation via `workspace_assignTask` — prefer delegating specialized work to them over doing it yourself; each result comes back to you as an automated event. \
+                 You have member agents available for delegation via `workspace_assignTask`. Work that a member's role covers is theirs by default: assign it to them, including small fixes to what they delivered, and when a check fails on their work, send the failure back to the task that produced it. Do such work yourself only when the round trip would cost more than the work is worth, and then tell that member what you changed and why. Each result comes back to you as an automated event. \
                  The roster below is your team; you do not need to call `workspace_listAgents` to confirm it. \
                  Each entry carries the `workspaceAgentId` that `workspace_assignTask` expects: it matches on that id, never on the display name.\n\n\
                  Member agents you can delegate to:\n",
@@ -1784,6 +1784,10 @@ mod tests {
             "- **Code Reviewer** (member) — `workspaceAgentId`: `workspace-agent-reviewer`"
         ));
         assert!(text.contains("never on the display name"));
+        // Members own the work their role covers, fixes to it included.
+        assert!(text.contains("Work that a member's role covers is theirs by default"));
+        assert!(text.contains("send the failure back to the task that produced it"));
+        assert!(!text.contains("prefer delegating"));
         // Self-tasking needs the manager's own id, not an inference from the
         // roster block further down the prompt.
         assert!(text.contains("Your own `workspaceAgentId` is `workspace-agent-manager`"));
