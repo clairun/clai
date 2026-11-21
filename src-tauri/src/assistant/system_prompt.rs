@@ -639,9 +639,37 @@ fn sandbox_prompt(
     }
 }
 
-/// How many craft files a member should aim to keep; past it, every run asks
-/// the member to prune.
-const CRAFT_TARGET_FILES: usize = 15;
+/// A folder of the craft and the limits the prompt sets on it.
+struct CraftFolder {
+    name: &'static str,
+    max_files: usize,
+    /// Per file, frontmatter included.
+    max_chars: usize,
+    max_description_chars: usize,
+}
+
+const PRINCIPLES: CraftFolder = CraftFolder {
+    name: "principles",
+    max_files: 15,
+    max_chars: 1_000,
+    max_description_chars: 200,
+};
+
+const TOOLS: CraftFolder = CraftFolder {
+    name: "tools",
+    max_files: 15,
+    max_chars: 2_000,
+    max_description_chars: 100,
+};
+
+// A file too long to measure is over every size limit.
+const _: () = assert!(
+    crate::agent_craft::HEAD_BYTES as usize / 4 > PRINCIPLES.max_chars
+        && crate::agent_craft::HEAD_BYTES as usize / 4 > TOOLS.max_chars
+);
+
+/// How many oversize files the nudge after the catalog names.
+const MAX_OVERSIZE_LISTED: usize = 10;
 
 /// A member's craft: what it is for, and a catalog of what it holds. The
 /// catalog names files without their contents, so the prompt stays small
@@ -651,26 +679,56 @@ fn push_craft(prompt: &mut String, dir: &std::path::Path) {
     // The path the sandbox exposes, which differs from `dir` when `~` or the
     // app directory is a symlink, or under Flatpak.
     let dir_text = agent_path_string(&resolve(dir).unwrap_or_else(|_| dir.to_path_buf()));
+    let principles_files = PRINCIPLES.max_files;
+    let principles_next = PRINCIPLES.max_files + 1;
+    let principles_chars = PRINCIPLES.max_chars;
+    let principles_description = PRINCIPLES.max_description_chars;
+    let tools_files = TOOLS.max_files;
+    let tools_next = TOOLS.max_files + 1;
+    let tools_chars = TOOLS.max_chars;
+    let tools_description = TOOLS.max_description_chars;
     prompt.push_str(&format!(
         "\n## Your Craft\n\
-         `{dir_text}` holds your craft: what you have learnt about how to do your work, carried into every run, in every workspace that assigns you. You reach it through the shell; on Linux and macOS no other agent's shell can. The user can read, edit and delete it in the CLAI app. The workspace's `.clai/memory/` belongs to its Main and is read-only to you.\n\n\
-         You are a craftsman striving for mastery, and a humble one. Your craft is how you work, not what you worked on: it must hold in any repository, for any user, in any workspace.\n\n\
-         Write principles, not incidents. When something goes wrong or proves itself, ask why, and keep asking until the answer no longer names this project, file, path or task; record that answer as a rule you can apply elsewhere. Name the incident in one line at most, as an illustration. Keep a precise technical fact that holds wherever you meet it (an API quirk, a version-specific behaviour) as the principle's example. Too narrow: \"In repo X, tests need flag Y.\" Craft: \"When local and CI results differ, compare the runtime environment before suspecting the code.\"\n\n\
-         At the end of a task, ask what a master would have done differently. Write a lesson only if it changes what you will do next time.\n\n\
-         Before writing, ask: would this change what I do in an unrelated project? If not, don't write it. Never record:\n\
-         - project or workspace facts;\n\
-         - instructions from a user or workspace (they reach you with the task);\n\
-         - history: what was proposed, rejected or shipped;\n\
-         - user data, paths, hosts, task status or secrets.\n\n\
-         Grow by refining, not by adding. One principle per file. Moving lessons out of sight (hidden folders, other extensions) is not pruning. Keep your craft to at most {CRAFT_TARGET_FILES} files: a few lessons you actually use beat a long catalog you skim.\n\n\
+         `{dir_text}` holds your craft, carried into every run, in every workspace that assigns you. You reach it through the shell; on Linux and macOS no other agent's shell can. The user can read, edit and delete it in the CLAI app. The workspace's `.clai/memory/` belongs to its Main and is read-only to you.\n\n\
+         Your profession is the one your role describes. If the role names a tool or a language, your profession is the work done with it. Craft is the skill you build in it by being corrected. A lesson is a gap between the work you delivered and what was expected of it, turned into a rule that closes that gap next time.\n\n\
+         Write a principle only after one of these:\n\
+         - someone who checked your work, a person or another agent, found a problem in it;\n\
+         - the user corrected or rejected your work;\n\
+         - something you assumed proved wrong and cost you rework;\n\
+         - a way of working saved substantial effort and you would not have tried it by default.\n\
+         When your work is checking the work of others, a problem your check nearly missed counts as the first. Work that went smoothly writes no principle. Do not write a rule you already follow without being told. A rule you knew, broke and were corrected on is a lesson.\n\n\
+         Write a tool fact when a tool behaved differently from what you expected and you verified the real behaviour. It needs no correction and no rework. What its documentation states plainly is not a lesson.\n\n\
+         Keep two kinds of lesson apart:\n\n\
+         - `principles/` holds the judgement of your profession: how you decide, design, check and present your work. Test: does it hold on any assignment in your profession, whatever the subject and tools? Each file is one rule: the rule in one or two sentences, why it holds, how to apply or check it, and at most one example of three lines. At most {principles_chars} characters, frontmatter included. Name no tool or product in the rule or the description. At most {principles_files} files; when a new principle would make {principles_next}, replace the one least likely to change what you do next, or do not write the new one.\n\
+         - `tools/<name>.md` holds what you learnt about one tool, source, format or platform, true wherever you meet it. Name the file after the narrowest thing the facts are about (a tool, library, format, platform or standard), never after a topic. Each fact is one line, or a procedure of at most five steps, with the version or date it was seen and how you verified it; write `unverified` when you do not know, never guess. A fact about two tools goes in the file of the one that surprised you. Delete a fact when it is outdated. At most {tools_chars} characters per file and {tools_files} files; when a new file would make {tools_next}, delete the one least likely to matter again. The description names the tool and when it matters, in under {tools_description} characters.\n\n\
+         A lesson that cannot be stated without naming a tool belongs in `tools/`. Do not turn a principle into a tool fact by attaching a tool's name to it.\n\n\
+         To place a lesson, remove every tool, product, client and file name from it. If it still tells you what to do, it is a principle. If nothing useful is left, it is a tool fact or a fact about one assignment.\n\n\
+         The same three levels in four professions. They show the distinction, not the topics to write about:\n\n\
+         | | Fact about one assignment (never record) | Tool fact (`tools/`) | Principle (`principles/`) |\n\
+         |---|---|---|---|\n\
+         | Developer | \"In repo X, tests need flag Y.\" | \"Library L's timer stops while the machine sleeps.\" | \"When a new outcome travels through an existing channel, check how every older consumer reads it.\" |\n\
+         | Financial analyst | \"The Q3 report excludes the Dutch subsidiary.\" | \"Provider Z restates the previous two quarters with each release.\" | \"Before comparing two periods, confirm both were measured the same way.\" |\n\
+         | Marketer | \"The spring campaign targets returning customers.\" | \"Platform P counts a view after two seconds.\" | \"Before reporting that a change worked, check what else changed in the same period.\" |\n\
+         | Writer | \"This client writes the product name in lower case.\" | \"Format F cuts titles after 60 characters.\" | \"Lead with what the reader must decide; background comes after.\" |\n\n\
+         When the user corrects you, record the standard behind the correction, not the request itself. Too narrow: \"the user wanted a shorter introduction\". Craft: \"lead with what the reader must decide; background comes after\". When the user states a standing preference about how you should work, do not store it: say in your reply that it belongs in your agent instructions, so they can add it.\n\n\
+         Never record facts about one assignment or workspace, the story of what was proposed or delivered, user data, locations, task status or secrets. The reason an approach fails, stated as a rule, is a principle; the account of who rejected it is not.\n\n\
          Maintain it only when there is a reason:\n\
-         - When you write a lesson, check the catalog below for related ones. Open only those, and decide whether they need refactoring: merge them with the new lesson, sharpen them, split one that mixes two principles, or delete one the new lesson supersedes. Prefer improving an existing lesson to creating a file.\n\
-         - When a lesson you followed proves wrong or useless, fix or delete it in the same run.\n\
-         - When the app tells you your craft is over its target size, merge and prune it.\n\n\
-         Organise the directory as you like: `.md` files, in subfolders if useful. Each file starts with frontmatter whose `description` says when to read it:\n\
+         - Before writing, open the related files in the catalog. Sharpen or replace one rather than add.\n\
+         - When a lesson you followed proves wrong, fix or delete it in the same run.\n\
+         - When a file passes its size limit, distil it; never merge unrelated lessons to meet a number.\n\
+         - A file outside `principles/` and `tools/` is from an earlier layout. The next time you write to your craft, move each lesson in it that fits the limits above and delete the rest.\n\n\
+         Each file starts with frontmatter. A principle's description is under {principles_description} characters, and its `source` says what taught it (`check`, `user`, `error` or `technique`); omit `source` if unknown:\n\
          ```\n\
          ---\n\
-         description: Use when <situation>: <the lesson in one line>.\n\
+         description: Use when <situation>: <the lesson>.\n\
+         source: check\n\
+         updated_at: YYYY-MM-DD\n\
+         ---\n\
+         ```\n\
+         A tool file's description is under {tools_description} characters, and it has no `source`:\n\
+         ```\n\
+         ---\n\
+         description: <tool>: <when it matters>.\n\
          updated_at: YYYY-MM-DD\n\
          ---\n\
          ```\n\
@@ -683,18 +741,75 @@ fn push_craft(prompt: &mut String, dir: &std::path::Path) {
         }
         Ok(files) => {
             prompt.push_str(&crate::agent_craft::catalog(&files));
-            if files.len() > CRAFT_TARGET_FILES {
-                prompt.push_str(&format!(
-                    "\nYour craft holds {} files, over its target of {CRAFT_TARGET_FILES}. Once your task is done, merge lessons that share a principle and delete stale ones until it holds at most {CRAFT_TARGET_FILES} files. Never combine unrelated lessons in one file to meet the number. If a file you did not touch changes or disappears while you prune, another run is pruning too: stop.\n",
-                    files.len()
-                ));
-            }
+            prompt.push_str(&craft_nudges(&files));
         }
         Err(error) => {
             tracing::warn!(%error, "Could not list agent craft");
             prompt.push_str("Unavailable this run: list the directory yourself.\n");
         }
     }
+}
+
+/// What the agent must fix to bring its craft within the prompt's limits;
+/// empty when it already is.
+fn craft_nudges(files: &[crate::agent_craft::AgentCraftFile]) -> String {
+    let mut nudges = String::new();
+    let mut oversize = Vec::new();
+    let mut legacy = files.len();
+    for folder in [PRINCIPLES, TOOLS] {
+        let prefix = format!("{}/", folder.name);
+        let inside: Vec<_> = files
+            .iter()
+            .filter(|file| file.path.starts_with(&prefix))
+            .collect();
+        legacy -= inside.len();
+        if inside.len() > folder.max_files {
+            nudges.push_str(&format!(
+                "\n`{prefix}` holds {} files, over its limit of {}. Once your task is done, delete the ones least likely to change what you do next until it holds at most {}.\n",
+                inside.len(),
+                folder.max_files,
+                folder.max_files
+            ));
+        }
+        for file in inside {
+            let size = match file.chars {
+                Some(chars) if chars <= folder.max_chars => continue,
+                Some(chars) => format!("{chars} characters"),
+                None => format!("over {} bytes", crate::agent_craft::HEAD_BYTES),
+            };
+            oversize.push(format!(
+                "- `{}`: {size}, limit {}\n",
+                file.path, folder.max_chars
+            ));
+        }
+    }
+    if !oversize.is_empty() {
+        nudges.push_str(
+            "\nThese files are over their size limit. Once your task is done, distil each:\n",
+        );
+        for line in oversize.iter().take(MAX_OVERSIZE_LISTED) {
+            nudges.push_str(line);
+        }
+        if oversize.len() > MAX_OVERSIZE_LISTED {
+            nudges.push_str(&format!(
+                "- … and {} more\n",
+                oversize.len() - MAX_OVERSIZE_LISTED
+            ));
+        }
+    }
+    if legacy > 0 {
+        let legacy = match legacy {
+            1 => "1 file sits".to_string(),
+            n => format!("{n} files sit"),
+        };
+        nudges.push_str(&format!(
+            "\n{legacy} outside `principles/` and `tools/`, from an earlier layout. The next time you write to your craft, move each lesson that fits the limits above and delete the rest.\n"
+        ));
+    }
+    if !nudges.is_empty() {
+        nudges.push_str("\nNever combine unrelated lessons in one file to meet a number. If a file you did not touch changes or disappears while you prune, another run is pruning too: stop.\n");
+    }
+    nudges
 }
 
 /// The `.clai/memory/` protocol. Every step of it reads or writes a file,
@@ -866,13 +981,17 @@ mod tests {
             assert!(text.contains("## Your Craft"));
             assert!(text.contains(&format!("`{}` holds your craft", shown_dir)));
             for rule in [
-                "Write principles, not incidents.",
-                "Grow by refining, not by adding.",
+                "Write a principle only after one of these:",
+                "Keep two kinds of lesson apart:",
                 "Maintain it only when there is a reason:",
-                "Open only those",
-                "One principle per file.",
-                "what a master would have done differently",
-                &format!("to at most {CRAFT_TARGET_FILES} files"),
+                "on Linux and macOS no other agent's shell can.",
+                "- `principles/` holds the judgement of your profession",
+                "At most 1000 characters, frontmatter included.",
+                "At most 15 files; when a new principle would make 16,",
+                "At most 2000 characters per file and 15 files; when a new file would make 16,",
+                "when it matters, in under 100 characters.",
+                "A principle's description is under 200 characters",
+                "description: <tool>: <when it matters>.",
             ] {
                 assert!(text.contains(rule), "missing {rule:?}");
             }
@@ -914,39 +1033,113 @@ mod tests {
         assert!(!text.contains("## Agent Memory"));
     }
 
-    #[test]
-    fn a_craft_over_its_target_size_asks_to_be_pruned() {
+    /// Writes `files` (path, content) into a fresh craft and returns what
+    /// the prompt says after its catalog.
+    fn after_catalog(files: &[(&str, String)]) -> String {
         let temp = tempfile::tempdir().unwrap();
+        for (path, content) in files {
+            let path = temp.path().join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, content).unwrap();
+        }
         let member = RunContext {
             execution: shell_execution(),
             craft_dir: Some(temp.path().to_path_buf()),
             ..Default::default()
         };
-        let fill = |count: usize| {
-            for i in 0..count {
-                std::fs::write(temp.path().join(format!("{i}.md")), "").unwrap();
-            }
-            prompt_text(&member, &RunTrigger::Scheduled)
-        };
-        let nudge = "Your craft holds";
-
-        assert!(!fill(CRAFT_TARGET_FILES).contains(nudge));
-
-        let over = CRAFT_TARGET_FILES + 1;
-        let text = fill(over);
+        let text = prompt_text(&member, &RunTrigger::Scheduled);
         let catalog = text.split("### Catalog\n").nth(1).unwrap();
+        let catalog = catalog.split("\n## ").next().unwrap();
+        catalog
+            .lines()
+            .skip_while(|line| line.starts_with("- "))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn many(folder: &str, count: usize, chars: usize) -> Vec<(String, String)> {
+        (0..count)
+            .map(|i| (format!("{folder}/{i}.md"), "x".repeat(chars)))
+            .collect()
+    }
+
+    fn borrowed(files: &[(String, String)]) -> Vec<(&str, String)> {
+        files.iter().map(|(p, c)| (p.as_str(), c.clone())).collect()
+    }
+
+    #[test]
+    fn a_craft_within_its_limits_gets_no_nudge() {
+        let mut files = many("principles", PRINCIPLES.max_files, PRINCIPLES.max_chars);
+        files.extend(many("tools", TOOLS.max_files, TOOLS.max_chars));
+        assert_eq!(after_catalog(&borrowed(&files)), "");
+    }
+
+    #[test]
+    fn a_folder_over_its_file_limit_is_named_with_its_count() {
+        for folder in [PRINCIPLES, TOOLS] {
+            let over = folder.max_files + 1;
+            let text = after_catalog(&borrowed(&many(folder.name, over, 10)));
+            assert!(
+                text.contains(&format!(
+                    "`{}/` holds {over} files, over its limit of {}.",
+                    folder.name, folder.max_files
+                )),
+                "{text}"
+            );
+            assert!(text.contains("Never combine unrelated lessons"), "{text}");
+            assert!(text.contains("another run is pruning too: stop."));
+            assert!(!text.contains("size limit"), "{text}");
+        }
+    }
+
+    #[test]
+    fn files_over_their_size_limit_are_listed_and_bounded() {
+        let text = after_catalog(&[
+            ("principles/ok.md", "é".repeat(PRINCIPLES.max_chars)),
+            ("principles/big.md", "x".repeat(PRINCIPLES.max_chars + 1)),
+            ("tools/ok.md", "x".repeat(TOOLS.max_chars)),
+            ("tools/huge.md", "x".repeat(64 * 1024)),
+        ]);
         assert!(
-            catalog.contains(&format!(
-                "\n\nYour craft holds {over} files, over its target of {CRAFT_TARGET_FILES}."
+            text.contains(&format!(
+                "- `principles/big.md`: {} characters, limit {}\n",
+                PRINCIPLES.max_chars + 1,
+                PRINCIPLES.max_chars
             )),
             "{text}"
         );
+        assert!(
+            text.contains(&format!(
+                "- `tools/huge.md`: over {} bytes, limit {}",
+                crate::agent_craft::HEAD_BYTES,
+                TOOLS.max_chars
+            )),
+            "{text}"
+        );
+        assert!(!text.contains("ok.md"), "{text}");
+        assert!(!text.contains("holds"), "{text}");
 
-        // Past the catalog's own bound, both notes are shown.
-        let many = crate::agent_craft::MAX_CATALOG_ENTRIES + 1;
-        let text = fill(many);
-        assert!(text.contains("- … 1 older files not listed"), "{text}");
-        assert!(text.contains(&format!("Your craft holds {many} files")));
+        let count = MAX_OVERSIZE_LISTED + 3;
+        let text = after_catalog(&borrowed(&many("tools", count, TOOLS.max_chars + 1)));
+        assert_eq!(
+            text.matches("characters, limit").count(),
+            MAX_OVERSIZE_LISTED
+        );
+        assert!(text.contains("- … and 3 more\n"), "{text}");
+    }
+
+    #[test]
+    fn files_from_the_earlier_layout_are_counted() {
+        let text = after_catalog(&[
+            ("principles/a.md", String::new()),
+            ("loose.md", String::new()),
+            ("rust/locks.md", String::new()),
+        ]);
+        assert!(
+            text.contains("2 files sit outside `principles/` and `tools/`, from an earlier layout. The next time you write to your craft, move each lesson that fits the limits above and delete the rest."),
+            "{text}"
+        );
+        assert!(text.contains("another run is pruning too: stop."));
     }
 
     /// The prompt names the craft folder where the sandbox exposes it,

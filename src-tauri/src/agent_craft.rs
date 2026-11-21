@@ -26,8 +26,9 @@ const MAX_CATALOG_BYTES: usize = 8 * 1024;
 /// at most `MAX_DEPTH` folders deep.
 const MAX_DEPTH: usize = 8;
 const MAX_FILES: usize = 1_000;
-/// Frontmatter must be within the start of a file.
-const FRONTMATTER_BYTES: u64 = 4 * 1024;
+/// Frontmatter must be within the start of a file, and characters are
+/// counted only in a file no longer than this.
+pub(crate) const HEAD_BYTES: u64 = 8 * 1024;
 /// The largest file the settings UI reads or writes.
 const MAX_FILE_BYTES: usize = 256 * 1024;
 
@@ -47,6 +48,10 @@ pub struct AgentCraftFile {
     /// Newest first: `updated_at`, else the modification time, in seconds.
     #[serde(skip)]
     sort_key: i64,
+    /// Characters in the file, frontmatter included; `None` when it is
+    /// longer than `HEAD_BYTES` bytes, so over `HEAD_BYTES / 4` characters.
+    #[serde(skip)]
+    pub(crate) chars: Option<usize>,
 }
 
 /// The craft directory of `definition_id` under `agents_root`.
@@ -124,7 +129,8 @@ fn walk(folder: &Folder, prefix: &str, depth: usize, files: &mut Vec<AgentCraftF
 fn describe(folder: &Folder, name: &str, relative: String) -> Option<AgentCraftFile> {
     let (file, meta) = folder.open_file(name).ok()?;
     let mut head = Vec::new();
-    let _ = file.take(FRONTMATTER_BYTES).read_to_end(&mut head);
+    let _ = file.take(HEAD_BYTES).read_to_end(&mut head);
+    let chars = (meta.len() <= HEAD_BYTES).then(|| String::from_utf8_lossy(&head).chars().count());
     // The cut may split a character, and a file may not be UTF-8 at all:
     // only the valid start is parsed.
     let head = match std::str::from_utf8(&head) {
@@ -148,6 +154,7 @@ fn describe(folder: &Folder, name: &str, relative: String) -> Option<AgentCraftF
         description: frontmatter.description,
         updated_at: frontmatter.updated_at,
         sort_key: updated.unwrap_or(modified),
+        chars,
     })
 }
 
@@ -562,6 +569,7 @@ mod tests {
             updated_at: None,
             frontmatter_valid: valid,
             sort_key: 0,
+            chars: None,
         }
     }
 
@@ -643,14 +651,28 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("long.md");
         let mut content = lesson("Use when long", "2026-11-10");
-        content.push_str(&"x".repeat(FRONTMATTER_BYTES as usize - content.len() - 1));
+        content.push_str(&"x".repeat(HEAD_BYTES as usize - content.len() - 1));
         content.push_str("é and more");
-        assert!(!content.is_char_boundary(FRONTMATTER_BYTES as usize));
+        assert!(!content.is_char_boundary(HEAD_BYTES as usize));
         fs::write(&path, &content).unwrap();
         let folder = Folder::open(temp.path()).unwrap();
         let file = describe(&folder, "long.md", "long.md".into()).unwrap();
         assert!(file.frontmatter_valid);
         assert_eq!(file.description.as_deref(), Some("Use when long"));
+    }
+
+    #[test]
+    fn files_are_measured_in_characters_up_to_the_read_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let folder = Folder::open(temp.path()).unwrap();
+        let chars = |content: &str| {
+            fs::write(temp.path().join("f.md"), content).unwrap();
+            describe(&folder, "f.md", "f.md".into()).unwrap().chars
+        };
+        assert_eq!(chars("ñandú\n"), Some(6));
+        let limit = HEAD_BYTES as usize;
+        assert_eq!(chars(&"é".repeat(limit / 2)), Some(limit / 2));
+        assert_eq!(chars(&"x".repeat(limit + 1)), None);
     }
 
     #[test]
