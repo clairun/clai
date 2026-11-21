@@ -84,9 +84,10 @@ pub(crate) fn build_system_prompt(
             // A worker session is told not to fan out unless asked (Task
             // Worker Context below), so it gets no standing order to assign.
             let ownership = if matches!(trigger, RunTrigger::WorkspaceTask) {
-                "in this task, do what your instructions ask, pass work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so it can go to them for review. "
+                "in this task, do what your instructions ask, pass work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so they can be told and it can be reviewed. \
+                 When a check or a review finds a problem in work you passed on, send it back to the task that produced it. "
             } else {
-                "assign it to them, including small fixes to what they delivered, and when a check or a review finding fails their work, send it back to the task that produced it. \
+                "assign it to them, including small fixes to what they delivered, and when a check or a review finds a problem in their work, send it back to the task that produced it. \
                  Fix a member's work yourself only when the round trip would cost more than the fix is worth; \
                  then tell that member what you changed, and have it reviewed in a new task before it goes out. "
             };
@@ -1829,8 +1830,14 @@ mod tests {
 
     /// The ownership rule a manager gets outside a task-worker run.
     const MANAGER_OWNERSHIP: [&str; 2] = [
-        "Work that a member's role covers is theirs by default: assign it to them, including small fixes to what they delivered, and when a check or a review finding fails their work, send it back to the task that produced it.",
+        "Work that a member's role covers is theirs by default: assign it to them, including small fixes to what they delivered, and when a check or a review finds a problem in their work, send it back to the task that produced it.",
         "Fix a member's work yourself only when the round trip would cost more than the fix is worth; then tell that member what you changed, and have it reviewed in a new task before it goes out.",
+    ];
+
+    /// The ownership rule a manager gets in a task-worker run.
+    const WORKER_OWNERSHIP: [&str; 2] = [
+        "Work that a member's role covers is theirs by default: in this task, do what your instructions ask, pass work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so they can be told and it can be reviewed.",
+        "When a check or a review finds a problem in work you passed on, send it back to the task that produced it.",
     ];
 
     #[test]
@@ -1857,11 +1864,29 @@ mod tests {
             "- **Code Reviewer** (member) — `workspaceAgentId`: `workspace-agent-reviewer`"
         ));
         assert!(text.contains("never on the display name"));
-        // Members own the work their role covers, fixes to it included.
-        for sentence in MANAGER_OWNERSHIP {
-            assert!(text.contains(sentence), "missing {sentence:?}");
+        // Members own the work their role covers, fixes to it included, in
+        // every run of the manager's own session, not only chat turns.
+        for trigger in [
+            RunTrigger::UserMessage,
+            RunTrigger::SignalWake,
+            RunTrigger::Scheduled,
+            RunTrigger::ManualAutomation,
+        ] {
+            let text = prompt_text(&context, &trigger);
+            for sentence in MANAGER_OWNERSHIP {
+                assert!(text.contains(sentence), "{trigger:?}: missing {sentence:?}");
+            }
+            for sentence in WORKER_OWNERSHIP {
+                assert!(
+                    !text.contains(sentence),
+                    "{trigger:?}: unexpected {sentence:?}"
+                );
+            }
+            assert!(
+                !text.contains("in this task, do what your instructions ask"),
+                "{trigger:?}"
+            );
         }
-        assert!(!text.contains("in this task, do what your instructions ask"));
         assert!(!text.contains("prefer delegating"));
         // When to stop sending work back and who reviews it live in the skills.
         assert!(!text.contains("none above minor"));
@@ -1972,7 +1997,9 @@ mod tests {
         assert!(!text.contains("### How tasks run"));
         assert!(text.contains("never create task chains"));
         // Nor a standing order to assign, which the worker context forbids.
-        assert!(text.contains("Work that a member's role covers is theirs by default: in this task, do what your instructions ask, pass work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so it can go to them for review."));
+        for sentence in WORKER_OWNERSHIP {
+            assert!(text.contains(sentence), "missing {sentence:?}");
+        }
         for sentence in MANAGER_OWNERSHIP {
             assert!(!text.contains(sentence), "unexpected {sentence:?}");
         }
