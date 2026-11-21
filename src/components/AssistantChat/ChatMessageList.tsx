@@ -61,6 +61,7 @@ const MAX_VISIBLE_TOOLS = 2;
 // of the generated discriminated union so `.text` / `.tool_name` etc.
 // are accessible after a `type ===` guard.
 type TextPart = Extract<ContentPart, { type: 'text' }>;
+type ThinkingPart = Extract<ContentPart, { type: 'thinking' }>;
 type ToolUsePart = Extract<ContentPart, { type: 'tool_use' }>;
 
 // A tool_use enriched with the matching ToolInvocation record for rendering.
@@ -223,15 +224,18 @@ const groupAssistantContent = (
   return segments;
 };
 
+/** Text and thinking parts: the ones that render as prose blocks. */
+const isProsePart = (part: ContentPart): part is TextPart | ThinkingPart =>
+  part.type === 'text' || part.type === 'thinking';
+
 /**
- * Check if an assistant message contains only tool calls (no text).
+ * Check if an assistant message contains only tool calls (no text or
+ * thinking to show).
  */
-const isToolOnlyMessage = (message: AssistantMessage): boolean => {
-  if (message.role !== 'assistant') return false;
-  const text = getTextContent(message);
-  const tools = getToolUses(message);
-  return !text.trim() && tools.length > 0;
-};
+const isToolOnlyMessage = (message: AssistantMessage): boolean =>
+  message.role === 'assistant' &&
+  getToolUses(message).length > 0 &&
+  !message.content.some((part) => isProsePart(part) && part.text.trim());
 
 /**
  * Whether an assistant message has anything to show: a non-empty text or
@@ -246,13 +250,14 @@ const hasRenderableContent = (message: AssistantMessage): boolean =>
   Array.isArray(message.content) &&
   message.content.some((part) => {
     if (!part || typeof part !== 'object') return false;
-    if (part.type === 'text' || part.type === 'thinking') return !!part.text;
-    return true;
+    return isProsePart(part) ? !!part.text : true;
   });
 
 const isHiddenMessage = (message: AssistantMessage | undefined): boolean => {
   if (!message) return true;
-  if (message.role === 'tool') return true;
+  // Tool results render inline with their calls; system messages (the
+  // compaction summary) are model context, never shown.
+  if (message.role === 'tool' || message.role === 'system') return true;
 
   if (message.role !== 'user') return false;
   const text = getTextContent(message);
