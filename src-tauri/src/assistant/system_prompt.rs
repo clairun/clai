@@ -668,8 +668,10 @@ const _: () = assert!(
         && crate::agent_craft::HEAD_BYTES as usize / 4 > TOOLS.max_chars
 );
 
-/// How many oversize files the nudge after the catalog names.
+/// How many oversize files the nudge after the catalog names, and how much
+/// of each path it shows.
 const MAX_OVERSIZE_LISTED: usize = 10;
+const MAX_NUDGE_PATH_CHARS: usize = 100;
 
 /// A member's craft: what it is for, and a catalog of what it holds. The
 /// catalog names files without their contents, so the prompt stays small
@@ -716,7 +718,7 @@ fn push_craft(prompt: &mut String, dir: &std::path::Path) {
          - Before writing, open the related files in the catalog. Sharpen or replace one rather than add.\n\
          - When a lesson you followed proves wrong, fix or delete it in the same run.\n\
          - When a file passes its size limit, distil it; never merge unrelated lessons to meet a number.\n\
-         - A file outside `principles/` and `tools/` is from an earlier layout. The next time you write to your craft, move each lesson in it that fits the limits above and delete the rest.\n\n\
+         - A file outside `principles/` and `tools/` is from an earlier layout. The next time you write to your craft, move each lesson in it to the folder it belongs in, distilled to fit the limits above, and delete only what is neither a principle nor a tool fact. Moving lessons out of sight (hidden folders, other extensions) is not pruning.\n\n\
          Each file starts with frontmatter. A principle's description is under {principles_description} characters, and its `source` says what taught it (`check`, `user`, `error` or `technique`); omit `source` if unknown:\n\
          ```\n\
          ---\n\
@@ -753,6 +755,12 @@ fn push_craft(prompt: &mut String, dir: &std::path::Path) {
 /// What the agent must fix to bring its craft within the prompt's limits;
 /// empty when it already is.
 fn craft_nudges(files: &[crate::agent_craft::AgentCraftFile]) -> String {
+    // A listing cut at its bound undercounts.
+    let at_least = if files.len() >= crate::agent_craft::MAX_FILES {
+        "at least "
+    } else {
+        ""
+    };
     let mut nudges = String::new();
     let mut oversize = Vec::new();
     let mut legacy = files.len();
@@ -765,7 +773,7 @@ fn craft_nudges(files: &[crate::agent_craft::AgentCraftFile]) -> String {
         legacy -= inside.len();
         if inside.len() > folder.max_files {
             nudges.push_str(&format!(
-                "\n`{prefix}` holds {} files, over its limit of {}. Once your task is done, delete the ones least likely to change what you do next until it holds at most {}.\n",
+                "\n`{prefix}` holds {at_least}{} files, over its limit of {}. Once your task is done, delete the ones least likely to change what you do next until it holds at most {}.\n",
                 inside.len(),
                 folder.max_files,
                 folder.max_files
@@ -777,10 +785,11 @@ fn craft_nudges(files: &[crate::agent_craft::AgentCraftFile]) -> String {
                 Some(chars) => format!("{chars} characters"),
                 None => format!("over {} bytes", crate::agent_craft::HEAD_BYTES),
             };
-            oversize.push(format!(
-                "- `{}`: {size}, limit {}\n",
-                file.path, folder.max_chars
-            ));
+            let mut path: String = file.path.chars().take(MAX_NUDGE_PATH_CHARS).collect();
+            if path.len() < file.path.len() {
+                path.push('…');
+            }
+            oversize.push(format!("- `{path}`: {size}, limit {}\n", folder.max_chars));
         }
     }
     if !oversize.is_empty() {
@@ -799,11 +808,11 @@ fn craft_nudges(files: &[crate::agent_craft::AgentCraftFile]) -> String {
     }
     if legacy > 0 {
         let legacy = match legacy {
-            1 => "1 file sits".to_string(),
-            n => format!("{n} files sit"),
+            1 => format!("{at_least}1 file sits"),
+            n => format!("{at_least}{n} files sit"),
         };
         nudges.push_str(&format!(
-            "\n{legacy} outside `principles/` and `tools/`, from an earlier layout. The next time you write to your craft, move each lesson that fits the limits above and delete the rest.\n"
+            "\n{legacy} outside `principles/` and `tools/`, from an earlier layout. The next time you write to your craft, move each lesson to the folder it belongs in, distilled to fit the limits above, and delete only what is neither a principle nor a tool fact.\n"
         ));
     }
     if !nudges.is_empty() {
@@ -992,6 +1001,7 @@ mod tests {
                 "when it matters, in under 100 characters.",
                 "A principle's description is under 200 characters",
                 "description: <tool>: <when it matters>.",
+                "delete only what is neither a principle nor a tool fact. Moving lessons out of sight (hidden folders, other extensions) is not pruning.",
             ] {
                 assert!(text.contains(rule), "missing {rule:?}");
             }
@@ -1132,14 +1142,50 @@ mod tests {
     fn files_from_the_earlier_layout_are_counted() {
         let text = after_catalog(&[
             ("principles/a.md", String::new()),
+            ("tools/b.md", String::new()),
             ("loose.md", String::new()),
-            ("rust/locks.md", String::new()),
+            ("principles.md", String::new()),
+            ("principlesX/a.md", String::new()),
+            ("old/principles/a.md", String::new()),
+            ("old/tools/a.md", String::new()),
         ]);
         assert!(
-            text.contains("2 files sit outside `principles/` and `tools/`, from an earlier layout. The next time you write to your craft, move each lesson that fits the limits above and delete the rest."),
+            text.contains("5 files sit outside `principles/` and `tools/`, from an earlier layout. The next time you write to your craft, move each lesson to the folder it belongs in, distilled to fit the limits above, and delete only what is neither a principle nor a tool fact."),
             "{text}"
         );
         assert!(text.contains("another run is pruning too: stop."));
+    }
+
+    #[test]
+    fn a_single_file_from_the_earlier_layout_is_singular() {
+        let text = after_catalog(&[("loose.md", String::new())]);
+        assert!(
+            text.contains("\n1 file sits outside `principles/` and `tools/`"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn long_paths_in_the_oversize_nudge_are_cut() {
+        let name = "é".repeat(MAX_NUDGE_PATH_CHARS);
+        let path = format!("tools/{name}.md");
+        let text = after_catalog(&[(path.as_str(), "x".repeat(TOOLS.max_chars + 1))]);
+        let shown: String = path.chars().take(MAX_NUDGE_PATH_CHARS).collect();
+        assert!(text.contains(&format!("- `{shown}…`: ")), "{text}");
+        assert!(!text.contains(&path), "{text}");
+    }
+
+    #[test]
+    fn counts_from_a_listing_cut_at_its_bound_are_lower_bounds() {
+        let files = many("tools", crate::agent_craft::MAX_FILES, 0);
+        let text = after_catalog(&borrowed(&files));
+        assert!(
+            text.contains(&format!(
+                "`tools/` holds at least {} files",
+                crate::agent_craft::MAX_FILES
+            )),
+            "{text}"
+        );
     }
 
     /// The prompt names the craft folder where the sandbox exposes it,

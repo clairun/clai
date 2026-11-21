@@ -25,7 +25,7 @@ const MAX_CATALOG_BYTES: usize = 8 * 1024;
 /// Bounds on the walk, so a runaway directory cannot stall a run. Files sit
 /// at most `MAX_DEPTH` folders deep.
 const MAX_DEPTH: usize = 8;
-const MAX_FILES: usize = 1_000;
+pub(crate) const MAX_FILES: usize = 1_000;
 /// Frontmatter must be within the start of a file, and characters are
 /// counted only in a file no longer than this.
 pub(crate) const HEAD_BYTES: u64 = 8 * 1024;
@@ -673,6 +673,10 @@ mod tests {
         let limit = HEAD_BYTES as usize;
         assert_eq!(chars(&"é".repeat(limit / 2)), Some(limit / 2));
         assert_eq!(chars(&"x".repeat(limit + 1)), None);
+        // Each invalid byte counts as one replacement character.
+        fs::write(temp.path().join("f.md"), b"\xff\xfea").unwrap();
+        let file = describe(&folder, "f.md", "f.md".into()).unwrap();
+        assert_eq!(file.chars, Some(3));
     }
 
     #[test]
