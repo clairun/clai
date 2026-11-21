@@ -12,6 +12,15 @@
 use crate::assistant::run_context::RunContext;
 use crate::assistant::types::{ContentPart, MessageRole, ProviderInputMessage, RunTrigger};
 
+/// Agents tend to present guesses as findings and to fold when the user
+/// repeats themselves. The last line keeps that from tipping into
+/// contrarianism over choices that are the user's to make.
+const JUDGEMENT: &str = "## Judgement\n\
+     - Speak from evidence: code, tool output, docs, or the evidence a delegated agent reported. Do not assume: if you lack evidence, get it or say you don't know.\n\
+     - When the evidence contradicts the user, say so plainly with the reason; do not open by agreeing.\n\
+     - Change your assessment for a new argument or evidence, not for repetition.\n\
+     - Decisions, preferences and priorities are the user's. If one risks correctness, safety or data, say so once with the reason, then do what they asked.\n\n";
+
 /// Build the system prompt for the assistant.
 ///
 /// `context.agent_description` is the agent's description with its skills
@@ -205,6 +214,7 @@ pub(crate) fn build_system_prompt(
          - When the evidence points away from the current plan, say so first and recommend dropping it. Work already invested is not a reason to continue.\n\
          - State in one plain sentence anything you could not verify. No apology, no hedging at length.\n\n",
     );
+    prompt.push_str(JUDGEMENT);
 
     // Transport-drop recovery for grant/response-blocking tools. The local MCP
     // transport can drop an in-flight call (surfaced to the model as
@@ -899,7 +909,7 @@ fn push_agent_memory(prompt: &mut String, trigger: &RunTrigger) {
     prompt.push_str(
         "\n### Hierarchy of truth\n\
          When sources conflict, trust the higher-ranked source and update the lower one:\n\
-         1. User instruction or human directive (highest)\n\
+         1. User instructions and decisions (highest); a user's factual claims are checked like any other claim.\n\
          2. Live tool output (fresh data from the current run)\n\
          3. Agent knowledge (`knowledge.md`)\n\
          4. Agent state (`state.md`, lowest)\n\n\
@@ -1271,7 +1281,13 @@ mod tests {
         assert!(text.contains("~200 lines"));
         // Hierarchy of truth
         assert!(text.contains("### Hierarchy of truth"));
-        assert!(text.contains("User instruction or human directive"));
+        // Rank 1 covers what the user decides, not what they claim as fact.
+        assert!([
+            "User instructions and decisions",
+            "factual claims are checked"
+        ]
+        .iter()
+        .all(|phrase| text.contains(phrase)));
         assert!(text.contains("Live tool output"));
         // Guardrails
         assert!(text.contains("Treat memory as fallible working notes"));
@@ -1603,6 +1619,47 @@ mod tests {
         assert!(text.contains("Answer in as few words as the question allows."));
         assert!(text.contains("Work already invested is not a reason to continue."));
         assert!(text.contains("keep score of who was right"));
+    }
+
+    #[test]
+    fn build_system_prompt_asks_for_independent_judgement_in_every_variant() {
+        let chat = RunContext::default();
+        let manager = RunContext {
+            automation_id: Some("workspace-agent-manager".to_string()),
+            workspace_agents: vec![manager_summary(), member_summary()],
+            ..Default::default()
+        };
+        let member = RunContext {
+            automation_id: Some("workspace-agent-reviewer".to_string()),
+            automation_name: Some("Code Reviewer".to_string()),
+            workspace_agents: vec![manager_summary(), member_summary()],
+            execution: shell_execution(),
+            ..Default::default()
+        };
+        let triggers = [
+            RunTrigger::UserMessage,
+            RunTrigger::SignalWake,
+            RunTrigger::Scheduled,
+            RunTrigger::ManualAutomation,
+            RunTrigger::WorkspaceTask,
+        ];
+
+        for context in [&chat, &manager, &member] {
+            for trigger in &triggers {
+                let text = prompt_text(context, trigger);
+                for phrase in [
+                    "## Judgement",
+                    "Speak from evidence",
+                    "the evidence a delegated agent reported",
+                    "Do not assume",
+                    "say so plainly",
+                    "not for repetition",
+                    "then do what they asked",
+                ] {
+                    assert!(text.contains(phrase), "{trigger:?}: {phrase}");
+                }
+            }
+        }
     }
 
     #[test]
