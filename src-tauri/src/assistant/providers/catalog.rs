@@ -100,6 +100,10 @@ pub struct ProviderCatalogEntry {
     pub base_url_is_api_root: bool,
     /// Capability defaults when the models endpoint is thin/absent.
     pub capabilities: Option<ProviderCaps>,
+    /// `max_tokens` the Anthropic adapter sends when a request sets none;
+    /// `None` keeps the adapter's own default. The OpenAI adapter ignores it.
+    #[serde(skip)]
+    pub default_max_output_tokens: Option<u32>,
 }
 
 fn model(id: &str) -> ModelInfo {
@@ -146,6 +150,7 @@ fn hosted_openai(
         models_endpoint_style: ModelsEndpointStyle::Standard,
         base_url_is_api_root: false,
         capabilities: None,
+        default_max_output_tokens: None,
     }
 }
 
@@ -267,6 +272,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         models_endpoint_style: ModelsEndpointStyle::Standard,
         base_url_is_api_root: false,
         capabilities: None,
+        default_max_output_tokens: None,
     });
     // MiniMax — Anthropic-compatible endpoint (user preference; international, not the CN variant).
     entries.push(ProviderCatalogEntry {
@@ -293,6 +299,10 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
             supports_tools: true,
             supports_images: false,
         }),
+        // Thinking counts toward `max_tokens` and M3.1-Flash thinks at
+        // effort `max` by default; 131072 is the documented recommendation
+        // for both models (CreateMessageReq.max_tokens, checked 2026-11-20).
+        default_max_output_tokens: Some(131_072),
     });
 
     // --- Self-hosted / open source (base_url editable, key optional) ---
@@ -346,6 +356,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         models_endpoint_style: ModelsEndpointStyle::Standard,
         base_url_is_api_root: false,
         capabilities: None,
+        default_max_output_tokens: None,
     });
     entries.push(ProviderCatalogEntry {
         id: "custom-anthropic".to_string(),
@@ -363,6 +374,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         models_endpoint_style: ModelsEndpointStyle::Standard,
         base_url_is_api_root: false,
         capabilities: None,
+        default_max_output_tokens: None,
     });
 
     entries
@@ -392,6 +404,7 @@ fn self_hosted(
         models_endpoint_style: ModelsEndpointStyle::Standard,
         base_url_is_api_root: false,
         capabilities: None,
+        default_max_output_tokens: None,
     }
 }
 
@@ -424,19 +437,26 @@ pub fn entry_for_connection(connection: &ProviderConnection) -> Option<ProviderC
 }
 
 /// The brand whose error codes apply to a connection. A connection saved as
-/// a custom, unknown or empty brand, or as the legacy `openai` brand that
-/// pre-brand connections carry whatever server they use, takes the brand
-/// whose origin its base URL points at: a custom URL on `api.z.ai` gets
-/// Z.ai's codes. Only error classification reads this.
+/// a custom, unknown or empty brand, or as the legacy `openai` or `anthropic`
+/// brand that pre-brand connections carry whatever server they use, takes
+/// the brand whose origin its base URL points at: a custom URL on `api.z.ai`
+/// gets Z.ai's codes. Error classification and the default output cap read this.
 pub fn error_code_brand(connection: &ProviderConnection) -> String {
-    let stored_brand_is_trusted = get_entry(&connection.provider_id)
-        .is_some_and(|entry| entry.category != ProviderCategory::Custom && entry.id != "openai");
+    let stored_brand_is_trusted = get_entry(&connection.provider_id).is_some_and(|entry| {
+        entry.category != ProviderCategory::Custom
+            && !matches!(entry.id.as_str(), "openai" | "anthropic")
+    });
     if !stored_brand_is_trusted {
         if let Some(entry) = connection.base_url.as_deref().and_then(entry_at_origin) {
             return entry.id;
         }
     }
     connection.provider_id.clone()
+}
+
+/// The `max_tokens` a connection's brand asks for when a request sets none.
+pub fn default_max_output_tokens(connection: &ProviderConnection) -> Option<u32> {
+    get_entry(&error_code_brand(connection))?.default_max_output_tokens
 }
 
 /// The entry whose base shares `base_url`'s origin, whatever the paths.
@@ -506,6 +526,11 @@ mod tests {
             ("", Some("https://api.z.ai/api/paas/v4"), "zai"),
             ("my-proxy", Some("https://api.z.ai/api/paas/v4"), "zai"),
             ("custom-anthropic", Some("https://api.anthropic.com"), "anthropic"),
+            // A pre-brand Anthropic connection pointed at MiniMax.
+            ("anthropic", Some("https://api.minimax.io/anthropic"), "minimax"),
+            ("anthropic", Some("https://api.anthropic.com"), "anthropic"),
+            ("anthropic", Some("https://llm.example.com"), "anthropic"),
+            ("anthropic", None, "anthropic"),
             ("openai", Some("http://localhost:11434"), "ollama"),
             ("openai", Some("http://localhost:1234/v1"), "lmstudio"),
             ("openai", Some("http://localhost"), "openai"),

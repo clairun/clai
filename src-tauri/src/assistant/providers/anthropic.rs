@@ -25,6 +25,10 @@ pub const ANTHROPIC_PROVIDER_ID: &str = "anthropic";
 
 const DEFAULT_BASE_URL: &str = "https://api.anthropic.com";
 const ANTHROPIC_API_VERSION: &str = "2023-06-01";
+/// `max_tokens` when neither the request nor the brand sets one: the
+/// largest value every current Claude model accepts (Claude Sonnet 4.5,
+/// Opus 4.5 and Haiku 4.5 cap output at 64000).
+const DEFAULT_MAX_TOKENS: u32 = 64_000;
 
 pub fn provider_descriptor() -> ProviderDescriptor {
     ProviderDescriptor {
@@ -128,7 +132,7 @@ impl ProviderAdapter for AnthropicAdapter {
     > {
         let api_key = get_api_key(connection)?;
         let url = endpoint_url(connection, "messages");
-        let body = build_request_body(&request);
+        let body = build_request_body(connection, &request);
 
         let client = Client::new();
         let resp = client
@@ -175,7 +179,10 @@ pub(super) fn endpoint_url(connection: &ProviderConnection, endpoint: &str) -> S
 // Request Building
 // =============================================================================
 
-fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
+fn build_request_body(
+    connection: &ProviderConnection,
+    request: &CompletionRequest,
+) -> serde_json::Value {
     // Anthropic separates system from messages
     let mut system_parts: Vec<serde_json::Value> = Vec::new();
     let mut messages: Vec<serde_json::Value> = Vec::new();
@@ -208,7 +215,10 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
         "model": request.model_id,
         "messages": messages,
         "stream": true,
-        "max_tokens": request.max_output_tokens.unwrap_or(8192),
+        "max_tokens": request
+            .max_output_tokens
+            .or_else(|| catalog::default_max_output_tokens(connection))
+            .unwrap_or(DEFAULT_MAX_TOKENS),
     });
 
     if !system_parts.is_empty() {
@@ -712,7 +722,7 @@ mod tests {
             images: Default::default(),
         };
 
-        let body = build_request_body(&request);
+        let body = build_request_body(&connection_at("anthropic", None), &request);
 
         // System should be at top level, not in messages
         assert!(body.get("system").is_some());
@@ -854,7 +864,7 @@ mod tests {
             images: Default::default(),
         };
 
-        let body = build_request_body(&request);
+        let body = build_request_body(&connection_at("anthropic", None), &request);
         let temp = body["temperature"].as_f64().unwrap();
         assert!((temp - 0.7).abs() < 0.001);
         assert_eq!(body["max_tokens"], 2048);
@@ -864,6 +874,63 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0]["name"], "get_weather");
         assert!(tools[0].get("input_schema").is_some());
+    }
+
+    fn connection_at(provider_id: &str, base_url: Option<&str>) -> ProviderConnection {
+        ProviderConnection {
+            id: "conn".into(),
+            name: "conn".into(),
+            protocol_id: ANTHROPIC_PROVIDER_ID.into(),
+            provider_id: provider_id.into(),
+            auth_mode: AuthMode::DeveloperApiKey,
+            base_url: base_url.map(Into::into),
+            secret_ref: "provider-connection::conn".into(),
+            model_id: "m".into(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
+    #[test]
+    fn max_tokens_defaults_per_brand_and_yields_to_the_request() {
+        let minimax = connection_at("minimax", None);
+        let minimax_by_origin =
+            connection_at("custom-anthropic", Some("https://api.minimax.io/anthropic"));
+        let anthropic = connection_at("anthropic", None);
+        let legacy_anthropic_at_minimax =
+            connection_at("anthropic", Some("https://api.minimax.io/anthropic"));
+        let custom = connection_at("custom-anthropic", Some("https://llm.example.com"));
+        #[rustfmt::skip]
+        let cases = [
+            (&minimax, None, 131_072),
+            (&minimax_by_origin, None, 131_072),
+            (&legacy_anthropic_at_minimax, None, 131_072),
+            (&anthropic, None, 64_000),
+            (&custom, None, 64_000),
+            (&minimax, Some(1024), 1024),
+            (&anthropic, Some(1024), 1024),
+        ];
+        for (connection, requested, expected) in cases {
+            let request = CompletionRequest {
+                run_id: "run_1".into(),
+                session_id: "sess_1".into(),
+                model_id: "m".into(),
+                messages: vec![],
+                tools: vec![],
+                temperature: None,
+                max_output_tokens: requested,
+                images: Default::default(),
+            };
+            assert_eq!(
+                build_request_body(connection, &request)["max_tokens"],
+                expected,
+                "{} at {:?}, requested {requested:?}",
+                connection.provider_id,
+                connection.base_url
+            );
+        }
     }
 
     #[tokio::test]
