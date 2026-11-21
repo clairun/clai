@@ -180,6 +180,7 @@ pub(crate) fn build_system_prompt(
     prompt.push_str(
         "## Tool Usage Guidelines\n\
          - First inspect what is available in this session and choose the smallest set of tools needed.\n\
+         - Make tool calls that don't depend on each other together in one reply (for example, three file reads as three calls at once); when a call needs an earlier call's result or should run only if it succeeds, wait for that result first.\n\
          - Use the configured MCP tools available in this session for domain-specific work.\n",
     );
     if shell_enabled {
@@ -1605,6 +1606,21 @@ mod tests {
             "Evaluate whether prior tool outputs are still fresh enough for the current decision."
         ));
         assert!(text.contains("re-run the relevant tools if freshness matters."));
+    }
+
+    #[test]
+    fn build_system_prompt_asks_for_independent_tool_calls_in_one_reply() {
+        let batch = "\n- Make tool calls that don't depend on each other together in one reply \
+                     (for example, three file reads as three calls at once); when a call needs an \
+                     earlier call's result or should run only if it succeeds, wait for that result first.\n";
+        let shell_agent = RunContext {
+            execution: shell_execution(),
+            ..Default::default()
+        };
+
+        for context in [&RunContext::default(), &shell_agent] {
+            assert!(prompt_text(context, &RunTrigger::UserMessage).contains(batch));
+        }
     }
 
     #[test]
