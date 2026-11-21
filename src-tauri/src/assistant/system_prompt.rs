@@ -75,13 +75,11 @@ pub(crate) fn build_system_prompt(
             // A worker session is told not to fan out unless asked (Task
             // Worker Context below), so it gets no standing order to assign.
             let ownership = if matches!(trigger, RunTrigger::WorkspaceTask) {
-                "in this task, do what your instructions ask, assign work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so it can go to them for review. "
+                "in this task, do what your instructions ask, pass work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so it can go to them for review. "
             } else {
-                "assign it to them, including small fixes to what they delivered, and when a check fails because of their work, send the failure back to the task that produced it. \
-                 Keep sending findings back until none above minor is open, and ask the user about the minor ones. \
-                 A review of a member's work goes to a new task, never to the task that produced it, so the reviewer starts without that context: \
-                 assign it to a member whose role is reviewing if there is one, and otherwise the member who did the work can take it. \
-                 Fix a member's work yourself only when the round trip would cost more than the fix is worth, and then ask that member to review what you changed before it goes out. "
+                "assign it to them, including small fixes to what they delivered, and when a check or a review finding fails their work, send it back to the task that produced it. \
+                 Fix a member's work yourself only when the round trip would cost more than the fix is worth; \
+                 then tell that member what you changed, and have it reviewed in a new task before it goes out. "
             };
             prompt.push_str(&format!(
                 "## Your Role\n\
@@ -1773,11 +1771,9 @@ mod tests {
     }
 
     /// The ownership rule a manager gets outside a task-worker run.
-    const MANAGER_OWNERSHIP: [&str; 4] = [
-        "Work that a member's role covers is theirs by default: assign it to them, including small fixes to what they delivered, and when a check fails because of their work, send the failure back to the task that produced it.",
-        "Keep sending findings back until none above minor is open, and ask the user about the minor ones.",
-        "A review of a member's work goes to a new task, never to the task that produced it, so the reviewer starts without that context: assign it to a member whose role is reviewing if there is one, and otherwise the member who did the work can take it.",
-        "Fix a member's work yourself only when the round trip would cost more than the fix is worth, and then ask that member to review what you changed before it goes out.",
+    const MANAGER_OWNERSHIP: [&str; 2] = [
+        "Work that a member's role covers is theirs by default: assign it to them, including small fixes to what they delivered, and when a check or a review finding fails their work, send it back to the task that produced it.",
+        "Fix a member's work yourself only when the round trip would cost more than the fix is worth; then tell that member what you changed, and have it reviewed in a new task before it goes out.",
     ];
 
     #[test]
@@ -1810,6 +1806,9 @@ mod tests {
         }
         assert!(!text.contains("in this task, do what your instructions ask"));
         assert!(!text.contains("prefer delegating"));
+        // When to stop sending work back and who reviews it live in the skills.
+        assert!(!text.contains("none above minor"));
+        assert!(!text.contains("whose role is reviewing"));
         // Self-tasking needs the manager's own id, not an inference from the
         // roster block further down the prompt.
         assert!(text.contains("Your own `workspaceAgentId` is `workspace-agent-manager`"));
@@ -1916,7 +1915,7 @@ mod tests {
         assert!(!text.contains("### How tasks run"));
         assert!(text.contains("never create task chains"));
         // Nor a standing order to assign, which the worker context forbids.
-        assert!(text.contains("Work that a member's role covers is theirs by default: in this task, do what your instructions ask, assign work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so it can go to them for review."));
+        assert!(text.contains("Work that a member's role covers is theirs by default: in this task, do what your instructions ask, pass work on only if they ask for fan-out, and say in your reply which member's role covers any part you did, so it can go to them for review."));
         for sentence in MANAGER_OWNERSHIP {
             assert!(!text.contains(sentence), "unexpected {sentence:?}");
         }
