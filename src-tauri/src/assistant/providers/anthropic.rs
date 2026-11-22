@@ -205,7 +205,7 @@ fn build_request_body(
             }
             MessageRole::User | MessageRole::Assistant | MessageRole::Tool => {
                 if let Some(m) = build_message(msg, &request.images) {
-                    messages.push(m);
+                    push_turn(&mut messages, m);
                 }
             }
         }
@@ -245,6 +245,28 @@ fn build_request_body(
     }
 
     body
+}
+
+/// Appends `turn`, folding it into the previous message when both are user
+/// turns. The API combines consecutive user turns anyway, but Anthropic's
+/// parallel tool use guide warns that a separate user message per tool result
+/// teaches Claude to stop calling tools in parallel.
+fn push_turn(messages: &mut Vec<serde_json::Value>, mut turn: serde_json::Value) {
+    if let Some(last) = messages
+        .last_mut()
+        .filter(|last| last["role"] == "user" && turn["role"] == "user")
+    {
+        if let (Some(blocks), Some(more)) = (
+            last.get_mut("content")
+                .and_then(serde_json::Value::as_array_mut),
+            turn.get_mut("content")
+                .and_then(serde_json::Value::as_array_mut),
+        ) {
+            blocks.append(more);
+            return;
+        }
+    }
+    messages.push(turn);
 }
 
 /// Build a single Anthropic message. Tool results become role: "user" with tool_result content.
@@ -1149,6 +1171,187 @@ mod tests {
         let frame = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":null}}\n\n";
         assert!(
             parse_sse_frame(frame, "anthropic", &mut emitted_start, &mut tool_calls).is_empty()
+        );
+    }
+
+    fn input(role: MessageRole, content: Vec<ContentPart>) -> ProviderInputMessage {
+        ProviderInputMessage { role, content }
+    }
+
+    fn user_text(text: &str) -> ProviderInputMessage {
+        input(
+            MessageRole::User,
+            vec![ContentPart::Text { text: text.into() }],
+        )
+    }
+
+    fn reply_calling(ids: &[&str]) -> ProviderInputMessage {
+        let calls = ids
+            .iter()
+            .map(|id| ContentPart::ToolUse {
+                tool_call_id: (*id).into(),
+                tool_name: "bash_exec".into(),
+                arguments: json!({}),
+            })
+            .collect();
+        input(MessageRole::Assistant, calls)
+    }
+
+    fn result_of(id: &str) -> ProviderInputMessage {
+        input(
+            MessageRole::Tool,
+            vec![ContentPart::ToolResult {
+                tool_call_id: id.into(),
+                payload: json!({ "ok": id }),
+                started_at: None,
+                completed_at: None,
+            }],
+        )
+    }
+
+    fn request_messages(messages: Vec<ProviderInputMessage>) -> Vec<serde_json::Value> {
+        let request = CompletionRequest {
+            run_id: "run_1".into(),
+            session_id: "sess_1".into(),
+            model_id: "m".into(),
+            messages,
+            tools: vec![],
+            temperature: None,
+            max_output_tokens: Some(1024),
+            images: Default::default(),
+        };
+        let body = build_request_body(&connection_at("anthropic", None), &request);
+        body["messages"].as_array().unwrap().clone()
+    }
+
+    /// `(role, [block type or tool_use_id])` per message, to assert shape.
+    fn shape(messages: &[serde_json::Value]) -> Vec<(String, Vec<String>)> {
+        messages
+            .iter()
+            .map(|m| {
+                let blocks = m["content"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|b| match b["type"].as_str().unwrap() {
+                        "tool_result" => b["tool_use_id"].as_str().unwrap().to_string(),
+                        other => other.to_string(),
+                    })
+                    .collect();
+                (m["role"].as_str().unwrap().to_string(), blocks)
+            })
+            .collect()
+    }
+
+    fn turn(role: &str, blocks: &[&str]) -> (String, Vec<String>) {
+        (
+            role.to_string(),
+            blocks.iter().map(|b| (*b).to_string()).collect(),
+        )
+    }
+
+    #[test]
+    fn results_of_one_reply_share_one_user_message() {
+        let messages = request_messages(vec![
+            user_text("do three things"),
+            reply_calling(&["a", "b", "c"]),
+            result_of("a"),
+            result_of("b"),
+            result_of("c"),
+        ]);
+
+        assert_eq!(
+            shape(&messages),
+            vec![
+                turn("user", &["text"]),
+                turn("assistant", &["tool_use", "tool_use", "tool_use"]),
+                turn("user", &["a", "b", "c"]),
+            ]
+        );
+        assert_eq!(messages[2]["content"][1]["content"], r#"{"ok":"b"}"#);
+    }
+
+    /// A user message typed while the tools ran is persisted between the
+    /// results; history normalization moves it after the result group, and
+    /// the request carries it as text after every tool_result block.
+    #[test]
+    fn user_text_between_results_lands_after_all_results() {
+        use crate::assistant::api_turn::normalize_history_for_provider;
+        use crate::assistant::types::AssistantMessage;
+
+        let history: Vec<AssistantMessage> = [
+            user_text("go"),
+            reply_calling(&["a", "b"]),
+            result_of("a"),
+            user_text("also check the logs"),
+            result_of("b"),
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, m)| AssistantMessage {
+            id: format!("msg-{i}"),
+            session_id: "sess_1".into(),
+            role: m.role,
+            content: m.content,
+            created_at: 0,
+            provider_metadata: None,
+            origin: Default::default(),
+        })
+        .collect();
+
+        let messages = request_messages(normalize_history_for_provider(&history));
+
+        assert_eq!(
+            shape(&messages),
+            vec![
+                turn("user", &["text"]),
+                turn("assistant", &["tool_use", "tool_use"]),
+                turn("user", &["a", "b", "text"]),
+            ]
+        );
+        assert_eq!(messages[2]["content"][2]["text"], "also check the logs");
+    }
+
+    #[test]
+    fn each_reply_keeps_its_own_result_message() {
+        let messages = request_messages(vec![
+            user_text("go"),
+            reply_calling(&["a", "b"]),
+            result_of("a"),
+            result_of("b"),
+            reply_calling(&["c", "d"]),
+            result_of("c"),
+            result_of("d"),
+        ]);
+
+        assert_eq!(
+            shape(&messages),
+            vec![
+                turn("user", &["text"]),
+                turn("assistant", &["tool_use", "tool_use"]),
+                turn("user", &["a", "b"]),
+                turn("assistant", &["tool_use", "tool_use"]),
+                turn("user", &["c", "d"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn single_call_request_is_unchanged() {
+        let messages =
+            request_messages(vec![user_text("go"), reply_calling(&["a"]), result_of("a")]);
+
+        assert_eq!(
+            json!(messages),
+            json!([
+                { "role": "user", "content": [{ "type": "text", "text": "go" }] },
+                { "role": "assistant", "content": [
+                    { "type": "tool_use", "id": "a", "name": "bash_exec", "input": {} }
+                ] },
+                { "role": "user", "content": [
+                    { "type": "tool_result", "tool_use_id": "a", "content": r#"{"ok":"a"}"# }
+                ] },
+            ])
         );
     }
 }
