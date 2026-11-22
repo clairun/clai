@@ -8,6 +8,7 @@ use futures::{stream, Stream};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::assistant::codex_app_server;
 use crate::assistant::providers::types::{ProviderAdapter, ProviderError};
 use crate::assistant::types::{
     AuthMode, CompletionRequest, ContentPart, MessageRole, ModelInfo, ProtocolFamily,
@@ -238,20 +239,32 @@ async fn run_codex_summary(
     system_prompt: &str,
     prompt: &str,
 ) -> Result<String, ProviderError> {
-    let mut command = cli_command(connection, CliRuntime::Codex, &[], working_dir);
+    // Codex reads project config from the cwd unless it is untrusted.
+    let cwd = working_dir.ok_or_else(|| {
+        ProviderError::RequestFailed("Codex summaries need the workspace folder".to_string())
+    })?;
+    let codex = codex_app_server::check_codex_cli(cli_command(
+        connection,
+        CliRuntime::Codex,
+        &[],
+        Some(cwd),
+    ))
+    .await
+    .map_err(ProviderError::RequestFailed)?;
+    let mut command = cli_command(connection, CliRuntime::Codex, &[], Some(cwd));
     command
         .arg("exec")
         .arg("--json")
         .arg("--ephemeral")
         .arg("--skip-git-repo-check")
-        .arg("--ignore-user-config")
-        .arg("--ignore-rules")
-        .arg("--disable")
-        .arg("shell_tool")
+        .args(codex_app_server::exec_isolation_args(
+            &codex,
+            &cwd.to_string_lossy(),
+        ))
         .arg("-c")
         .arg(format!(
             "developer_instructions={}",
-            toml_string_value(system_prompt)
+            codex_app_server::toml_string(system_prompt)
         ));
     let model = connection.model_id.trim();
     if !model.is_empty() && model != "default" {
@@ -706,10 +719,6 @@ fn parsed_text_or_error(
     Err(ProviderError::RequestFailed(error.unwrap_or_else(|| {
         format!("{provider} summarizer produced no text")
     })))
-}
-
-fn toml_string_value(value: &str) -> String {
-    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
 }
 
 fn opencode_summary_config_content() -> String {
