@@ -1085,6 +1085,7 @@ mod tests {
                 tool_call_id: "call-1".into(),
                 tool_name: "bash_exec".into(),
                 params: serde_json::json!({}),
+                thought_signature: None,
             },
         }
     }
