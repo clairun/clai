@@ -265,6 +265,7 @@ async fn test_update_message_content() {
                 tool_call_id: "tc-1".to_string(),
                 tool_name: "fs.read".to_string(),
                 arguments: serde_json::json!({"path": "/tmp"}),
+                thought_signature: None,
             },
         ],
     )
@@ -919,6 +920,7 @@ async fn tool_input_lookup_is_session_scoped_and_preserves_stored_copies() {
                 tool_call_id: original.id.clone(),
                 tool_name: original.tool_name.clone(),
                 arguments: full.clone(),
+                thought_signature: None,
             }],
             provider_metadata: None,
         },

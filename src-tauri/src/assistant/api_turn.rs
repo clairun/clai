@@ -788,6 +788,7 @@ async fn consume_api_stream_with_sink(
                         tool_call_id: tool_call.tool_call_id.clone(),
                         tool_name: tool_call.tool_name.clone(),
                         arguments: tool_call.params.clone(),
+                        thought_signature: tool_call.thought_signature.clone(),
                     });
                     tool_calls.push(tool_call);
                 }
@@ -901,6 +902,7 @@ mod tests {
             tool_call_id: "call-1".into(),
             tool_name: "test".into(),
             params: serde_json::json!({"x": 1}),
+            thought_signature: Some("sig-1".into()),
         };
         let stream: ProviderStream = Box::pin(futures::stream::iter(vec![
             Ok(ProviderEvent::TextDelta {
@@ -951,10 +953,12 @@ mod tests {
         assert_eq!(rows.len(), 2);
         assert!(matches!(rows[0].role, MessageRole::Assistant));
         assert!(matches!(rows[1].role, MessageRole::Tool));
+        // Read back from the database, the call keeps its thought signature.
         let replay = normalize_history_for_provider(&rows);
         assert!(matches!(
             &replay[0].content[..],
-            [ContentPart::Text { .. }, ContentPart::ToolUse { .. }]
+            [ContentPart::Text { .. }, ContentPart::ToolUse { thought_signature: Some(signature), .. }]
+                if signature == "sig-1"
         ));
         assert!(matches!(
             &replay[1].content[..],
@@ -1223,6 +1227,7 @@ mod tests {
                 tool_call_id: "call_b".into(),
                 tool_name: "bash_exec".into(),
                 arguments: serde_json::json!({}),
+                thought_signature: None,
             }]),
             tool_message("call_b"),
         ];
@@ -1296,6 +1301,7 @@ mod tests {
                     tool_call_id: "call_a".into(),
                     tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 },
             ]),
             tool_message("call_a"),
@@ -1345,6 +1351,7 @@ mod tests {
                 tool_call_id: "call_old".into(),
                 tool_name: "bash_exec".into(),
                 arguments: serde_json::json!({}),
+                thought_signature: None,
             }]),
             tool_message("call_old"),
             user_message("any update?"),
@@ -1378,16 +1385,19 @@ mod tests {
                     tool_call_id: "call_a".into(),
                     tool_name: "mcp__clai__web_fetch".into(),
                     arguments: serde_json::json!({"url": "https://example.com"}),
+                    thought_signature: None,
                 },
                 ContentPart::ToolUse {
                     tool_call_id: "call_b".into(),
                     tool_name: "mcp__clai__mcp__1c47ed2d__search".into(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 },
                 ContentPart::ToolUse {
                     tool_call_id: "call_c".into(),
                     tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 },
             ]),
             // Every tool_use needs a result or the orphan-stripping pass
@@ -1425,6 +1435,7 @@ mod tests {
                     tool_call_id: "call_a".into(),
                     tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 },
             ]),
             tool_message("call_a"),
@@ -1470,11 +1481,13 @@ mod tests {
                     tool_call_id: "call_a".into(),
                     tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 },
                 ContentPart::ToolUse {
                     tool_call_id: "call_b".into(),
                     tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 },
             ]),
             tool_message("call_a"),
@@ -1531,11 +1544,13 @@ mod tests {
                     tool_call_id: "call_a".into(),
                     tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 },
                 ContentPart::ToolUse {
                     tool_call_id: "call_b".into(),
                     tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 },
             ]),
             tool_message("call_a"),
@@ -1572,6 +1587,7 @@ mod tests {
                 tool_call_id: "call_orphan".into(),
                 tool_name: "bash_exec".into(),
                 arguments: serde_json::json!({}),
+                thought_signature: None,
             }]),
         ];
 
@@ -1646,6 +1662,7 @@ mod tests {
                 tool_call_id: "call_a".into(),
                 tool_name: "bash_exec".into(),
                 arguments: serde_json::json!({}),
+                thought_signature: None,
             }]),
             bogus_tool,
             tool_message("call_a"),
@@ -1755,6 +1772,7 @@ mod tests {
             tool_call_id: "call_a".into(),
             tool_name: "bash_exec".into(),
             arguments: serde_json::json!({}),
+            thought_signature: None,
         }]));
         // ToolResult alone is always non-empty (irrelevant for assistant but
         // the helper still treats it as not-empty).
@@ -1792,6 +1810,7 @@ mod tests {
             tool_call_id: "call_a".into(),
             tool_name: "bash_exec".into(),
             arguments: serde_json::json!({}),
+            thought_signature: None,
         }];
         let source = vec![ContentPart::Text {
             text: "hello".to_string(),
@@ -1813,6 +1832,7 @@ mod tests {
             tool_call_id: "call_a".into(),
             tool_name: "bash_exec".into(),
             arguments: serde_json::json!({}),
+            thought_signature: None,
         }];
 
         append_text_with_separator(&mut target, &source);
@@ -1880,6 +1900,7 @@ mod tests {
             tool_call_id: "call_1".into(),
             tool_name: "bash".into(),
             arguments: serde_json::json!({}),
+            thought_signature: None,
         });
         push_thinking_delta(&mut parts, "tool worked");
         set_thinking_signature(&mut parts, "sig-2".into());
@@ -2067,12 +2088,14 @@ fn normalized_assistant_parts(parts: &[ContentPart]) -> Vec<ContentPart> {
                 tool_call_id,
                 tool_name,
                 arguments,
+                thought_signature,
             } => {
                 let canonical = tools::strip_local_mcp_qualifier(&tool_name).to_string();
                 ContentPart::ToolUse {
                     tool_call_id,
                     tool_name: canonical,
                     arguments,
+                    thought_signature,
                 }
             }
             other => other,

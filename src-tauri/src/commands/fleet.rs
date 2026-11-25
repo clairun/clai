@@ -142,6 +142,7 @@ fn emptied(part: ContentPart) -> ContentPart {
             tool_call_id,
             tool_name,
             arguments: serde_json::Value::Null,
+            thought_signature: None,
         },
         ContentPart::ToolResult { tool_call_id, .. } => ContentPart::ToolResult {
             tool_call_id,
@@ -435,6 +436,7 @@ mod tests {
                     tool_call_id: "c".into(),
                     tool_name: "bash_exec".into(),
                     arguments: serde_json::json!({ "command": "ls", "stdin": long_reply }),
+                    thought_signature: None,
                 },
             ],
         )
@@ -516,6 +518,7 @@ mod tests {
             tool_call_id: id.into(),
             tool_name: "bash_exec".into(),
             arguments: serde_json::json!({ "command": "x".repeat(300) }),
+            thought_signature: None,
         };
         let thinking = ContentPart::Thinking {
             text: "hmm".repeat(1000),
@@ -540,6 +543,7 @@ mod tests {
             tool_call_id: "c1".into(),
             tool_name: "bash_exec".into(),
             arguments: serde_json::Value::Null,
+            thought_signature: None,
         };
         assert_eq!(
             sent(preview(parts.clone(), PREVIEW_CHARS)),
@@ -837,6 +841,7 @@ mod tests {
             tool_call_id: "call".to_string(),
             tool_name: "bash".to_string(),
             arguments: serde_json::Value::Null,
+            thought_signature: None,
         }];
         let run = start_run(&pool, &task.id, RunStatus::Running).await;
         let rows = [
@@ -920,6 +925,7 @@ mod tests {
             tool_call_id: "call".into(),
             tool_name: "bash".into(),
             arguments: serde_json::Value::Null,
+            thought_signature: None,
         };
         let parts = vec![
             call(),

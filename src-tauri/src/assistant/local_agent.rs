@@ -3719,6 +3719,7 @@ async fn persist_opencode_tool_use_and_result(
         tool_call_id: tool_call_id.clone(),
         tool_name,
         arguments: params,
+        thought_signature: None,
     });
     state.persisted_tool_part_ids.insert(raw_part_id);
     flush_opencode_assistant_message_content(
@@ -4075,6 +4076,7 @@ async fn persist_codex_mcp_tool_use(
         tool_call_id: tool_call_id.clone(),
         tool_name,
         arguments: params,
+        thought_signature: None,
     });
     state.persisted_tool_item_ids.insert(raw_item_id.clone());
     state.tool_item_to_call_id.insert(raw_item_id, tool_call_id);
@@ -4648,6 +4650,7 @@ async fn persist_tool_use(
         tool_call_id: tool_call_id.to_string(),
         tool_name: tool_name.to_string(),
         arguments: params,
+        thought_signature: None,
     });
     state
         .persisted_tool_use_ids
@@ -5755,6 +5758,7 @@ mod tests {
                 tool_call_id: format!("call-{i}"),
                 tool_name: "bash_exec".to_string(),
                 arguments: serde_json::json!({ "command": format!("echo {i}") }),
+                thought_signature: None,
             })
             .collect::<Vec<_>>();
         let mut out = vec![test_message("asst", MessageRole::Assistant, calls)];

@@ -773,6 +773,7 @@ mod tests {
                     tool_call_id: (*call_id).to_string(),
                     tool_name: "probe".to_string(),
                     arguments: serde_json::Value::Null,
+                    thought_signature: None,
                 })
                 .collect(),
         )
@@ -1737,6 +1738,7 @@ mod tests {
                             tool_call_id: call_id.clone(),
                             tool_name: "probe".to_string(),
                             arguments: serde_json::json!({"i": i}),
+                            thought_signature: None,
                         }],
                     )
                     .await
@@ -2181,6 +2183,7 @@ mod tests {
                     tool_call_id: "c1".to_string(),
                     tool_name: "probe".to_string(),
                     arguments: serde_json::Value::Null,
+                    thought_signature: None,
                 }],
             )
             .await;

@@ -133,7 +133,13 @@ export type CompactionStrategy = "local_summary" | "session_rotation_summary";
 
 export type CompactionTrigger = "manual" | "automatic" | "error_recovery";
 
-export type ContentPart = { "type": "text", text: string, } | { "type": "thinking", text: string, signature?: string | null, } | { "type": "tool_use", tool_call_id: string, tool_name: string, arguments: JsonValue, } | { "type": "tool_result", tool_call_id: string, payload: JsonValue, started_at?: bigint | null, completed_at?: bigint | null, } | { "type": "image", 
+export type ContentPart = { "type": "text", text: string, } | { "type": "thinking", text: string, signature?: string | null, } | { "type": "tool_use", tool_call_id: string, tool_name: string, arguments: JsonValue, 
+/**
+ * Gemini's opaque `thought_signature` for this call, replayed
+ * verbatim on the same call. Gemini 3 and 4 reject a tool-call
+ * follow-up without it; of parallel calls only the first has one.
+ */
+thought_signature?: string | null, } | { "type": "tool_result", tool_call_id: string, payload: JsonValue, started_at?: bigint | null, completed_at?: bigint | null, } | { "type": "image", 
 /**
  * Stable id for this image part (also the on-disk file stem).
  */
