@@ -184,23 +184,21 @@ pub(crate) fn build_system_prompt(
          - Use the configured MCP tools available in this session for domain-specific work.\n",
     );
     if shell_enabled {
-        prompt
-            .push_str("         - Use `bash_exec` for local filesystem inspection and changes.\n");
+        prompt.push_str("- Use `bash_exec` for local filesystem inspection and changes.\n");
     }
     prompt.push_str(
-        "         - Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
+        "- Prior tool outputs in the conversation may be stale. Treat them as historical context, not guaranteed current state.\n\
          - Evaluate whether prior tool outputs are still fresh enough for the current decision. When information can expire or change over time (for example issues, alerts, metrics, repo state, or external system status), re-run the relevant tools if freshness matters.\n\
-         - Chat is the default output channel. Use normal assistant replies for status, findings, and conclusions.\n\
-         - Chat is the default output channel for status, findings, and conclusions.\n",
+         - Chat is the default output channel. Use normal assistant replies for status, findings, and conclusions.\n",
     );
     if shell_enabled {
         prompt.push_str(
-            "         - When looking for code, files, or prior work, ALWAYS search your workspace first with `bash_exec` before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n",
+            "- When looking for code, files, or prior work, ALWAYS search your workspace first with `bash_exec` before searching other granted paths. The workspace holds your own artifacts and earlier outputs; prefer a match found there over an equivalent one found elsewhere.\n",
         );
     }
     if shell_enabled {
         prompt.push_str(
-            "         - Durable outputs belong in the workspace: write them there with `bash_exec` so they persist after the run as user-visible artifacts.\n\
+            "- Durable outputs belong in the workspace: write them there with `bash_exec` so they persist after the run as user-visible artifacts.\n\
              - Before creating a new durable artifact, search the workspace for an existing relevant one and update it rather than creating a duplicate.\n",
         );
     }
@@ -379,8 +377,9 @@ pub(crate) fn build_system_prompt(
         "- Make the chart worth looking at — aim for what an analyst would publish, not the default output. Give it a `title` whose `subtitle` states the finding and the units; sort categorical axes by value, not alphabetically. Numeric categories such as hour, age and rank must remain numeric: for CSV data, declare them in `data.format.parse`; otherwise provide an explicit domain order matching the source values, because nominal/ordinal CSV fields sort as strings by default (0, 1, 10, 11, …). Pick the mark that answers the question — a `rect` heatmap for a value across two keys, layered `rule` + `point` to compare two measures per category, `stack: \"center\"` area for composition over time, log or sqrt scales for values spanning orders of magnitude — and let `transform` (`fold`, `window`, `regression`, `joinaggregate`, `timeUnit`) shape the data instead of pre-chewing it. CLAI supplies the theme, quiet axes and tooltips, plus clickable categorical legends and a pan/zoom button on eligible unit or flat layered charts. Spend your effort on the encoding; add an explicit `tooltip` array only to choose which fields show. Specs with authored parameters keep control of their own interactions; set `usermeta.clai.interactions` to false to disable automatic interactions, or add native Vega-Lite parameters for linked brushing or composed views. One hard rule: declare a selection `param` inside a single unit view — one mark — and read it from the other views with `{\"filter\": {\"param\": …}}`, `scale.domain.param` or `condition.param`. Vega-Lite copies a param down into every unit view in its scope, so a param placed on a `layer` of two or more marks (directly, or above one through a concat/facet/repeat) validates and then fails to render with `Duplicate signal name`.\n",
     );
 
-    if shell_enabled {
-        push_shell_capability_lines(&mut prompt, context);
+    let sandbox = shell_enabled.then(|| sandbox_prompt_for(context));
+    if let Some(sandbox) = &sandbox {
+        push_shell_capability_lines(&mut prompt, context, sandbox);
     } else {
         prompt.push_str(
             "- Shell mode: off — no `bash_exec` and no filesystem tools. Do not plan work that depends on reading or writing files; say plainly that you lack the access if a request needs it. `create_vega_chart` still saves charts for you, and `history_query` still reads this workspace's conversation record.\n",
@@ -391,8 +390,8 @@ pub(crate) fn build_system_prompt(
         prompt.push_str("- Web access: enabled (`web_search` and `web_fetch` available)\n");
     }
 
-    if shell_enabled {
-        push_filesystem_boundary(&mut prompt, trigger, sandbox_prompt_for(context).ssh);
+    if let Some(sandbox) = &sandbox {
+        push_filesystem_boundary(&mut prompt, trigger, sandbox.ssh);
     }
     // Either memory protocol is all reads and writes of files.
     if shell_enabled {
@@ -412,7 +411,7 @@ pub(crate) fn build_system_prompt(
     );
     if shell_enabled {
         prompt.push_str(
-            "             - To read a DIFFERENT workspace's DB that you have been granted access to, fall back to the shell — STRICTLY READ-ONLY: open it only as `sqlite3 'file:<path>/.clai/data.sqlite?mode=ro'` (or python3's sqlite3 module with the same `mode=ro` URI). Never INSERT/UPDATE/DELETE, never VACUUM or ALTER, never open it without `mode=ro` — a write can corrupt the app's state.\n",
+            "- To read a DIFFERENT workspace's DB that you have been granted access to, fall back to the shell — STRICTLY READ-ONLY: open it only as `sqlite3 'file:<path>/.clai/data.sqlite?mode=ro'` (or python3's sqlite3 module with the same `mode=ro` URI). Never INSERT/UPDATE/DELETE, never VACUUM or ALTER, never open it without `mode=ro` — a write can corrupt the app's state.\n",
         );
     }
     prompt.push_str(
@@ -428,7 +427,7 @@ pub(crate) fn build_system_prompt(
 
 /// Path grants, shell mode, sandbox posture and the command policy.
 /// Only meaningful when the agent actually has `bash_exec`.
-fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
+fn push_shell_capability_lines(prompt: &mut String, context: &RunContext, sandbox: &SandboxPrompt) {
     use crate::assistant::sandbox::{
         filesystem::{agent_path_string, EffectiveFilesystemPolicy},
         SandboxPathAccess,
@@ -476,17 +475,12 @@ fn push_shell_capability_lines(prompt: &mut String, context: &RunContext) {
         crate::config::ShellAccessMode::Full => "Don't ask (full)",
     };
     prompt.push_str(&format!("- Shell mode: {}\n", shell_mode));
-    let sandbox = sandbox_prompt_for(context);
     prompt.push_str(&format!("- Shell sandbox: {}\n", sandbox.sandbox));
     if let Some(allowlist) = &sandbox.allowlist {
         prompt.push_str(allowlist);
     }
-    if cfg!(target_os = "linux") {
-        let unfiltered = crate::assistant::sandbox::status().session_bus_filter_unavailable_reason;
-        prompt.push_str(&session_bus_line(
-            context.execution.sandbox.session_bus,
-            unfiltered.as_deref(),
-        ));
+    if let Some(session_bus) = &sandbox.session_bus {
+        prompt.push_str(session_bus);
     }
 
     if matches!(
@@ -520,13 +514,13 @@ fn push_filesystem_boundary(prompt: &mut String, trigger: &RunTrigger, ssh: Opti
          - Do not silently extend your reach by other means. The grant flow is the only sanctioned escape valve.\n",
     );
     if !matches!(trigger, RunTrigger::WorkspaceTask) {
-        prompt.push_str("         - If a denied grant requires a human answer, use `ask_user`.\n");
+        prompt.push_str("- If a denied grant requires a human answer, use `ask_user`.\n");
     }
     prompt.push_str(
-        "         - Default your writes to the workspace. Other grants (often `$HOME`) are commonly read_only, so writing there fails — check the access listed above first, and if you genuinely need to write to a read_only or ungranted path, `fs_request_grant` it rather than attempting the write and failing.\n",
+        "- Default your writes to the workspace. Other grants (often `$HOME`) are commonly read_only, so writing there fails — check the access listed above first, and if you genuinely need to write to a read_only or ungranted path, `fs_request_grant` it rather than attempting the write and failing.\n",
     );
     prompt.push_str(
-        "         - Other CLAI workspaces exist on this machine but are intentionally isolated: you cannot see, list, or read them, and they will never appear in your grants. If the user asks you to work with a different workspace, ask them for its workspace id (the value they can read most easily in the CLAI app; you cannot enumerate workspaces). That workspace lives next to yours — same parent directory as your workspace, named with that id — so `fs_request_grant` that path (e.g. read_only first) to gain access.\n",
+        "- Other CLAI workspaces exist on this machine but are intentionally isolated: you cannot see, list, or read them, and they will never appear in your grants. If the user asks you to work with a different workspace, ask them for its workspace id (the value they can read most easily in the CLAI app; you cannot enumerate workspaces). That workspace lives next to yours — same parent directory as your workspace, named with that id — so `fs_request_grant` that path (e.g. read_only first) to gain access.\n",
     );
 
     // Git/SSH etiquette guard. The agent shouldn't rewrite commit authorship
@@ -539,9 +533,7 @@ fn push_filesystem_boundary(prompt: &mut String, trigger: &RunTrigger, ssh: Opti
          - Never rewrite commit authorship. Do not run `git commit --amend --reset-author`, do not change `user.email` / `user.name` away from what the commit already has, and do not use the `--author=` flag to overwrite an existing author. If a push is rejected because of GitHub's email privacy (error `GH007`) or because the author's email is not allowed, STOP with the exact failing email and the rejection reason. The user owns the choice of which email to publish.\n",
     );
     if !matches!(trigger, RunTrigger::WorkspaceTask) {
-        prompt.push_str(
-            "         - If GH007 blocks a push, use `ask_user` with the rejection detail.\n",
-        );
+        prompt.push_str("- If GH007 blocks a push, use `ask_user` with the rejection detail.\n");
     }
     if let Some(ssh) = ssh {
         prompt.push_str(ssh);
@@ -556,13 +548,15 @@ struct SandboxPrompt {
     sandbox: String,
     /// How to work in Allowlist, where the shell is in it.
     allowlist: Option<String>,
+    /// What the session bus offers, where the sandbox has one.
+    session_bus: Option<String>,
     /// How ssh is configured inside the sandbox, for the git section.
     ssh: Option<&'static str>,
 }
 
-const SSH_HOME_CONFIG_ONLY: &str = "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh`, so OpenSSH only consults `~/.ssh/config` and its built-in defaults. You do not need `-F /dev/null` workarounds; if you see `Bad owner or permissions` from ssh, the cause is something else (likely an explicit `-F` pointing at an unreadable path).\n";
+const SSH_HOME_CONFIG_ONLY: &str = "- The Linux sandbox overlays an empty tmpfs at `/etc/ssh`, so OpenSSH only consults `~/.ssh/config` and its built-in defaults. You do not need `-F /dev/null` workarounds; if you see `Bad owner or permissions` from ssh, the cause is something else (likely an explicit `-F` pointing at an unreadable path).\n";
 
-const SSH_THROUGH_PROXY: &str = "             - The Linux sandbox overlays an empty tmpfs at `/etc/ssh` and binds a CLAI-written `/etc/ssh/ssh_config` there that sends ssh (and git, scp and rsync over ssh) through the network proxy, so ssh to an allowed host works. `~/.ssh/config` is read first: a `ProxyCommand` or `ProxyJump` there overrides CLAI's and then fails inside the sandbox. You do not need `-F /dev/null` workarounds.\n";
+const SSH_THROUGH_PROXY: &str = "- The Linux sandbox overlays an empty tmpfs at `/etc/ssh` and binds a CLAI-written `/etc/ssh/ssh_config` there that sends ssh (and git, scp and rsync over ssh) through the network proxy, so ssh to an allowed host works. `~/.ssh/config` is read first: a `ProxyCommand` or `ProxyJump` there overrides CLAI's and then fails inside the sandbox. You do not need `-F /dev/null` workarounds.\n";
 
 /// What the shell's session bus offers on Linux. Keyring only where the bus
 /// cannot be filtered is no bus: `unfiltered` says why and how to get one.
@@ -584,17 +578,21 @@ fn session_bus_line(
 }
 
 fn sandbox_prompt_for(context: &RunContext) -> SandboxPrompt {
+    let status = crate::assistant::sandbox::status();
     sandbox_prompt(
-        crate::assistant::sandbox::status().backend,
+        status.backend,
         &context.execution.sandbox.network_access,
         context.execution.sandbox.session_bus,
+        status.session_bus_filter_unavailable_reason.as_deref(),
     )
 }
 
+/// `unfiltered` is why the session bus cannot be filtered on this PC.
 fn sandbox_prompt(
     backend: Option<crate::assistant::sandbox::SandboxBackend>,
     network: &crate::config::NetworkPolicy,
     session_bus: crate::config::SandboxSessionBusConfig,
+    unfiltered: Option<&str>,
 ) -> SandboxPrompt {
     use crate::assistant::sandbox::SandboxBackend;
     use crate::config::NetworkMode;
@@ -620,6 +618,7 @@ fn sandbox_prompt(
                     "- Network allowlist: shell commands and `web_fetch` reach only the hosts matching the {} entries on this agent's allowlist and any the user allows during this run. Shell traffic goes through CLAI's network proxy: `HTTP_PROXY` and `HTTPS_PROXY` are set, so tools that honour them work; DNS lookups fail inside the sandbox and tools that ignore the proxy variables cannot connect. An unlisted host fails with a 403 or a refused connection, and the `bash_exec` result names it under `network.refused`. When the task needs such a host, call `net_request_access` with the host and the reason; do not look for a way around the proxy. `localhost` inside the sandbox is the sandbox's own, separate from this computer's: `ss`, `ps` and `netstat` there see only the sandbox, and a refused connection to localhost does not mean nothing listens on the computer. To reach a service on this computer's localhost, call `net_request_access` with host `localhost:<port>`; once granted, the port answers on 127.0.0.1 and ::1 from your next command, and it is taken inside the sandbox, so do not start your own server on it. Any other listed name that resolves to a loopback or link-local address is never reached, while one that resolves to a private local-network address is reachable from shell commands (`web_fetch` refuses every non-public address).\n",
                     network.allow_domains.len()
                 )),
+                session_bus: Some(session_bus_line(session_bus, unfiltered)),
                 ssh: Some(if in_allowlist {
                     SSH_THROUGH_PROXY
                 } else {
@@ -637,6 +636,7 @@ fn sandbox_prompt(
                     "sandboxed shell on macOS through Seatbelt/sandbox-exec when `bash_exec` is available (network: {network})"
                 ),
                 allowlist: None,
+                session_bus: None,
                 ssh: None,
             }
         }
@@ -655,6 +655,7 @@ fn sandbox_prompt(
                     "host shell — no OS sandbox on this platform, so the path grants are NOT enforced by the kernel and the boundary below is a rule you keep yourself (network: {network})"
                 ),
                 allowlist: None,
+                session_bus: None,
                 ssh: None,
             }
         }
@@ -1571,6 +1572,10 @@ mod tests {
         };
 
         assert!(text.contains("Chat is the default output channel."));
+        assert_eq!(
+            text.matches("Chat is the default output channel").count(),
+            1
+        );
         assert!(
             text.contains("Treat chat as the primary way to communicate progress and outcomes.")
         );
@@ -2137,7 +2142,7 @@ mod tests {
                     deny_domains: Vec::new(),
                     local_ports: Vec::new(),
                 };
-                let prompt = sandbox_prompt(backend, &network, SandboxSessionBusConfig::Deny);
+                let prompt = sandbox_prompt(backend, &network, SandboxSessionBusConfig::Deny, None);
                 let case = format!("{backend:?} {mode:?}: {}", prompt.sandbox);
                 let linux_allowlist = backend == Some(Bubblewrap) && mode == NetworkMode::Allowlist;
 
@@ -2199,6 +2204,170 @@ mod tests {
                     linux_allowlist,
                     "{case}"
                 );
+            }
+        }
+    }
+
+    /// Fails on a line indented by mistake or a bullet repeated verbatim.
+    /// Only a nested list may indent, by two spaces: bullets under a line
+    /// ending in `:`, such as the path grants.
+    fn assert_flat_unique_bullets(text: &str, case: &str) {
+        let mut bullets = std::collections::HashSet::new();
+        let mut nested_list_allowed = false;
+        for line in text.lines() {
+            let content = line.trim_start();
+            if content.len() < line.len() {
+                assert!(
+                    nested_list_allowed
+                        && line.len() - content.len() == 2
+                        && content.starts_with("- "),
+                    "{case}: stray indentation in {line:?}"
+                );
+            } else {
+                nested_list_allowed = line.ends_with(':');
+            }
+            if content.starts_with("- ") {
+                assert!(bullets.insert(content), "{case}: repeated bullet {line:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn every_prompt_variant_has_flat_unique_bullets() {
+        let temp = tempfile::tempdir().unwrap();
+        let craft = temp.path().join("craft");
+        std::fs::create_dir_all(craft.join("principles")).unwrap();
+        std::fs::write(
+            craft.join("principles/review.md"),
+            "---\ndescription: Use when reviewing: run the cited command.\nupdated_at: 2026-11-09\n---\n",
+        )
+        .unwrap();
+        let tools: Vec<crate::assistant::types::ToolDefinition> =
+            ["bash_exec", "ask_user", "workspace_assignTask"]
+                .into_iter()
+                .map(|name| crate::assistant::types::ToolDefinition {
+                    name: name.to_string(),
+                    description: "A test tool.".to_string(),
+                    input_schema: serde_json::json!({}),
+                })
+                .collect();
+        let teams = [
+            (None, Vec::new()),
+            (Some(manager_summary()), vec![manager_summary()]),
+            (
+                Some(manager_summary()),
+                vec![manager_summary(), member_summary()],
+            ),
+            (
+                Some(member_summary()),
+                vec![manager_summary(), member_summary()],
+            ),
+        ];
+
+        for (own, workspace_agents) in &teams {
+            for shell in [
+                ShellAccessMode::Off,
+                ShellAccessMode::Restricted,
+                ShellAccessMode::Full,
+            ] {
+                let mut execution = ExecutionCapabilityConfig::default();
+                execution.shell.mode = shell;
+                execution.web.enabled = true;
+                execution.filesystem.extra_paths = vec![crate::config::FilesystemPathGrant {
+                    path: temp.path().display().to_string(),
+                    access: crate::config::FilesystemPathAccess::ReadOnly,
+                    origin: None,
+                }];
+                for craft_dir in [None, Some(craft.clone())] {
+                    let context = RunContext {
+                        automation_id: own.as_ref().map(|agent| agent.id.clone()),
+                        automation_name: Some("Test Agent".to_string()),
+                        mcp_server_ids: vec!["test-server".to_string()],
+                        execution: execution.clone(),
+                        workspace_agents: workspace_agents.clone(),
+                        craft_dir: craft_dir.clone(),
+                        ..Default::default()
+                    };
+                    for trigger in [
+                        RunTrigger::UserMessage,
+                        RunTrigger::Scheduled,
+                        RunTrigger::ManualAutomation,
+                        RunTrigger::WorkspaceTask,
+                        RunTrigger::SignalWake,
+                    ] {
+                        let message =
+                            build_system_prompt(&context, Some("Agent rules."), &tools, &trigger);
+                        let ContentPart::Text { text } = &message.content[0] else {
+                            panic!("expected text content");
+                        };
+                        let case = format!(
+                            "{:?} {:?} craft={} {trigger:?}",
+                            own.as_ref().map(|agent| &agent.display_name),
+                            context.execution.shell.mode,
+                            craft_dir.is_some()
+                        );
+                        assert_flat_unique_bullets(text, &case);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The real sandbox backend decides which sandbox lines a full prompt
+    /// gets, so every platform's lines are checked on their own.
+    #[test]
+    fn every_sandbox_variant_has_flat_unique_bullets() {
+        use crate::assistant::sandbox::SandboxBackend::{Bubblewrap, Seatbelt};
+        use crate::config::{NetworkMode, NetworkPolicy, SandboxSessionBusConfig};
+        let workspace = tempfile::tempdir().unwrap();
+        let granted = tempfile::tempdir().unwrap();
+        for backend in [Some(Bubblewrap), Some(Seatbelt), None] {
+            for mode in [
+                NetworkMode::Off,
+                NetworkMode::Allowlist,
+                NetworkMode::HostNetwork,
+            ] {
+                for bus in [
+                    SandboxSessionBusConfig::Full,
+                    SandboxSessionBusConfig::KeyringOnly,
+                    SandboxSessionBusConfig::Deny,
+                ] {
+                    let mut execution = shell_execution();
+                    execution.sandbox.network_access = NetworkPolicy {
+                        mode,
+                        allow_domains: vec!["github.com".to_string()],
+                        deny_domains: Vec::new(),
+                        local_ports: Vec::new(),
+                    };
+                    execution.sandbox.session_bus = bus;
+                    execution.filesystem.extra_paths = vec![crate::config::FilesystemPathGrant {
+                        path: granted.path().display().to_string(),
+                        access: crate::config::FilesystemPathAccess::ReadOnly,
+                        origin: None,
+                    }];
+                    let context = RunContext {
+                        execution,
+                        workspace_root: workspace.path().to_path_buf(),
+                        ..Default::default()
+                    };
+                    for unfiltered in [None, Some("Install xdg-dbus-proxy.")] {
+                        let sandbox = sandbox_prompt(
+                            backend,
+                            &context.execution.sandbox.network_access,
+                            bus,
+                            unfiltered,
+                        );
+                        for trigger in [RunTrigger::UserMessage, RunTrigger::WorkspaceTask] {
+                            let mut text = String::new();
+                            push_shell_capability_lines(&mut text, &context, &sandbox);
+                            push_filesystem_boundary(&mut text, &trigger, sandbox.ssh);
+                            assert_flat_unique_bullets(
+                                &text,
+                                &format!("{backend:?} {mode:?} {bus:?} {unfiltered:?} {trigger:?}"),
+                            );
+                        }
+                    }
+                }
             }
         }
     }
