@@ -539,7 +539,7 @@ protocolId: string, defaultBaseUrl: string | null,
  */
 baseUrlLocked: boolean, 
 /**
- * `false` for keyless self-hosted providers (ollama / lmstudio / vllm).
+ * `false` for keyless self-hosted providers (litellm / ollama / lmstudio / vllm).
  */
 requiresApiKey: boolean, 
 /**

@@ -85,7 +85,7 @@ pub struct ProviderCatalogEntry {
     pub default_base_url: Option<String>,
     /// Hosted SaaS: endpoint fixed (advanced-override only). Self-hosted/custom: editable.
     pub base_url_locked: bool,
-    /// `false` for keyless self-hosted providers (ollama / lmstudio / vllm).
+    /// `false` for keyless self-hosted providers (litellm / ollama / lmstudio / vllm).
     pub requires_api_key: bool,
     /// Frontend asset path, e.g. `provider-catalog/openrouter.svg`.
     pub logo_asset: String,
@@ -316,7 +316,9 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
         "LiteLLM",
         "Self-hosted proxy exposing many providers via one OpenAI-compatible endpoint.",
         "http://localhost:4000",
-        true, // LiteLLM commonly uses a master key
+        // The proxy checks keys only when `general_settings.master_key` is
+        // set, which its config docs mark optional; a key given is still sent.
+        false,
         "https://docs.litellm.ai/docs/simple_proxy",
     ));
     entries.push(self_hosted(
@@ -607,7 +609,7 @@ mod tests {
 
     #[test]
     fn keyless_self_hosted_do_not_require_a_key() {
-        for id in ["ollama", "lmstudio", "vllm"] {
+        for id in ["litellm", "ollama", "lmstudio", "vllm"] {
             let e = get_entry(id).expect("entry present");
             assert!(!e.requires_api_key, "{id} should be keyless");
             assert!(!e.base_url_locked, "{id} base_url should be editable");

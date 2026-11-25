@@ -420,7 +420,7 @@ async fn summarize_window(
 /// Stop reasons that mean the provider cut generation at its output-token
 /// budget — Anthropic `max_tokens`, OpenAI `length`. Anything else is a
 /// natural finish and the text is complete as written.
-fn is_budget_truncation(reason: &str) -> bool {
+pub(crate) fn is_budget_truncation(reason: &str) -> bool {
     matches!(reason, "max_tokens" | "length")
 }
 

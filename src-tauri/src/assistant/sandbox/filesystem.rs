@@ -34,7 +34,7 @@ pub(crate) const CLI_PROJECT_CONFIG: &[&str] = &[
 /// that exists, so they are created before each command; the files cannot be
 /// created empty without breaking the CLIs, which are told to ignore them
 /// instead.
-const CLI_PROJECT_CONFIG_DIRS: &[&str] = &[".claude", ".codex", ".opencode"];
+pub(crate) const CLI_PROJECT_CONFIG_DIRS: &[&str] = &[".claude", ".codex", ".opencode"];
 
 #[derive(Debug, Clone)]
 pub struct EffectiveFilesystemPolicy {

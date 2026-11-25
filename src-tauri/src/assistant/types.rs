@@ -569,8 +569,8 @@ pub enum ProviderEvent {
     /// Why the provider stopped generating, when it reports one, verbatim:
     /// Anthropic `message_delta.delta.stop_reason`, OpenAI
     /// `choices[0].finish_reason`. `max_tokens` / `length` mean the output
-    /// was cut at its token budget; consumers that must not persist partial
-    /// output (compaction) treat those values as truncation.
+    /// was cut at its token budget: compaction rejects such a summary, and a
+    /// turn cut before any text or tool call fails.
     StopReason {
         reason: String,
     },
