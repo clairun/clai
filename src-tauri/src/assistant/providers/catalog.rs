@@ -25,6 +25,10 @@ use ts_rs::TS;
 
 use crate::assistant::types::{ModelInfo, ProviderConnection};
 
+/// Google Gemini's brand id. Its OpenAI-compatible layer carries Gemini's
+/// thought signatures, which the OpenAI adapter replays to this brand only.
+pub const GEMINI_ID: &str = "gemini";
+
 /// Where a catalog entry sits in the picker (also drives form defaults).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
 #[serde(rename_all = "snake_case")]
@@ -157,7 +161,7 @@ fn hosted_openai(
 /// The bundled provider catalog (v1). See the provider-catalog design doc §5.
 #[expect(
     clippy::too_many_lines,
-    reason = "lint debt: 179 lines against a 100-line budget; split it, do not raise the budget"
+    reason = "lint debt: 184 lines against a 100-line budget; split it, do not raise the budget"
 )]
 pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
     // Sonar chat is served at `<base>/chat/completions`, and has no models
@@ -207,6 +211,7 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
             vec![model("deepseek-flash"), text_model("deepseek-v4-pro")],
         ),
         perplexity,
+        gemini(),
         hosted_openai(
             "zai",
             "Z.ai (GLM)",
@@ -382,6 +387,28 @@ pub fn catalog_entries() -> Vec<ProviderCatalogEntry> {
     entries
 }
 
+/// Google's OpenAI-compatible layer, https://aistudio.google.com/docs/openai.
+/// Each model takes images, calls functions, and has a 1,048,576-token
+/// context with 65,536 output tokens by default: the model pages under
+/// https://aistudio.google.com/docs/models, checked 2026-11-25.
+fn gemini() -> ProviderCatalogEntry {
+    let mut gemini = hosted_openai(
+        GEMINI_ID,
+        "Google Gemini",
+        "Gemini models through Google's OpenAI-compatible endpoint.",
+        "https://generativelanguage.googleapis.com/v1beta/openai",
+        "https://aistudio.google.com/apikey",
+        vec![
+            model("gemini-4-neon"),
+            model("gemini-4-hydrogen"),
+            model("gemini-4-carbon"),
+            model("gemini-4-argon"),
+        ],
+    );
+    gemini.base_url_is_api_root = true;
+    gemini
+}
+
 fn self_hosted(
     id: &str,
     display_name: &str,
@@ -442,7 +469,8 @@ pub fn entry_for_connection(connection: &ProviderConnection) -> Option<ProviderC
 /// a custom, unknown or empty brand, or as the legacy `openai` or `anthropic`
 /// brand that pre-brand connections carry whatever server they use, takes
 /// the brand whose origin its base URL points at: a custom URL on `api.z.ai`
-/// gets Z.ai's codes. Error classification and the default output cap read this.
+/// gets Z.ai's codes. Error classification, the default output cap and
+/// Gemini's thought-signature replay read this.
 pub fn error_code_brand(connection: &ProviderConnection) -> String {
     let stored_brand_is_trusted = get_entry(&connection.provider_id).is_some_and(|entry| {
         entry.category != ProviderCategory::Custom
@@ -529,6 +557,7 @@ mod tests {
             ("", Some("https://api.z.ai/api/paas/v4"), "zai"),
             ("my-proxy", Some("https://api.z.ai/api/paas/v4"), "zai"),
             ("custom-anthropic", Some("https://api.anthropic.com"), "anthropic"),
+            ("custom-openai", Some("https://generativelanguage.googleapis.com/v1beta/openai/"), "gemini"),
             // A pre-brand Anthropic connection pointed at MiniMax.
             ("anthropic", Some("https://api.minimax.io/anthropic"), "minimax"),
             ("anthropic", Some("https://api.anthropic.com"), "anthropic"),
@@ -734,7 +763,6 @@ mod tests {
         for id in [
             "cerebras",
             "fireworks",
-            "gemini",
             "groq",
             "mistral",
             "together",

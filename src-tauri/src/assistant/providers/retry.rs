@@ -258,6 +258,7 @@ mod tests {
                     tool_call_id: "call-1".into(),
                     tool_name: "t".into(),
                     params: serde_json::json!({}),
+                    thought_signature: None,
                 },
             },
         ];

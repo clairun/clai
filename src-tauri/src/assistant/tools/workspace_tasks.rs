@@ -1312,6 +1312,7 @@ mod tests {
                     tool_call_id: "t1".to_string(),
                     tool_name: "bash_exec".to_string(),
                     arguments: serde_json::json!({}),
+                    thought_signature: None,
                 },
                 text("Verdict: production_quality. No findings."),
             ],

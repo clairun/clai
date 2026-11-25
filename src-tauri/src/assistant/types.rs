@@ -160,6 +160,11 @@ pub enum ContentPart {
         tool_name: String,
         #[serde(default)]
         arguments: serde_json::Value,
+        /// Gemini's opaque `thought_signature` for this call, replayed
+        /// verbatim on the same call. Gemini 3 and 4 reject a tool-call
+        /// follow-up without it; of parallel calls only the first has one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thought_signature: Option<String>,
     },
     ToolResult {
         tool_call_id: ToolCallId,
@@ -526,6 +531,9 @@ pub struct ToolInvocationDraft {
     pub tool_call_id: ToolCallId,
     pub tool_name: String,
     pub params: serde_json::Value,
+    /// See `ContentPart::ToolUse::thought_signature`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thought_signature: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -597,6 +605,27 @@ mod tests {
         let connection: ProviderConnection = serde_json::from_value(stored.clone()).unwrap();
         assert!(connection.env.is_empty());
         assert_eq!(serde_json::to_value(&connection).unwrap(), stored);
+    }
+
+    /// Tool calls stored before thought signatures existed load without
+    /// one and are written back unchanged.
+    #[test]
+    fn tool_use_without_thought_signature_round_trips_unchanged() {
+        let stored = serde_json::json!({
+            "type": "tool_use",
+            "tool_call_id": "call-1",
+            "tool_name": "bash_exec",
+            "arguments": { "cmd": "ls" }
+        });
+        let part: ContentPart = serde_json::from_value(stored.clone()).unwrap();
+        assert!(matches!(
+            &part,
+            ContentPart::ToolUse {
+                thought_signature: None,
+                ..
+            }
+        ));
+        assert_eq!(serde_json::to_value(&part).unwrap(), stored);
     }
 
     #[test]

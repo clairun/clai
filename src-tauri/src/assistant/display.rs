@@ -203,8 +203,12 @@ pub fn message(mut message: AssistantMessage) -> AssistantMessage {
             ContentPart::ToolUse {
                 tool_name,
                 arguments,
+                thought_signature,
                 ..
-            } => *arguments = compact_input(tool_name, arguments),
+            } => {
+                *arguments = compact_input(tool_name, arguments);
+                *thought_signature = None;
+            }
             _ => {}
         }
     }
@@ -359,6 +363,7 @@ mod tests {
                 tool_call_id: "t".into(),
                 tool_name: "fs_write".into(),
                 arguments: full.clone(),
+                thought_signature: Some("signature-for-the-provider".into()),
             }],
             created_at: 1,
             provider_metadata: None,
@@ -381,6 +386,7 @@ mod tests {
         let serialized =
             serde_json::to_string(&(displayed_event, displayed_call, &displayed_page)).unwrap();
         assert!(!serialized.contains("payloadpayload"));
+        assert!(!serialized.contains("signature-for-the-provider"));
         assert!(serialized.contains("report.md"));
         assert_eq!(
             displayed_page.tool_calls[0].params,
@@ -447,6 +453,7 @@ mod tests {
                     tool_call_id: "missing".into(),
                     tool_name: "fs_write".into(),
                     arguments: full,
+                    thought_signature: None,
                 }],
                 created_at: 1,
                 provider_metadata: None,

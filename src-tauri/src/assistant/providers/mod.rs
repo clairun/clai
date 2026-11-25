@@ -280,6 +280,12 @@ mod tests {
                 "https://api.perplexity.ai/chat/completions",
                 None,
             ),
+            // aistudio.google.com/docs/openai: chat and "List models".
+            (
+                "gemini",
+                "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+                Some("https://generativelanguage.googleapis.com/v1beta/openai/models"),
+            ),
             (
                 "zai",
                 "https://api.z.ai/api/paas/v4/chat/completions",

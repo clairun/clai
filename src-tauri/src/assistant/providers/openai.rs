@@ -85,8 +85,8 @@ impl ProviderAdapter for OpenAiAdapter {
             ProviderError::RequestFailed(e.to_string())
         })?;
 
+        let brand = catalog::error_code_brand(connection);
         if !resp.status().is_success() {
-            let brand = catalog::error_code_brand(connection);
             return Err(ProviderError::Failed(read_failure(&brand, resp).await));
         }
 
@@ -100,7 +100,15 @@ impl ProviderAdapter for OpenAiAdapter {
             .unwrap_or(&vec![])
             .iter()
             .filter_map(|m| {
-                let id = m["id"].as_str()?.to_string();
+                let id = m["id"].as_str()?;
+                // Gemini's native model names are `models/{model}`; its chat
+                // endpoint documents the bare `{model}`.
+                let id = if brand == catalog::GEMINI_ID {
+                    id.strip_prefix("models/").unwrap_or(id)
+                } else {
+                    id
+                }
+                .to_string();
                 Some(ModelInfo {
                     id: id.clone(),
                     display_name: id,
@@ -127,7 +135,8 @@ impl ProviderAdapter for OpenAiAdapter {
     > {
         let api_key = get_api_key(connection)?;
         let url = endpoint_url(connection, "chat/completions");
-        let body = build_request_body(&request);
+        let brand = catalog::error_code_brand(connection);
+        let body = build_request_body(&request, brand == catalog::GEMINI_ID);
 
         let client = Client::new();
         let mut builder = client
@@ -146,13 +155,11 @@ impl ProviderAdapter for OpenAiAdapter {
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
         if !resp.status().is_success() {
-            let brand = catalog::error_code_brand(connection);
             return Err(ProviderError::Failed(read_failure(&brand, resp).await));
         }
 
         let byte_stream = resp.bytes_stream();
-        let event_stream =
-            sse_to_provider_events(byte_stream, catalog::error_code_brand(connection));
+        let event_stream = sse_to_provider_events(byte_stream, brand);
 
         Ok(Box::pin(event_stream))
     }
@@ -246,11 +253,16 @@ fn ends_with_version_segment(base: &str) -> bool {
 // Request Building
 // =============================================================================
 
-fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
+/// `replay_thought_signatures` sends stored Gemini thought signatures back;
+/// for every other brand the body is what it was before they existed.
+fn build_request_body(
+    request: &CompletionRequest,
+    replay_thought_signatures: bool,
+) -> serde_json::Value {
     let messages: Vec<serde_json::Value> = request
         .messages
         .iter()
-        .map(|m| build_message(m, &request.images))
+        .map(|m| build_message(m, &request.images, replay_thought_signatures))
         .collect();
 
     let mut body = json!({
@@ -293,11 +305,12 @@ fn build_request_body(request: &CompletionRequest) -> serde_json::Value {
 /// Handles text, tool_use (assistant with tool_calls), and tool_result (role: tool).
 #[expect(
     clippy::too_many_lines,
-    reason = "lint debt: 125 lines against a 100-line budget; split it, do not raise the budget"
+    reason = "lint debt: 111 lines against a 100-line budget; split it, do not raise the budget"
 )]
 fn build_message(
     msg: &crate::assistant::types::ProviderInputMessage,
     images: &HashMap<String, ResolvedImage>,
+    replay_thought_signatures: bool,
 ) -> serde_json::Value {
     let role = match msg.role {
         MessageRole::System => "system",
@@ -359,21 +372,7 @@ fn build_message(
 
         let tool_calls: Vec<serde_json::Value> = tool_uses
             .iter()
-            .map(|p| match p {
-                ContentPart::ToolUse {
-                    tool_call_id,
-                    tool_name,
-                    arguments,
-                } => json!({
-                    "id": tool_call_id,
-                    "type": "function",
-                    "function": {
-                        "name": tool_name,
-                        "arguments": arguments.to_string(),
-                    }
-                }),
-                _ => json!(null),
-            })
+            .map(|part| tool_call_json(part, replay_thought_signatures))
             .collect();
 
         // Always include `reasoning_content` (empty string when we
@@ -450,6 +449,35 @@ fn build_message(
     })
 }
 
+/// A `tool_calls[]` entry. Gemini's thought signature goes back on the call
+/// that carried it, in `extra_content.google.thought_signature`.
+fn tool_call_json(part: &ContentPart, replay_thought_signatures: bool) -> serde_json::Value {
+    let ContentPart::ToolUse {
+        tool_call_id,
+        tool_name,
+        arguments,
+        thought_signature,
+    } = part
+    else {
+        return json!(null);
+    };
+    let mut call = json!({
+        "id": tool_call_id,
+        "type": "function",
+        "function": {
+            "name": tool_name,
+            "arguments": arguments.to_string(),
+        }
+    });
+    if let Some(signature) = thought_signature
+        .as_ref()
+        .filter(|_| replay_thought_signatures)
+    {
+        call["extra_content"] = json!({ "google": { "thought_signature": signature } });
+    }
+    call
+}
+
 fn format_timestamp_millis_as_rfc3339(timestamp_ms: i64) -> Option<String> {
     chrono::DateTime::<chrono::Utc>::from_timestamp_millis(timestamp_ms).map(|dt| dt.to_rfc3339())
 }
@@ -464,6 +492,42 @@ struct PartialToolCall {
     id: String,
     name: String,
     arguments: String,
+    thought_signature: Option<String>,
+}
+
+impl PartialToolCall {
+    /// Applies one `delta.tool_calls[]` fragment.
+    fn apply_delta(&mut self, delta: &serde_json::Value) {
+        // Only a non-empty id/name/signature (re)binds: some
+        // OpenAI-compatible streams repeat `id` (and `name`) as an empty
+        // string on argument fragments, which must not erase the value the
+        // first fragment set.
+        let non_empty = |pointer: &str| {
+            delta
+                .pointer(pointer)
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        };
+        if let Some(id) = non_empty("/id") {
+            self.id = id;
+        }
+        if let Some(name) = non_empty("/function/name") {
+            self.name = name;
+        }
+        // Gemini's signature, where its OpenAI-compatible layer puts it on
+        // a tool call.
+        if let Some(signature) = non_empty("/extra_content/google/thought_signature") {
+            self.thought_signature = Some(signature);
+        }
+        // Accumulate function arguments (streamed as partial JSON)
+        if let Some(args) = delta
+            .pointer("/function/arguments")
+            .and_then(|a| a.as_str())
+        {
+            self.arguments.push_str(args);
+        }
+    }
 }
 
 /// Full state carried through the SSE stream unfold.
@@ -577,10 +641,6 @@ fn find_sse_frame_delimiter(buf: &[u8]) -> Option<(usize, usize)> {
 }
 
 /// Parse a single SSE frame into ProviderEvent values.
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "lint debt: cognitive complexity 27 against a budget of 25"
-)]
 fn parse_sse_frame(
     frame: &str,
     brand: &str,
@@ -662,37 +722,7 @@ fn parse_sse_frame(
                         while tool_calls_buf.len() <= index {
                             tool_calls_buf.push(PartialToolCall::default());
                         }
-
-                        // Only a non-empty id/name (re)binds: some
-                        // OpenAI-compatible streams repeat `id` (and
-                        // `name`) as an empty string on argument
-                        // fragments, which must not erase the value the
-                        // first fragment set.
-                        if let Some(id) = tc
-                            .get("id")
-                            .and_then(|i| i.as_str())
-                            .filter(|id| !id.is_empty())
-                        {
-                            tool_calls_buf[index].id = id.to_string();
-                        }
-
-                        if let Some(name) = tc
-                            .get("function")
-                            .and_then(|f| f.get("name"))
-                            .and_then(|n| n.as_str())
-                            .filter(|name| !name.is_empty())
-                        {
-                            tool_calls_buf[index].name = name.to_string();
-                        }
-
-                        // Accumulate function arguments (streamed as partial JSON)
-                        if let Some(args) = tc
-                            .get("function")
-                            .and_then(|f| f.get("arguments"))
-                            .and_then(|a| a.as_str())
-                        {
-                            tool_calls_buf[index].arguments.push_str(args);
-                        }
+                        tool_calls_buf[index].apply_delta(tc);
                     }
                 }
 
@@ -772,6 +802,7 @@ fn flush_tool_calls(
                 tool_call_id: tc.id,
                 tool_name: tc.name,
                 params,
+                thought_signature: tc.thought_signature,
             },
         }));
     }
@@ -795,7 +826,7 @@ mod tests {
             }],
         };
 
-        let built = build_message(&msg, &HashMap::new());
+        let built = build_message(&msg, &HashMap::new(), false);
         assert_eq!(built["role"], "tool");
         assert_eq!(built["tool_call_id"], "call_123");
 
@@ -837,7 +868,7 @@ mod tests {
             },
         );
 
-        let built = build_message(&msg, &images);
+        let built = build_message(&msg, &images, false);
         assert_eq!(built["role"], "user");
         let content = built["content"].as_array().expect("content array");
         assert_eq!(content[0]["type"], "text");
@@ -863,7 +894,7 @@ mod tests {
                 },
             ],
         };
-        let built = build_message(&msg, &HashMap::new());
+        let built = build_message(&msg, &HashMap::new(), false);
         assert_eq!(built["content"], "hi");
     }
 
@@ -952,6 +983,34 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn gemini_model_ids_lose_the_native_models_prefix() {
+        use axum::{routing::get, Router};
+
+        let router = Router::new().route(
+            "/v1/models",
+            get(|| async {
+                axum::Json(serde_json::json!({
+                    "data": [{ "id": "models/gemini-4-neon" }, { "id": "gemini-4-argon" }]
+                }))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base_url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+        for (brand, want) in [
+            ("gemini", ["gemini-4-neon", "gemini-4-argon"]),
+            ("custom-openai", ["models/gemini-4-neon", "gemini-4-argon"]),
+        ] {
+            let mut connection = conn_with_brand(brand);
+            connection.base_url = Some(base_url.clone());
+            let models = OpenAiAdapter.list_models(&connection).await.unwrap();
+            let ids: Vec<_> = models.iter().map(|m| m.id.as_str()).collect();
+            assert_eq!(ids, want, "{brand}");
+        }
+    }
+
     /// Stored and hand-typed bases are read as they are, never rewritten:
     /// a versioned root or an as-written catalog base is used as written,
     /// anything else keeps the `/v1` that CLAI has always appended.
@@ -1026,6 +1085,16 @@ mod tests {
             ),
             // No stored base: the brand's catalog base, else OpenAI.
             ("openrouter", None, "https://openrouter.ai/api/v1"),
+            (
+                "gemini",
+                None,
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+            ),
+            (
+                "custom-openai",
+                Some("https://generativelanguage.googleapis.com/v1beta/openai/"),
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+            ),
             ("custom-openai", None, "https://api.openai.com/v1"),
         ];
         for (brand, base, want) in cases {
@@ -1201,6 +1270,179 @@ mod tests {
                 tool_call.params == serde_json::json!({"cmd": "ls"}) &&
                 reason == "tool_calls"
         ));
+    }
+
+    /// Gemini's thought signatures on its OpenAI-compatible layer. The
+    /// tool-call shapes are the documented Chat Completions "Parallel
+    /// function calling example" (docs.cloud.google.com/gemini-enterprise-agent-platform/models/thinking/thought-signatures):
+    /// `extra_content.google.thought_signature`, on the first call only.
+    /// Streamed, they arrive as `delta.tool_calls` fragments, which is where
+    /// the Vercel AI SDK's openai-compatible provider reads them.
+    mod gemini_thought_signatures {
+        use super::*;
+
+        const PARIS: &str = "function-call-f3b9ecb3-d55f-4076-98c8-b13e9d1c0e01";
+        const LONDON: &str = "function-call-335673ad-913e-42d1-bbf5-387c8ab80f44";
+        const PARALLEL_CALLS: &str = r#"data: {"choices":[{"index":0,"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"function-call-f3b9ecb3-d55f-4076-98c8-b13e9d1c0e01","type":"function","function":{"name":"get_current_temperature","arguments":"{\"location\":\"Paris\"}"},"extra_content":{"google":{"thought_signature":"<SIGNATURE_A>"}}},{"index":1,"id":"function-call-335673ad-913e-42d1-bbf5-387c8ab80f44","type":"function","function":{"name":"get_current_temperature","arguments":"{\"location\":\"London\"}"}}]}}]}"#;
+        const TOOL_CALLS_FINISH: &str =
+            r#"data: {"choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}"#;
+
+        fn ready_calls(frames: &[&str]) -> Vec<ToolInvocationDraft> {
+            let mut is_first = true;
+            let mut buf = Vec::new();
+            frames
+                .iter()
+                .flat_map(|frame| parse_sse_frame(frame, "gemini", &mut is_first, &mut buf))
+                .filter_map(|event| match event {
+                    Ok(ProviderEvent::ToolCallReady { tool_call }) => Some(tool_call),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        fn tool_use(id: &str, location: &str, signature: Option<&str>) -> ContentPart {
+            ContentPart::ToolUse {
+                tool_call_id: id.into(),
+                tool_name: "get_current_temperature".into(),
+                arguments: serde_json::json!({ "location": location }),
+                thought_signature: signature.map(Into::into),
+            }
+        }
+
+        fn parallel_turn(signature: Option<&str>) -> CompletionRequest {
+            CompletionRequest {
+                run_id: "run".into(),
+                session_id: "session".into(),
+                model_id: "gemini-4-neon".into(),
+                messages: vec![
+                    ProviderInputMessage {
+                        role: MessageRole::User,
+                        content: vec![ContentPart::Text {
+                            text: "Check the weather in Paris and London.".into(),
+                        }],
+                    },
+                    ProviderInputMessage {
+                        role: MessageRole::Assistant,
+                        content: vec![
+                            tool_use(PARIS, "Paris", signature),
+                            tool_use(LONDON, "London", None),
+                        ],
+                    },
+                ],
+                tools: Vec::new(),
+                temperature: None,
+                max_output_tokens: None,
+                images: HashMap::new(),
+            }
+        }
+
+        #[test]
+        fn only_the_first_parallel_call_keeps_a_signature() {
+            let calls = ready_calls(&[PARALLEL_CALLS, TOOL_CALLS_FINISH]);
+            let got: Vec<_> = calls
+                .iter()
+                .map(|c| (c.tool_call_id.as_str(), c.thought_signature.as_deref()))
+                .collect();
+            assert_eq!(got, [(PARIS, Some("<SIGNATURE_A>")), (LONDON, None)]);
+        }
+
+        /// A signature on the first fragment survives the argument
+        /// fragments after it, which carry none.
+        #[test]
+        fn signature_survives_later_fragments() {
+            let head = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash_exec","arguments":""},"extra_content":{"google":{"thought_signature":"sig"}}}]}}]}"#;
+            let tail = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"","function":{"arguments":"{}"},"extra_content":{"google":{"thought_signature":""}}}]}}]}"#;
+            let calls = ready_calls(&[head, tail, TOOL_CALLS_FINISH]);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].thought_signature.as_deref(), Some("sig"));
+        }
+
+        #[test]
+        fn a_call_without_a_signature_is_sent_back_without_one() {
+            let unsigned = r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"bash_exec","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}"#;
+            let calls = ready_calls(&[unsigned]);
+            assert_eq!(calls.len(), 1);
+            assert_eq!(calls[0].thought_signature, None);
+
+            let body = build_request_body(&parallel_turn(None), true);
+            assert!(!body.to_string().contains("extra_content"), "{body}");
+        }
+
+        /// The assistant message of the documented step 2 request.
+        #[test]
+        fn signature_is_sent_back_on_the_call_that_carried_it() {
+            let body = build_request_body(&parallel_turn(Some("<SIGNATURE_A>")), true);
+            let documented = serde_json::json!([
+                {
+                    "extra_content": { "google": { "thought_signature": "<SIGNATURE_A>" } },
+                    "function": {
+                        "arguments": "{\"location\":\"Paris\"}",
+                        "name": "get_current_temperature"
+                    },
+                    "id": PARIS,
+                    "type": "function"
+                },
+                {
+                    "function": {
+                        "arguments": "{\"location\":\"London\"}",
+                        "name": "get_current_temperature"
+                    },
+                    "id": LONDON,
+                    "type": "function"
+                }
+            ]);
+            assert_eq!(body["messages"][1]["tool_calls"], documented);
+        }
+
+        /// Every other brand gets the body it got before signatures were
+        /// stored, even for history Gemini signed.
+        #[test]
+        fn other_brands_get_a_byte_identical_body() {
+            let signed = build_request_body(&parallel_turn(Some("<SIGNATURE_A>")), false);
+            let unsigned = build_request_body(&parallel_turn(None), false);
+            assert_eq!(signed.to_string(), unsigned.to_string());
+        }
+
+        /// Through `stream_completion`: the Gemini brand gets the signature
+        /// back, a custom OpenAI-compatible server does not.
+        #[tokio::test]
+        async fn only_the_gemini_brand_is_sent_signatures() {
+            use axum::{routing::post, Router};
+            use std::sync::{Arc, Mutex};
+
+            let bodies = Arc::new(Mutex::new(Vec::new()));
+            let captured = bodies.clone();
+            let router = Router::new().route(
+                "/v1/chat/completions",
+                post(move |body: String| {
+                    let captured = captured.clone();
+                    async move {
+                        captured.lock().unwrap().push(body);
+                        "data: [DONE]\n\n"
+                    }
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base_url = format!("http://{}", listener.local_addr().unwrap());
+            tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+
+            for brand in ["gemini", "custom-openai"] {
+                let mut connection = conn_with_brand(brand);
+                connection.base_url = Some(base_url.clone());
+                connection.secret_ref = format!("provider-connection::signatures-{brand}");
+                ProviderSecretStorage::set_secret(&connection.secret_ref, "key").unwrap();
+                let stream = OpenAiAdapter
+                    .stream_completion(&connection, parallel_turn(Some("<SIGNATURE_A>")))
+                    .await
+                    .unwrap();
+                stream.collect::<Vec<_>>().await;
+            }
+
+            let bodies = bodies.lock().unwrap();
+            assert_eq!(bodies.len(), 2);
+            assert!(bodies[0].contains(r#""thought_signature":"<SIGNATURE_A>""#));
+            assert!(!bodies[1].contains("extra_content"), "{}", bodies[1]);
+        }
     }
 
     mod stream_errors {

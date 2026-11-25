@@ -318,6 +318,7 @@ fn build_message(
                         tool_call_id,
                         tool_name,
                         arguments,
+                        ..
                     } => {
                         content.push(json!({
                             "type": "tool_use",
@@ -677,6 +678,7 @@ fn parse_sse_frame(
                         tool_call_id: tc.id.clone(),
                         tool_name: tc.name.clone(),
                         params,
+                        thought_signature: None,
                     },
                 }));
             }
@@ -772,6 +774,7 @@ mod tests {
                     tool_call_id: "toolu_123".into(),
                     tool_name: "get_weather".into(),
                     arguments: json!({"city": "London"}),
+                    thought_signature: None,
                 },
             ],
         };
@@ -1147,6 +1150,7 @@ mod tests {
                     tool_call_id: "toolu_1".into(),
                     tool_name: "bash".into(),
                     arguments: json!({}),
+                    thought_signature: None,
                 },
             ],
         };
@@ -1220,6 +1224,7 @@ mod tests {
                 tool_call_id: (*id).into(),
                 tool_name: "bash_exec".into(),
                 arguments: json!({}),
+                thought_signature: None,
             })
             .collect();
         input(MessageRole::Assistant, calls)

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use ts_rs::TS;
 
+use super::catalog::GEMINI_ID;
 use super::types::is_context_limit_error;
 
 /// What a failed provider request asks for: one kind per action.
@@ -277,8 +278,12 @@ fn classify(
     if status == Some(429) && has_retry_after {
         return FailureKind::Transient;
     }
-    // 2. The brand's own code, then an unknown model in any protocol's words.
+    // 2. The brand's own code or status, then an unknown model in any
+    //    protocol's words.
     if let Some(kind) = code.and_then(|code| code_kind(brand, code)) {
+        return kind;
+    }
+    if let Some(kind) = gemini_kind(brand, status, message) {
         return kind;
     }
     if is_unknown_model(status, code, message) {
@@ -322,6 +327,21 @@ fn is_unknown_model(status: Option<u16>, code: Option<&str>, message: &str) -> b
     const PREFIXES: &[&str] = &["model:", "model '", "model \"", "The model `"];
     code == Some("model_not_found")
         || (status == Some(404) && PREFIXES.iter().any(|prefix| message.starts_with(prefix)))
+}
+
+/// Gemini sends every rate, token, daily and spend limit as `429
+/// RESOURCE_EXHAUSTED`, which reads as a quota or billing limit in words, and
+/// an invalid API key as `400 INVALID_ARGUMENT` "API key not valid"
+/// (https://aistudio.google.com/docs/api-errors?generate-content=true).
+fn gemini_kind(brand: &str, status: Option<u16>, message: &str) -> Option<FailureKind> {
+    if brand != GEMINI_ID {
+        return None;
+    }
+    match status {
+        Some(429) => Some(FailureKind::Transient),
+        Some(400) if message.contains("API key not valid") => Some(FailureKind::Auth),
+        _ => None,
+    }
 }
 
 fn code_kind(brand: &str, code: &str) -> Option<FailureKind> {
@@ -410,6 +430,12 @@ mod tests {
         serde_json::json!({ "error": { "code": code, "message": message } }).to_string()
     }
 
+    /// The documented envelope (aistudio.google.com/docs/api-errors).
+    fn gemini(code: u16, status: &str, message: &str) -> String {
+        serde_json::json!({ "error": { "code": code, "message": message, "status": status } })
+            .to_string()
+    }
+
     #[test]
     fn classify_http_cases() {
         let wait = Some(Duration::from_secs(7));
@@ -469,6 +495,14 @@ mod tests {
             ("ollama", 404, None, "404 page not found".into(), Other, None),
             ("custom-openai", 404, None, openai(Value::Null, "The page does not exist"), Other, None),
             ("anthropic", 400, None, anthropic("invalid_request_error", "model: Field required"), Other, None),
+            // Gemini: the documented invalid-key body, and a 429 whose words
+            // would otherwise read as a billing limit.
+            ("gemini", 400, None, gemini(400, "INVALID_ARGUMENT", "API key not valid. Please pass a valid API key."), Auth, Some("400")),
+            ("gemini", 429, None, gemini(429, "RESOURCE_EXHAUSTED", "You exceeded your current quota, please check your plan and billing details."), Transient, Some("429")),
+            ("gemini", 402, None, gemini(402, "RESOURCE_EXHAUSTED", "Your Prepay credit balance is depleted."), Billing, Some("402")),
+            ("gemini", 403, None, gemini(403, "PERMISSION_DENIED", "Your API key was reported as leaked."), Auth, Some("403")),
+            ("gemini", 400, None, gemini(400, "INVALID_ARGUMENT", "Invalid JSON payload received."), Other, Some("400")),
+            ("custom-openai", 400, None, gemini(400, "INVALID_ARGUMENT", "API key not valid. Please pass a valid API key."), Other, Some("400")),
             // Z.ai's codes apply to the Z.ai brand only.
             ("custom-openai", 429, None, zai("1305", "The service may be temporarily overloaded"), Transient, Some("1305")),
             ("custom-openai", 429, None, zai("1309", "Your GLM Coding Plan package has expired"), Transient, Some("1309")),
