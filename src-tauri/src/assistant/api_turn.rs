@@ -749,6 +749,7 @@ async fn consume_api_stream_with_sink(
 ) -> (StreamExit, Vec<ContentPart>, Vec<ToolInvocationDraft>) {
     let mut content_parts: Vec<ContentPart> = Vec::new();
     let mut tool_calls: Vec<ToolInvocationDraft> = Vec::new();
+    let mut stop_reason: Option<String> = None;
 
     let stream_exit = loop {
         match tokio::select! {
@@ -794,12 +795,7 @@ async fn consume_api_stream_with_sink(
                 ProviderEvent::ToolCallDelta { .. } => {
                     // Could emit live UI updates here in the future
                 }
-                ProviderEvent::StopReason { .. } => {
-                    // A budget-capped finish (max_tokens / length) is legal
-                    // on a normal turn: the partial reply is stored as-is,
-                    // as before. Compaction is the consumer that must
-                    // reject truncated output.
-                }
+                ProviderEvent::StopReason { reason } => stop_reason = Some(reason),
                 ProviderEvent::MessageComplete => {
                     // Finalization happens once after the stream loop exits
                     // so we also capture in-memory state (text + tool_calls)
@@ -814,11 +810,42 @@ async fn consume_api_stream_with_sink(
                     message: e.to_string(),
                 };
             }
-            None => break StreamExit::Completed,
+            None => {
+                break answerless_truncation(stop_reason.as_deref(), &content_parts, &tool_calls)
+                    .map_or(StreamExit::Completed, StreamExit::ProviderReported);
+            }
         }
     };
 
     (stream_exit, content_parts, tool_calls)
+}
+
+/// The failure for a turn the provider cut at its output-token budget before
+/// it produced any text or tool call, typically because thinking used the
+/// whole budget. Completing it would end the run with no answer. A truncated
+/// turn that has text or a tool call completes as usual.
+fn answerless_truncation(
+    stop_reason: Option<&str>,
+    parts: &[ContentPart],
+    tool_calls: &[ToolInvocationDraft],
+) -> Option<ProviderFailure> {
+    let reason = stop_reason.filter(|reason| compaction::is_budget_truncation(reason))?;
+    let has_text = parts
+        .iter()
+        .any(|part| matches!(part, ContentPart::Text { text } if !text.trim().is_empty()));
+    if has_text || !tool_calls.is_empty() {
+        return None;
+    }
+    // Shown verbatim in the run's failure banner. Avoid the phrases
+    // `is_context_limit_error` matches, or the message is rewritten as a
+    // context-window failure.
+    Some(ProviderFailure::in_stream(
+        FailureKind::Other,
+        format!(
+            "The model reached its maximum output length (stop reason: {reason}) before \
+             answering, so no answer was received. Try again, or ask for a shorter answer."
+        ),
+    ))
 }
 
 // The existing helper tests still precede their private functions; keep the
@@ -1018,6 +1045,123 @@ mod tests {
     fn text(t: &str) -> ContentPart {
         ContentPart::Text {
             text: t.to_string(),
+        }
+    }
+
+    async fn consume_events(
+        events: Vec<ProviderEvent>,
+    ) -> (StreamExit, Vec<ContentPart>, Vec<ToolInvocationDraft>) {
+        let stream: ProviderStream = Box::pin(futures::stream::iter(events.into_iter().map(Ok)));
+        consume_api_stream_with_sink(
+            stream,
+            &tokio_util::sync::CancellationToken::new(),
+            "assistant",
+            |_| {},
+        )
+        .await
+    }
+
+    fn thinking() -> ProviderEvent {
+        ProviderEvent::ThinkingDelta { text: "Hmm".into() }
+    }
+
+    fn text_delta(text: &str) -> ProviderEvent {
+        ProviderEvent::TextDelta { text: text.into() }
+    }
+
+    fn stop(reason: &str) -> ProviderEvent {
+        ProviderEvent::StopReason {
+            reason: reason.into(),
+        }
+    }
+
+    fn tool_call_ready() -> ProviderEvent {
+        ProviderEvent::ToolCallReady {
+            tool_call: ToolInvocationDraft {
+                tool_call_id: "call-1".into(),
+                tool_name: "bash_exec".into(),
+                params: serde_json::json!({}),
+            },
+        }
+    }
+
+    /// Anthropic's and OpenAI's stop for an exhausted output budget.
+    const BUDGET_STOPS: [&str; 2] = ["max_tokens", "length"];
+
+    /// A turn that spends its whole output budget on thinking used to end
+    /// the run green with no answer. It fails, and keeps the streamed thinking.
+    #[tokio::test]
+    async fn output_budget_stop_without_an_answer_fails_the_turn() {
+        for reason in BUDGET_STOPS {
+            for answer in [None, Some(text_delta(" \n"))] {
+                let events = [Some(thinking()), answer, Some(stop(reason))];
+                let (exit, parts, _) = consume_events(events.into_iter().flatten().collect()).await;
+                let StreamExit::ProviderReported(failure) = &exit else {
+                    panic!("{reason}: expected a failure, got {exit:?}");
+                };
+                assert_eq!(failure.kind, FailureKind::Other, "{reason}");
+                assert!(failure.message.contains(reason), "{}", failure.message);
+                assert!(matches!(parts.first(), Some(ContentPart::Thinking { .. })));
+                assert!(exit_keeps_streamed_message(
+                    &exit,
+                    run_produced_no_content(&parts)
+                ));
+            }
+        }
+    }
+
+    /// The failure reaches the run as written: a message that reads like a
+    /// context-window failure is replaced with compaction advice.
+    #[tokio::test]
+    async fn answerless_truncation_message_is_not_rewritten() {
+        for reason in BUDGET_STOPS {
+            let (exit, _, _) = consume_events(vec![thinking(), stop(reason)]).await;
+            let StreamExit::ProviderReported(failure) = exit else {
+                panic!("{reason}: expected a failure, got {exit:?}");
+            };
+            let message = failure.to_string();
+            assert_eq!(
+                failure_message_with_compaction_context(
+                    &message,
+                    &compaction::CompactionAttempt::NotAttempted
+                ),
+                message
+            );
+        }
+    }
+
+    /// Truncated text is still an answer: the turn completes as before.
+    #[tokio::test]
+    async fn output_budget_stop_with_text_completes() {
+        for reason in BUDGET_STOPS {
+            let (exit, _, _) =
+                consume_events(vec![thinking(), text_delta("Partial answer"), stop(reason)]).await;
+            assert!(matches!(exit, StreamExit::Completed), "{reason}: {exit:?}");
+        }
+    }
+
+    /// A tool call goes on to the tool loop, whatever the stop reason. The
+    /// OpenAI adapter emits buffered tool calls after the stop reason, at
+    /// `[DONE]`; Anthropic emits them before it.
+    #[tokio::test]
+    async fn output_budget_stop_with_a_tool_call_completes() {
+        for events in [
+            vec![thinking(), stop("length"), tool_call_ready()],
+            vec![thinking(), tool_call_ready(), stop("max_tokens")],
+        ] {
+            let (exit, _, calls) = consume_events(events).await;
+            assert!(matches!(exit, StreamExit::Completed), "{exit:?}");
+            assert_eq!(calls.len(), 1);
+        }
+    }
+
+    /// Only the output-budget stop fails a turn with no answer: a natural
+    /// stop completes it, as before.
+    #[tokio::test]
+    async fn natural_stop_without_text_completes() {
+        for reason in ["end_turn", "stop"] {
+            let (exit, _, _) = consume_events(vec![thinking(), stop(reason)]).await;
+            assert!(matches!(exit, StreamExit::Completed), "{reason}: {exit:?}");
         }
     }
 
@@ -2442,7 +2586,8 @@ enum StreamExit {
     /// The user pressed Stop.
     Cancelled,
     /// The provider reported an error inside the stream after output; one
-    /// before output fails the request in `until_first_output`.
+    /// before output fails the request in `until_first_output`. Also a turn
+    /// cut at the output-token limit with no answer (`answerless_truncation`).
     ProviderReported(ProviderFailure),
     /// The stream itself yielded a transport error.
     StreamFailed { message: String },
