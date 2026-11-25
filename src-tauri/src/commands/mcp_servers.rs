@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::assistant::auth::{secret_hint, McpSecretStorage};
-use crate::config::{McpServerAuth, McpServerConfig, McpServerTransport};
+use crate::assistant::auth::env_vars::EnvSecrets;
+use crate::assistant::auth::{secret_hint, McpSecretStorage, Vault};
+use crate::config::{ConfigManager, McpServerAuth, McpServerConfig, McpServerTransport};
 use crate::mcp::oauth;
 use crate::AppState;
 
@@ -253,11 +254,6 @@ impl McpServerResponse {
     }
 }
 
-/// Vault-ref namespace + key for a secret env var / header.
-fn env_secret_ref(server_id: &str, ns: &str, key: &str) -> String {
-    format!("mcp-server::{}::{}::{}", server_id, ns, key)
-}
-
 /// Map a stored [`McpEnvVar`] to its response shape: plain value for
 /// non-secrets; for secrets, a last-4 hint read live from the vault (never
 /// the value, never the secret_ref).
@@ -298,65 +294,23 @@ fn transport_to_response(transport: &McpServerTransport) -> McpServerTransportRe
     }
 }
 
-/// Persist secret values to the vault and rewrite secret entries to carry a
-/// `secret_ref` (value cleared). Non-secret entries pass through. On update,
-/// a secret entry submitted with no value keeps its existing secret_ref
-/// (from `previous`) so the user needn't re-enter it.
-fn materialize_secret_vars(
-    server_id: &str,
-    ns: &str,
-    incoming: Vec<crate::config::McpEnvVar>,
-    previous: &[crate::config::McpEnvVar],
-) -> Result<Vec<crate::config::McpEnvVar>, String> {
-    let mut out = Vec::with_capacity(incoming.len());
-    for var in incoming {
-        if !var.secret {
-            out.push(crate::config::McpEnvVar {
-                key: var.key,
-                value: var.value,
-                secret_ref: None,
-                secret: false,
-            });
-            continue;
-        }
-        let secret_ref = env_secret_ref(server_id, ns, &var.key);
-        match var.value {
-            Some(ref v) if !v.is_empty() => {
-                McpSecretStorage::set_secret(&secret_ref, v)
-                    .map_err(|e| format!("Failed to store MCP secret `{}`: {}", var.key, e))?;
-                out.push(crate::config::McpEnvVar {
-                    key: var.key,
-                    value: None,
-                    secret_ref: Some(secret_ref),
-                    secret: true,
-                });
-            }
-            _ => {
-                // No new value: keep the existing stored secret if there is one.
-                let prev = previous
-                    .iter()
-                    .find(|p| p.secret && p.key == var.key && p.secret_ref.is_some());
-                if let Some(prev) = prev {
-                    out.push(crate::config::McpEnvVar {
-                        key: var.key,
-                        value: None,
-                        secret_ref: prev.secret_ref.clone(),
-                        secret: true,
-                    });
-                } else {
-                    tracing::warn!(key = %var.key, "secret MCP var has no value and no prior secret; dropping");
-                }
-            }
-        }
-    }
-    Ok(out)
+/// Where a transport's secret env vars (stdio) or headers (HTTP) live.
+fn transport_secrets(server_id: &str, transport: &McpServerTransport) -> EnvSecrets {
+    let kind = match transport {
+        McpServerTransport::Stdio { .. } => "env",
+        McpServerTransport::Http { .. } => "header",
+    };
+    EnvSecrets::new(Vault::MCP, format!("mcp-server::{server_id}::{kind}"))
 }
 
+/// Moves the transport's secret env vars / headers into the vault; see
+/// [`EnvSecrets::store`].
 fn materialize_transport_secrets(
     server_id: &str,
     incoming: McpServerTransport,
     previous: Option<&McpServerTransport>,
 ) -> Result<McpServerTransport, String> {
+    let secrets = transport_secrets(server_id, &incoming);
     match incoming {
         McpServerTransport::Stdio { command, args, env } => {
             let prev: &[crate::config::McpEnvVar] = match previous {
@@ -366,7 +320,7 @@ fn materialize_transport_secrets(
             Ok(McpServerTransport::Stdio {
                 command,
                 args,
-                env: materialize_secret_vars(server_id, "env", env, prev)?,
+                env: secrets.store(env, prev)?,
             })
         }
         McpServerTransport::Http { url, headers } => {
@@ -376,37 +330,16 @@ fn materialize_transport_secrets(
             };
             Ok(McpServerTransport::Http {
                 url,
-                headers: materialize_secret_vars(server_id, "header", headers, prev)?,
+                headers: secrets.store(headers, prev)?,
             })
         }
     }
 }
 
-fn transport_secret_refs(transport: &McpServerTransport) -> Vec<String> {
-    let vars: &[crate::config::McpEnvVar] = match transport {
+fn transport_vars(transport: &McpServerTransport) -> &[crate::config::McpEnvVar] {
+    match transport {
         McpServerTransport::Stdio { env, .. } => env,
         McpServerTransport::Http { headers, .. } => headers,
-    };
-    vars.iter()
-        .filter(|v| v.secret)
-        .filter_map(|v| v.secret_ref.clone())
-        .collect()
-}
-
-/// Clear vault entries for secrets present in `previous` but not in `next`
-/// (removed vars, or vars flipped to non-secret / renamed).
-fn clear_orphaned_transport_secrets(previous: &McpServerTransport, next: &McpServerTransport) {
-    let keep: std::collections::HashSet<String> = transport_secret_refs(next).into_iter().collect();
-    for r in transport_secret_refs(previous) {
-        if !keep.contains(&r) {
-            let _ = McpSecretStorage::clear_secret(&r);
-        }
-    }
-}
-
-fn clear_transport_secrets(transport: &McpServerTransport) {
-    for r in transport_secret_refs(transport) {
-        let _ = McpSecretStorage::clear_secret(&r);
     }
 }
 
@@ -717,36 +650,13 @@ pub async fn update_mcp_server(
     request: UpdateMcpServerRequest,
     state: State<'_, AppState>,
 ) -> Result<McpServerResponse, String> {
-    let server = {
-        let config_manager = state
+    let server = update_server_config(
+        &*state
             .config_manager
             .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-
-        let existing = config_manager
-            .get_mcp_server(&request.id)
-            .ok_or_else(|| format!("MCP server not found: {}", request.id))?;
-        let next_auth = build_auth_for_existing_server(&existing, &request.auth)?;
-        let next_transport = materialize_transport_secrets(
-            &request.id,
-            request.transport.clone(),
-            Some(&existing.transport),
-        )?;
-        clear_orphaned_transport_secrets(&existing.transport, &next_transport);
-
-        config_manager
-            .update_mcp_server(&request.id, |server| {
-                server.name = request.name.clone();
-                server.enabled = request.enabled;
-                server.transport = next_transport.clone();
-                server.auth = next_auth.clone();
-            })
-            .map_err(|e| format!("Failed to update MCP server: {}", e))?;
-
-        config_manager
-            .get_mcp_server(&request.id)
-            .ok_or_else(|| "MCP server not found after update".to_string())?
-    };
+            .map_err(|e| format!("Lock error: {}", e))?,
+        &request,
+    )?;
 
     // Workspace configs reference MCP servers by id, so a rename needs no
     // workspace sweep: display names are resolved from AppConfig at read
@@ -765,28 +675,64 @@ pub async fn delete_mcp_server(id: String, state: State<'_, AppState>) -> Result
     // not linger as a dangling ref.
     sweep_workspace_agent_mcp_ids(state.inner(), &id)?;
 
-    {
-        let config_manager = state
+    remove_server_config(
+        &*state
             .config_manager
             .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-
-        if let Some(server) = config_manager.get_mcp_server(&id) {
-            clear_auth_secret(&server.id, &server.auth)?;
-            clear_transport_secrets(&server.transport);
-        }
-
-        let removed = config_manager
-            .remove_mcp_server(&id)
-            .map_err(|e| format!("Failed to delete MCP server: {}", e))?;
-
-        if !removed {
-            return Err(format!("MCP server not found: {}", id));
-        }
-    }
+            .map_err(|e| format!("Lock error: {}", e))?,
+        &id,
+    )?;
 
     sync_mcp_client_manager(&state).await;
 
+    Ok(())
+}
+
+fn update_server_config(
+    config_manager: &ConfigManager,
+    request: &UpdateMcpServerRequest,
+) -> Result<McpServerConfig, String> {
+    let existing = config_manager
+        .get_mcp_server(&request.id)
+        .ok_or_else(|| format!("MCP server not found: {}", request.id))?;
+    let next_auth = build_auth_for_existing_server(&existing, &request.auth)?;
+    let next_transport = materialize_transport_secrets(
+        &request.id,
+        request.transport.clone(),
+        Some(&existing.transport),
+    )?;
+
+    config_manager
+        .update_mcp_server(&request.id, |server| {
+            server.name = request.name.clone();
+            server.enabled = request.enabled;
+            server.transport = next_transport.clone();
+            server.auth = next_auth.clone();
+        })
+        .map_err(|e| format!("Failed to update MCP server: {}", e))?;
+    transport_secrets(&existing.id, &existing.transport).clear_orphaned(
+        transport_vars(&existing.transport),
+        transport_vars(&next_transport),
+    );
+
+    config_manager
+        .get_mcp_server(&request.id)
+        .ok_or_else(|| "MCP server not found after update".to_string())
+}
+
+fn remove_server_config(config_manager: &ConfigManager, id: &str) -> Result<(), String> {
+    if let Some(server) = config_manager.get_mcp_server(id) {
+        clear_auth_secret(&server.id, &server.auth)?;
+        transport_secrets(&server.id, &server.transport).clear(transport_vars(&server.transport));
+    }
+
+    let removed = config_manager
+        .remove_mcp_server(id)
+        .map_err(|e| format!("Failed to delete MCP server: {}", e))?;
+
+    if !removed {
+        return Err(format!("MCP server not found: {}", id));
+    }
     Ok(())
 }
 
@@ -1017,32 +963,6 @@ mod tests {
         assert!(r.hint.is_none());
     }
 
-    #[test]
-    fn transport_secret_refs_collects_only_secret_entries() {
-        let t = McpServerTransport::Stdio {
-            command: "uvx".into(),
-            args: vec![],
-            env: vec![
-                McpEnvVar {
-                    key: "PLAIN".into(),
-                    value: Some("x".into()),
-                    secret_ref: None,
-                    secret: false,
-                },
-                McpEnvVar {
-                    key: "SECRET".into(),
-                    value: None,
-                    secret_ref: Some("mcp-server::s::env::SECRET".into()),
-                    secret: true,
-                },
-            ],
-        };
-        assert_eq!(
-            transport_secret_refs(&t),
-            vec!["mcp-server::s::env::SECRET"]
-        );
-    }
-
     /// The sweep is the only writer that walks every workspace, so it is also
     /// the only one that can leave the index describing a config it no longer
     /// matches. It must strip the server from every agent that referenced it,
@@ -1136,6 +1056,123 @@ mod tests {
                     "the sweep bumped updated_at, so this is not the seed value"
                 );
             }
+        }
+    }
+
+    /// Secret env vars and headers go to the MCP vault service under the
+    /// server's references, and update and delete remove the ones config no
+    /// longer holds.
+    #[test]
+    fn transport_secrets_live_in_the_mcp_vault_until_dropped() {
+        let stdio = server(
+            "mcp-env-vault-stdio",
+            stdio_transport(vec![secret("API_KEY", "env-secret")]),
+        );
+        let http = server(
+            "mcp-env-vault-http",
+            McpServerTransport::Http {
+                url: "https://example.com/mcp".into(),
+                headers: vec![secret("Authorization", "header-secret")],
+            },
+        );
+        let env_ref = "mcp-server::mcp-env-vault-stdio::env::API_KEY";
+        let header_ref = "mcp-server::mcp-env-vault-http::header::Authorization";
+        let stored = |secret_ref: &str| McpSecretStorage::get_secret(secret_ref).unwrap();
+        assert_eq!(
+            transport_vars(&stdio.transport)[0].secret_ref.as_deref(),
+            Some(env_ref)
+        );
+        assert_eq!(
+            transport_vars(&http.transport)[0].secret_ref.as_deref(),
+            Some(header_ref)
+        );
+        assert_eq!(stored(env_ref).as_deref(), Some("env-secret"));
+        assert_eq!(stored(header_ref).as_deref(), Some("header-secret"));
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_manager = config_with(
+            vec![stdio.clone(), http.clone()],
+            dir.path().join("config.json"),
+        );
+        update_server_config(&config_manager, &drop_env_request(&stdio)).unwrap();
+        assert_eq!(stored(env_ref), None);
+
+        remove_server_config(&config_manager, &http.id).unwrap();
+        assert_eq!(stored(header_ref), None);
+    }
+
+    /// Update clears dropped secrets only once config no longer references
+    /// them: a failed save leaves a server whose secrets still resolve.
+    #[test]
+    fn update_clears_dropped_secrets_only_after_saving() {
+        let stdio = server(
+            "mcp-env-unsaved",
+            stdio_transport(vec![secret("API_KEY", "env-secret")]),
+        );
+        let env_ref = "mcp-server::mcp-env-unsaved::env::API_KEY";
+        let dir = tempfile::tempdir().unwrap();
+
+        // Config cannot be saved where its directory does not exist.
+        let unsaveable = config_with(
+            vec![stdio.clone()],
+            dir.path().join("missing").join("config.json"),
+        );
+        assert!(update_server_config(&unsaveable, &drop_env_request(&stdio)).is_err());
+        assert_eq!(
+            McpSecretStorage::get_secret(env_ref).unwrap().as_deref(),
+            Some("env-secret")
+        );
+        McpSecretStorage::clear_secret(env_ref).unwrap();
+    }
+
+    fn secret(key: &str, value: &str) -> McpEnvVar {
+        McpEnvVar {
+            key: key.to_string(),
+            value: Some(value.to_string()),
+            secret_ref: None,
+            secret: true,
+        }
+    }
+
+    fn stdio_transport(env: Vec<McpEnvVar>) -> McpServerTransport {
+        McpServerTransport::Stdio {
+            command: "uvx".into(),
+            args: vec![],
+            env,
+        }
+    }
+
+    /// A server whose secret values are already stored in the vault.
+    fn server(id: &str, transport: McpServerTransport) -> McpServerConfig {
+        McpServerConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            enabled: true,
+            transport: materialize_transport_secrets(id, transport, None).unwrap(),
+            auth: McpServerAuth::None,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    fn config_with(
+        mcp_servers: Vec<McpServerConfig>,
+        config_path: std::path::PathBuf,
+    ) -> ConfigManager {
+        let config = crate::AppConfig {
+            mcp_servers,
+            ..Default::default()
+        };
+        ConfigManager::new_for_tests(config, config_path)
+    }
+
+    fn drop_env_request(server: &McpServerConfig) -> UpdateMcpServerRequest {
+        UpdateMcpServerRequest {
+            id: server.id.clone(),
+            name: server.name.clone(),
+            enabled: true,
+            transport: stdio_transport(vec![]),
+            auth: McpServerAuthRequest::None,
         }
     }
 

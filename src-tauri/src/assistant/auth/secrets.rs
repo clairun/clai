@@ -1,3 +1,4 @@
+#[cfg(not(test))]
 use keyring::Entry;
 
 // Reverse-DNS of clai.run. Renamed from com.juacker.clai.* on 2026-07-04
@@ -6,6 +7,7 @@ use keyring::Entry;
 const SERVICE_NAME: &str = "run.clai.providers";
 const MCP_SERVICE_NAME: &str = "run.clai.mcp";
 
+#[cfg(not(test))]
 fn entry_for(service_name: &str, secret_ref: &str) -> Result<Entry, keyring::Error> {
     Entry::new(service_name, secret_ref)
 }
@@ -23,6 +25,7 @@ fn entry_for(service_name: &str, secret_ref: &str) -> Result<Entry, keyring::Err
 /// collection with the `default` alias — the daemon shows its own password
 /// dialog, so the user stays in control of the keyring password — and then
 /// retry the write once.
+#[cfg(not(test))]
 fn set_password_creating_default_collection(
     entry: &Entry,
     secret: &str,
@@ -40,6 +43,7 @@ fn set_password_creating_default_collection(
 /// True when the keyring error means the Secret Service is reachable but has
 /// no collection behind the `default` alias ("no result found").
 #[cfg(target_os = "linux")]
+#[cfg(not(test))]
 fn is_missing_default_collection(error: &keyring::Error) -> bool {
     matches!(error, keyring::Error::NoStorageAccess(_))
         && error
@@ -56,6 +60,7 @@ fn is_missing_default_collection(error: &keyring::Error) -> bool {
 /// consumer resolves the same `default` alias afterwards, so the collection
 /// created here is shared system-wide, not CLAI-specific.
 #[cfg(target_os = "linux")]
+#[cfg(not(test))]
 fn create_default_collection() -> Result<(), keyring::Error> {
     use dbus_secret_service::{EncryptionType, Error as SsError, SecretService};
 
@@ -75,38 +80,38 @@ fn create_default_collection() -> Result<(), keyring::Error> {
     }
 }
 
-pub struct ProviderSecretStorage;
+/// The keyring service one kind of CLAI secret lives under. Under
+/// `cfg(test)` it reads and writes an in-process stand-in instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Vault(&'static str);
 
-impl ProviderSecretStorage {
-    #[cfg_attr(test, allow(dead_code))]
-    fn entry(secret_ref: &str) -> Result<Entry, keyring::Error> {
-        entry_for(SERVICE_NAME, secret_ref)
-    }
+impl Vault {
+    pub const PROVIDERS: Self = Self(SERVICE_NAME);
+    pub const MCP: Self = Self(MCP_SERVICE_NAME);
 
     #[cfg_attr(test, allow(clippy::unnecessary_wraps))]
-    pub fn set_secret(secret_ref: &str, secret: &str) -> Result<(), keyring::Error> {
+    pub fn set(self, secret_ref: &str, secret: &str) -> Result<(), keyring::Error> {
         #[cfg(test)]
         {
-            test_vault::set(SERVICE_NAME, secret_ref, secret);
+            test_vault::set(self.0, secret_ref, secret);
             Ok(())
         }
         #[cfg(not(test))]
         {
-            let entry = Self::entry(secret_ref)?;
+            let entry = entry_for(self.0, secret_ref)?;
             set_password_creating_default_collection(&entry, secret)
         }
     }
 
-    #[allow(dead_code)]
     #[cfg_attr(test, allow(clippy::unnecessary_wraps))]
-    pub fn get_secret(secret_ref: &str) -> Result<Option<String>, keyring::Error> {
+    pub fn get(self, secret_ref: &str) -> Result<Option<String>, keyring::Error> {
         #[cfg(test)]
         {
-            Ok(test_vault::get(SERVICE_NAME, secret_ref))
+            Ok(test_vault::get(self.0, secret_ref))
         }
         #[cfg(not(test))]
         {
-            let entry = Self::entry(secret_ref)?;
+            let entry = entry_for(self.0, secret_ref)?;
             match entry.get_password() {
                 Ok(secret) => Ok(Some(secret)),
                 Err(keyring::Error::NoEntry) => Ok(None),
@@ -116,15 +121,15 @@ impl ProviderSecretStorage {
     }
 
     #[cfg_attr(test, allow(clippy::unnecessary_wraps))]
-    pub fn clear_secret(secret_ref: &str) -> Result<(), keyring::Error> {
+    pub fn clear(self, secret_ref: &str) -> Result<(), keyring::Error> {
         #[cfg(test)]
         {
-            test_vault::clear(SERVICE_NAME, secret_ref);
+            test_vault::clear(self.0, secret_ref);
             Ok(())
         }
         #[cfg(not(test))]
         {
-            let entry = Self::entry(secret_ref)?;
+            let entry = entry_for(self.0, secret_ref)?;
             match entry.delete_credential() {
                 Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
                 Err(error) => Err(error),
@@ -133,33 +138,35 @@ impl ProviderSecretStorage {
     }
 }
 
-pub struct McpSecretStorage;
+pub struct ProviderSecretStorage;
 
-impl McpSecretStorage {
-    fn entry(secret_ref: &str) -> Result<Entry, keyring::Error> {
-        entry_for(MCP_SERVICE_NAME, secret_ref)
-    }
-
+impl ProviderSecretStorage {
     pub fn set_secret(secret_ref: &str, secret: &str) -> Result<(), keyring::Error> {
-        let entry = Self::entry(secret_ref)?;
-        set_password_creating_default_collection(&entry, secret)
+        Vault::PROVIDERS.set(secret_ref, secret)
     }
 
     pub fn get_secret(secret_ref: &str) -> Result<Option<String>, keyring::Error> {
-        let entry = Self::entry(secret_ref)?;
-        match entry.get_password() {
-            Ok(secret) => Ok(Some(secret)),
-            Err(keyring::Error::NoEntry) => Ok(None),
-            Err(error) => Err(error),
-        }
+        Vault::PROVIDERS.get(secret_ref)
     }
 
     pub fn clear_secret(secret_ref: &str) -> Result<(), keyring::Error> {
-        let entry = Self::entry(secret_ref)?;
-        match entry.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(error),
-        }
+        Vault::PROVIDERS.clear(secret_ref)
+    }
+}
+
+pub struct McpSecretStorage;
+
+impl McpSecretStorage {
+    pub fn set_secret(secret_ref: &str, secret: &str) -> Result<(), keyring::Error> {
+        Vault::MCP.set(secret_ref, secret)
+    }
+
+    pub fn get_secret(secret_ref: &str) -> Result<Option<String>, keyring::Error> {
+        Vault::MCP.get(secret_ref)
+    }
+
+    pub fn clear_secret(secret_ref: &str) -> Result<(), keyring::Error> {
+        Vault::MCP.clear(secret_ref)
     }
 }
 
@@ -176,9 +183,9 @@ pub fn secret_hint(value: &str) -> Option<String> {
     Some(last4.into_iter().collect())
 }
 
-/// In-process stand-in for the OS keyring, consulted only by
-/// `ProviderSecretStorage` under `cfg(test)`. CI runners have no Secret
-/// Service, so key-dependent command flows can be tested without the keyring.
+/// In-process stand-in for the OS keyring, consulted by both secret stores
+/// under `cfg(test)`. CI runners have no Secret Service, so key-dependent
+/// command flows can be tested without the keyring.
 #[cfg(test)]
 mod test_vault {
     use std::collections::HashMap;
@@ -213,5 +220,18 @@ mod test_vault {
             .lock()
             .expect("test vault lock")
             .remove(&key(service, secret_ref));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Vault;
+
+    /// Stored secrets are found by these keyring service names, so renaming
+    /// or swapping either one orphans every secret already saved under it.
+    #[test]
+    fn vaults_keep_their_keyring_service_names() {
+        assert_eq!(Vault::PROVIDERS.0, "run.clai.providers");
+        assert_eq!(Vault::MCP.0, "run.clai.mcp");
     }
 }

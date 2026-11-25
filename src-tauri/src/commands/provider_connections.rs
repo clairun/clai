@@ -1,11 +1,15 @@
+use std::sync::Mutex;
+
 use serde::{Deserialize, Serialize};
 use tauri::State;
 use ts_rs::TS;
 
+use crate::assistant::auth::env_vars::validate_env_vars;
 use crate::assistant::auth::ProviderSecretStorage;
 use crate::assistant::providers::catalog::ProviderCatalogEntry;
 use crate::assistant::providers::{self, catalog, cli};
 use crate::assistant::types::{AuthMode, ModelInfo, ProviderConnection, ProviderDescriptor};
+use crate::config::{ConfigManager, McpEnvVar};
 use crate::AppState;
 
 #[derive(Debug, Deserialize, TS)]
@@ -26,6 +30,11 @@ pub struct CreateProviderConnectionRequest {
     pub model_id: String,
     #[serde(default)]
     pub account_label: Option<String>,
+    /// Env vars for a CLI-backed connection's process. A secret entry sends
+    /// its value once; it is stored in the vault and never returned.
+    #[serde(default)]
+    #[ts(as = "Option<Vec<McpEnvVar>>", optional)]
+    pub env: Vec<McpEnvVar>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -48,6 +57,11 @@ pub struct UpdateProviderConnectionRequest {
     #[serde(default)]
     pub account_label: Option<String>,
     pub enabled: bool,
+    /// Replaces the connection's env vars; omitted keeps them. A secret
+    /// entry sent without a value keeps its stored secret.
+    #[serde(default)]
+    #[ts(optional)]
+    pub env: Option<Vec<McpEnvVar>>,
 }
 
 #[derive(Debug, Deserialize, TS)]
@@ -198,6 +212,9 @@ pub async fn provider_catalog_probe_models(
             .as_ref()
             .map(|conn| conn.updated_at)
             .unwrap_or(0),
+        // CLI connections return before this point (static model lists), and
+        // API adapters spawn no process.
+        env: Vec::new(),
     };
 
     let adapter = providers::resolve_connection_adapter(&connection).map_err(|e| e.to_string());
@@ -262,6 +279,7 @@ pub async fn provider_connection_create(
         }
     }
 
+    let env = store_connection_env(&id, &request.protocol_id, request.env, &[])?;
     let now = chrono::Utc::now().timestamp_millis();
     let connection = ProviderConnection {
         id,
@@ -282,6 +300,7 @@ pub async fn provider_connection_create(
         enabled: true,
         created_at: now,
         updated_at: now,
+        env,
     };
     state
         .config_manager
@@ -292,17 +311,48 @@ pub async fn provider_connection_create(
     Ok(connection)
 }
 
+/// Validates a connection's env vars and moves secret values into the vault,
+/// returning the entries to persist. Only CLI connections take env: API
+/// adapters spawn no process, so env there would be stored and never used.
+fn store_connection_env(
+    connection_id: &str,
+    protocol_id: &str,
+    env: Vec<McpEnvVar>,
+    previous: &[McpEnvVar],
+) -> Result<Vec<McpEnvVar>, String> {
+    if env.is_empty() {
+        return Ok(env);
+    }
+    if !providers::is_cli_provider(protocol_id) {
+        return Err(format!(
+            "Environment variables are supported only for CLI providers, not '{protocol_id}'"
+        ));
+    }
+    validate_env_vars(&env)?;
+    cli::connection_env_secrets(connection_id).store(env, previous)
+}
+
 #[tauri::command]
 pub async fn provider_connection_update(
     request: UpdateProviderConnectionRequest,
     state: State<'_, AppState>,
 ) -> Result<ProviderConnection, String> {
-    let existing = state
-        .config_manager
+    update_connection(&state.config_manager, request)
+}
+
+fn update_connection(
+    config_manager: &Mutex<ConfigManager>,
+    request: UpdateProviderConnectionRequest,
+) -> Result<ProviderConnection, String> {
+    let existing = config_manager
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?
         .get_provider_connection(&request.id)
         .ok_or_else(|| format!("Provider connection not found: {}", request.id))?;
+    // Sessions, models and env belong to the connection's CLI or API.
+    if request.protocol_id != existing.protocol_id {
+        return Err("A connection's provider cannot be changed; add a new connection".to_string());
+    }
 
     let descriptor = providers::get_provider_descriptor(&request.protocol_id)
         .ok_or_else(|| format!("Unsupported provider: {}", request.protocol_id))?;
@@ -345,6 +395,12 @@ pub async fn provider_connection_update(
                 existing.provider_id.clone()
             }
         });
+    let env = store_connection_env(
+        &request.id,
+        &request.protocol_id,
+        request.env.unwrap_or_else(|| existing.env.clone()),
+        &existing.env,
+    )?;
     let updated = ProviderConnection {
         id: request.id,
         name: request.name.trim().to_string(),
@@ -364,13 +420,14 @@ pub async fn provider_connection_update(
         enabled: request.enabled,
         created_at: existing.created_at,
         updated_at: chrono::Utc::now().timestamp_millis(),
+        env,
     };
-    state
-        .config_manager
+    config_manager
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?
         .update_provider_connection(updated.clone())
         .map_err(|e| format!("Failed to update provider connection: {}", e))?;
+    cli::connection_env_secrets(&updated.id).clear_orphaned(&existing.env, &updated.env);
     Ok(updated)
 }
 
@@ -424,22 +481,33 @@ pub async fn provider_connection_delete(
         ));
     }
 
-    let connection = state
-        .config_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
-        .get_provider_connection(&id);
-    if let Some(connection) = connection {
-        ProviderSecretStorage::clear_secret(&connection.secret_ref)
-            .map_err(|e| format!("Failed to clear provider credential: {}", e))?;
-    }
+    remove_connection(&state.config_manager, &id)
+}
 
-    state
-        .config_manager
-        .lock()
-        .map_err(|e| format!("Lock error: {}", e))?
-        .remove_provider_connection(&id)
-        .map_err(|e| format!("Failed to delete provider connection: {}", e))
+/// Removes the connection from config, then its secrets from the vault, so a
+/// failed removal leaves a connection that still authenticates.
+fn remove_connection(config_manager: &Mutex<ConfigManager>, id: &str) -> Result<bool, String> {
+    let (connection, removed) = {
+        let config_manager = config_manager
+            .lock()
+            .map_err(|e| format!("Lock error: {}", e))?;
+        let connection = config_manager.get_provider_connection(id);
+        let removed = config_manager
+            .remove_provider_connection(id)
+            .map_err(|e| format!("Failed to delete provider connection: {}", e))?;
+        (connection, removed)
+    };
+    if let Some(connection) = connection {
+        if let Err(error) = ProviderSecretStorage::clear_secret(&connection.secret_ref) {
+            tracing::warn!(
+                %error,
+                connection_id = %connection.id,
+                "Failed to clear a deleted provider connection's credential"
+            );
+        }
+        cli::connection_env_secrets(&connection.id).clear(&connection.env);
+    }
+    Ok(removed)
 }
 
 #[tauri::command]
@@ -678,30 +746,28 @@ async fn test_api_provider_connection(
 async fn test_cli_provider_connection(
     connection: &ProviderConnection,
 ) -> Result<TestResult, String> {
-    let command = connection
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .or_else(|| cli::command_for_provider(&connection.protocol_id).map(str::to_string))
-        .ok_or_else(|| format!("Unsupported CLI provider: {}", connection.protocol_id))?;
-
-    // Resolve to an absolute host path and run host-aware (via
-    // `flatpak-spawn --host` under Flatpak) — the same path the actual run
-    // uses, so a passing test reflects a launchable CLI.
-    let resolved =
-        crate::providers::resolve_command_path(&command).unwrap_or_else(|| command.clone());
     let args: &[&str] = match connection.protocol_id.as_str() {
         cli::CLAUDE_CODE_PROVIDER_ID => &["auth", "status"],
         cli::CODEX_PROVIDER_ID => &["login", "status"],
         _ => &["--version"],
     };
-    let output = crate::providers::build_host_cli_command(&resolved, &[], None)
+    // The same command builder the runs use (binary resolution, host hop,
+    // the connection's env), so a passing test reflects the account and
+    // binary a run will use.
+    let (mut command, binary) = match cli::cli_command(connection, &[], None) {
+        Ok(built) => built,
+        Err(error) => {
+            return Ok(TestResult {
+                success: false,
+                error: Some(error),
+            })
+        }
+    };
+    let output = command
         .args(args)
         .output()
         .await
-        .map_err(|e| format!("Failed to run `{}`: {}", command, e))?;
+        .map_err(|e| format!("Failed to run `{binary}`: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -807,7 +873,356 @@ mod tests {
             enabled: true,
             created_at: 0,
             updated_at: 0,
+            env: Vec::new(),
         }
+    }
+
+    fn env_var(key: &str, value: &str, secret: bool) -> McpEnvVar {
+        McpEnvVar {
+            key: key.to_string(),
+            value: Some(value.to_string()),
+            secret_ref: None,
+            secret,
+        }
+    }
+
+    fn cli_connection(id: &str, protocol_id: &str, env: Vec<McpEnvVar>) -> ProviderConnection {
+        ProviderConnection {
+            id: id.to_string(),
+            name: "CLI".into(),
+            protocol_id: protocol_id.into(),
+            provider_id: protocol_id.into(),
+            auth_mode: AuthMode::SubscriptionLogin,
+            base_url: None,
+            secret_ref: format!("provider-connection::{id}"),
+            model_id: "default".into(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+            env,
+        }
+    }
+
+    /// A secret env value goes to the vault; the saved connection, which is
+    /// both what config persists and what the commands return, holds only
+    /// its reference.
+    #[test]
+    fn saved_connection_env_keeps_secret_values_out_of_config_and_responses() {
+        let id = "env-save-secret";
+        let env = store_connection_env(
+            id,
+            cli::CLAUDE_CODE_PROVIDER_ID,
+            vec![
+                env_var("CLAUDE_CONFIG_DIR", "claude-work", false),
+                env_var("ANTHROPIC_API_KEY", "sk-secret-value", true),
+            ],
+            &[],
+        )
+        .expect("valid env saves");
+        let connection = cli_connection(id, cli::CLAUDE_CODE_PROVIDER_ID, env);
+
+        let json = serde_json::to_string(&connection).unwrap();
+        assert!(!json.contains("sk-secret-value"), "{json}");
+        assert!(json.contains("claude-work"), "{json}");
+        let secret_ref = format!("provider-connection::{id}::env::ANTHROPIC_API_KEY");
+        assert_eq!(
+            ProviderSecretStorage::get_secret(&secret_ref)
+                .unwrap()
+                .as_deref(),
+            Some("sk-secret-value")
+        );
+        ProviderSecretStorage::clear_secret(&secret_ref).unwrap();
+    }
+
+    #[test]
+    fn saving_env_rejects_api_connections_and_invalid_keys() {
+        let error = store_connection_env("env-api", "openai", vec![env_var("A", "1", false)], &[])
+            .expect_err("API connections spawn no process");
+        assert!(error.contains("only for CLI providers"), "{error}");
+        assert_eq!(
+            store_connection_env("env-api", "openai", Vec::new(), &[]),
+            Ok(Vec::new())
+        );
+
+        let error = store_connection_env(
+            "env-dup",
+            cli::CODEX_PROVIDER_ID,
+            vec![env_var("A", "1", false), env_var("A", "2", false)],
+            &[],
+        )
+        .expect_err("duplicate keys");
+        assert!(error.contains("more than once"), "{error}");
+    }
+
+    fn config_with(
+        connection: &ProviderConnection,
+        config_path: std::path::PathBuf,
+    ) -> Mutex<ConfigManager> {
+        let config = crate::AppConfig {
+            provider_connections: vec![connection.clone()],
+            ..Default::default()
+        };
+        Mutex::new(ConfigManager::new_for_tests(config, config_path))
+    }
+
+    fn stored(secret_ref: &str) -> Option<String> {
+        ProviderSecretStorage::get_secret(secret_ref).unwrap()
+    }
+
+    fn update_request(
+        connection: &ProviderConnection,
+        env: Option<Vec<McpEnvVar>>,
+    ) -> UpdateProviderConnectionRequest {
+        UpdateProviderConnectionRequest {
+            id: connection.id.clone(),
+            name: connection.name.clone(),
+            protocol_id: connection.protocol_id.clone(),
+            provider_id: None,
+            api_key: None,
+            auth_mode: None,
+            base_url: None,
+            model_id: connection.model_id.clone(),
+            account_label: None,
+            enabled: true,
+            env,
+        }
+    }
+
+    /// An update that omits env keeps it; one that replaces it removes the
+    /// dropped secrets from the vault.
+    #[test]
+    fn update_keeps_omitted_env_and_clears_dropped_secrets() {
+        let id = "env-update";
+        let env = store_connection_env(
+            id,
+            cli::CLAUDE_CODE_PROVIDER_ID,
+            vec![
+                env_var("CLAUDE_CONFIG_DIR", "work", false),
+                env_var("TOKEN", "secret-value", true),
+            ],
+            &[],
+        )
+        .unwrap();
+        let connection = cli_connection(id, cli::CLAUDE_CODE_PROVIDER_ID, env.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with(&connection, dir.path().join("config.json"));
+        let request = |env| update_request(&connection, env);
+        let token_ref = format!("provider-connection::{id}::env::TOKEN");
+
+        let kept = update_connection(&config, request(None)).unwrap();
+        assert_eq!(kept.env, env);
+        assert_eq!(stored(&token_ref).as_deref(), Some("secret-value"));
+
+        let personal = vec![env_var("CLAUDE_CONFIG_DIR", "personal", false)];
+        let replaced = update_connection(&config, request(Some(personal.clone()))).unwrap();
+        assert_eq!(replaced.env, personal);
+        assert_eq!(stored(&token_ref), None);
+        let saved = config.lock().unwrap().get_provider_connection(id).unwrap();
+        assert_eq!(saved.env, personal);
+    }
+
+    /// The editor sends a stored secret back as `{key, secret: true}` with no
+    /// value. Under the key it was stored with, that keeps the stored value;
+    /// under any other key there is nothing to keep, so the update fails and
+    /// changes nothing.
+    #[test]
+    fn update_with_a_valueless_secret_keeps_only_a_stored_key() {
+        let id = "env-update-valueless";
+        let env = store_connection_env(
+            id,
+            cli::CLAUDE_CODE_PROVIDER_ID,
+            vec![env_var("TOKEN", "secret-value", true)],
+            &[],
+        )
+        .unwrap();
+        let connection = cli_connection(id, cli::CLAUDE_CODE_PROVIDER_ID, env.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with(&connection, dir.path().join("config.json"));
+        let request = |key: &str| {
+            let var = serde_json::json!({ "key": key, "secret": true });
+            update_request(
+                &connection,
+                Some(vec![serde_json::from_value(var).unwrap()]),
+            )
+        };
+        let token_ref = format!("provider-connection::{id}::env::TOKEN");
+
+        let error = update_connection(&config, request("NEW")).expect_err("nothing stored");
+        assert!(error.contains("`NEW`"), "{error}");
+        let saved = config.lock().unwrap().get_provider_connection(id).unwrap();
+        assert_eq!(saved.env, env);
+        assert_eq!(stored(&token_ref).as_deref(), Some("secret-value"));
+
+        let kept = update_connection(&config, request("TOKEN")).unwrap();
+        assert_eq!(kept.env, env);
+        assert_eq!(stored(&token_ref).as_deref(), Some("secret-value"));
+    }
+
+    /// Update clears dropped secrets only once config no longer references
+    /// them: a failed save leaves a connection whose secrets still resolve.
+    #[test]
+    fn update_clears_dropped_secrets_only_after_saving() {
+        let id = "env-update-unsaved";
+        let env = store_connection_env(
+            id,
+            cli::CLAUDE_CODE_PROVIDER_ID,
+            vec![env_var("TOKEN", "secret-value", true)],
+            &[],
+        )
+        .unwrap();
+        let connection = cli_connection(id, cli::CLAUDE_CODE_PROVIDER_ID, env);
+        let token_ref = format!("provider-connection::{id}::env::TOKEN");
+        let dir = tempfile::tempdir().unwrap();
+
+        // Config cannot be saved where its directory does not exist.
+        let unsaveable = config_with(&connection, dir.path().join("missing").join("config.json"));
+        let dropped = update_request(&connection, Some(Vec::new()));
+        assert!(update_connection(&unsaveable, dropped).is_err());
+        assert_eq!(stored(&token_ref).as_deref(), Some("secret-value"));
+        ProviderSecretStorage::clear_secret(&token_ref).unwrap();
+    }
+
+    /// A connection keeps its provider: its CLI session, models and env
+    /// mean nothing to another one.
+    #[test]
+    fn update_rejects_a_provider_change() {
+        let connection = cli_connection(
+            "env-update-protocol",
+            cli::CLAUDE_CODE_PROVIDER_ID,
+            Vec::new(),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with(&connection, dir.path().join("config.json"));
+        let mut request = update_request(&connection, None);
+        request.protocol_id = cli::CODEX_PROVIDER_ID.to_string();
+
+        let error = update_connection(&config, request).expect_err("provider change");
+        assert!(error.contains("cannot be changed"), "{error}");
+        let saved = config
+            .lock()
+            .unwrap()
+            .get_provider_connection(&connection.id)
+            .unwrap();
+        assert_eq!(saved.protocol_id, cli::CLAUDE_CODE_PROVIDER_ID);
+    }
+
+    /// Delete clears the connection's secrets only once config no longer
+    /// holds it: a failed removal leaves a connection that still works.
+    #[test]
+    fn delete_clears_secrets_only_after_removing_the_connection() {
+        let id = "env-delete";
+        let env = store_connection_env(
+            id,
+            cli::CLAUDE_CODE_PROVIDER_ID,
+            vec![env_var("TOKEN", "secret-value", true)],
+            &[],
+        )
+        .unwrap();
+        let connection = cli_connection(id, cli::CLAUDE_CODE_PROVIDER_ID, env);
+        ProviderSecretStorage::set_secret(&connection.secret_ref, "api-key").unwrap();
+        let token_ref = format!("provider-connection::{id}::env::TOKEN");
+        let dir = tempfile::tempdir().unwrap();
+
+        // Config cannot be saved where its directory does not exist.
+        let unsaveable = config_with(&connection, dir.path().join("missing").join("config.json"));
+        assert!(remove_connection(&unsaveable, id).is_err());
+        assert_eq!(stored(&token_ref).as_deref(), Some("secret-value"));
+        assert_eq!(stored(&connection.secret_ref).as_deref(), Some("api-key"));
+
+        let config = config_with(&connection, dir.path().join("config.json"));
+        assert_eq!(remove_connection(&config, id), Ok(true));
+        assert_eq!(stored(&token_ref), None);
+        assert_eq!(stored(&connection.secret_ref), None);
+    }
+
+    /// A secret sent without a value needs one stored under its key; a
+    /// renamed secret has none, and saving says so instead of dropping it.
+    #[test]
+    fn saving_env_rejects_a_secret_with_nothing_stored_and_nul_values() {
+        let mut renamed = env_var("RENAMED", "", true);
+        renamed.value = None;
+        let error = store_connection_env("env-renamed", cli::CODEX_PROVIDER_ID, vec![renamed], &[])
+            .expect_err("nothing stored under the new key");
+        assert!(error.contains("`RENAMED`"), "{error}");
+
+        let error = store_connection_env(
+            "env-nul",
+            cli::CODEX_PROVIDER_ID,
+            vec![env_var("DIR", "a\0B=1", false)],
+            &[],
+        )
+        .expect_err("NUL would split the Flatpak env block");
+        assert!(error.contains("NUL"), "{error}");
+    }
+
+    /// A secret the vault no longer holds fails the connection test, naming
+    /// the key, rather than testing the CLI without it.
+    #[tokio::test]
+    async fn cli_connection_test_fails_when_a_secret_is_missing() {
+        let mut missing = env_var("ANTHROPIC_API_KEY", "", true);
+        missing.value = None;
+        missing.secret_ref =
+            Some("provider-connection::env-test-missing::env::ANTHROPIC_API_KEY".into());
+        let connection = cli_connection(
+            "env-test-missing",
+            cli::CLAUDE_CODE_PROVIDER_ID,
+            vec![missing],
+        );
+
+        let result = run_connection_test(connection).await;
+
+        assert!(!result.success);
+        let error = result.error.unwrap_or_default();
+        assert!(error.contains("`ANTHROPIC_API_KEY`"), "{error}");
+    }
+
+    /// The connection test runs the CLI with the connection's env, so it
+    /// reports on the account a run will use. The stand-in `claude` reports
+    /// "logged in" only when it sees the connection's config dir.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cli_connection_test_runs_with_the_connection_env() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let config_dir = dir.path().join("claude-work");
+        let script = dir.path().join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nif [ \"$CLAUDE_CONFIG_DIR\" = '{}' ]; then echo '{{\"loggedIn\":true}}'; \
+                 else echo '{{\"loggedIn\":false}}'; fi\n",
+                config_dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let run = |env: Vec<McpEnvVar>| {
+            let mut connection = cli_connection("env-test-path", cli::CLAUDE_CODE_PROVIDER_ID, env);
+            connection.base_url = Some(script.to_string_lossy().into_owned());
+            async move {
+                // A freshly written script can be briefly busy (ETXTBSY) while
+                // another test's fork still holds the write descriptor.
+                for _ in 0..20 {
+                    match test_api_provider_connection(&connection).await {
+                        Err(error) if error.contains("Text file busy") => {
+                            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                        }
+                        result => return result.expect("the stand-in CLI runs"),
+                    }
+                }
+                panic!("the stand-in CLI stayed busy");
+            }
+        };
+
+        let without_env = run(Vec::new()).await;
+        assert!(!without_env.success, "{:?}", without_env.error);
+
+        let config_dir = config_dir.to_string_lossy().into_owned();
+        let with_env = run(vec![env_var("CLAUDE_CONFIG_DIR", &config_dir, false)]).await;
+        assert!(with_env.success, "{:?}", with_env.error);
     }
 
     async fn run_connection_test(connection: ProviderConnection) -> TestResult {

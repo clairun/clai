@@ -137,10 +137,10 @@ impl AiProvider {
 // MCP Server Config
 // =============================================================================
 
-/// A single environment variable (stdio) or HTTP header (http) entry for an
-/// MCP server. Secret entries store their value in the OS vault under
-/// `secret_ref` and leave `value` empty; non-secret entries store the value
-/// inline. See `design/mcp-env-vars-design.md`.
+/// A single environment variable (stdio MCP server, CLI provider connection)
+/// or HTTP header (http MCP server) entry. Secret entries store their value
+/// in the OS vault under `secret_ref` and leave `value` empty; non-secret
+/// entries store the value inline.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, ts_rs::TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export, export_to = "bindings.ts")]
@@ -1023,6 +1023,7 @@ mod tests {
             enabled,
             created_at: 0,
             updated_at: 0,
+            env: Vec::new(),
         }
     }
 

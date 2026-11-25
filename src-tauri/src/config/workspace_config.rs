@@ -957,6 +957,7 @@ mod attach_provider_tests {
             enabled,
             created_at: 0,
             updated_at: 0,
+            env: Vec::new(),
         }
     }
 

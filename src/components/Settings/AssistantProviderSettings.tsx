@@ -15,6 +15,7 @@ import styles from './ProviderSettings.module.css';
 import modalStyles from './McpServerFormModal.module.css';
 import { openExternal } from '../../utils/openExternal';
 import { useOverlayLayer } from '../../hooks/useOverlayLayer';
+import { EnvVarEditor, envRowsError, rowsFromEntries, rowsToEnvVars, type EnvRow } from './EnvVarEditor';
 
 import { askOnce } from '../../utils/askOnce';
 import { notifySettingsChanged } from '../../utils/settingsEvents';
@@ -33,6 +34,8 @@ interface ConnectionForm {
   modelId: string;
   enabled: boolean;
   authMode: AuthMode | null;
+  /** Env vars for a CLI connection's process; unused for API connections. */
+  envRows: EnvRow[];
 }
 
 const LoadingIcon = () => (
@@ -77,6 +80,7 @@ const initialForm: ConnectionForm = {
   modelId: '',
   enabled: true,
   authMode: null,
+  envRows: [],
 };
 
 const CLI_BINARY_PLACEHOLDERS: Record<string, string> = {
@@ -387,6 +391,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
         modelId: connection.modelId,
         enabled: connection.enabled,
         authMode: connection.authMode || null,
+        envRows: rowsFromEntries(connection.env),
       });
       setFormError(null);
       setSuccess(null);
@@ -466,6 +471,11 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
       setFormError('API key is required for new connections.');
       return;
     }
+    const envError = isCliAdapter ? envRowsError(form.envRows) : null;
+    if (envError) {
+      setFormError(envError);
+      return;
+    }
 
     setSaving(true);
     setFormError(null);
@@ -473,6 +483,8 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
 
     const authMode: AuthMode | null = isCliAdapter ? 'subscription_login' : form.authMode ?? null;
     const brandId = form.providerId || form.protocolId;
+    // Only CLI connections spawn a process; API connections have no env.
+    const env = isCliAdapter ? rowsToEnvVars(form.envRows) : undefined;
 
     try {
       if (editingId) {
@@ -487,6 +499,9 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
           modelId: form.modelId.trim(),
           accountLabel: null,
           enabled: form.enabled,
+          // The full list replaces the stored env, so removing every row
+          // clears it; a stored secret sent without a value is kept.
+          env,
         });
         setSuccess('Connection updated.');
       } else {
@@ -499,6 +514,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
           baseUrl: form.baseUrl.trim() || null,
           modelId: form.modelId.trim(),
           accountLabel: null,
+          env: env?.length ? env : undefined,
         });
         setSuccess('Connection created.');
       }
@@ -1007,6 +1023,17 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                     disabled={saving}
                   />
                 </div>
+              )}
+
+              {isCliAdapter && (
+                <EnvVarEditor
+                  label="Environment variables"
+                  description="Passed to the CLI process, e.g. CLAUDE_CONFIG_DIR to use another account. Values are used as-is, so write full paths rather than ~."
+                  addLabel="Add variable"
+                  rows={form.envRows}
+                  onChange={(envRows) => setForm((current) => ({ ...current, envRows }))}
+                  disabled={saving}
+                />
               )}
 
               {editingId && (

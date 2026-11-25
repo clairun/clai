@@ -669,6 +669,7 @@ fn register_detected_providers(config_manager: &ConfigManager) {
                 enabled: true,
                 created_at: now,
                 updated_at: now,
+                env: Vec::new(),
             };
             match config_manager.add_provider_connection(connection) {
                 Ok(()) => tracing::info!(
