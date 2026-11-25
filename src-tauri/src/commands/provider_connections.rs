@@ -109,113 +109,30 @@ pub async fn provider_catalog_list() -> Result<Vec<ProviderCatalogEntry>, String
 /// the call) and reuses the adapter's `list_models`. On failure the caller
 /// falls back to the catalog entry's `curated_models`.
 #[tauri::command]
-#[expect(
-    clippy::too_many_lines,
-    reason = "lint debt: 106 lines against a 100-line budget; split it, do not raise the budget"
-)]
 pub async fn provider_catalog_probe_models(
     request: ProbeModelsRequest,
     state: State<'_, AppState>,
+) -> Result<Vec<ModelInfo>, String> {
+    let probe_id = uuid::Uuid::new_v4().to_string();
+    probe_models(&state.config_manager, request, probe_id).await
+}
+
+async fn probe_models(
+    config_manager: &Mutex<ConfigManager>,
+    request: ProbeModelsRequest,
+    probe_id: String,
 ) -> Result<Vec<ModelInfo>, String> {
     // CLI providers have static lists — no live probe needed.
     if let Some(models) = cli::models_for_provider(&request.protocol_id) {
         return Ok(models);
     }
 
-    let existing_connection = if let Some(connection_id) = request
-        .connection_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let config = state
-            .config_manager
-            .lock()
-            .map_err(|e| format!("Lock error: {}", e))?;
-        Some(
-            config
-                .get_provider_connection(connection_id)
-                .ok_or_else(|| format!("Provider connection not found: {}", connection_id))?,
-        )
-    } else {
-        None
-    };
-
-    let probe_id = uuid::Uuid::new_v4().to_string();
-    let probe_secret_ref = format!("provider-probe::{}", probe_id);
-    let key = request
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty());
-    let mut stored_key = false;
-    let secret_ref = if let Some(key) = key {
-        ProviderSecretStorage::set_secret(&probe_secret_ref, key)
+    let connection = probe_connection(config_manager, &request, probe_id)?;
+    let typed_key = request.typed_key();
+    if let Some(key) = typed_key {
+        ProviderSecretStorage::set_secret(&connection.secret_ref, key)
             .map_err(|e| format!("Failed to store probe credential: {}", e))?;
-        stored_key = true;
-        probe_secret_ref.clone()
-    } else if let Some(existing) = existing_connection.as_ref() {
-        existing.secret_ref.clone()
-    } else {
-        probe_secret_ref.clone()
-    };
-    let brand_id = request
-        .provider_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            existing_connection
-                .as_ref()
-                .map(|conn| conn.provider_id.clone())
-        })
-        .unwrap_or_else(|| request.protocol_id.clone());
-
-    let connection = ProviderConnection {
-        id: existing_connection
-            .as_ref()
-            .map(|conn| conn.id.clone())
-            .unwrap_or(probe_id),
-        name: "probe".to_string(),
-        protocol_id: request.protocol_id.clone(),
-        provider_id: brand_id,
-        auth_mode: existing_connection
-            .as_ref()
-            .map(|conn| conn.auth_mode.clone())
-            .unwrap_or(AuthMode::DeveloperApiKey),
-        base_url: request
-            .base_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_string)
-            .or_else(|| {
-                existing_connection
-                    .as_ref()
-                    .and_then(|conn| conn.base_url.clone())
-            }),
-        secret_ref: secret_ref.clone(),
-        model_id: existing_connection
-            .as_ref()
-            .map(|conn| conn.model_id.clone())
-            .unwrap_or_default(),
-        account_label: existing_connection
-            .as_ref()
-            .and_then(|conn| conn.account_label.clone()),
-        enabled: true,
-        created_at: existing_connection
-            .as_ref()
-            .map(|conn| conn.created_at)
-            .unwrap_or(0),
-        updated_at: existing_connection
-            .as_ref()
-            .map(|conn| conn.updated_at)
-            .unwrap_or(0),
-        // CLI connections return before this point (static model lists), and
-        // API adapters spawn no process.
-        env: Vec::new(),
-    };
+    }
 
     let adapter = providers::resolve_connection_adapter(&connection).map_err(|e| e.to_string());
     let result = match adapter {
@@ -226,16 +143,109 @@ pub async fn provider_catalog_probe_models(
         Err(e) => Err(e),
     };
 
-    if stored_key {
-        let _ = ProviderSecretStorage::clear_secret(&probe_secret_ref);
+    if typed_key.is_some() {
+        let _ = ProviderSecretStorage::clear_secret(&connection.secret_ref);
     }
     result
+}
+
+impl ProbeModelsRequest {
+    fn typed_key(&self) -> Option<&str> {
+        self.api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+    }
+}
+
+/// The connection a probe lists models with: the request's fields over the
+/// saved connection's, if any. A typed key gets its own transient secret.
+fn probe_connection(
+    config_manager: &Mutex<ConfigManager>,
+    request: &ProbeModelsRequest,
+    probe_id: String,
+) -> Result<ProviderConnection, String> {
+    let existing = match request
+        .connection_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(connection_id) => Some(
+            config_manager
+                .lock()
+                .map_err(|e| format!("Lock error: {}", e))?
+                .get_provider_connection(connection_id)
+                .ok_or_else(|| format!("Provider connection not found: {}", connection_id))?,
+        ),
+        None => None,
+    };
+
+    let brand_id = request
+        .provider_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| existing.as_ref().map(|conn| conn.provider_id.clone()))
+        .unwrap_or_else(|| request.protocol_id.clone());
+    let base_url =
+        trimmed(request.base_url.clone()).or_else(|| existing.as_ref()?.base_url.clone());
+    check_brand_protocol(&brand_id, &request.protocol_id)?;
+    check_base_url(&brand_id, base_url.as_deref(), existing.as_ref())?;
+
+    let probe_secret_ref = format!("provider-probe::{probe_id}");
+    let name = "probe".to_string();
+    let protocol_id = request.protocol_id.clone();
+    // CLI connections return before this point (static model lists), and
+    // API adapters spawn no process, so a probe carries no env.
+    let connection = match existing {
+        Some(existing) => ProviderConnection {
+            name,
+            protocol_id,
+            provider_id: brand_id,
+            base_url,
+            secret_ref: if request.typed_key().is_some() {
+                probe_secret_ref
+            } else {
+                existing.secret_ref
+            },
+            enabled: true,
+            env: Vec::new(),
+            ..existing
+        },
+        None => ProviderConnection {
+            id: probe_id,
+            name,
+            protocol_id,
+            provider_id: brand_id,
+            auth_mode: AuthMode::DeveloperApiKey,
+            base_url,
+            secret_ref: probe_secret_ref,
+            model_id: String::new(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+            env: Vec::new(),
+        },
+    };
+    Ok(connection)
 }
 
 #[tauri::command]
 pub async fn provider_connection_create(
     request: CreateProviderConnectionRequest,
     state: State<'_, AppState>,
+) -> Result<ProviderConnection, String> {
+    let id = uuid::Uuid::new_v4().to_string();
+    create_connection(&state.config_manager, request, id)
+}
+
+fn create_connection(
+    config_manager: &Mutex<ConfigManager>,
+    request: CreateProviderConnectionRequest,
+    id: String,
 ) -> Result<ProviderConnection, String> {
     let descriptor = providers::get_provider_descriptor(&request.protocol_id)
         .ok_or_else(|| format!("Unsupported provider: {}", request.protocol_id))?;
@@ -252,7 +262,6 @@ pub async fn provider_connection_create(
         ));
     }
 
-    let id = uuid::Uuid::new_v4().to_string();
     let auth_mode = request.auth_mode.unwrap_or(AuthMode::DeveloperApiKey);
     let secret_ref = format!("provider-connection::{}", id);
     let brand_id = request
@@ -262,6 +271,9 @@ pub async fn provider_connection_create(
         .filter(|v| !v.is_empty())
         .map(str::to_string)
         .unwrap_or_else(|| request.protocol_id.clone());
+    let base_url = trimmed(request.base_url);
+    check_brand_protocol(&brand_id, &request.protocol_id)?;
+    check_base_url(&brand_id, base_url.as_deref(), None)?;
     // Keyless self-hosted catalog entries (ollama / LM Studio / vLLM) may be
     // created without an API key; store one only when provided.
     let requires_key = catalog::requires_api_key(&brand_id);
@@ -287,10 +299,7 @@ pub async fn provider_connection_create(
         protocol_id: request.protocol_id,
         provider_id: brand_id,
         auth_mode,
-        base_url: request
-            .base_url
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty()),
+        base_url,
         secret_ref,
         model_id: request.model_id.trim().to_string(),
         account_label: request
@@ -302,13 +311,50 @@ pub async fn provider_connection_create(
         updated_at: now,
         env,
     };
-    state
-        .config_manager
+    config_manager
         .lock()
         .map_err(|e| format!("Lock error: {}", e))?
         .add_provider_connection(connection.clone())
         .map_err(|e| format!("Failed to create provider connection: {}", e))?;
     Ok(connection)
+}
+
+const BASE_URL_REQUIRED: &str = "A base URL is required for this provider";
+
+/// A catalog brand without a default base (the custom-* entries) needs one:
+/// without it, its key would go to the protocol's default host. A connection
+/// saved without one before this rule keeps working under its brand.
+fn check_base_url(
+    brand_id: &str,
+    base_url: Option<&str>,
+    existing: Option<&ProviderConnection>,
+) -> Result<(), String> {
+    let requires_base_url =
+        catalog::get_entry(brand_id).is_some_and(|entry| entry.default_base_url.is_none());
+    let saved_without_base =
+        existing.is_some_and(|conn| conn.base_url.is_none() && conn.provider_id == brand_id);
+    if base_url.is_none() && requires_base_url && !saved_without_base {
+        return Err(BASE_URL_REQUIRED.to_string());
+    }
+    Ok(())
+}
+
+/// A catalog brand speaks one protocol: under another, its key would go to
+/// the brand's host in a wire format it does not serve, or to another host.
+fn check_brand_protocol(brand_id: &str, protocol_id: &str) -> Result<(), String> {
+    match catalog::get_entry(brand_id) {
+        Some(entry) if entry.protocol_id != protocol_id => Err(format!(
+            "Provider '{brand_id}' uses the '{}' protocol, not '{protocol_id}'",
+            entry.protocol_id
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn trimmed(value: Option<String>) -> Option<String> {
+    value
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
 }
 
 /// Validates a connection's env vars and moves secret values into the vault,
@@ -369,19 +415,6 @@ fn update_connection(
         ));
     }
 
-    let auth_mode = request.auth_mode.unwrap_or(existing.auth_mode.clone());
-    if let Some(api_key) = request
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-    {
-        if auth_mode == AuthMode::DeveloperApiKey {
-            ProviderSecretStorage::set_secret(&existing.secret_ref, api_key)
-                .map_err(|e| format!("Failed to store provider credential: {}", e))?;
-        }
-    }
-
     let brand_id = request
         .provider_id
         .as_deref()
@@ -395,6 +428,26 @@ fn update_connection(
                 existing.provider_id.clone()
             }
         });
+    // A row hand-edited to a brand of another protocol keeps saving as is.
+    if brand_id != existing.provider_id {
+        check_brand_protocol(&brand_id, &request.protocol_id)?;
+    }
+    let base_url = trimmed(request.base_url);
+    check_base_url(&brand_id, base_url.as_deref(), Some(&existing))?;
+
+    let auth_mode = request.auth_mode.unwrap_or(existing.auth_mode.clone());
+    if let Some(api_key) = request
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        if auth_mode == AuthMode::DeveloperApiKey {
+            ProviderSecretStorage::set_secret(&existing.secret_ref, api_key)
+                .map_err(|e| format!("Failed to store provider credential: {}", e))?;
+        }
+    }
+
     let env = store_connection_env(
         &request.id,
         &request.protocol_id,
@@ -407,10 +460,7 @@ fn update_connection(
         protocol_id: request.protocol_id,
         provider_id: brand_id,
         auth_mode,
-        base_url: request
-            .base_url
-            .map(|v| v.trim().to_string())
-            .filter(|v| !v.is_empty()),
+        base_url,
         secret_ref: existing.secret_ref,
         model_id: request.model_id.trim().to_string(),
         account_label: request
@@ -1105,6 +1155,279 @@ mod tests {
             .get_provider_connection(&connection.id)
             .unwrap();
         assert_eq!(saved.protocol_id, cli::CLAUDE_CODE_PROVIDER_ID);
+    }
+
+    fn create_request(
+        protocol_id: &str,
+        provider_id: &str,
+        base_url: Option<&str>,
+    ) -> CreateProviderConnectionRequest {
+        CreateProviderConnectionRequest {
+            name: "Custom".into(),
+            protocol_id: protocol_id.into(),
+            provider_id: Some(provider_id.into()),
+            api_key: Some("sk-custom".into()),
+            auth_mode: None,
+            base_url: base_url.map(Into::into),
+            model_id: "m".into(),
+            account_label: None,
+            env: Vec::new(),
+        }
+    }
+
+    fn empty_config(dir: &tempfile::TempDir) -> Mutex<ConfigManager> {
+        Mutex::new(ConfigManager::new_for_tests(
+            crate::AppConfig::default(),
+            dir.path().join("config.json"),
+        ))
+    }
+
+    /// A custom brand has no catalog base, so without its own URL its key
+    /// would go to the protocol's default host.
+    #[test]
+    fn create_rejects_a_custom_brand_without_a_base_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = empty_config(&dir);
+        let cases = [
+            ("anthropic", "custom-anthropic", None),
+            ("anthropic", "custom-anthropic", Some("  ")),
+            ("openai", "custom-openai", None),
+        ];
+        for (protocol_id, brand, base_url) in cases {
+            let id = "custom-create-rejected";
+            let error = create_connection(
+                &config,
+                create_request(protocol_id, brand, base_url),
+                id.into(),
+            )
+            .expect_err("custom brand without a base URL");
+            assert_eq!(error, BASE_URL_REQUIRED);
+            assert_eq!(stored(&format!("provider-connection::{id}")), None);
+        }
+        assert!(config.lock().unwrap().get_provider_connections().is_empty());
+
+        let created = create_connection(
+            &config,
+            create_request("anthropic", "minimax", None),
+            "minimax-create".into(),
+        )
+        .unwrap();
+        assert_eq!(created.base_url, None, "the catalog base applies");
+        let created = create_connection(
+            &config,
+            create_request(
+                "anthropic",
+                "custom-anthropic",
+                Some(" https://llm.example.com "),
+            ),
+            "custom-create".into(),
+        )
+        .unwrap();
+        assert_eq!(created.base_url.as_deref(), Some("https://llm.example.com"));
+    }
+
+    fn custom_connection(id: &str, base_url: Option<&str>) -> ProviderConnection {
+        let mut connection = openrouter_connection(id, String::new());
+        connection.protocol_id = "anthropic".into();
+        connection.provider_id = "custom-anthropic".into();
+        connection.base_url = base_url.map(Into::into);
+        connection
+    }
+
+    #[test]
+    fn update_rejects_clearing_a_custom_base_url() {
+        let connection = custom_connection("custom-clear", Some("https://llm.example.com"));
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with(&connection, dir.path().join("config.json"));
+        let mut request = update_request(&connection, None);
+        request.api_key = Some("sk-new".into());
+
+        let error = update_connection(&config, request).expect_err("base URL cleared");
+        assert_eq!(error, BASE_URL_REQUIRED);
+        let saved = config
+            .lock()
+            .unwrap()
+            .get_provider_connection(&connection.id)
+            .unwrap();
+        assert_eq!(saved.base_url, connection.base_url);
+        assert_eq!(stored(&connection.secret_ref), None, "key not written");
+    }
+
+    /// Connections saved without a base before the rule keep saving.
+    #[test]
+    fn update_keeps_a_custom_connection_saved_without_a_base_url() {
+        let connection = custom_connection("custom-legacy", None);
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with(&connection, dir.path().join("config.json"));
+        let mut request = update_request(&connection, None);
+        request.name = "Renamed".into();
+
+        let updated = update_connection(&config, request).expect("legacy connection updates");
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.base_url, None);
+    }
+
+    /// The legacy exemption is for the brand the connection was saved as:
+    /// a URL-less MiniMax connection turned custom would send its key to
+    /// Anthropic.
+    #[test]
+    fn update_rejects_switching_a_url_less_connection_to_a_custom_brand() {
+        let mut connection = custom_connection("minimax-to-custom", None);
+        connection.provider_id = "minimax".into();
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with(&connection, dir.path().join("config.json"));
+        let mut request = update_request(&connection, None);
+        request.provider_id = Some("custom-anthropic".into());
+        request.api_key = Some("sk-new".into());
+
+        let error = update_connection(&config, request).expect_err("custom brand without a URL");
+        assert_eq!(error, BASE_URL_REQUIRED);
+        assert_eq!(stored(&connection.secret_ref), None, "key not written");
+    }
+
+    /// Listing models for a custom brand without a URL would send the typed
+    /// key to the protocol's default host.
+    #[tokio::test]
+    async fn probe_rejects_a_custom_brand_without_a_base_url() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = empty_config(&dir);
+        let request = ProbeModelsRequest {
+            protocol_id: "anthropic".into(),
+            connection_id: None,
+            provider_id: Some("custom-anthropic".into()),
+            base_url: None,
+            api_key: Some("sk-typed".into()),
+        };
+
+        let error = probe_models(&config, request, "custom-probe".into())
+            .await
+            .expect_err("custom brand without a URL");
+        assert_eq!(error, BASE_URL_REQUIRED);
+        assert_eq!(
+            stored("provider-probe::custom-probe"),
+            None,
+            "key not written"
+        );
+    }
+
+    fn probe_request(connection_id: &str, api_key: Option<&str>) -> ProbeModelsRequest {
+        ProbeModelsRequest {
+            protocol_id: "anthropic".into(),
+            connection_id: Some(connection_id.into()),
+            provider_id: None,
+            base_url: None,
+            api_key: api_key.map(Into::into),
+        }
+    }
+
+    /// "Load models" on a saved connection probes with its stored base URL
+    /// and key; a legacy custom connection saved without a URL still probes.
+    #[test]
+    fn probe_uses_the_saved_base_url_and_key() {
+        let dir = tempfile::tempdir().unwrap();
+        for base_url in [Some("https://llm.example.com"), None] {
+            let saved = custom_connection("custom-probe-saved", base_url);
+            let config = config_with(&saved, dir.path().join("config.json"));
+
+            let probe = probe_connection(&config, &probe_request(&saved.id, None), "p".into())
+                .expect("saved connection probes");
+            assert_eq!(probe.base_url, saved.base_url);
+            assert_eq!(probe.secret_ref, saved.secret_ref);
+
+            let probe = probe_connection(
+                &config,
+                &probe_request(&saved.id, Some("sk-typed")),
+                "p".into(),
+            )
+            .unwrap();
+            assert_eq!(
+                probe.secret_ref, "provider-probe::p",
+                "a typed key is transient"
+            );
+        }
+    }
+
+    /// A brand under another protocol would send its key elsewhere: MiniMax
+    /// over the OpenAI protocol resolves to MiniMax's Anthropic base.
+    #[tokio::test]
+    async fn create_and_probe_reject_a_brand_of_another_protocol() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = empty_config(&dir);
+        let error = create_connection(
+            &config,
+            create_request("openai", "minimax", None),
+            "minimax-over-openai".into(),
+        )
+        .expect_err("brand of another protocol");
+        assert!(error.contains("'anthropic' protocol"), "{error}");
+        assert_eq!(stored("provider-connection::minimax-over-openai"), None);
+        assert!(config.lock().unwrap().get_provider_connections().is_empty());
+
+        let request = ProbeModelsRequest {
+            protocol_id: "openai".into(),
+            connection_id: None,
+            provider_id: Some("minimax".into()),
+            base_url: None,
+            api_key: Some("sk-typed".into()),
+        };
+        let error = probe_models(&config, request, "minimax-probe".into())
+            .await
+            .expect_err("brand of another protocol");
+        assert!(error.contains("'anthropic' protocol"), "{error}");
+        assert_eq!(stored("provider-probe::minimax-probe"), None);
+    }
+
+    /// Switching a saved connection to a brand of another protocol would
+    /// send its key to that brand's host; a row already saved that way (by
+    /// hand) keeps saving under its brand.
+    #[test]
+    fn update_rejects_switching_to_a_brand_of_another_protocol() {
+        let connection = openrouter_connection("openai-to-minimax", String::new());
+        let dir = tempfile::tempdir().unwrap();
+        let config = config_with(&connection, dir.path().join("config.json"));
+        let mut request = update_request(&connection, None);
+        request.provider_id = Some("minimax".into());
+        request.api_key = Some("sk-new".into());
+
+        let error = update_connection(&config, request).expect_err("brand of another protocol");
+        assert!(error.contains("'anthropic' protocol"), "{error}");
+        assert_eq!(stored(&connection.secret_ref), None, "key not written");
+        let saved = config
+            .lock()
+            .unwrap()
+            .get_provider_connection(&connection.id)
+            .unwrap();
+        assert_eq!(saved.provider_id, "openrouter");
+
+        let mut hand_edited = connection.clone();
+        hand_edited.id = "hand-edited-minimax".into();
+        hand_edited.provider_id = "minimax".into();
+        let config = config_with(&hand_edited, dir.path().join("config.json"));
+        let mut request = update_request(&hand_edited, None);
+        request.provider_id = Some("minimax".into());
+        request.name = "Renamed".into();
+        let updated = update_connection(&config, request).expect("unchanged brand saves");
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.provider_id, "minimax");
+    }
+
+    /// A typed key lives only for the probe, failed or not.
+    #[tokio::test]
+    async fn probe_clears_the_typed_key_after_a_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = empty_config(&dir);
+        let request = ProbeModelsRequest {
+            protocol_id: "no-such-protocol".into(),
+            connection_id: None,
+            provider_id: None,
+            base_url: None,
+            api_key: Some("sk-typed".into()),
+        };
+
+        probe_models(&config, request, "unresolved-probe".into())
+            .await
+            .expect_err("no adapter for the protocol");
+        assert_eq!(stored("provider-probe::unresolved-probe"), None);
     }
 
     /// Delete clears the connection's secrets only once config no longer
