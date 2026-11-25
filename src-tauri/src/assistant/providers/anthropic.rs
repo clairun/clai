@@ -165,11 +165,15 @@ fn get_api_key(connection: &ProviderConnection) -> Result<String, ProviderError>
 }
 
 /// Anthropic-compatible bases omit the version, as the Anthropic SDKs'
-/// `base_url` does (e.g. `https://api.minimax.io/anthropic`).
+/// `base_url` does (e.g. `https://api.minimax.io/anthropic`). A connection
+/// without a base uses its brand's catalog base, so a brand's key never goes
+/// to Anthropic by default.
 pub(super) fn endpoint_url(connection: &ProviderConnection, endpoint: &str) -> String {
+    let catalog_base = catalog::get_entry(&connection.provider_id).and_then(|e| e.default_base_url);
     let base = connection
         .base_url
         .as_deref()
+        .or(catalog_base.as_deref())
         .unwrap_or(DEFAULT_BASE_URL)
         .trim_end_matches('/');
     format!("{base}/v1/{endpoint}")
@@ -913,6 +917,29 @@ mod tests {
             created_at: 0,
             updated_at: 0,
             env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn endpoint_url_falls_back_to_the_brand_base_then_anthropic() {
+        #[rustfmt::skip]
+        let cases = [
+            (connection_at("minimax", None), "https://api.minimax.io/anthropic/v1/messages"),
+            (connection_at("anthropic", None), "https://api.anthropic.com/v1/messages"),
+            (connection_at("custom-anthropic", None), "https://api.anthropic.com/v1/messages"),
+            (
+                connection_at("minimax", Some("https://proxy.example.com/")),
+                "https://proxy.example.com/v1/messages",
+            ),
+        ];
+        for (connection, expected) in cases {
+            assert_eq!(
+                endpoint_url(&connection, "messages"),
+                expected,
+                "{} at {:?}",
+                connection.provider_id,
+                connection.base_url
+            );
         }
     }
 

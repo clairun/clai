@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, waitFor } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { ProviderCatalogEntry } from '../../generated/bindings';
 
 const client = vi.hoisted(() => ({
   listProviderConnections: vi.fn().mockResolvedValue([]),
@@ -435,5 +436,268 @@ describe('provider connection environment variables', () => {
 
     await waitFor(() => expect(client.updateProviderConnection).toHaveBeenCalledTimes(1));
     expect(client.updateProviderConnection.mock.calls[0]![0].env).toBeUndefined();
+  });
+});
+
+describe('provider connection form', () => {
+  const entry = (
+    fields: Pick<ProviderCatalogEntry, 'id' | 'displayName' | 'category' | 'protocolId'> & Partial<ProviderCatalogEntry>,
+  ): ProviderCatalogEntry => ({
+    description: '',
+    defaultBaseUrl: null,
+    baseUrlLocked: false,
+    requiresApiKey: true,
+    logoAsset: '',
+    curatedModels: [],
+    docsUrl: null,
+    extraHeaders: [],
+    modelsEndpointStyle: 'standard',
+    capabilities: null,
+    ...fields,
+  });
+  const CATALOG = [
+    entry({
+      id: 'anthropic', displayName: 'Anthropic', category: 'hosted', protocolId: 'anthropic',
+      defaultBaseUrl: 'https://api.anthropic.com', baseUrlLocked: true,
+    }),
+    entry({
+      id: 'minimax', displayName: 'MiniMax', category: 'hosted', protocolId: 'anthropic',
+      defaultBaseUrl: 'https://api.minimax.io/anthropic', baseUrlLocked: true,
+      docsUrl: 'https://www.minimax.io/platform',
+    }),
+    entry({
+      id: 'ollama', displayName: 'Ollama', category: 'self_hosted', protocolId: 'openai',
+      defaultBaseUrl: 'http://localhost:11434/v1', requiresApiKey: false,
+      docsUrl: 'https://ollama.com',
+    }),
+    entry({ id: 'custom-openai', displayName: 'Custom (OpenAI-compatible)', category: 'custom', protocolId: 'openai' }),
+    entry({ id: 'custom-anthropic', displayName: 'Custom (Anthropic-compatible)', category: 'custom', protocolId: 'anthropic' }),
+  ];
+  const connection = (fields: { id: string; name: string; protocolId: string; providerId: string; baseUrl: string | null }) => ({
+    authMode: 'developer_api_key',
+    secretRef: fields.id,
+    modelId: 'some-model',
+    accountLabel: null,
+    enabled: true,
+    ...fields,
+  });
+  const CONNECTIONS = [
+    connection({ id: 'c1', name: 'Claude API', protocolId: 'anthropic', providerId: 'anthropic', baseUrl: 'https://api.anthropic.com' }),
+    connection({ id: 'c2', name: 'Old Claude', protocolId: 'anthropic', providerId: 'anthropic', baseUrl: null }),
+    connection({ id: 'c3', name: 'Old Custom', protocolId: 'openai', providerId: 'custom-openai', baseUrl: null }),
+    connection({ id: 'c4', name: 'Gateway', protocolId: 'anthropic', providerId: 'custom-anthropic', baseUrl: 'https://llm.example.com' }),
+    connection({ id: 'c5', name: 'Local Ollama', protocolId: 'openai', providerId: 'ollama', baseUrl: 'http://localhost:11434/v1' }),
+    connection({ id: 'c6', name: 'Old Ollama', protocolId: 'openai', providerId: 'ollama', baseUrl: null }),
+    connection({ id: 'c7', name: 'MiniMax Proxy', protocolId: 'anthropic', providerId: 'minimax', baseUrl: 'https://proxy.example.com/anthropic' }),
+    connection({ id: 'c8', name: 'MiniMax Slash', protocolId: 'anthropic', providerId: 'minimax', baseUrl: 'https://api.minimax.io/anthropic/' }),
+    connection({ id: 'c9', name: 'MiniMax Caps', protocolId: 'anthropic', providerId: 'minimax', baseUrl: 'https://API.MiniMax.io/anthropic' }),
+    connection({ id: 'c10', name: 'Old Custom Claude', protocolId: 'anthropic', providerId: 'custom-anthropic', baseUrl: null }),
+  ];
+  const BASE_URL_REQUIRED = 'Base URL is required for a custom provider.';
+
+  beforeEach(() => {
+    client.listAvailableProviderAdapters.mockResolvedValue([]);
+    client.listProviderCatalog.mockResolvedValue(CATALOG);
+    client.listProviderConnections.mockReset().mockResolvedValue(CONNECTIONS);
+    client.createProviderConnection.mockReset().mockResolvedValue({});
+    client.updateProviderConnection.mockReset().mockResolvedValue({});
+  });
+
+  const pickProvider = async (user: ReturnType<typeof userEvent.setup>, name: string) => {
+    await user.click(await screen.findByRole('button', { name: '+ Add Connection' }));
+    await user.click(await screen.findByText(name));
+  };
+
+  it('requires a base URL for a new custom connection', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await pickProvider(user, 'Custom (OpenAI-compatible)');
+
+    await user.type(screen.getByLabelText(/^API Key/), 'sk-test');
+    await user.type(screen.getByLabelText(/^Model ID/), 'llama3');
+    await user.type(screen.getByLabelText(/^Base URL/), '   ');
+    await user.click(screen.getByRole('button', { name: 'Add Connection' }));
+    expect(await screen.findByText(BASE_URL_REQUIRED)).toBeInTheDocument();
+    expect(client.createProviderConnection).not.toHaveBeenCalled();
+
+    await user.clear(screen.getByLabelText(/^Base URL/));
+    await user.type(screen.getByLabelText(/^Base URL/), 'https://llm.example.com/v1');
+    await user.click(screen.getByRole('button', { name: 'Add Connection' }));
+    await waitFor(() => expect(client.createProviderConnection).toHaveBeenCalledTimes(1));
+    expect(client.createProviderConnection.mock.calls[0]![0].baseUrl).toBe('https://llm.example.com/v1');
+  });
+
+  it('enables Load models for a new custom connection only once it has a base URL', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await pickProvider(user, 'Custom (Anthropic-compatible)');
+
+    const loadModels = screen.getByRole('button', { name: 'Load models' });
+    expect(loadModels).toBeDisabled();
+    expect(loadModels).toHaveAccessibleDescription('Enter the base URL below to load models.');
+
+    await user.type(screen.getByLabelText(/^Base URL/), 'https://llm.example.com');
+    expect(loadModels).toBeEnabled();
+    expect(loadModels).not.toHaveAccessibleDescription();
+    expect(screen.queryByText('Enter the base URL below to load models.')).toBeNull();
+  });
+
+  it('keeps a custom connection from losing its base URL on edit', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await user.click(await screen.findByText('Gateway'));
+
+    await user.clear(screen.getByLabelText(/^Base URL/));
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }));
+
+    expect(await screen.findByText(BASE_URL_REQUIRED)).toBeInTheDocument();
+    expect(client.updateProviderConnection).not.toHaveBeenCalled();
+    expect(screen.queryByText(/No base URL is set/)).toBeNull();
+  });
+
+  it('does not warn about the official API for a self-hosted connection without a base URL', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await user.click(await screen.findByText('Old Ollama'));
+
+    expect(screen.getByLabelText(/^Base URL/)).toHaveValue('');
+    expect(screen.queryByText(/No base URL is set/)).toBeNull();
+  });
+
+  // It already reaches the protocol's official API; saving must not force a URL on it.
+  it('saves a custom connection stored without a base URL unchanged', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await user.click(await screen.findByText('Old Custom'));
+
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }));
+
+    await waitFor(() => expect(client.updateProviderConnection).toHaveBeenCalledTimes(1));
+    expect(client.updateProviderConnection.mock.calls[0]![0].baseUrl).toBeNull();
+  });
+
+  it.each([
+    ['Old Custom', 'https://api.openai.com/v1'],
+    ['Old Custom Claude', 'https://api.anthropic.com'],
+  ])('warns that %s sends its key to %s', async (name, officialUrl) => {
+    const user = userEvent.setup();
+    openSettings();
+    await user.click(await screen.findByText(name));
+
+    const baseUrl = screen.getByLabelText(/^Base URL/);
+    expect(baseUrl).toHaveAccessibleDescription(
+      `No base URL is set, so requests and this connection's API key go to ${officialUrl}.`,
+    );
+    expect(screen.getByRole('button', { name: 'Load models' })).toBeEnabled();
+
+    await user.type(baseUrl, 'https://llm.example.com');
+    expect(screen.queryByText(/No base URL is set/)).toBeNull();
+  });
+
+  it.each([
+    ['Custom (OpenAI-compatible)', 'https://llm.example.com/v1'],
+    ['Custom (Anthropic-compatible)', 'https://llm.example.com'],
+  ])('suggests an example base URL for %s', async (name, placeholder) => {
+    const user = userEvent.setup();
+    openSettings();
+    await pickProvider(user, name);
+
+    expect(screen.getByLabelText(/^Base URL/)).toHaveAttribute('placeholder', placeholder);
+  });
+
+  it('offers an optional API key for a keyless provider and sends it', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await pickProvider(user, 'Ollama');
+
+    const key = screen.getByLabelText(/^API Key/);
+    expect(key).toHaveAccessibleDescription(/Only needed if the server is set up to require a key/);
+    expect(screen.getByText('(optional)')).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Where do I get an API key/ })).toBeNull();
+    await user.type(key, 'vllm-secret');
+    await user.type(screen.getByLabelText(/^Model ID/), 'llama3');
+    await user.click(screen.getByRole('button', { name: 'Add Connection' }));
+
+    await waitFor(() => expect(client.createProviderConnection).toHaveBeenCalledTimes(1));
+    expect(client.createProviderConnection.mock.calls[0]![0].apiKey).toBe('vllm-secret');
+  });
+
+  it('creates a keyless connection without an API key', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await pickProvider(user, 'Ollama');
+
+    await user.type(screen.getByLabelText(/^Model ID/), 'llama3');
+    await user.click(screen.getByRole('button', { name: 'Add Connection' }));
+
+    await waitFor(() => expect(client.createProviderConnection).toHaveBeenCalledTimes(1));
+    expect(client.createProviderConnection.mock.calls[0]![0].apiKey).toBeNull();
+  });
+
+  it('shows the API key field when editing a keyless connection', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await user.click(await screen.findByText('Local Ollama'));
+
+    expect(screen.getByLabelText(/^API Key/)).toHaveValue('');
+  });
+
+  it('links to the key docs for a provider that requires a key', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await pickProvider(user, 'MiniMax');
+
+    expect(screen.getByRole('link', { name: /Where do I get an API key/ })).toHaveAttribute(
+      'href',
+      'https://www.minimax.io/platform',
+    );
+  });
+
+  it('opens the Base URL field when editing a hosted connection saved with another URL', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await user.click(await screen.findByText('MiniMax Proxy'));
+
+    expect(screen.getByLabelText(/^Base URL/)).toHaveValue('https://proxy.example.com/anthropic');
+    expect(screen.queryByRole('button', { name: 'Advanced: override' })).toBeNull();
+  });
+
+  it.each(['MiniMax Slash', 'MiniMax Caps'])(
+    'treats the stored URL of %s as the default endpoint',
+    async (name) => {
+      const user = userEvent.setup();
+      openSettings();
+      await user.click(await screen.findByText(name));
+
+      expect(screen.getByRole('button', { name: 'Advanced: override' })).toBeInTheDocument();
+      expect(screen.queryByLabelText(/^Base URL/)).toBeNull();
+    },
+  );
+
+  it('keeps a hosted endpoint locked when editing a connection saved at its default', async () => {
+    const user = userEvent.setup();
+    openSettings();
+    await user.click(await screen.findByText('Claude API'));
+
+    expect(screen.getByRole('button', { name: 'Advanced: override' })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/^Base URL/)).toBeNull();
+
+    await user.click(screen.getByRole('button', { name: 'Save Connection' }));
+    await waitFor(() => expect(client.updateProviderConnection).toHaveBeenCalledTimes(1));
+    expect(client.updateProviderConnection.mock.calls[0]![0].baseUrl).toBe('https://api.anthropic.com');
+  });
+
+  it("lists a connection without a stored base URL at its provider's default", async () => {
+    openSettings();
+    const row = (await screen.findByText('Old Claude')).closest<HTMLElement>('[role="button"]')!;
+
+    expect(within(row).getByText('https://api.anthropic.com')).toBeInTheDocument();
+  });
+
+  it("lists a self-hosted connection without a stored base URL at the entry's default", async () => {
+    openSettings();
+    const row = (await screen.findByText('Old Ollama')).closest<HTMLElement>('[role="button"]')!;
+
+    expect(within(row).getByText('http://localhost:11434/v1')).toBeInTheDocument();
   });
 });

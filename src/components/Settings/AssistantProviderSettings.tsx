@@ -94,6 +94,12 @@ const OFFICIAL_PROVIDER_BASE_URLS: Record<string, string> = {
   anthropic: 'https://api.anthropic.com',
 };
 
+// The Anthropic adapter appends /v1 itself.
+const CUSTOM_BASE_URL_EXAMPLES: Record<string, string> = {
+  openai: 'https://llm.example.com/v1',
+  anthropic: 'https://llm.example.com',
+};
+
 const DARK_THEME_LOGOS = new Set(['anthropic', 'codex', 'opencode', 'ollama', 'lmstudio']);
 
 const normalizeBaseUrl = (value?: string | null): string =>
@@ -152,6 +158,15 @@ const catalogEntryForConnection = (
   return catalog.find((entry) => entry.id === displayProviderId)
     || catalog.find((entry) => entry.id === connection.providerId)
     || null;
+};
+
+/** The endpoint the backend uses when a connection stores no base URL. */
+const defaultBaseUrlFor = (entry: ProviderCatalogEntry | null, protocolId: string): string =>
+  entry?.defaultBaseUrl || OFFICIAL_PROVIDER_BASE_URLS[protocolId] || '';
+
+const apiKeyPlaceholder = (editing: boolean, secretHint: string | null): string => {
+  if (editing && secretHint) return `\u2022\u2022\u2022\u2022${secretHint} \u2014 leave blank to keep`;
+  return editing ? 'Leave blank to keep existing key' : 'sk-...';
 };
 
 const useAppTheme = (): 'light' | 'dark' => {
@@ -261,6 +276,13 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
   const isCliAdapter = selectedAdapter?.isCliBacked === true;
   const requiresKey = selectedEntry ? selectedEntry.requiresApiKey : true;
   const baseUrlLocked = selectedEntry?.baseUrlLocked === true;
+  // Without a URL a custom entry sends its key to the official API; legacy URL-less connections stay exempt.
+  const editingConnection = connections.find((connection) => connection.id === editingId);
+  const isCustomEntry = !isCliAdapter && selectedEntry !== null && !selectedEntry.defaultBaseUrl;
+  const savedWithoutBaseUrl = Boolean(editingConnection) && !editingConnection?.baseUrl;
+  const baseUrlRequired = isCustomEntry && !savedWithoutBaseUrl;
+  const showOfficialApiWarning = isCustomEntry && savedWithoutBaseUrl && !form.baseUrl.trim();
+  const baseUrlMissing = baseUrlRequired && !form.baseUrl.trim();
 
   const cliAdapters = useMemo(
     () => adapters.filter((adapter) => adapter.isCliBacked),
@@ -380,7 +402,12 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
       setEditingId(connection.id);
       setSelectedEntry(nextSelectedEntry);
       setProbeModels([]);
-      setShowAdvancedUrl(Boolean(connection.baseUrl));
+      // Hosted connections store their default URL, so only a different one
+      // counts as an override.
+      setShowAdvancedUrl(
+        Boolean(connection.baseUrl)
+        && normalizeBaseUrl(connection.baseUrl) !== normalizeBaseUrl(nextSelectedEntry?.defaultBaseUrl),
+      );
       setForm({
         id: connection.id,
         name: connection.name,
@@ -471,6 +498,10 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
       setFormError('API key is required for new connections.');
       return;
     }
+    if (baseUrlMissing) {
+      setFormError('Base URL is required for a custom provider.');
+      return;
+    }
     const envError = isCliAdapter ? envRowsError(form.envRows) : null;
     if (envError) {
       setFormError(envError);
@@ -530,7 +561,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
     } finally {
       setSaving(false);
     }
-  }, [editingId, form, isCliAdapter, requiresKey, loadData]);
+  }, [editingId, form, isCliAdapter, requiresKey, baseUrlMissing, loadData]);
 
   const handleDelete = useCallback(async (connection: ProviderConnection) => {
     const confirmed = await askOnce(`Delete provider connection "${connection.name}"? This cannot be undone.`, {
@@ -737,7 +768,7 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                     <code>{connection.modelId.trim() || 'default model'}</code> • <code>
                       {connection.authMode === 'subscription_login'
                         ? (connection.baseUrl || CLI_BINARY_PLACEHOLDERS[connection.protocolId] || connection.protocolId)
-                        : (connection.baseUrl || 'api.openai.com/v1')}
+                        : (connection.baseUrl || defaultBaseUrlFor(catalogEntryForConnection(connection, catalog), connection.protocolId))}
                     </code>
                   </span>
                 </div>
@@ -882,10 +913,12 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                 </div>
               )}
 
-              {!isCliAdapter && requiresKey && (
+              {!isCliAdapter && (
                 <div className={modalStyles.field}>
                   <label className={modalStyles.label} htmlFor="provider-conn-api-key">
-                    API Key {!editingId && <span className={modalStyles.required}>*</span>}
+                    API Key{' '}
+                    {requiresKey && !editingId && <span className={modalStyles.required}>*</span>}
+                    {!requiresKey && <span style={{ fontWeight: 400, opacity: 0.7 }}>(optional)</span>}
                   </label>
                   <input
                     id="provider-conn-api-key"
@@ -893,16 +926,16 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                     type="password"
                     value={form.apiKey}
                     onChange={(e) => setForm((current) => ({ ...current, apiKey: e.target.value }))}
-                    placeholder={
-                      editingId
-                        ? editSecretHint
-                          ? `\u2022\u2022\u2022\u2022${editSecretHint} \u2014 leave blank to keep`
-                          : 'Leave blank to keep existing key'
-                        : 'sk-...'
-                    }
+                    placeholder={apiKeyPlaceholder(Boolean(editingId), editSecretHint)}
+                    aria-describedby={requiresKey ? undefined : 'provider-conn-api-key-hint'}
                     disabled={saving}
                   />
-                  {selectedEntry?.docsUrl && (
+                  {!requiresKey && (
+                    <p id="provider-conn-api-key-hint" className={modalStyles.sectionDescription}>
+                      Only needed if the server is set up to require a key. Make sure the server is running at the endpoint below.
+                    </p>
+                  )}
+                  {requiresKey && selectedEntry?.docsUrl && (
                     <a
                       href={selectedEntry.docsUrl}
                       onClick={(event) => {
@@ -918,12 +951,6 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                     </a>
                   )}
                 </div>
-              )}
-
-              {!isCliAdapter && !requiresKey && (
-                <p className={modalStyles.sectionDescription}>
-                  This provider is keyless — no API key required. Make sure the server is running at the endpoint below.
-                </p>
               )}
 
               <div className={modalStyles.field}>
@@ -965,12 +992,18 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                       type="button"
                       style={{ ...secondaryButtonStyle, whiteSpace: 'nowrap' }}
                       onClick={handleLoadModels}
-                      disabled={saving || probing}
+                      aria-describedby={baseUrlMissing ? 'provider-conn-load-models-hint' : undefined}
+                      disabled={saving || probing || baseUrlMissing}
                     >
                       {probing ? 'Loading…' : 'Load models'}
                     </button>
                   )}
                 </div>
+                {baseUrlMissing && (
+                  <p id="provider-conn-load-models-hint" className={modalStyles.hint}>
+                    Enter the base URL below to load models.
+                  </p>
+                )}
               </div>
 
               {/* Endpoint: CLI binary path, editable base URL, or locked-with-override */}
@@ -1012,16 +1045,26 @@ const AssistantProviderSettings = ({ initialAction = null }: AssistantProviderSe
                 </div>
               ) : (
                 <div className={modalStyles.field}>
-                  <label className={modalStyles.label} htmlFor="provider-conn-base-url">Base URL</label>
+                  <label className={modalStyles.label} htmlFor="provider-conn-base-url">
+                    Base URL {baseUrlRequired && <span className={modalStyles.required}>*</span>}
+                  </label>
                   <input
                     id="provider-conn-base-url"
                     className={modalStyles.input}
                     type="text"
                     value={form.baseUrl}
                     onChange={(e) => setForm((current) => ({ ...current, baseUrl: e.target.value }))}
-                    placeholder={selectedEntry?.defaultBaseUrl || 'https://api.openai.com/v1'}
+                    placeholder={isCustomEntry
+                      ? CUSTOM_BASE_URL_EXAMPLES[form.protocolId]
+                      : defaultBaseUrlFor(selectedEntry, form.protocolId)}
+                    aria-describedby={showOfficialApiWarning ? 'provider-conn-base-url-warning' : undefined}
                     disabled={saving}
                   />
+                  {showOfficialApiWarning && (
+                    <p id="provider-conn-base-url-warning" className={modalStyles.hint}>
+                      No base URL is set, so requests and this connection's API key go to {defaultBaseUrlFor(selectedEntry, form.protocolId)}.
+                    </p>
+                  )}
                 </div>
               )}
 
