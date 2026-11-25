@@ -8,6 +8,8 @@ use futures::{stream, Stream};
 use serde_json::Value;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
+use crate::assistant::auth::env_vars::{resolve_env_value, EnvSecrets};
+use crate::assistant::auth::Vault;
 use crate::assistant::providers::types::{ProviderAdapter, ProviderError};
 use crate::assistant::types::{
     AuthMode, CompletionRequest, ContentPart, MessageRole, ModelInfo, ProtocolFamily,
@@ -66,7 +68,7 @@ pub fn is_cli_provider(provider_id: &str) -> bool {
     )
 }
 
-pub fn command_for_provider(provider_id: &str) -> Option<&'static str> {
+fn command_for_provider(provider_id: &str) -> Option<&'static str> {
     match provider_id {
         CLAUDE_CODE_PROVIDER_ID => Some("claude"),
         CODEX_PROVIDER_ID => Some("codex"),
@@ -105,14 +107,6 @@ impl CliRuntime {
             Self::ClaudeCode => "Claude Code",
             Self::Codex => "Codex CLI",
             Self::OpenCode => "OpenCode",
-        }
-    }
-
-    fn default_command(self) -> &'static str {
-        match self {
-            Self::ClaudeCode => "claude",
-            Self::Codex => "codex",
-            Self::OpenCode => "opencode",
         }
     }
 }
@@ -200,12 +194,8 @@ async fn run_claude_summary(
     system_prompt: &str,
     prompt: &str,
 ) -> Result<String, ProviderError> {
-    let mut command = cli_command(
-        connection,
-        CliRuntime::ClaudeCode,
-        &[("ENABLE_TOOL_SEARCH", "false")],
-        working_dir,
-    );
+    let (mut command, _) = cli_command(connection, &[("ENABLE_TOOL_SEARCH", "false")], working_dir)
+        .map_err(ProviderError::RequestFailed)?;
     command
         .arg("-p")
         .arg("--safe-mode")
@@ -238,7 +228,8 @@ async fn run_codex_summary(
     system_prompt: &str,
     prompt: &str,
 ) -> Result<String, ProviderError> {
-    let mut command = cli_command(connection, CliRuntime::Codex, &[], working_dir);
+    let (mut command, _) =
+        cli_command(connection, &[], working_dir).map_err(ProviderError::RequestFailed)?;
     command
         .arg("exec")
         .arg("--json")
@@ -270,9 +261,8 @@ async fn run_opencode_summary(
     prompt: &str,
 ) -> Result<String, ProviderError> {
     let config = opencode_summary_config_content();
-    let mut command = cli_command(
+    let (mut command, _) = cli_command(
         connection,
-        CliRuntime::OpenCode,
         &[
             ("OPENCODE_CONFIG_CONTENT", config.as_str()),
             ("OPENCODE_DISABLE_AUTOUPDATE", "true"),
@@ -285,7 +275,8 @@ async fn run_opencode_summary(
             OPENCODE_NO_PROJECT_CONFIG_ENV,
         ],
         working_dir,
-    );
+    )
+    .map_err(ProviderError::RequestFailed)?;
     command.arg("--pure").arg("run").arg("--format").arg("json");
     let model = connection.model_id.trim();
     if !model.is_empty() && model != "default" {
@@ -304,21 +295,68 @@ async fn run_opencode_summary(
     parse_opencode_summary(&output)
 }
 
-fn cli_command(
+/// Where a provider connection's env var secrets live in the vault.
+pub(crate) fn connection_env_secrets(connection_id: &str) -> EnvSecrets {
+    EnvSecrets::new(
+        Vault::PROVIDERS,
+        format!("provider-connection::{connection_id}::env"),
+    )
+}
+
+/// Builds the host command for a CLI connection: its configured binary
+/// (`base_url`) or its protocol's default one, resolved to an absolute host
+/// path, run with the connection's env vars and CLAI's `clai_env`. Every CLI
+/// spawn goes through here, so a connection's env (e.g. the config dir that
+/// selects its account) applies to chat turns, summaries and the connection
+/// test alike. Fails for a non-CLI connection, and rather than start the CLI
+/// without part of its env, when a secret cannot be read or the env cannot be
+/// handed over. Returns the resolved binary too, for error messages.
+pub(crate) fn cli_command(
     connection: &ProviderConnection,
-    runtime: CliRuntime,
-    envs: &[(&str, &str)],
+    clai_env: &[(&str, &str)],
     working_dir: Option<&Path>,
-) -> tokio::process::Command {
+) -> Result<(tokio::process::Command, String), String> {
+    let default_binary = command_for_provider(&connection.protocol_id)
+        .ok_or_else(|| format!("Unsupported CLI provider: {}", connection.protocol_id))?;
     let configured_binary = connection
         .base_url
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| runtime.default_command());
+        .unwrap_or(default_binary);
     let binary = crate::providers::resolve_command_path(configured_binary)
         .unwrap_or_else(|| configured_binary.to_string());
-    crate::providers::build_host_cli_command(&binary, envs, working_dir)
+    let env = process_env(connection, clai_env)?;
+    let env: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let command = crate::providers::build_host_cli_command(&binary, &env, working_dir)
+        .map_err(|error| format!("Cannot pass the environment to `{binary}`: {error}"))?;
+    Ok((command, binary))
+}
+
+/// The connection's env vars, secrets read from the vault, followed by
+/// `clai_env`. A connection var that names one of CLAI's keys is left out,
+/// so CLAI's value is the only one handed to the process, directly or
+/// through the Flatpak env block.
+fn process_env(
+    connection: &ProviderConnection,
+    clai_env: &[(&str, &str)],
+) -> Result<Vec<(String, String)>, String> {
+    let mut env = Vec::with_capacity(connection.env.len() + clai_env.len());
+    for var in &connection.env {
+        if clai_env.iter().any(|(key, _)| *key == var.key) {
+            tracing::warn!(key = %var.key, "Connection env var is set by CLAI; ignoring it");
+            continue;
+        }
+        if let Some(value) = resolve_env_value(Vault::PROVIDERS, var)? {
+            env.push((var.key.clone(), value));
+        }
+    }
+    env.extend(
+        clai_env
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string())),
+    );
+    Ok(env)
 }
 
 async fn run_cli_json_command(
@@ -826,7 +864,90 @@ mod tests {
             enabled: true,
             created_at: 0,
             updated_at: 0,
+            env: Vec::new(),
         }
+    }
+
+    /// A secret connection var is read from the vault when the command is
+    /// built; the config entry carries only its reference. One that cannot
+    /// be read stops the command, so the CLI never starts on the account it
+    /// would use without it.
+    #[test]
+    fn cli_command_reads_secret_env_from_the_vault_or_fails() {
+        let secrets = connection_env_secrets("cli-secret-env");
+        let mut connection = cli_connection(CODEX_PROVIDER_ID);
+        connection.env = secrets
+            .store(
+                vec![crate::config::McpEnvVar {
+                    key: "API_TOKEN".to_string(),
+                    value: Some("vault-value".to_string()),
+                    secret_ref: None,
+                    secret: true,
+                }],
+                &[],
+            )
+            .unwrap();
+
+        let (command, _) = cli_command(&connection, &[], None).unwrap();
+        let value = command
+            .as_std()
+            .get_envs()
+            .find(|(key, _)| *key == "API_TOKEN")
+            .and_then(|(_, value)| value);
+        assert_eq!(value, Some(std::ffi::OsStr::new("vault-value")));
+
+        secrets.clear(&connection.env);
+        let error = cli_command(&connection, &[], None).unwrap_err();
+        assert!(error.contains("`API_TOKEN`"), "{error}");
+    }
+
+    /// Without a configured binary, a connection runs its protocol's CLI.
+    #[test]
+    fn cli_command_runs_the_protocols_binary() {
+        for (protocol_id, binary) in [
+            (CLAUDE_CODE_PROVIDER_ID, "claude"),
+            (CODEX_PROVIDER_ID, "codex"),
+            (OPENCODE_PROVIDER_ID, "opencode"),
+        ] {
+            let (_, resolved) = cli_command(&cli_connection(protocol_id), &[], None).unwrap();
+            assert_eq!(
+                Path::new(&resolved).file_name(),
+                Some(std::ffi::OsStr::new(binary)),
+                "{protocol_id}"
+            );
+        }
+        assert!(cli_command(&cli_connection("openai"), &[], None).is_err());
+    }
+
+    /// Each key reaches the process once, with CLAI's value. The Flatpak path
+    /// hands this list over as-is in an env block, so the list itself must
+    /// hold one value per key.
+    #[test]
+    fn process_env_lists_each_key_once_with_clai_values_last() {
+        let mut connection = cli_connection(OPENCODE_PROVIDER_ID);
+        let var = |key: &str, value: &str| crate::config::McpEnvVar {
+            key: key.to_string(),
+            value: Some(value.to_string()),
+            secret_ref: None,
+            secret: false,
+        };
+        connection.env = vec![
+            var("XDG_CONFIG_HOME", "work"),
+            var(OPENCODE_NO_PROJECT_CONFIG_ENV.0, "false"),
+        ];
+
+        let env = process_env(&connection, &[OPENCODE_NO_PROJECT_CONFIG_ENV]).unwrap();
+
+        assert_eq!(
+            env,
+            vec![
+                ("XDG_CONFIG_HOME".to_string(), "work".to_string()),
+                (
+                    OPENCODE_NO_PROJECT_CONFIG_ENV.0.to_string(),
+                    OPENCODE_NO_PROJECT_CONFIG_ENV.1.to_string()
+                ),
+            ]
+        );
     }
 
     fn summary_request() -> CompletionRequest {

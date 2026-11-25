@@ -258,11 +258,14 @@ pub(crate) fn resolve_command_path(cmd: &str) -> Option<String> {
 /// Outside Flatpak it's a plain `Command` with env/cwd applied directly.
 /// Callers append the CLI's own arguments with `.arg(...)` afterwards — in
 /// both modes those land as arguments to the target binary.
+///
+/// Fails when the environment cannot be handed to `flatpak-spawn`: the CLI
+/// must not start without it.
 pub(crate) fn build_host_cli_command(
     binary: &str,
     envs: &[(&str, &str)],
     working_dir: Option<&std::path::Path>,
-) -> tokio::process::Command {
+) -> std::io::Result<tokio::process::Command> {
     build_host_cli_command_impl(is_flatpak(), binary, envs, working_dir)
 }
 
@@ -271,14 +274,12 @@ fn build_host_cli_command_impl(
     binary: &str,
     envs: &[(&str, &str)],
     working_dir: Option<&std::path::Path>,
-) -> tokio::process::Command {
+) -> std::io::Result<tokio::process::Command> {
     let mut command = if in_flatpak {
         let mut command = tokio::process::Command::new("flatpak-spawn");
         command.arg("--host");
         if !envs.is_empty() {
-            if let Err(error) = pass_env_fd(&mut command, envs) {
-                tracing::error!("Cannot hand the environment to flatpak-spawn: {error}");
-            }
+            pass_env_fd(&mut command, envs)?;
         }
         command.arg(binary);
         command
@@ -296,7 +297,7 @@ fn build_host_cli_command_impl(
     // session spawn would flash a console window on Windows
     // (windows_console.rs).
     command.hide_console_window();
-    command
+    Ok(command)
 }
 
 /// Adds `--env-fd` with a memory file holding `envs` in `env -0` form, which
@@ -308,6 +309,19 @@ fn pass_env_fd(
 ) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+    // A NUL would end the entry early and smuggle the rest in as another.
+    if let Some((key, _)) = envs
+        .iter()
+        .find(|(key, value)| key.contains('\0') || value.contains('\0'))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "environment variable `{}` contains a NUL character",
+                key.escape_debug()
+            ),
+        ));
+    }
     let block: Vec<u8> = envs
         .iter()
         .flat_map(|(key, value)| format!("{key}={value}\0").into_bytes())
@@ -432,7 +446,8 @@ mod tests {
             "/usr/bin/codex",
             &[("MCP_TIMEOUT", "3600000")],
             Some(std::path::Path::new("/home/u/ws")),
-        );
+        )
+        .unwrap();
         // Program is the binary itself; env is set on the process (not argv).
         assert_eq!(argv(&command), vec!["/usr/bin/codex".to_string()]);
         let std = command.as_std();
@@ -460,7 +475,8 @@ mod tests {
             "/usr/bin/codex",
             &[("CLAI_MCP_TOKEN", "tok"), ("MCP_TIMEOUT", "3600000")],
             Some(std::path::Path::new("/home/u/ws")),
-        );
+        )
+        .unwrap();
         // flatpak-spawn --host --env-fd=N <binary>: the host command runs in
         // the host's env, so .env() on the wrapper wouldn't reach it, and the
         // token must not be in arguments any local user can read. The binary
@@ -485,11 +501,27 @@ mod tests {
         );
     }
 
+    /// Under Flatpak the env reaches the CLI only through the env block, so
+    /// a failure to build it stops the spawn instead of running the CLI
+    /// without its env.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn host_cli_command_in_flatpak_fails_when_the_env_cannot_be_passed() {
+        let error = build_host_cli_command_impl(
+            true,
+            "claude",
+            &[("CLAUDE_CONFIG_DIR", "work\0EXTRA=1")],
+            None,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("`CLAUDE_CONFIG_DIR`"), "{error}");
+    }
+
     #[test]
     fn host_cli_command_appends_caller_args_after_binary() {
         // Caller appends the CLI's own args; under Flatpak they must land after
         // the binary so they're args to the binary, not to flatpak-spawn.
-        let mut command = build_host_cli_command_impl(true, "codex", &[], None);
+        let mut command = build_host_cli_command_impl(true, "codex", &[], None).unwrap();
         command.arg("exec").arg("-");
         assert_eq!(
             argv(&command),

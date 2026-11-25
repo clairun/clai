@@ -23,7 +23,7 @@ use crate::assistant::engine::{AssistantDeps, AssistantEngineError, RunTurnInput
 use crate::assistant::events::AssistantUiEvent;
 use crate::assistant::local_mcp::{self, ToolBinding};
 use crate::assistant::providers::cli::{
-    CLAUDE_CODE_PROVIDER_ID, CODEX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
+    cli_command, is_cli_provider, CLAUDE_CODE_PROVIDER_ID, CODEX_PROVIDER_ID, OPENCODE_PROVIDER_ID,
 };
 use crate::assistant::providers::retry::RetryHooks;
 use crate::assistant::repository::{self, CreateMessageParams};
@@ -40,7 +40,7 @@ use crate::assistant::turn_common::{
 };
 use crate::assistant::types::{
     AssistantMessage, AssistantSession, CompactionTrigger, ContentPart, MessageRole,
-    ProviderConnection, ProviderInputMessage, RunStatus,
+    ProviderConnection, ProviderInputMessage, RunStatus, SessionContext,
 };
 use crate::assistant::{compaction, compaction_service};
 
@@ -89,6 +89,34 @@ fn claude_code_host_env(idle_ms: &str) -> [(&'static str, &str); 3] {
         ("ENABLE_TOOL_SEARCH", "false"),
     ]
 }
+
+/// Env for the Codex host process (`exec` and `app-server`): the MCP bearer
+/// token CLAI's tool server expects, and the MCP startup timeout.
+fn codex_host_env(mcp_token: &str) -> [(&'static str, &str); 2] {
+    [
+        (MCP_TOKEN_ENV, mcp_token),
+        ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
+    ]
+}
+
+/// Env for the OpenCode host process: CLAI's MCP config (which carries the
+/// token), switches that keep OpenCode from loading the user's or the
+/// workspace's own extensions, and the MCP startup timeout.
+fn opencode_host_env(config_content: &str) -> [(&'static str, &str); 10] {
+    [
+        ("OPENCODE_CONFIG_CONTENT", config_content),
+        ("OPENCODE_DISABLE_AUTOUPDATE", "true"),
+        ("OPENCODE_DISABLE_PRUNE", "true"),
+        ("OPENCODE_DISABLE_CLAUDE_CODE", "true"),
+        ("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT", "true"),
+        ("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS", "true"),
+        ("OPENCODE_DISABLE_DEFAULT_PLUGINS", "true"),
+        ("OPENCODE_DISABLE_LSP_DOWNLOAD", "true"),
+        crate::assistant::providers::cli::OPENCODE_NO_PROJECT_CONFIG_ENV,
+        ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
+    ]
+}
+
 const CLI_FRESH_CONTEXT_MAX_MESSAGES: usize = 16;
 const CLI_FRESH_CONTEXT_MAX_CHARS: usize = 32_000;
 const CLI_FRESH_CONTEXT_SUMMARY_MAX_BYTES: usize = 64_000;
@@ -297,21 +325,12 @@ pub async fn run_session_turn(
             crate::assistant::providers::types::ProviderError::RequestFailed(message),
         ));
     };
-    // A CLI session id is provider-specific (Claude generates its own UUID;
-    // Codex returns a server-side thread id), so an id created by one CLI is
-    // meaningless to another — resuming it fails (e.g. Codex: "no rollout
-    // found for thread id"). If the session was last driven by a *known,
-    // different* provider, drop the stale id so this run starts fresh. We only
-    // act when the owning provider is known: legacy sessions (provider `None`,
-    // created before this was tracked) are left alone and recover via the
-    // session-lost path instead, so we don't needlessly reset live sessions.
-    if session
-        .context
-        .cli_session_provider
-        .as_deref()
-        .is_some_and(|owner| owner != connection.protocol_id)
-        && session.context.cli_session_id.is_some()
-    {
+    // A CLI session id belongs to the connection that recorded it: another
+    // CLI cannot resume it (e.g. Codex: "no rollout found for thread id"),
+    // and neither can the same CLI under another account (a different
+    // `CLAUDE_CONFIG_DIR`). Drop an id another connection recorded so this
+    // run starts fresh.
+    if holds_foreign_cli_session(&session.context, &connection) {
         clear_cli_session_id(deps, &mut session).await?;
     }
 
@@ -410,7 +429,7 @@ pub async fn run_session_turn(
         let attempt = match provider_runtime {
             CliProviderRuntime::ClaudeCode => {
                 let (cli_session_id, is_new_session) =
-                    ensure_cli_session_id(deps, &mut session, &connection.protocol_id).await?;
+                    ensure_cli_session_id(deps, &mut session, &connection).await?;
                 run_claude_turn(
                     deps,
                     &run_context.workspace_root,
@@ -765,19 +784,51 @@ async fn clear_cli_session_id(
     Ok(())
 }
 
+/// Whether the session's CLI session id was recorded by a connection other
+/// than `connection`. Sessions recorded before connections owned them name
+/// the CLI protocol instead and are compared by protocol, so upgrading
+/// resets none of them; sessions older still name no owner and are kept,
+/// recovering through the session-lost path if the id is stale.
+fn holds_foreign_cli_session(context: &SessionContext, connection: &ProviderConnection) -> bool {
+    context.cli_session_id.is_some()
+        && context
+            .cli_session_provider
+            .as_deref()
+            .is_some_and(|owner| {
+                if is_cli_provider(owner) {
+                    owner != connection.protocol_id
+                } else {
+                    owner != connection.id
+                }
+            })
+}
+
+/// Records `cli_session_id` as `connection`'s. Returns whether the context
+/// changed and needs saving.
+fn record_cli_session(
+    context: &mut SessionContext,
+    cli_session_id: String,
+    connection: &ProviderConnection,
+) -> bool {
+    if context.cli_session_id.as_deref() == Some(cli_session_id.as_str())
+        && context.cli_session_provider.as_deref() == Some(connection.id.as_str())
+    {
+        return false;
+    }
+    context.cli_session_id = Some(cli_session_id);
+    context.cli_session_provider = Some(connection.id.clone());
+    true
+}
+
 async fn set_cli_session_id(
     deps: &AssistantDeps,
     session: &mut AssistantSession,
     cli_session_id: String,
-    provider_id: &str,
+    connection: &ProviderConnection,
 ) -> Result<(), LocalAgentRunError> {
-    if session.context.cli_session_id.as_deref() == Some(cli_session_id.as_str())
-        && session.context.cli_session_provider.as_deref() == Some(provider_id)
-    {
+    if !record_cli_session(&mut session.context, cli_session_id, connection) {
         return Ok(());
     }
-    session.context.cli_session_id = Some(cli_session_id);
-    session.context.cli_session_provider = Some(provider_id.to_string());
     session.updated_at = chrono::Utc::now().timestamp_millis();
     *session = repository::update_session(&deps.pool, session)
         .await
@@ -785,28 +836,23 @@ async fn set_cli_session_id(
     Ok(())
 }
 
+/// The session's CLI session id, and whether it is new. An existing id is
+/// claimed for `connection`, so a legacy owner is replaced by the connection
+/// that resumes it.
 async fn ensure_cli_session_id(
     deps: &AssistantDeps,
     session: &mut AssistantSession,
-    provider_id: &str,
+    connection: &ProviderConnection,
 ) -> Result<(String, bool), AssistantEngineError> {
-    if let Some(id) = session.context.cli_session_id.clone() {
-        // Backfill the owning provider for sessions created before it was
-        // tracked, so a future provider switch is detected proactively.
-        if session.context.cli_session_provider.as_deref() != Some(provider_id) {
-            session.context.cli_session_provider = Some(provider_id.to_string());
-            session.updated_at = chrono::Utc::now().timestamp_millis();
-            *session = repository::update_session(&deps.pool, session).await?;
-        }
-        return Ok((id, false));
+    let (id, is_new) = match session.context.cli_session_id.clone() {
+        Some(id) => (id, false),
+        None => (Uuid::new_v4().to_string(), true),
+    };
+    if record_cli_session(&mut session.context, id.clone(), connection) {
+        session.updated_at = chrono::Utc::now().timestamp_millis();
+        *session = repository::update_session(&deps.pool, session).await?;
     }
-
-    let id = Uuid::new_v4().to_string();
-    session.context.cli_session_id = Some(id.clone());
-    session.context.cli_session_provider = Some(provider_id.to_string());
-    session.updated_at = chrono::Utc::now().timestamp_millis();
-    *session = repository::update_session(&deps.pool, session).await?;
-    Ok((id, true))
+    Ok((id, is_new))
 }
 
 /// Resolve the turn's assistant message from a reusable slot.
@@ -1171,19 +1217,18 @@ async fn try_deliver_queued_to_claude(
 
 /// The Claude Code command for one turn, without the prompt.
 struct ClaudeTurnCommand<'turn> {
-    binary: &'turn str,
+    connection: &'turn ProviderConnection,
     workspace_root: &'turn Path,
     cli_session_id: &'turn str,
     is_new_session: bool,
     mcp_url: &'turn str,
     mcp_token: &'turn str,
     system_prompt: &'turn str,
-    model_id: &'turn str,
     midrun_input: bool,
 }
 
 impl ClaudeTurnCommand<'_> {
-    fn build(&self) -> Command {
+    fn build(&self) -> Result<(Command, String), String> {
         // Pin the subprocess cwd to the agent's workspace root. Without it, Claude
         // Code inherits CLAI's launch cwd (the repo on a dev box) and its
         // auto-memory loader pulls in unrelated projects's memory.
@@ -1195,8 +1240,7 @@ impl ClaudeTurnCommand<'_> {
             .to_string();
         let mut env = claude_code_host_env(&idle_ms).to_vec();
         env.push((MCP_TOKEN_ENV, self.mcp_token));
-        let mut command =
-            crate::providers::build_host_cli_command(self.binary, &env, Some(self.workspace_root));
+        let (mut command, binary) = cli_command(self.connection, &env, Some(self.workspace_root))?;
         command
             .arg("-p")
             .arg("--output-format")
@@ -1231,8 +1275,9 @@ impl ClaudeTurnCommand<'_> {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if !self.model_id.trim().is_empty() {
-            command.arg("--model").arg(self.model_id.trim());
+        let model_id = self.connection.model_id.trim();
+        if !model_id.is_empty() {
+            command.arg("--model").arg(model_id);
         }
 
         // Opt-in: when `CLAI_CC_DEBUG` is truthy, route Claude Code's own debug
@@ -1250,7 +1295,7 @@ impl ClaudeTurnCommand<'_> {
             );
             command.arg("--debug-file").arg(&debug_path);
         }
-        command
+        Ok((command, binary))
     }
 }
 
@@ -1303,29 +1348,18 @@ async fn run_claude_turn(
     .await?;
     let midrun_input = claude_midrun_input_enabled();
 
-    let configured_binary = connection
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("claude");
-    // Resolve to an absolute host path: a GUI-launched app or a Flatpak has a
-    // minimal/runtime PATH that often can't find a bare `claude`. Falls back to
-    // the bare name (and the usual "not found" error) if unresolvable.
-    let binary = crate::providers::resolve_command_path(configured_binary)
-        .unwrap_or_else(|| configured_binary.to_string());
-    let mut command = ClaudeTurnCommand {
-        binary: &binary,
+    let (mut command, binary) = ClaudeTurnCommand {
+        connection,
         workspace_root,
         cli_session_id,
         is_new_session,
         mcp_url,
         mcp_token,
         system_prompt,
-        model_id: &connection.model_id,
         midrun_input,
     }
-    .build();
+    .build()
+    .map_err(LocalAgentRunError::failed)?;
 
     let mut child = command.spawn().map_err(|e| {
         LocalAgentRunError::failed(format!(
@@ -1592,25 +1626,12 @@ async fn run_codex_turn(
     )
     .await?;
 
-    let configured_binary = connection
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("codex");
-    let binary = crate::providers::resolve_command_path(configured_binary)
-        .unwrap_or_else(|| configured_binary.to_string());
     // Env (MCP token + timeout) goes through the helper so it survives the
     // `flatpak-spawn --host` hop — under Flatpak the host CLI runs in the
     // host's environment, not the sandbox's.
-    let mut command = crate::providers::build_host_cli_command(
-        &binary,
-        &[
-            (MCP_TOKEN_ENV, mcp_token),
-            ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
-        ],
-        Some(workspace_root),
-    );
+    let (mut command, binary) =
+        cli_command(connection, &codex_host_env(mcp_token), Some(workspace_root))
+            .map_err(LocalAgentRunError::failed)?;
     command.arg("exec");
     match existing_thread_id.as_deref() {
         Some(thread_id) => {
@@ -1722,6 +1743,7 @@ async fn run_codex_turn(
         let handled = handle_codex_event(
             deps,
             session,
+            connection,
             run_id,
             &assistant_message,
             &value,
@@ -1825,22 +1847,8 @@ async fn run_codex_turn_app_server(
     )
     .await?;
 
-    let configured_binary = connection
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("codex");
-    let binary = crate::providers::resolve_command_path(configured_binary)
-        .unwrap_or_else(|| configured_binary.to_string());
-    let command = crate::providers::build_host_cli_command(
-        &binary,
-        &[
-            (MCP_TOKEN_ENV, mcp_token),
-            ("MCP_TIMEOUT", MCP_STARTUP_TIMEOUT_MS),
-        ],
-        Some(workspace_root),
-    );
+    let (command, _) = cli_command(connection, &codex_host_env(mcp_token), Some(workspace_root))
+        .map_err(LocalAgentRunError::failed)?;
     let mut transport =
         aps::AppServerTransport::spawn(command).map_err(LocalAgentRunError::failed)?;
 
@@ -1890,7 +1898,7 @@ async fn run_codex_turn_app_server(
         .and_then(|t| t.get("id"))
         .and_then(Value::as_str)
     {
-        set_cli_session_id(deps, session, thread_id.to_string(), CODEX_PROVIDER_ID).await?;
+        set_cli_session_id(deps, session, thread_id.to_string(), connection).await?;
     }
     let thread_id =
         session.context.cli_session_id.clone().ok_or_else(|| {
@@ -2053,6 +2061,7 @@ async fn run_codex_turn_app_server(
         let turn_done = handle_app_server_notification(
             deps,
             session,
+            connection,
             run_id,
             &assistant_message,
             method,
@@ -2165,6 +2174,7 @@ async fn aps_request_await(
 async fn handle_app_server_notification(
     deps: &AssistantDeps,
     session: &mut AssistantSession,
+    connection: &ProviderConnection,
     run_id: &str,
     assistant_message: &AssistantMessage,
     method: &str,
@@ -2183,7 +2193,7 @@ async fn handle_app_server_notification(
                 .and_then(|t| t.get("id"))
                 .and_then(Value::as_str)
             {
-                set_cli_session_id(deps, session, thread_id.to_string(), CODEX_PROVIDER_ID).await?;
+                set_cli_session_id(deps, session, thread_id.to_string(), connection).await?;
             }
         }
         "turn/started" => {
@@ -2581,35 +2591,17 @@ async fn run_opencode_turn(
     )
     .await?;
 
-    let configured_binary = connection
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("opencode");
-    let binary = crate::providers::resolve_command_path(configured_binary)
-        .unwrap_or_else(|| configured_binary.to_string());
     let config_content = opencode_config_content(mcp_url, mcp_token)?;
 
     // Env (incl. the MCP config blob) goes through the helper so it survives
     // the `flatpak-spawn --host` hop — under Flatpak the host CLI runs in the
     // host's environment, not the sandbox's.
-    let mut command = crate::providers::build_host_cli_command(
-        &binary,
-        &[
-            ("OPENCODE_CONFIG_CONTENT", config_content.as_str()),
-            ("OPENCODE_DISABLE_AUTOUPDATE", "true"),
-            ("OPENCODE_DISABLE_PRUNE", "true"),
-            ("OPENCODE_DISABLE_CLAUDE_CODE", "true"),
-            ("OPENCODE_DISABLE_CLAUDE_CODE_PROMPT", "true"),
-            ("OPENCODE_DISABLE_CLAUDE_CODE_SKILLS", "true"),
-            ("OPENCODE_DISABLE_DEFAULT_PLUGINS", "true"),
-            ("OPENCODE_DISABLE_LSP_DOWNLOAD", "true"),
-            crate::assistant::providers::cli::OPENCODE_NO_PROJECT_CONFIG_ENV,
-            ("MCP_TIMEOUT", "3600000"),
-        ],
+    let (mut command, binary) = cli_command(
+        connection,
+        &opencode_host_env(&config_content),
         Some(workspace_root),
-    );
+    )
+    .map_err(LocalAgentRunError::failed)?;
     command
         .arg("--pure")
         .arg("run")
@@ -2701,6 +2693,7 @@ async fn run_opencode_turn(
         let handled = handle_opencode_event(
             deps,
             session,
+            connection,
             run_id,
             &assistant_message,
             &value,
@@ -3597,6 +3590,7 @@ impl OpenCodeStreamState {
 async fn handle_opencode_event(
     deps: &AssistantDeps,
     session: &mut AssistantSession,
+    connection: &ProviderConnection,
     run_id: &str,
     assistant_message: &AssistantMessage,
     value: &Value,
@@ -3605,7 +3599,7 @@ async fn handle_opencode_event(
     conversation: &mut RunConversation,
 ) -> Result<(), LocalAgentRunError> {
     if let Some(session_id) = value.get("sessionID").and_then(Value::as_str) {
-        set_cli_session_id(deps, session, session_id.to_string(), OPENCODE_PROVIDER_ID).await?;
+        set_cli_session_id(deps, session, session_id.to_string(), connection).await?;
     }
 
     match value.get("type").and_then(Value::as_str) {
@@ -3883,6 +3877,7 @@ async fn flush_opencode_assistant_message_content(
 async fn handle_codex_event(
     deps: &AssistantDeps,
     session: &mut AssistantSession,
+    connection: &ProviderConnection,
     run_id: &str,
     assistant_message: &AssistantMessage,
     value: &Value,
@@ -3893,7 +3888,7 @@ async fn handle_codex_event(
     match value.get("type").and_then(Value::as_str) {
         Some("thread.started") => {
             if let Some(thread_id) = value.get("thread_id").and_then(Value::as_str) {
-                set_cli_session_id(deps, session, thread_id.to_string(), CODEX_PROVIDER_ID).await?;
+                set_cli_session_id(deps, session, thread_id.to_string(), connection).await?;
             }
         }
         Some("turn.failed") => {
@@ -5092,18 +5087,20 @@ mod tests {
     /// write; it must not load project settings or MCP servers from there.
     #[test]
     fn claude_turn_ignores_project_settings_and_mcp_servers() {
-        let command = ClaudeTurnCommand {
-            binary: "claude",
+        let mut connection = cli_connection(CLAUDE_CODE_PROVIDER_ID, Vec::new());
+        connection.model_id = String::new();
+        let (command, _) = ClaudeTurnCommand {
+            connection: &connection,
             workspace_root: Path::new("/ws"),
             cli_session_id: "00000000-0000-0000-0000-000000000000",
             is_new_session: true,
             mcp_url: "http://127.0.0.1:4000/mcp",
             mcp_token: "secret-token",
             system_prompt: "system",
-            model_id: "",
             midrun_input: false,
         }
-        .build();
+        .build()
+        .unwrap();
         let args: Vec<String> = command
             .as_std()
             .get_args()
@@ -5132,6 +5129,155 @@ mod tests {
             Some(Path::new("/ws")),
             "the working directory keys Claude Code sessions"
         );
+    }
+
+    fn cli_connection(protocol_id: &str, env: Vec<crate::config::McpEnvVar>) -> ProviderConnection {
+        ProviderConnection {
+            id: "connection".to_string(),
+            name: "CLI".to_string(),
+            protocol_id: protocol_id.to_string(),
+            provider_id: protocol_id.to_string(),
+            auth_mode: crate::assistant::types::AuthMode::SubscriptionLogin,
+            base_url: None,
+            secret_ref: String::new(),
+            model_id: "default".to_string(),
+            account_label: None,
+            enabled: true,
+            created_at: 0,
+            updated_at: 0,
+            env,
+        }
+    }
+
+    /// Two connections of one CLI are two accounts: a session id one of them
+    /// recorded must not be resumed through the other. Owners recorded before
+    /// connections owned sessions name the protocol and survive the upgrade.
+    #[test]
+    fn cli_session_belongs_to_the_connection_that_recorded_it() {
+        let a = ProviderConnection {
+            id: "conn-a".to_string(),
+            ..cli_connection(CLAUDE_CODE_PROVIDER_ID, Vec::new())
+        };
+        let b = ProviderConnection {
+            id: "conn-b".to_string(),
+            ..cli_connection(CLAUDE_CODE_PROVIDER_ID, Vec::new())
+        };
+        let codex = cli_connection(CODEX_PROVIDER_ID, Vec::new());
+
+        let mut context = SessionContext::default();
+        assert!(record_cli_session(&mut context, "sid".into(), &a));
+        assert!(!record_cli_session(&mut context, "sid".into(), &a));
+        assert!(
+            !holds_foreign_cli_session(&context, &a),
+            "A then A keeps it"
+        );
+        assert!(holds_foreign_cli_session(&context, &b), "A then B drops it");
+
+        let mut legacy = SessionContext {
+            cli_session_id: Some("sid".into()),
+            cli_session_provider: Some(CLAUDE_CODE_PROVIDER_ID.into()),
+            ..Default::default()
+        };
+        assert!(!holds_foreign_cli_session(&legacy, &a));
+        assert!(!holds_foreign_cli_session(&legacy, &b));
+        assert!(holds_foreign_cli_session(&legacy, &codex));
+        // Resuming a legacy session claims it for the connection.
+        assert!(record_cli_session(&mut legacy, "sid".into(), &a));
+        assert!(holds_foreign_cli_session(&legacy, &b));
+
+        let untracked = SessionContext {
+            cli_session_id: Some("sid".into()),
+            ..Default::default()
+        };
+        assert!(!holds_foreign_cli_session(&untracked, &codex));
+    }
+
+    fn plain_var(key: &str, value: &str) -> crate::config::McpEnvVar {
+        crate::config::McpEnvVar {
+            key: key.to_string(),
+            value: Some(value.to_string()),
+            secret_ref: None,
+            secret: false,
+        }
+    }
+
+    fn command_env(command: &Command) -> HashMap<String, String> {
+        command
+            .as_std()
+            .get_envs()
+            .filter_map(|(key, value)| {
+                Some((
+                    key.to_string_lossy().into_owned(),
+                    value?.to_string_lossy().into_owned(),
+                ))
+            })
+            .collect()
+    }
+
+    /// A connection's env reaches every CLI's turn process, and CLAI's own
+    /// variables keep their values when the user sets the same names. The
+    /// CLAI env lists are the ones the turn spawns use.
+    #[test]
+    fn turn_commands_carry_connection_env_and_keep_clai_env() {
+        let workspace = std::env::temp_dir();
+        let claude_env = {
+            let idle_ms = crate::assistant::tools::CLI_MCP_CLIENT_TIMEOUT
+                .as_millis()
+                .to_string();
+            let mut env: Vec<(String, String)> = claude_code_host_env(&idle_ms)
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect();
+            env.push((MCP_TOKEN_ENV.to_string(), "clai-token".to_string()));
+            env
+        };
+        let owned = |env: &[(&str, &str)]| -> Vec<(String, String)> {
+            env.iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect()
+        };
+        let cases: Vec<(&str, Vec<(String, String)>)> = vec![
+            (CLAUDE_CODE_PROVIDER_ID, claude_env),
+            (CODEX_PROVIDER_ID, owned(&codex_host_env("clai-token"))),
+            (OPENCODE_PROVIDER_ID, owned(&opencode_host_env("{}"))),
+        ];
+        for (protocol_id, clai_env) in cases {
+            let mut user_env = vec![plain_var("CLAUDE_CONFIG_DIR", "work-account")];
+            user_env.extend(clai_env.iter().map(|(key, _)| plain_var(key, "user-value")));
+            let connection = cli_connection(protocol_id, user_env);
+
+            let command = if protocol_id == CLAUDE_CODE_PROVIDER_ID {
+                ClaudeTurnCommand {
+                    connection: &connection,
+                    workspace_root: &workspace,
+                    cli_session_id: "00000000-0000-0000-0000-000000000000",
+                    is_new_session: true,
+                    mcp_url: "http://127.0.0.1:4000/mcp",
+                    mcp_token: "clai-token",
+                    system_prompt: "system",
+                    midrun_input: false,
+                }
+                .build()
+                .unwrap()
+                .0
+            } else {
+                let env: Vec<(&str, &str)> = clai_env
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
+                cli_command(&connection, &env, Some(&workspace)).unwrap().0
+            };
+
+            let env = command_env(&command);
+            assert_eq!(
+                env.get("CLAUDE_CONFIG_DIR").map(String::as_str),
+                Some("work-account"),
+                "{protocol_id}: {env:?}"
+            );
+            for (key, value) in &clai_env {
+                assert_eq!(env.get(key), Some(value), "{protocol_id}: {key}");
+            }
+        }
     }
 
     fn test_message(id: &str, role: MessageRole, content: Vec<ContentPart>) -> AssistantMessage {

@@ -109,10 +109,10 @@ pub struct SessionContext {
     pub automation_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_id: Option<String>,
-    /// The CLI provider that owns `cli_session_id`. A session id is
-    /// provider-specific (Claude generates its own UUID; Codex returns a
-    /// server-side thread id), so switching providers must NOT reuse it.
-    /// `None` for sessions created before this was tracked.
+    /// The provider connection that owns `cli_session_id`. A session id is
+    /// meaningful only to the CLI, and the account, that created it, so
+    /// switching connections must NOT reuse it. Sessions recorded before
+    /// connections owned them hold the CLI protocol id; older ones `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cli_session_provider: Option<String>,
 }
@@ -430,6 +430,12 @@ pub struct ProviderConnection {
     pub enabled: bool,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Environment variables for a CLI-backed connection's process (e.g.
+    /// `CLAUDE_CONFIG_DIR` to pick an account). Secret entries carry only a
+    /// vault `secretRef`, never the value. CLAI's own variables win over
+    /// these; see `providers::cli::cli_command`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<crate::config::McpEnvVar>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -571,6 +577,27 @@ pub enum ProviderEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Connections saved before `env` existed load with no env, and saving
+    /// them again writes them back without the field.
+    #[test]
+    fn provider_connection_without_env_round_trips_unchanged() {
+        let stored = serde_json::json!({
+            "id": "abc",
+            "name": "Claude Code",
+            "protocolId": "claude-code",
+            "providerId": "claude-code",
+            "authMode": "subscription_login",
+            "secretRef": "provider-connection::abc",
+            "modelId": "default",
+            "enabled": true,
+            "createdAt": 1,
+            "updatedAt": 2
+        });
+        let connection: ProviderConnection = serde_json::from_value(stored.clone()).unwrap();
+        assert!(connection.env.is_empty());
+        assert_eq!(serde_json::to_value(&connection).unwrap(), stored);
+    }
 
     #[test]
     fn finished_run_statuses_are_terminal() {

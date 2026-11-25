@@ -22,7 +22,8 @@ use tokio::{
     process::{Child, ChildStderr, Command},
 };
 
-use crate::assistant::auth::McpSecretStorage;
+use crate::assistant::auth::env_vars::resolve_env_value;
+use crate::assistant::auth::{McpSecretStorage, Vault};
 use crate::assistant::network::spawn_roots::{self, StartedBy};
 use crate::assistant::types::ToolDefinition;
 use crate::config::{ClaiConfig, McpEnvVar, McpServerAuth, McpServerConfig};
@@ -224,32 +225,14 @@ pub struct McpClientManager {
     servers: HashMap<String, ManagedMcpServer>,
 }
 
-/// Resolve an [`McpEnvVar`] to its concrete value: the plain `value` for a
-/// non-secret entry, or the vault secret for a secret entry. Returns `None`
-/// (with a warning) for a malformed or missing-secret entry so a single bad
-/// var can't abort the whole server connection. The secret is read here, at
-/// spawn/connect time — never persisted in config, argv, or logs.
+/// MCP env vars and headers keep their secrets in the MCP vault service. One
+/// that cannot be resolved is skipped with a warning, so the server still
+/// starts.
 fn resolve_mcp_env_value(var: &McpEnvVar) -> Option<String> {
-    if !var.secret {
-        return var.value.clone();
-    }
-    match var.secret_ref.as_deref() {
-        Some(secret_ref) => match McpSecretStorage::get_secret(secret_ref) {
-            Ok(Some(value)) => Some(value),
-            Ok(None) => {
-                tracing::warn!(key = %var.key, "MCP secret var missing from vault; skipping");
-                None
-            }
-            Err(error) => {
-                tracing::warn!(key = %var.key, %error, "Failed to read MCP secret var; skipping");
-                None
-            }
-        },
-        None => {
-            tracing::warn!(key = %var.key, "MCP secret var has no secret_ref; skipping");
-            None
-        }
-    }
+    resolve_env_value(Vault::MCP, var).unwrap_or_else(|error| {
+        tracing::warn!(%error, "Skipping an MCP env var or header");
+        None
+    })
 }
 
 /// Build the custom-header map for an HTTP MCP server, resolving secret values
@@ -1007,6 +990,24 @@ mod tests {
             secret: false,
         };
         assert_eq!(resolve_mcp_env_value(&var), Some("debug".to_string()));
+    }
+
+    /// Secrets come from the MCP vault service; one it does not hold is
+    /// skipped rather than failing the server.
+    #[test]
+    fn resolve_mcp_env_value_reads_secrets_from_the_mcp_vault() {
+        let secret_ref = "mcp-server::resolve-env-test::env::TOKEN";
+        McpSecretStorage::set_secret(secret_ref, "mcp-value").unwrap();
+        let var = McpEnvVar {
+            key: "TOKEN".into(),
+            value: None,
+            secret_ref: Some(secret_ref.into()),
+            secret: true,
+        };
+        assert_eq!(resolve_mcp_env_value(&var), Some("mcp-value".to_string()));
+
+        McpSecretStorage::clear_secret(secret_ref).unwrap();
+        assert_eq!(resolve_mcp_env_value(&var), None);
     }
 
     #[test]

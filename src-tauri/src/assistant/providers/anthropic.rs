@@ -890,6 +890,7 @@ mod tests {
             enabled: true,
             created_at: 0,
             updated_at: 0,
+            env: Vec::new(),
         }
     }
 

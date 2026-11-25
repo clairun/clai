@@ -97,6 +97,20 @@
   font-size: 13px;
 }
 
+/* Inside a scrolling form, keep the error in view wherever Save was clicked.
+ * The tint is layered over an opaque background so fields scroll under it. */
+.form > .errorBanner {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background:
+    linear-gradient(
+      var(--color-critical-alpha-10, rgba(220, 38, 38, 0.1)),
+      var(--color-critical-alpha-10, rgba(220, 38, 38, 0.1))
+    ),
+    var(--color-bg-primary, #FDFCFB);
+}
+
 /* Field */
 .field {
   display: flex;

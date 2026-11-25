@@ -153,7 +153,12 @@ export type CreateProviderConnectionRequest = { name: string, protocolId: string
 /**
  * Brand/catalog id. Defaults to `protocol_id` when omitted.
  */
-providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, };
+providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, 
+/**
+ * Env vars for a CLI-backed connection's process. A secret entry sends
+ * its value once; it is stored in the vault and never returned.
+ */
+env?: Array<McpEnvVar>, };
 
 export type ExecutionCapabilityConfig = { sandbox: ExecutionSandboxConfig, filesystem: FilesystemCapabilityConfig, shell: ShellCapabilityConfig, web: WebCapabilityConfig, };
 
@@ -300,10 +305,10 @@ export type LocalStartedBy = { "kind": "terminal" } | { "kind": "app", name: str
 export type McpCatalogEntry = { id: string, displayName: string, description: string, category: string, endpointUrl: string, authMode: string, logoAsset: string, suggestedScopes: Array<string>, notes: string | null, };
 
 /**
- * A single environment variable (stdio) or HTTP header (http) entry for an
- * MCP server. Secret entries store their value in the OS vault under
- * `secret_ref` and leave `value` empty; non-secret entries store the value
- * inline. See `design/mcp-env-vars-design.md`.
+ * A single environment variable (stdio MCP server, CLI provider connection)
+ * or HTTP header (http MCP server) entry. Secret entries store their value
+ * in the OS vault under `secret_ref` and leave `value` empty; non-secret
+ * entries store the value inline.
  */
 export type McpEnvVar = { 
 /**
@@ -574,7 +579,14 @@ protocolId: string,
  * Drives the logo, display grouping, and per-provider quirk data. For a
  * vanilla OpenAI/Anthropic or CLI connection, brand == protocol value.
  */
-providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: string, modelId: string, accountLabel: string | null, enabled: boolean, createdAt: bigint, updatedAt: bigint, };
+providerId: string, authMode: AuthMode, baseUrl: string | null, secretRef: string, modelId: string, accountLabel: string | null, enabled: boolean, createdAt: bigint, updatedAt: bigint, 
+/**
+ * Environment variables for a CLI-backed connection's process (e.g.
+ * `CLAUDE_CONFIG_DIR` to pick an account). Secret entries carry only a
+ * vault `secretRef`, never the value. CLAI's own variables win over
+ * these; see `providers::cli::cli_command`.
+ */
+env?: Array<McpEnvVar>, };
 
 export type ProviderDescriptor = { id: string, displayName: string, protocolFamily: ProtocolFamily, supportedAuthModes: Array<AuthMode>, configurableBaseUrl: boolean, isCliBacked: boolean, };
 
@@ -669,10 +681,10 @@ export type SessionContext = {
  */
 automationId?: string | null, cliSessionId?: string | null, 
 /**
- * The CLI provider that owns `cli_session_id`. A session id is
- * provider-specific (Claude generates its own UUID; Codex returns a
- * server-side thread id), so switching providers must NOT reuse it.
- * `None` for sessions created before this was tracked.
+ * The provider connection that owns `cli_session_id`. A session id is
+ * meaningful only to the CLI, and the account, that created it, so
+ * switching connections must NOT reuse it. Sessions recorded before
+ * connections owned them hold the CLI protocol id; older ones `None`.
  */
 cliSessionProvider?: string | null, };
 
@@ -762,7 +774,12 @@ export type UpdateProviderConnectionRequest = { id: string, name: string, protoc
 /**
  * Brand/catalog id. Defaults to `protocol_id` when omitted.
  */
-providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, };
+providerId: string | null, apiKey: string | null, authMode: AuthMode | null, baseUrl: string | null, modelId: string, accountLabel: string | null, enabled: boolean, 
+/**
+ * Replaces the connection's env vars; omitted keeps them. A secret
+ * entry sent without a value keeps its stored secret.
+ */
+env?: Array<McpEnvVar>, };
 
 export type WebCapabilityConfig = { enabled: boolean, };
 

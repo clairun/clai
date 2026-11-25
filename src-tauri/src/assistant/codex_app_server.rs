@@ -64,7 +64,7 @@ pub(crate) struct AppServerTransport {
 impl AppServerTransport {
     /// Spawn `<command> app-server` with piped stdio and start the reader task.
     /// `command` is expected to already carry the env (MCP token, timeouts) and
-    /// working directory, built via `providers::build_host_cli_command` so it
+    /// working directory, built via `providers::cli::cli_command` so it
     /// survives the Flatpak host hop.
     pub(crate) fn spawn(mut command: Command) -> Result<Self, String> {
         command
