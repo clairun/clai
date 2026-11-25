@@ -25,7 +25,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use crate::assistant::sandbox::filesystem::normalize_path;
+use crate::assistant::sandbox::filesystem::{normalize_path, CLI_PROJECT_CONFIG_DIRS};
 use std::sync::RwLock;
 use tauri::{AppHandle, Emitter, Manager, State, Window};
 use ts_rs::TS;
@@ -611,6 +611,26 @@ fn should_skip_artifact_dir(path: &Path) -> bool {
         .and_then(|value| value.to_str())
         .map(is_skipped_artifact_dir_name)
         .unwrap_or(false)
+}
+
+/// Whether the artifacts panel hides the directory `path` in the workspace
+/// `root`: a skip-listed name at any depth, or an empty CLI configuration
+/// directory at the root.
+fn is_hidden_artifact_dir(root: &Path, path: &Path) -> bool {
+    should_skip_artifact_dir(path) || is_empty_root_cli_config_dir(root, path)
+}
+
+/// Whether `path` is one of the provider CLI configuration directories the
+/// sandbox creates at the workspace `root` to protect it, and still empty.
+/// Only the root's qualify: a `.claude/` deeper down belongs to a project the
+/// user keeps there. One that holds anything, or cannot be read, is not.
+fn is_empty_root_cli_config_dir(root: &Path, path: &Path) -> bool {
+    path.parent() == Some(root)
+        && path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| CLI_PROJECT_CONFIG_DIRS.contains(&name))
+        && fs::read_dir(path).is_ok_and(|mut entries| entries.next().is_none())
 }
 
 fn collect_files(
@@ -1431,7 +1451,10 @@ pub struct WorkspaceListDirRequest {
 /// List a single directory level of the artifact tree. The artifacts panel
 /// calls this lazily — once for the root, then again per folder as the user
 /// expands it — so the whole tree never has to be walked or held in memory at
-/// once. Applies the same skip-list as the rest of the artifact surface.
+/// once. Hides the skip-listed directories, like the rest of the artifact
+/// surface, and the root's empty CLI configuration directories
+/// ([`is_hidden_artifact_dir`]); those hold no files, so the search and the
+/// header count need no rule of their own.
 #[tauri::command]
 pub async fn workspace_list_dir(
     request: WorkspaceListDirRequest,
@@ -1457,7 +1480,14 @@ pub async fn workspace_list_dir(
         return Err(format!("Not a directory: {}", rel));
     }
 
-    let read_dir = fs::read_dir(&target)
+    list_dir_entries(root_path, &target)
+}
+
+/// The entries of `target`, a directory inside the workspace `root_path`, as
+/// the artifacts panel renders them: hidden directories left out, folders
+/// first, then files, each group sorted by name.
+fn list_dir_entries(root_path: &Path, target: &Path) -> Result<Vec<WorkspaceDirEntry>, String> {
+    let read_dir = fs::read_dir(target)
         .map_err(|error| format!("Failed to read {}: {}", target.display(), error))?;
     let mut entries: Vec<WorkspaceDirEntry> = Vec::new();
     for entry in read_dir {
@@ -1478,7 +1508,7 @@ pub async fn workspace_list_dir(
             .to_string();
 
         if file_type.is_dir() {
-            if should_skip_artifact_dir(&path) {
+            if is_hidden_artifact_dir(root_path, &path) {
                 continue;
             }
             entries.push(WorkspaceDirEntry {
@@ -4298,6 +4328,79 @@ mod tests {
             3,
             "only the three real artifacts should count"
         );
+    }
+
+    fn listed_names(root: &Path, dir: &Path) -> Vec<String> {
+        list_dir_entries(root, dir)
+            .unwrap()
+            .into_iter()
+            .map(|entry| entry.name)
+            .collect()
+    }
+
+    fn searched_paths(root: &Path) -> Vec<PathBuf> {
+        let mut found = Vec::new();
+        search_artifact_files(root, root, "", &mut found);
+        let mut paths: Vec<PathBuf> = found.into_iter().map(|e| PathBuf::from(e.path)).collect();
+        paths.sort();
+        paths
+    }
+
+    /// The empty provider CLI configuration directories the sandbox creates
+    /// at the workspace root are CLAI's, not artifacts, so the listing hides
+    /// them. Once one holds anything it shows again, its files in the search
+    /// and the header count too, and a project's own `.claude/` deeper down
+    /// always shows.
+    #[test]
+    fn empty_cli_project_config_dirs_are_hidden_at_the_workspace_root_only() {
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        crate::assistant::sandbox::filesystem::ensure_cli_project_config_dirs(root);
+        write_file(&root.join("notes/a.md"), "a");
+        write_file(&root.join("repo/.claude/skill.md"), "s");
+        write_file(&root.join("repo/.codex/config.toml"), "c");
+        // Empty, like the root's, so only its depth keeps it visible.
+        fs::create_dir(root.join("repo/.opencode")).unwrap();
+
+        assert_eq!(listed_names(root, root), ["notes", "repo"]);
+        assert_eq!(
+            listed_names(root, &root.join("repo")),
+            [".claude", ".codex", ".opencode"]
+        );
+        let mut expected = vec![
+            Path::new("notes").join("a.md"),
+            Path::new("repo").join(".claude").join("skill.md"),
+            Path::new("repo").join(".codex").join("config.toml"),
+        ];
+        assert_eq!(searched_paths(root), expected);
+        assert_eq!(artifact_tree_stats(root).file_count, 3);
+
+        write_file(&root.join(".claude/settings.local.json"), "x");
+        assert_eq!(listed_names(root, root), [".claude", "notes", "repo"]);
+        expected.insert(0, Path::new(".claude").join("settings.local.json"));
+        assert_eq!(searched_paths(root), expected);
+        assert_eq!(artifact_tree_stats(root).file_count, 4);
+    }
+
+    /// Hiding needs proof the directory is empty: one that cannot be read
+    /// stays visible.
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_cli_project_config_dir_stays_visible() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let root = root.path();
+        let dir = root.join(".codex");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o000)).unwrap();
+        let readable = fs::read_dir(&dir).is_ok();
+        let hidden = is_hidden_artifact_dir(root, &dir);
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        if readable {
+            eprintln!("skipped: permissions do not restrict this user");
+            return;
+        }
+        assert!(!hidden);
     }
 
     // A symlink is not an entry the artifacts panel can surface:
