@@ -7,6 +7,7 @@ pub mod openrouter;
 pub mod registry;
 pub mod retry;
 pub mod types;
+pub mod wire_log;
 
 use crate::assistant::types::{ModelInfo, ProviderConnection};
 
@@ -92,6 +93,40 @@ fn models_source(
     }
 }
 
+/// Perform the wire-logged GET and return the response text. Non-2xx bodies
+/// and transport failures are logged; a non-2xx is classified for `brand`.
+pub(crate) async fn get_logged(
+    wire: &wire_log::Scope,
+    brand: &str,
+    url: &str,
+    headers: &[(String, String)],
+) -> Result<String, types::ProviderError> {
+    let mut builder = reqwest::Client::new().get(url);
+    for (name, value) in headers {
+        builder = builder.header(name, value);
+    }
+    let resp = match builder.send().await {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!(url = %url, error = %e, "HTTP request failed");
+            wire.transport_error(&e.to_string());
+            return Err(types::ProviderError::RequestFailed(e.to_string()));
+        }
+    };
+    wire.response(resp.status().as_u16(), resp.headers());
+    if !resp.status().is_success() {
+        return Err(types::ProviderError::Failed(
+            failure::read_failure(brand, resp, wire).await,
+        ));
+    }
+    let text = resp
+        .text()
+        .await
+        .map_err(|e| types::ProviderError::RequestFailed(e.to_string()))?;
+    wire.body(&text);
+    Ok(text)
+}
+
 /// Fetch a model list from an absolute OpenAI-compatible models URL
 /// (`Authorization: Bearer`, `{"data":[{"id":..}]}` response shape).
 ///
@@ -104,26 +139,32 @@ fn models_source(
 pub(crate) async fn fetch_models_openai_compatible(
     brand: &str,
     url: &str,
+    provider_id: &str,
     api_key: Option<&str>,
     caps: Option<&catalog::ProviderCaps>,
 ) -> Result<Vec<ModelInfo>, types::ProviderError> {
     tracing::info!(url = %url, "Fetching models from dedicated models endpoint");
-    let mut builder = reqwest::Client::new().get(url);
+
+    let mut headers: Vec<(String, String)> = Vec::new();
     if let Some(key) = api_key {
-        builder = builder.header("Authorization", format!("Bearer {}", key));
+        headers.push(("Authorization".to_string(), format!("Bearer {}", key)));
     }
-    let resp = builder.send().await.map_err(|e| {
-        tracing::error!(url = %url, error = %e, "HTTP request failed");
-        types::ProviderError::RequestFailed(e.to_string())
-    })?;
-    if !resp.status().is_success() {
-        return Err(types::ProviderError::Failed(
-            failure::read_failure(brand, resp).await,
-        ));
-    }
-    let body: serde_json::Value = resp
-        .json()
-        .await
+
+    let wire = wire_log::Scope::begin(&wire_log::Request {
+        kind: "models",
+        provider_id,
+        protocol_id: "",
+        model_id: None,
+        run_id: None,
+        session_id: None,
+        method: "GET",
+        url,
+        headers: &headers,
+        body: &serde_json::Value::Null,
+    });
+
+    let text = get_logged(&wire, brand, url, &headers).await?;
+    let body: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| types::ProviderError::RequestFailed(e.to_string()))?;
     let (supports_tools, supports_images) = caps
         .map(|c| (c.supports_tools, c.supports_images))
